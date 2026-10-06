@@ -6,7 +6,7 @@
 ## 시작하기 (Windows)
 
 1. **Python 설치** — https://www.python.org/downloads/ 에서 받아 설치합니다. 설치 첫 화면의 "Add python.exe to PATH" 를 체크하십시오. (3.10 이상)
-2. **코드 받기** — GitHub 저장소에서 `claude/sleepy-keller-7611fg` 브랜치를 "Code → Download ZIP" 으로 받아 풉니다. 안에 `YeonE_OCR` 폴더가 있습니다.
+2. **코드 받기** — https://github.com/kyengilam-coder/YeonE_OCR 에서 "Code → Download ZIP" 으로 받아 `C:\Projects\YeonE_OCR` 에 풉니다. git 이 있으면 `git clone https://github.com/kyengilam-coder/YeonE_OCR.git C:\Projects\YeonE_OCR` 로 받고, 새 판은 그 폴더에서 `git pull` 로 받습니다.
 3. **`YeonE_OCR.pyw` 더블클릭** — 창이 뜹니다. 뜨지 않으면 `YeonE_OCR.bat` 을 더블클릭하십시오(오류 글이 보입니다).
 4. **[필요한 패키지 설치·점검]** — 처음 한 번. 아래 "진행 기록"에 설치 과정이 흐르고, 끝나면 오른쪽 아래에 "패키지 모두 있음"이 뜹니다.
 5. **API 키** — https://aistudio.google.com/apikey 에서 키를 만들어 "Gemini API 키" 칸에 통째로 붙여 넣고 **[키 확인·모델 고르기]**. 키가 맞는지 Gemini 에 확인하고, 쓸 수 있는 모델 목록에서 고릅니다(pro 계열이 품질, flash 계열이 속도·비용). 키는 내 PC의 `사용자 폴더\.yeone_ocr\config.json` 에만 저장됩니다.
@@ -61,7 +61,7 @@
 ## 명령줄로도 됩니다
 
 ```
-pip install .                         # YeonE_OCR 폴더에서 한 번
+pip install .                         # 저장소 폴더에서 한 번
 yeone-ocr run 책.pdf --pages 1-5 --print-offset 29
 yeone-ocr inspect|prepare|read|remerge|build|review|report|mark 책.pdf [옵션]    (yeone-ocr --help)
 yeone-ocr-gui                         # 창 프로그램
@@ -70,7 +70,7 @@ yeone-ocr-gui                         # 창 프로그램
 ## 검사
 
 ```
-python -m unittest discover -s YeonE_OCR/tests -v     # 저장소 루트에서. 모델 없이 돌아갑니다.
+python -m unittest discover -s tests -v     # 저장소 루트에서. 모델 없이 돌아갑니다.
 ```
 
 ## 알려진 한계
