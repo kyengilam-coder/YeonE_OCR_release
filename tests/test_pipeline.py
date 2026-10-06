@@ -138,6 +138,15 @@ class ExpandText(unittest.TestCase):
         self.assertEqual(len(boxes), 1); self.assertAlmostEqual((boxes[0][0] + boxes[0][2]) / 2 * 900, 760, delta=6)
         grown, orphans = attach_uncovered(boxes, [("r3", region)])
         self.assertEqual(orphans, []); self.assertLess(grown["r3"][0] * 900, 753)
+        # 큰 제목 글자가 좌표 밖으로 삐져나온 경우: cover_check 가 제목 영역을 넓히고 고아로 남기지 않아야 한다
+        from yeone_ocr.cli import cover_check
+        im2 = Image.new("L", (900, 1300), 245); d2 = ImageDraw.Draw(im2)
+        for y in range(170, 420, 36):
+            d2.rectangle([725, y, 765, y + 28], fill=30)                 # 제목 글자(큼) x 725~765
+        p1 = PageReading(pdf_page=3, regions=[Region(id="t1", kind="제목", title_text="第十四層", bbox=[130, 829, 330, 847])])  # x 746~762: 왼쪽 획 삐져나옴
+        notes = cover_check(im2, p1)
+        self.assertTrue(any("t1" in n for n in notes), notes); self.assertEqual(p1.uncertain, [])
+        self.assertLessEqual(p1.regions[0].bbox[1], 810)
 
 
 class Build(unittest.TestCase):

@@ -160,8 +160,9 @@ def cover_check(img: Image.Image, p1: PageReading) -> list[str]:
     boxes = uncovered_ink_boxes(img, all_fr)
     if not boxes:
         return []
-    text_regions = [(r.id, _bf(r.bbox)) for r in p1.regions if r.kind in TEXT_KINDS]
-    grown, orphans = attach_uncovered(boxes, text_regions)
+    # 도판이 아닌 모든 영역(본문·제목·소주·쪽번호…)에 붙일 수 있다. 제목 글자가 크면 모델 좌표 밖으로 획이 삐져나오기 쉽다.
+    targets = [(r.id, _bf(r.bbox)) for r in p1.regions if r.kind not in IMAGE_KINDS]
+    grown, orphans = attach_uncovered(boxes, targets)
     notes = []
     for r in p1.regions:
         if r.id in grown:

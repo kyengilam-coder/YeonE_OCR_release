@@ -86,7 +86,7 @@ def expand_until_clean(im: Image.Image, fr: Frac, pad: float = 0.0, thr: float =
     return {"bbox": tuple(round(v, 4) for v in bb), "touching": bad, "steps": steps}
 
 
-def uncovered_ink_boxes(im: Image.Image, regions: list[Frac], thr: int = 110, margin: float = 0.004,
+def uncovered_ink_boxes(im: Image.Image, regions: list[Frac], thr: int = 110, margin: float = 0.008,
                         min_w: float = 0.006, min_h: float = 0.03, density: float = 0.004) -> list[Frac]:
     """어느 영역에도 들지 않은 먹 기둥(세로 글 열)을 찾는다. 모델이 영역 좌표를 좁게 잡아 열 하나를 통째로 빠뜨린 경우를
     잡기 위한 것으로, 지침 36 '원본에 있는 본문이 누락되지 않아야 한다' 의 기계적 보조 수단이다."""
