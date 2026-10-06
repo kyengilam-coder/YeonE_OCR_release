@@ -1,4 +1,4 @@
-# YeonE_OCR · 연어OCR (0.2)
+# YeonE_OCR · 연어OCR
 
 세로쓰기 한자·한글 혼용 문헌(풍수·역학서 등 스캔 PDF)을 `yeone_ocr/지침.md`에 따라 OCR·교정해 **HWPX**로 만드는 PC 프로그램입니다.
 글자는 **Gemini**가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다. 모든 기능은 창 안의 단추로 누릅니다.
@@ -6,7 +6,7 @@
 ## 시작하기 (Windows)
 
 1. **Python 설치** — https://www.python.org/downloads/ 에서 받아 설치합니다. 설치 첫 화면의 "Add python.exe to PATH" 를 체크하십시오. (3.10 이상)
-2. **코드 받기** — https://github.com/kyengilam-coder/YeonE_OCR 에서 "Code → Download ZIP" 으로 받아 `C:\Projects\YeonE_OCR` 에 풉니다. git 이 있으면 `git clone https://github.com/kyengilam-coder/YeonE_OCR.git C:\Projects\YeonE_OCR` 로 받고, 새 판은 그 폴더에서 `git pull` 로 받습니다.
+2. **코드 받기** — https://github.com/kyengilam-coder/YeonE_OCR 에서 "Code → Download ZIP" 으로 받아 `C:\Projects\YeonE_OCR` 에 풉니다. git 이 있으면 `git clone https://github.com/kyengilam-coder/YeonE_OCR.git C:\Projects\YeonE_OCR` 로 받고, 새 판은 그 폴더에서 `git pull` 로 받습니다. 창 머리 오른쪽의 `v0.x.y` 와 진행 기록 첫 줄의 "프로그램 위치"로 어느 판이 떠 있는지 확인할 수 있습니다.
 3. **`YeonE_OCR.pyw` 더블클릭** — 창이 뜹니다. 뜨지 않으면 `YeonE_OCR.bat` 을 더블클릭하십시오(오류 글이 보입니다).
 4. **[필요한 패키지 설치·점검]** — 처음 한 번. 아래 "진행 기록"에 설치 과정이 흐르고, 끝나면 오른쪽 아래에 "패키지 모두 있음"이 뜹니다.
 5. **API 키** — https://aistudio.google.com/apikey 에서 키를 만들어 "Gemini API 키" 칸에 통째로 붙여 넣고 **[키 확인·모델 고르기]**. 키가 맞는지 Gemini 에 확인하고, 쓸 수 있는 모델 목록에서 고릅니다(pro 계열이 품질, flash 계열이 속도·비용). 키는 내 PC의 `사용자 폴더\.yeone_ocr\config.json` 에만 저장됩니다.

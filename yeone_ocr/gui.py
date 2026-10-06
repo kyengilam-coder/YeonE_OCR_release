@@ -683,6 +683,9 @@ class App(tk.Tk):
 
     # ---------- 패키지 ----------
     def check_packages(self):
+        here = Path(__file__).resolve().parent.parent
+        self.q.put(("log", f"{APP_NAME} v{__version__} · 프로그램 위치: {here} · Python {sys.version.split()[0]}\n"
+                           f"(다른 판이 뜨면 이 위치의 YeonE_OCR.pyw 를 실행하는지 확인하십시오)\n"))
         def t():
             self.q.put(("pkg", missing_packages()))
         threading.Thread(target=t, daemon=True).start()
