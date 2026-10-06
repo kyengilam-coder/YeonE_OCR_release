@@ -140,7 +140,10 @@ def cmd_read(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     pages = parse_pages(args.pages, len(doc))
-    reader = make_reader(args, doc, work)
+    try:
+        reader = make_reader(args, doc, work)
+    except Exception as e:
+        log(f"오류: {e}"); return 1
     log(f"read: 판독기 {reader.name} {getattr(reader, 'model', '')} · {len(pages)}쪽 · 묶음 {args.batch}쪽")
     for i in range(0, len(pages), args.batch):
         batch = pages[i:i + args.batch]
@@ -149,7 +152,13 @@ def cmd_read(args, work: Work | None = None, doc=None):
                 log("중지 요청으로 판독을 멈춤. 지금까지의 쪽은 기록에 남아 있음."); return 130
             if work.load_record(n) and not args.force:
                 log(f"  {n}쪽: 기록 있음(건너뜀, --force 로 다시)"); continue
-            rec = read_one(work, doc, reader, n, args)
+            try:
+                rec = read_one(work, doc, reader, n, args)
+            except Exception as e:
+                from .reader_gemini import ReaderError
+                if isinstance(e, ReaderError):
+                    log(f"오류: {n}쪽 판독 실패 — {e}"); return 1
+                raise
             m = rec["merged"]
             log(f"  {n}쪽: 영역 {len(m['regions'])} · 확인 필요 {len(m['uncertain'])} · 구조 검사 {len(rec['verify'])} · 레이어 일치율 {rec['textlayer_diff'].get('ratio')} · {rec['seconds']}s")
         log(f"  — 묶음 {batch[0]}~{batch[-1]}쪽 끝. 앞 묶음 마지막 문장과 이음새를 검수에서 확인하십시오(지침 25).")
@@ -224,6 +233,8 @@ def cmd_review(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     from .review_html import make_review
     recs = work.records(parse_pages(args.pages, len(doc)))
+    if not recs:
+        log("오류: 판독 기록이 없어 검수 화면을 만들지 않았습니다. 먼저 ③ 판독(read)을 실행하십시오."); return 2
     out = make_review(work, recs)
     log(f"review: {out} ({len(recs)}쪽)")
     return 0

@@ -129,5 +129,23 @@ class Guide(unittest.TestCase):
         self.assertIn("## 출력 형식 규칙", system_prompt())
 
 
+class GeminiHelpers(unittest.TestCase):
+    def test_normalize_and_shape(self):
+        from yeone_ocr.reader_gemini import normalize_key, key_shape_warning, friendly_error
+        k = "AIza" + "x" * 35
+        self.assertEqual(normalize_key(f'  "GEMINI_API_KEY={k}"\n'), k)
+        self.assertEqual(normalize_key(k[:10] + " \n" + k[10:]), k)
+        self.assertEqual(key_shape_warning(k), "")
+        self.assertIn("78자", key_shape_warning(k + k))          # 두 번 붙여 넣음
+        self.assertTrue(key_shape_warning(""))
+        class E(Exception): code = 400
+        msg, retry = friendly_error(E("400 INVALID_ARGUMENT ... API_KEY_INVALID ... API key not valid"))
+        self.assertIn("API 키가 올바르지 않습니다", msg); self.assertFalse(retry)
+        class Q(Exception): code = 429
+        msg, retry = friendly_error(Q("quota")); self.assertTrue(retry)
+        class N(Exception): code = 404
+        msg, retry = friendly_error(N("NOT_FOUND"), "gemini-9"); self.assertIn("gemini-9", msg); self.assertFalse(retry)
+
+
 if __name__ == "__main__":
     unittest.main()

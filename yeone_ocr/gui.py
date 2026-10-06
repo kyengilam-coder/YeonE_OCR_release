@@ -27,7 +27,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
 차례
  1. [필요한 패키지 설치·점검] — 처음 한 번.
- 2. API 키를 넣고 [설정 저장]. (https://aistudio.google.com/apikey)
+ 2. API 키를 넣고 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다. (https://aistudio.google.com/apikey)
  3. [PDF 고르기…] 로 파일을 고르고 쪽 범위(예 1-5)와 인쇄 쪽수 차이를 적습니다.
  4. [▶ 한 번에 실행] 을 누르면 준비 → 판독 → 문서 만들기 → 검수 화면 → 보고 까지 갑니다.
  5. [⑤ 검수 화면 열기] 에서 원본과 대조하고, 글자를 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다.
@@ -83,11 +83,17 @@ def open_path(path: str | Path) -> None:
 
 
 class QueueWriter(io.TextIOBase):
+    """작업 스레드의 출력을 창으로 보낸다. '오류:' 로 시작하는 줄은 따로 모아 끝난 뒤 알림창에 보여 준다."""
     def __init__(self, q: queue.Queue):
-        self.q = q
+        self.q = q; self.problems: list[str] = []; self._buf = ""   # (errors 는 TextIOBase 의 예약 속성이라 못 씀)
     def write(self, s):
         if s:
             self.q.put(("log", s))
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip().startswith(("오류:", "주의:")):
+                    self.problems.append(line.strip())
         return len(s)
     def flush(self):
         pass
@@ -121,6 +127,33 @@ class MarkDialog(tk.Toplevel):
             argv.append("--clear-check")
         self.destroy()
         self.app.start(argv, "검수 결과 기록")
+
+
+class ModelDialog(tk.Toplevel):
+    """키 확인 뒤 쓸 수 있는 모델 목록에서 고른다. gemini 가 든 이름을 앞에 둔다."""
+    def __init__(self, app: "App", models: list[str]):
+        super().__init__(app)
+        self.app = app; self.title("쓸 수 있는 모델 고르기"); self.resizable(False, False)
+        f = ttk.Frame(self, padding=12); f.grid()
+        cur = app.v_model.get().strip()
+        ttk.Label(f, text=f"키 확인됨. 모델 {len(models)}개 중 고르십시오." + (f"  (지금 '{cur}' 은 목록에 {'있음' if cur in models else '없음'})" if cur else "")).grid(row=0, column=0, columnspan=2, sticky="w")
+        pref = [m for m in models if "gemini" in m and "pro" in m] + [m for m in models if "gemini" in m and "flash" in m and "pro" not in m]
+        ordered = pref + [m for m in models if m not in pref]
+        self.cb = ttk.Combobox(f, values=ordered, width=48, state="readonly")
+        if cur in ordered: self.cb.set(cur)
+        elif ordered: self.cb.current(0)
+        self.cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Label(f, text="판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다.").grid(row=2, column=0, columnspan=2, sticky="w")
+        b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(b, text="이 모델로", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=4)
+        self.transient(app); self.grab_set()
+
+    def ok(self):
+        if self.cb.get():
+            self.app.v_model.set(self.cb.get()); self.app.save_settings(quiet=True)
+            self.app.v_status.set(f"모델 '{self.cb.get()}' 로 설정됨")
+        self.destroy()
 
 
 class App(tk.Tk):
@@ -180,7 +213,9 @@ class App(tk.Tk):
         r += 1
         ttk.Label(st, text="Gemini API 키").grid(row=r, column=0, sticky="w", **pad)
         self.e_key = ttk.Entry(st, textvariable=self.v_key, width=48, show="•"); self.e_key.grid(row=r, column=1, columnspan=3, sticky="w", **pad)
-        self._btn(st, "보기", self.toggle_key, width=5).grid(row=r, column=4, sticky="w", **pad)
+        kb = ttk.Frame(st); kb.grid(row=r, column=4, sticky="w")
+        self._btn(kb, "보기", self.toggle_key, width=5).pack(side="left", padx=(6, 2))
+        self._btn(kb, "키 확인·모델 고르기", self.check_key, width=18).pack(side="left")
         r += 1
         cf = ttk.Frame(st); cf.grid(row=r, column=0, columnspan=5, sticky="w")
         ttk.Checkbutton(cf, text="영역을 확대해 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=6)
@@ -258,9 +293,15 @@ class App(tk.Tk):
 
     def _prepare_env(self) -> bool:
         if self.v_reader.get() == "gemini":
-            key = self.v_key.get().strip()
+            from .reader_gemini import normalize_key, key_shape_warning
+            key = normalize_key(self.v_key.get())
+            if key != self.v_key.get():
+                self.v_key.set(key)                  # 공백·따옴표 등을 걷어 낸 값으로 바꿔 보여 준다
             if not key:
                 messagebox.showwarning(APP_NAME, "Gemini API 키가 없습니다. 설정에 키를 넣거나 판독기를 '기존 텍스트 레이어만' 으로 바꾸십시오."); return False
+            warn = key_shape_warning(key)
+            if warn and not messagebox.askyesno(APP_NAME, warn + "\n\n그래도 이 키로 진행할까요?"):
+                return False
             os.environ["GEMINI_API_KEY"] = key
         self.save_settings(quiet=True)
         return True
@@ -284,20 +325,24 @@ class App(tk.Tk):
         self.q.put(("log", f"\n▶ {label}\n   yeone-ocr {' '.join(argv)}\n"))
         def target():
             rc = 1
-            w = QueueWriter(self.q)
+            w = None
             try:
+                w = QueueWriter(self.q)
+                self._last_writer = w
                 with contextlib.redirect_stdout(w), contextlib.redirect_stderr(w):
                     from . import cli
                     cli.CANCEL.clear()
                     rc = cli.main(argv)
             except SystemExit as e:
                 rc = e.code if isinstance(e.code, int) else 1
-                if e.code and not isinstance(e.code, int): w.write(str(e.code) + "\n")
+                if e.code and not isinstance(e.code, int): self.q.put(("log", str(e.code) + "\n"))
             except ModuleNotFoundError as e:
-                w.write(f"\n패키지가 없습니다: {e.name}. [필요한 패키지 설치·점검] 단추를 누르십시오.\n")
+                self.q.put(("log", f"\n오류: 패키지가 없습니다: {e.name}. [필요한 패키지 설치·점검] 단추를 누르십시오.\n"))
+                if w: w.problems.append(f"오류: 패키지가 없습니다: {e.name}")
             except Exception:
-                w.write(traceback.format_exc())
-            self.q.put(("done", rc, label))
+                self.q.put(("log", traceback.format_exc()))
+            finally:
+                self.q.put(("done", rc, label))          # 어떤 경우에도 창에 끝을 알린다
         threading.Thread(target=target, daemon=True).start()
 
     def _poll(self):
@@ -310,6 +355,8 @@ class App(tk.Tk):
                     self._finish(item[1], item[2])
                 elif item[0] == "pkg":
                     self._pkg_result(item[1])
+                elif item[0] == "keycheck":
+                    self._keycheck_result(item[1])
         except queue.Empty:
             pass
         self.after(100, self._poll)
@@ -320,6 +367,10 @@ class App(tk.Tk):
         self.v_status.set(f"{label} {'끝' if ok else ('중지됨' if rc == 130 else '오류 (진행 기록 확인)')}")
         self._append(f"— {label} {'끝' if ok else '중단'} (rc={rc})\n")
         self.refresh_table()
+        w = getattr(self, "_last_writer", None)
+        if not ok and rc != 130 and w is not None and w.problems:
+            messagebox.showerror(APP_NAME, f"{label} 이(가) 중단되었습니다.\n\n" + "\n".join(w.problems[-3:]))
+        self._last_writer = None
         if ok and self.open_after and Path(self.open_after).exists():
             open_path(self.open_after)
         elif ok and label.startswith("한 번에 실행"):
@@ -336,6 +387,31 @@ class App(tk.Tk):
 
     def toggle_key(self):
         self.e_key.configure(show="" if self.e_key.cget("show") else "•")
+
+    def check_key(self):
+        """키가 쓸 수 있는지 Gemini 에 물어보고, 쓸 수 있는 모델 목록에서 고르게 한다."""
+        if self.running: return
+        from .reader_gemini import normalize_key
+        key = normalize_key(self.v_key.get()); self.v_key.set(key)
+        model = self.v_model.get().strip()
+        self._set_running(True); self.v_status.set("키 확인 중…")
+        def t():
+            try:
+                from .reader_gemini import check_key
+                res = check_key(key, model)
+            except Exception as e:
+                res = {"ok": False, "message": f"확인 실패: {e}", "models": [], "shape_warning": ""}
+            self.q.put(("keycheck", res))
+        threading.Thread(target=t, daemon=True).start()
+
+    def _keycheck_result(self, res: dict):
+        self._set_running(False)
+        self.v_status.set(res["message"][:90])
+        self._append("키 확인: " + res["message"] + ("\n주의: " + res["shape_warning"] if res.get("shape_warning") else "") + "\n")
+        if not res["ok"]:
+            messagebox.showerror(APP_NAME, res["message"] + ("\n\n" + res["shape_warning"] if res.get("shape_warning") else "")); return
+        self.save_settings(quiet=True)
+        ModelDialog(self, res["models"])
 
     def _reader_changed(self):
         st = "normal" if self.v_reader.get() == "gemini" else "disabled"
