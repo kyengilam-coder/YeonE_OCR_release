@@ -19,6 +19,7 @@ def make_report(work: Work, total_pages: int) -> str:
     lines = [f"# 작업 상태 보고 — {work.pdf_path.name}", ""]
     groups: dict[str, list[int]] = {}
     details = []
+    tot = {"pages": 0, "calls": 0, "prompt_tokens": 0, "output_tokens": 0, "seconds": 0.0}; models: dict[str, int] = {}
     for n in range(1, total_pages + 1):
         p = st["pages"].get(str(n))
         key = " · ".join(p["statuses"]) if p and p.get("statuses") else "미처리"
@@ -36,6 +37,11 @@ def make_report(work: Work, total_pages: int) -> str:
             ms = rec.get("merge_stats") or {}
             if ms.get("columns_compared"): d += f", 2차 비교 {ms['columns_compared']}열 중 {ms['columns_differ']}열 불일치"
             if rec.get("reader") == "mock": d += " — 기존 OCR 레이어 그대로, 원본 대조 전"
+            u = rec.get("usage") or {}
+            if u.get("calls"):
+                d += f", 호출 {u['calls']}회·토큰 {u.get('prompt_tokens', 0):,}/{u.get('output_tokens', 0):,}"
+                tot["pages"] += 1; tot["calls"] += u["calls"]; tot["prompt_tokens"] += u.get("prompt_tokens", 0); tot["output_tokens"] += u.get("output_tokens", 0)
+                tot["seconds"] += float(rec.get("seconds") or 0); models[rec.get("model", "")] = models.get(rec.get("model", ""), 0) + 1
             details.append(d)
     lines.append("## 구간별 상태")
     for key, nums in groups.items():
@@ -44,6 +50,13 @@ def make_report(work: Work, total_pages: int) -> str:
     lines.append("## 쪽별 요약")
     lines.extend(f"- {d}" for d in details) if details else lines.append("- (판독 기록 없음)")
     lines.append("")
+    if tot["pages"]:
+        lines.append("## 모델 호출 (판독 기록이 있는 쪽 누적)")
+        lines.append(f"- 모델: {', '.join(f'{m} {c}쪽' for m, c in models.items())}")
+        lines.append(f"- {tot['pages']}쪽 · 호출 {tot['calls']}회 · 토큰 입력 {tot['prompt_tokens']:,} 출력 {tot['output_tokens']:,} · 판독 시간 {tot['seconds']:.0f}초")
+        lines.append(f"- 쪽당 평균: 호출 {tot['calls'] / tot['pages']:.1f}회 · 입력 {tot['prompt_tokens'] / tot['pages']:,.0f} 출력 {tot['output_tokens'] / tot['pages']:,.0f} 토큰 · {tot['seconds'] / tot['pages']:.0f}초")
+        lines.append("- 비용은 Google AI Studio 의 모델별 단가(입력/출력 토큰 100만 개당)를 위 토큰 수에 곱해 구합니다.")
+        lines.append("")
     lines.append("## 주의")
     lines.append("- '원본 대조 완료(사람)' 은 검수자가 `mark` 명령으로 붙일 때만 기록됩니다. 프로그램은 이 상태를 스스로 붙이지 않습니다.")
     lines.append("- 자동 OCR·2차 비교·구조 검사는 전수 교감을 대신하지 않습니다(지침 27).")

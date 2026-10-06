@@ -179,6 +179,7 @@ def read_one(work: Work, doc, reader, n: int, args) -> dict:
     img, src = _load_page_image(work, doc, n, args.dpi)
     model_img = upscale(img, args.upscale) if max(img.size) * args.upscale <= 4200 else img
     t0 = time.time()
+    u0 = dict(getattr(reader, "usage", {}) or {})
     p1 = reader.read_page(model_img, Path(args.pdf).name, n, total)
     coverage_notes = cover_check(img, p1)
     for line in coverage_notes:
@@ -214,8 +215,11 @@ def read_one(work: Work, doc, reader, n: int, args) -> dict:
     layer = json.loads(tlp.read_text(encoding="utf-8")) if tlp.exists() else {"plain": text_layer(doc, n).plain()}
     tdiff = compare_textlayer(merged, layer.get("plain", ""))
     issues = verify_page(merged)
+    u1 = dict(getattr(reader, "usage", {}) or {})
+    usage = {k: int(u1.get(k, 0)) - int(u0.get(k, 0)) for k in ("calls", "prompt_tokens", "output_tokens") if k in u1}
     rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": reader.name, "model": getattr(reader, "model", ""),
            "image_source": src, "upscale": args.upscale, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(time.time() - t0, 1),
+           "usage": usage,
            "pass1": p1.model_dump(), "pass2": {k: (locals().get("rereads_meta") or {}).get(k) or v.model_dump() for k, v in rereads.items()},
            "merged": merged.model_dump(), "merge_stats": mstats, "textlayer_diff": tdiff, "verify": issues, "crops": {}}
     work.save_record(n, rec)
@@ -251,10 +255,13 @@ def cmd_read(args, work: Work | None = None, doc=None):
                     log(f"오류: {n}쪽 판독 실패 — {e}"); return 1
                 raise
             m = rec["merged"]
-            log(f"  {n}쪽: 영역 {len(m['regions'])} · 확인 필요 {len(m['uncertain'])} · 구조 검사 {len(rec['verify'])} · 레이어 일치율 {rec['textlayer_diff'].get('ratio')} · {rec['seconds']}s")
+            u = rec.get("usage") or {}
+            log(f"  {n}쪽: 영역 {len(m['regions'])} · 확인 필요 {len(m['uncertain'])} · 구조 검사 {len(rec['verify'])} · 레이어 일치율 {rec['textlayer_diff'].get('ratio')} · {rec['seconds']}s"
+                + (f" · 호출 {u.get('calls')}회 · 토큰 입력 {u.get('prompt_tokens'):,} 출력 {u.get('output_tokens'):,}" if u.get("calls") else ""))
         log(f"  — 묶음 {batch[0]}~{batch[-1]}쪽 끝. 앞 묶음 마지막 문장과 이음새를 검수에서 확인하십시오(지침 25).")
-    if getattr(reader, "usage", None):
-        log(f"모델 호출 통계: {reader.usage}")
+    if getattr(reader, "usage", None) and reader.usage.get("calls"):
+        u = reader.usage
+        log(f"모델 호출 통계(이번 실행): 호출 {u['calls']}회 · 토큰 입력 {u['prompt_tokens']:,} 출력 {u['output_tokens']:,}  — 쪽별 누적은 ⑥ 보고에 있음")
     return 0
 
 

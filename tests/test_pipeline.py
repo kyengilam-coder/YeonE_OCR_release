@@ -162,6 +162,22 @@ class ExpandText(unittest.TestCase):
         self.assertLessEqual(p1.regions[0].bbox[1], 810)
 
 
+class ReportUsage(unittest.TestCase):
+    def test_usage_summary(self):
+        from yeone_ocr.state import Work
+        from yeone_ocr.report import make_report
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "x.pdf"); open(pdf, "wb").write(b"%PDF-1.4\n")
+            w = Work(pdf, os.path.join(td, "w"))
+            for n, calls in ((1, 3), (2, 5)):
+                w.save_record(n, {"file": "x.pdf", "pdf_page": n, "reader": "gemini", "model": "m", "seconds": 20, "verify": [],
+                                  "usage": {"calls": calls, "prompt_tokens": 1000 * calls, "output_tokens": 100 * calls},
+                                  "merged": PageReading(pdf_page=n, print_page=str(29 + n)).model_dump()})
+                w.set_status(n, "1차 OCR 완료")
+            rep = make_report(w, 2)
+            self.assertIn("호출 8회", rep); self.assertIn("쪽당 평균: 호출 4.0회", rep); self.assertIn("입력 8,000", rep)
+
+
 class Build(unittest.TestCase):
     def test_hwpx_structure_and_images(self):
         with tempfile.TemporaryDirectory() as td:
