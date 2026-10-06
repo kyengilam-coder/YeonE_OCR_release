@@ -355,9 +355,9 @@ class App(tk.Tk):
                  ("④ 문서 만들기", self.do_build), ("⑤ 검수 화면", self.do_review), ("⑥ 보고", self.do_report)]
         for i, (t, c) in enumerate(steps):
             self._btn(sf, t, c, width=12).grid(row=0, column=i, padx=3, pady=2)
-        ttk.Separator(sf, orient="vertical").grid(row=0, column=6, sticky="ns", padx=8)
         for i, (t, c) in enumerate([("검수 결과 기록…", self.do_mark), ("비교 다시 계산", self.do_remerge), ("패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
-            self._btn(sf, t, c, width=14 if i < 3 else 8).grid(row=0, column=7 + i, padx=3, pady=2)
+            self._btn(sf, t, c, width=12).grid(row=1, column=i, padx=3, pady=(6, 2))
+        ttk.Label(sf, text="검수 뒤 사람이 확인한 쪽은 [검수 결과 기록…], 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산]", style="Hint.TLabel").grid(row=1, column=4, columnspan=2, sticky="w", padx=6)
 
         # ---- 진행 ----
         pf2 = ttk.Frame(root); pf2.pack(fill="x", pady=(10, 0))
