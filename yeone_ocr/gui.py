@@ -16,8 +16,8 @@ APP_NAME = "YeonE_OCR"
 CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx")]
-DEFAULTS = {"pages": "1-5", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-2.5-pro",
-            "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "last_pdf": ""}
+DEFAULTS = {"pages": "1-5", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
+            "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "last_pdf": ""}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -31,6 +31,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
  3. [PDF 고르기…] 로 파일을 고르고 쪽 범위(예 1-5)와 인쇄 쪽수 차이를 적습니다.
  4. [▶ 한 번에 실행] 을 누르면 준비 → 판독 → 문서 만들기 → 검수 화면 → 보고 까지 갑니다.
  5. [⑤ 검수 화면 열기] 에서 원본과 대조하고, 글자를 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다.
+    [비교 다시 계산] 은 저장된 1차·2차 판독으로 확인 표시만 다시 만듭니다(모델 호출 없음). "기록 있는 쪽도 다시 판독" 을 켜면 ③ 판독이 기존 기록을 덮어씁니다.
  6. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 "원본 대조 완료(사람)" 을 남깁니다.
 
 결과는 PDF 와 같은 폴더의 「<PDF 이름>_YeonE_OCR」 안에 생깁니다.
@@ -198,7 +199,7 @@ class App(tk.Tk):
         self.v_up = tk.StringVar(value=self.cfg["upscale"]); self.v_reader = tk.StringVar(value=self.cfg["reader"])
         self.v_model = tk.StringVar(value=self.cfg["model"]); self.v_key = tk.StringVar(value=self.cfg["api_key"])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
-        self.v_join = tk.BooleanVar(value=self.cfg["join_pages"])
+        self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
         r = 0
         ttk.Label(st, text="쪽 범위").grid(row=r, column=0, sticky="w", **pad)
         ttk.Entry(st, textvariable=self.v_pages, width=12).grid(row=r, column=1, sticky="w", **pad)
@@ -228,6 +229,7 @@ class App(tk.Tk):
         ttk.Checkbutton(cf, text="영역을 확대해 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=6)
         ttk.Checkbutton(cf, text="DOCX 도 만들기", variable=self.v_docx).pack(side="left", padx=6)
         ttk.Checkbutton(cf, text="앞 쪽에서 이어지는 문단 잇기", variable=self.v_join).pack(side="left", padx=6)
+        ttk.Checkbutton(cf, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left", padx=6)
         self._btn(cf, "설정 저장", self.save_settings).pack(side="left", padx=18)
 
         # 차례 단추
@@ -242,8 +244,8 @@ class App(tk.Tk):
         # 그 밖에
         ef = ttk.LabelFrame(root, text="그 밖에", padding=8); ef.pack(fill="x", pady=(8, 0))
         for i, (t, c) in enumerate([("결과 폴더 열기", self.open_work), ("HWPX 열기", self.open_hwpx), ("검수 결과 기록…", self.do_mark),
-                                    ("필요한 패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
-            self._btn(ef, t, c, width=22 if i == 3 else 16).grid(row=0, column=i, padx=3, pady=2)
+                                    ("비교 다시 계산", self.do_remerge), ("필요한 패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
+            self._btn(ef, t, c, width=22 if i == 4 else 15).grid(row=0, column=i, padx=3, pady=2)
 
         # 진행 표시
         pf = ttk.Frame(root); pf.pack(fill="x", pady=(8, 0))
@@ -290,6 +292,8 @@ class App(tk.Tk):
             o.append("--no-second-pass")
         if self.v_off.get().strip():
             o += ["--print-offset", self.v_off.get().strip()]
+        if self.v_force.get():
+            o.append("--force")
         return o
 
     def _build_opts(self) -> list[str]:
@@ -427,7 +431,7 @@ class App(tk.Tk):
     def save_settings(self, quiet=False):
         self.cfg.update({"pages": self.v_pages.get(), "print_offset": self.v_off.get(), "upscale": self.v_up.get(), "reader": self.v_reader.get(),
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
-                         "join_pages": self.v_join.get(), "last_pdf": self.pdf()})
+                         "join_pages": self.v_join.get(), "force": self.v_force.get(), "last_pdf": self.pdf()})
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
@@ -469,6 +473,15 @@ class App(tk.Tk):
 
     def do_mark(self):
         if self._need_pdf(): MarkDialog(self)
+
+    def do_remerge(self):
+        """저장된 1차·2차 판독으로 비교·표시만 다시 계산한다(모델 호출 없음). 프로그램을 고친 뒤 기존 기록에 적용할 때 쓴다."""
+        if not self._need_pdf(): return
+        if not messagebox.askyesno(APP_NAME, "저장된 1차·2차 판독으로 비교와 확인 표시를 다시 계산합니다(모델 호출 없음).\n"
+                                             "readings/pNNN.json 의 merged 를 손으로 고친 내용은 사라집니다. 계속할까요?"):
+            return
+        self.nb.select(0)
+        self.start(["remerge", self.pdf(), "--work", str(self.work())] + self._pages(), "비교 다시 계산")
 
     def open_work(self):
         if not self._need_pdf(): return

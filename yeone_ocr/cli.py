@@ -4,6 +4,7 @@
   prepare  쪽 이미지(내장 스캔 우선)와 기존 텍스트 레이어를 작업 폴더에 꺼냄
   read     모델(기본 gemini)로 영역 분류·판독 → 확대 재판독 비교 → 텍스트 레이어 대조 → 구조 검사
   build    도판 잘라내기(외곽 검사) → HWPX(+DOCX) 조립 → 파일 구조 검사
+  remerge  저장된 1차·2차 판독으로 비교·표시만 다시 계산 (모델 호출 없음)
   review   검수용 review.html
   report   작업 상태 보고 report.md
   mark     사람이 확인한 상태 기록 (예: --status "원본 대조 완료(사람)")
@@ -92,6 +93,66 @@ def _load_page_image(work: Work, doc, n: int, dpi: int) -> tuple[Image.Image, st
     return img, src
 
 
+def fill_page_marks(pr: PageReading) -> None:
+    """모델이 쪽번호·머리말 영역은 만들고 page_label/running_header 칸을 비워 두면 영역 글로 채운다."""
+    from .schema import region_text
+    for reg in pr.regions:
+        t = (reg.title_text or region_text(reg)).strip()
+        if not t:
+            continue
+        if reg.kind == "쪽번호" and not pr.page_label:
+            pr.page_label = t
+            m = __import__("re").search(r"\d{1,4}", t)
+            if m and not pr.print_page:
+                pr.print_page = m.group(0)
+        elif reg.kind == "머리말" and not pr.running_header:
+            pr.running_header = t
+
+
+def remerge_record(rec: dict, layer_plain: str) -> dict:
+    """저장된 1차·2차 판독으로 비교·표시를 다시 계산한다(모델 호출 없음). merged 에 손으로 고친 내용은 사라진다."""
+    p1 = PageReading.model_validate(rec["pass1"])
+    rereads = {k: RegionReread.model_validate(v) for k, v in (rec.get("pass2") or {}).items()}
+    merged, mstats = merge_passes(p1, rereads)
+    fill_page_marks(merged)
+    keep = [u for u in PageReading.model_validate(rec["merged"]).uncertain
+            if u.context.startswith(("자동 감지한 큰 도형", "인쇄 쪽수 판독값"))]      # 도판·쪽수 교차 확인 항목은 유지
+    merged.uncertain.extend(u for u in keep if u not in merged.uncertain)
+    rec["merged"] = merged.model_dump(); rec["merge_stats"] = mstats
+    rec["textlayer_diff"] = compare_textlayer(merged, layer_plain)
+    rec["verify"] = verify_page(merged)
+    rec["remerged_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return rec
+
+
+def cmd_remerge(args, work: Work | None = None, doc=None):
+    doc = doc or open_pdf(args.pdf)
+    work = work or Work(args.pdf, args.work)
+    records = work.records(parse_pages(args.pages, len(doc)))
+    if not records:
+        log("오류: 판독 기록이 없습니다."); return 2
+    for rec in records:
+        n = rec["pdf_page"]
+        if not rec.get("pass1"):
+            log(f"  {n}쪽: 1차 판독 원본이 없어 건너뜀"); continue
+        before = len(rec["merged"].get("uncertain", []))
+        tlp = work.textlayer_path(n)
+        layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else ""
+        rec = remerge_record(rec, layer)
+        work.save_record(n, rec)
+        m = rec["merged"]; ms = rec["merge_stats"]
+        if m["uncertain"] or any(i["level"] == "error" for i in rec["verify"]):
+            work.set_status(n, "판독 확인 필요")
+        else:
+            st = work.load_state(); p = st["pages"].get(str(n))
+            if p and "판독 확인 필요" in p["statuses"]:
+                p["statuses"].remove("판독 확인 필요"); work.save_state(st)
+        log(f"  {n}쪽: 확인 필요 {before} → {len(m['uncertain'])}건 · 열 비교 {ms.get('columns_compared')}열 중 {ms.get('columns_differ')}열 불일치"
+            + (f" · 1차에만 {ms.get('columns_only_pass1')}열, 2차에만 {ms.get('columns_only_pass2')}열" if ms.get('columns_only_pass1') or ms.get('columns_only_pass2') else ""))
+    log("remerge: 끝. ④ 문서 만들기를 다시 실행하십시오.")
+    return 0
+
+
 def read_one(work: Work, doc, reader, n: int, args) -> dict:
     total = len(doc)
     img, src = _load_page_image(work, doc, n, args.dpi)
@@ -109,6 +170,7 @@ def read_one(work: Work, doc, reader, n: int, args) -> dict:
             if rr.columns:
                 rereads[reg.id] = rr
     merged, mstats = merge_passes(p1, rereads)
+    fill_page_marks(merged)
     # 도판 교차 확인(자동 감지)
     cv = detect_figures(img)
     model_figs = [bbox_frac(r.bbox) for r in merged.regions if r.kind in IMAGE_KINDS]
@@ -306,6 +368,7 @@ def build_parser():
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
     p = sub.add_parser("read"); common(p); read_opts(p); p.set_defaults(fn=cmd_read)
     p = sub.add_parser("build"); common(p); build_opts(p); p.set_defaults(fn=cmd_build)
+    p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p); p.set_defaults(fn=cmd_remerge)
     p = sub.add_parser("review"); common(p); p.set_defaults(fn=cmd_review)
     p = sub.add_parser("report"); common(p); p.set_defaults(fn=cmd_report)
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")

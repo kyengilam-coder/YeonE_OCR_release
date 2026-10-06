@@ -51,6 +51,36 @@ class SchemaMerge(unittest.TestCase):
         self.assertIn("〔甲/화〕", paragraph_text(m.regions[0].paragraphs[0]))
         self.assertEqual(len(m.uncertain), 1); self.assertEqual(m.uncertain[0].col_from_right, 1)
 
+    def test_merge_aligns_by_text_not_number(self):
+        """1차가 문단마다 열 번호를 1부터 다시 세고 2차가 영역 전체로 세어도, 같은 열끼리 비교해야 한다(3쪽 50건 사태 방지)."""
+        p1 = PageReading(pdf_page=3, regions=[Region(id="b", kind="본문", paragraphs=[
+            Paragraph(columns=[Column(col_from_right=1, text="이것은 十二地支下에 各排五子位이니"), Column(col_from_right=2, text="甲丙戊庚壬子하고 乙丁己辛癸丑의 順으로 排卦한 것이다")]),
+            Paragraph(columns=[Column(col_from_right=1, text="이것을 一名胎骨龍이라고도 하고 또 六十分金이라"), Column(col_from_right=2, text="고도 하는데 이는 五子를 비롯한 六十龍直下에")])])])
+        rr = {"b": RegionReread(columns=[
+            Column(col_from_right=1, text="이것은 十二地支下에 各排五子位이니"), Column(col_from_right=2, text="甲丙戊庚壬子하고 乙丁己辛癸丑의 順으로 排卦한 것이다"),
+            Column(col_from_right=3, text="이것을 一名胎骨龍이라고도 하고 또 六十分金이라"), Column(col_from_right=4, text="고도 하는데 이는 五子를 비롯한 六十龍直下에")])}
+        m, st = merge_passes(p1, rr)
+        self.assertEqual(st["columns_compared"], 4); self.assertEqual(st["columns_differ"], 0); self.assertEqual(m.uncertain, [])
+        self.assertEqual([c.col_from_right for p in m.regions[0].paragraphs for c in p.columns], [1, 2, 3, 4])   # 영역 전체 번호로 통일
+        # 2차에 열이 하나 빠지면 글자 단위 표시 대신 '대응 열 없음' 한 건
+        rr2 = {"b": RegionReread(columns=[rr["b"].columns[0], rr["b"].columns[2], rr["b"].columns[3]])}
+        m2, st2 = merge_passes(p1, rr2)
+        self.assertEqual(st2["columns_only_pass1"], 1); self.assertEqual(st2["marks"], 0)
+        self.assertTrue(any("대응하는 열이 없음" in u.context for u in m2.uncertain))
+
+    def test_remerge_record_and_page_marks(self):
+        from yeone_ocr.cli import remerge_record, fill_page_marks
+        p1 = PageReading(pdf_page=4, regions=[
+            Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="剋하니 冲和가 되고")])]),
+            Region(id="n", kind="쪽번호", title_text="- 33 -")])
+        fill_page_marks(p1); self.assertEqual((p1.page_label, p1.print_page), ("- 33 -", "33"))
+        rec = {"pdf_page": 4, "pass1": p1.model_dump(), "pass2": {"b": RegionReread(columns=[Column(col_from_right=1, text="剋하니 沖和가 되고")]).model_dump()},
+               "merged": PageReading(pdf_page=4, uncertain=[Uncertain(context="자동 감지한 큰 도형 (0.1, 0.5, 0.5, 0.9) 가 도판 영역으로 분류되지 않음")]).model_dump()}
+        rec = remerge_record(rec, "剋하니冲和가되고")
+        ctx = [u["context"] for u in rec["merged"]["uncertain"]]
+        self.assertTrue(any("冲/沖" in c for c in ctx)); self.assertTrue(any(c.startswith("자동 감지한 큰 도형") for c in ctx))
+        self.assertEqual(rec["merge_stats"]["columns_compared"], 1); self.assertIn("remerged_at", rec)
+
     def test_compare_textlayer(self):
         pr = PageReading(pdf_page=1, regions=[Region(id="b1", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="納甲은 乾")])])])
         d = compare_textlayer(pr, "納화은乾")

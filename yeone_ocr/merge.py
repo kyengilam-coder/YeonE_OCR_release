@@ -1,7 +1,7 @@
 """1차(쪽 전체) 판독과 2차(영역 확대) 독립 판독의 비교·병합, 기존 텍스트 레이어와의 대조."""
 from __future__ import annotations
 import difflib, re
-from .schema import PageReading, RegionReread, Region, Uncertain, TEXT_KINDS, region_columns, region_text
+from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_columns, region_text
 
 WS = re.compile(r"\s+")
 
@@ -59,36 +59,94 @@ def diff_mark(a: str, b: str) -> tuple[str, list[tuple[int, str]]]:
     return _detok("".join(out), table), marks
 
 
+def columns_in_reading_order(r: Region) -> list[Column]:
+    """문단 순서 → 문단 안 열 번호 순서. (모델이 문단마다 열 번호를 1부터 다시 세는 경우가 있어 번호로 전역 정렬하면 안 된다)"""
+    out: list[Column] = []
+    for p in r.paragraphs:
+        out.extend(sorted(p.columns, key=lambda c: c.col_from_right))
+    return out
+
+
+def _sim(a: str, b: str) -> float:
+    a, b = WS.sub("", a), WS.sub("", b)
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+def align_columns(c1: list[Column], c2: list[Column], min_sim: float = 0.55) -> list[tuple[int | None, int | None]]:
+    """두 판독의 열을 글 유사도로 짝짓는다(순서 보존, 빈칸 허용). 번호가 어긋나거나 열이 빠져도 같은 열끼리 비교하게 한다."""
+    n, m = len(c1), len(c2)
+    S = [[_sim(c1[i].text, c2[j].text) for j in range(m)] for i in range(n)]
+    dp = [[0.0] * (m + 1) for _ in range(n + 1)]
+    bt = [[""] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            best, move = dp[i - 1][j], "up"
+            if dp[i][j - 1] > best:
+                best, move = dp[i][j - 1], "left"
+            gain = S[i - 1][j - 1] if S[i - 1][j - 1] >= min_sim else -0.01   # 닮지 않은 열은 짝짓지 않는다
+            if dp[i - 1][j - 1] + gain > best:
+                best, move = dp[i - 1][j - 1] + gain, "diag"
+            dp[i][j], bt[i][j] = best, move
+    pairs: list[tuple[int | None, int | None]] = []
+    i, j = n, m
+    while i > 0 and j > 0:
+        mv = bt[i][j]
+        if mv == "diag":
+            pairs.append((i - 1, j - 1) if S[i - 1][j - 1] >= min_sim else (i - 1, None)); i -= 1; j -= 1
+            if pairs[-1][1] is None:
+                pairs.append((None, j))          # 짝 못 지은 2차 열도 남긴다
+        elif mv == "up":
+            pairs.append((i - 1, None)); i -= 1
+        else:
+            pairs.append((None, j - 1)); j -= 1
+    while i > 0:
+        pairs.append((i - 1, None)); i -= 1
+    while j > 0:
+        pairs.append((None, j - 1)); j -= 1
+    return list(reversed(pairs))
+
+
 def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[PageReading, dict]:
-    """2차 판독이 있는 문자 영역마다 열 단위로 비교해 다른 곳을 표시한다. 통계도 돌려준다."""
+    """2차 판독이 있는 문자 영역마다 열을 글 유사도로 맞춘 뒤 비교해 다른 곳을 표시한다. 열 번호는 영역 전체 기준으로 다시 매긴다."""
     merged = p1.model_copy(deep=True)
-    stats = {"regions_compared": 0, "columns_compared": 0, "columns_differ": 0, "marks": 0, "column_count_mismatch": []}
+    stats = {"regions_compared": 0, "columns_compared": 0, "columns_differ": 0, "marks": 0,
+             "columns_only_pass1": 0, "columns_only_pass2": 0, "column_count_mismatch": []}
     for r in merged.regions:
-        if r.kind not in TEXT_KINDS or r.id not in rereads:
+        if r.kind not in TEXT_KINDS:
             continue
-        rr = rereads[r.id]
-        if not rr.columns:
+        cols = columns_in_reading_order(r)
+        for k, c in enumerate(cols, 1):           # 영역 전체에서 오른쪽부터 1, 2, 3… 으로 통일
+            c.col_from_right = k
+        rr = rereads.get(r.id)
+        if not rr or not rr.columns:
             continue
         stats["regions_compared"] += 1
-        second = {c.col_from_right: c.text for c in rr.columns}
-        cols = region_columns(r)
-        if len(cols) != len(rr.columns):
-            stats["column_count_mismatch"].append((r.id, len(cols), len(rr.columns)))
-            merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=0, position="",
-                context=f"열 개수 불일치: 1차 {len(cols)}열, 2차 {len(rr.columns)}열 → 열 경계·순서를 원본에서 확인"))
-        for c in cols:
-            if c.col_from_right not in second:
-                continue
-            stats["columns_compared"] += 1
-            if _norm(c.text) == _norm(second[c.col_from_right]):
-                continue
-            stats["columns_differ"] += 1
-            text, marks = diff_mark(c.text, second[c.col_from_right])
-            c.text = text
-            for i, ctx in marks:
-                stats["marks"] += 1
-                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=c.col_from_right,
-                                                  position=_pos(i, len(_norm(c.text))), context=ctx))
+        cols2 = sorted(rr.columns, key=lambda c: c.col_from_right)
+        if len(cols) != len(cols2):
+            stats["column_count_mismatch"].append((r.id, len(cols), len(cols2)))
+        for i, j in align_columns(cols, cols2):
+            if i is not None and j is not None:
+                stats["columns_compared"] += 1
+                c = cols[i]
+                if _norm(c.text) == _norm(cols2[j].text):
+                    continue
+                stats["columns_differ"] += 1
+                text, marks = diff_mark(c.text, cols2[j].text)
+                c.text = text
+                for pos, ctx in marks:
+                    stats["marks"] += 1
+                    merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=c.col_from_right,
+                                                      position=_pos(pos, len(_norm(c.text))), context=ctx))
+            elif i is not None:
+                stats["columns_only_pass1"] += 1
+                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=cols[i].col_from_right, position="",
+                    context=f"2차 판독에 대응하는 열이 없음 — 열 경계·순서를 원본에서 확인: 「{_norm(cols[i].text)[:24]}…」"))
+            else:
+                stats["columns_only_pass2"] += 1
+                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=0, position="",
+                    context=f"2차 판독에만 있는 열(1차 누락 가능) — 원본 확인: 「{_norm(cols2[j].text)[:24]}…」"))
         for u in rr.uncertain:            # 2차가 따로 적은 불확실 항목도 보탠다
             u2 = u.model_copy(); u2.region_id = u2.region_id or r.id
             if all(not (x.region_id == u2.region_id and x.context == u2.context) for x in merged.uncertain):

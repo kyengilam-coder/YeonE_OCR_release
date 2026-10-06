@@ -58,6 +58,10 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None) ->
                 for p in reg.paragraphs:
                     cols = "".join(f"<li><small>{c.col_from_right}열</small> {_mark(c.text)}</li>" for c in sorted(p.columns, key=lambda c: c.col_from_right))
                     parts.append(f"<p>{_mark(paragraph_text(p))}</p><details><summary>열별 보기</summary><ol>{cols}</ol></details>")
+                p2 = (rec.get("pass2") or {}).get(reg.id)
+                if p2 and p2.get("columns"):
+                    cols2 = "".join(f"<li><small>{c.get('col_from_right')}열</small> {html.escape(c.get('text', ''))}</li>" for c in sorted(p2["columns"], key=lambda c: c.get("col_from_right", 0)))
+                    parts.append(f"<details><summary>2차 판독(확대 조각) 열 {len(p2['columns'])}개 — 비교 원본</summary><ol>{cols2}</ol></details>")
             elif reg.kind == "단순표":
                 parts.append("<table border=1 cellpadding=3>" + "".join("<tr>" + "".join(f"<td>{_mark(c)}</td>" for c in r.cells) + "</tr>" for r in reg.table_rows) + "</table>")
             if reg.note:
