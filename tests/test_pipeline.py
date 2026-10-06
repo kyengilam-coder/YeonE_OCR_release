@@ -136,7 +136,11 @@ class GeminiHelpers(unittest.TestCase):
         self.assertEqual(normalize_key(f'  "GEMINI_API_KEY={k}"\n'), k)
         self.assertEqual(normalize_key(k[:10] + " \n" + k[10:]), k)
         self.assertEqual(key_shape_warning(k), "")
+        self.assertEqual(key_shape_warning("AQ." + "B" * 50), "")   # 새 형식 키
         self.assertIn("78자", key_shape_warning(k + k))          # 두 번 붙여 넣음
+        from yeone_ocr.reader_gemini import model_sort_key
+        names = ["gemini-2.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3.1-flash", "gemini-2.0-flash-lite"]
+        self.assertEqual(sorted(names, key=model_sort_key)[:3], ["gemini-3.1-pro-preview", "gemini-3.1-flash", "gemini-2.5-pro"])
         self.assertTrue(key_shape_warning(""))
         class E(Exception): code = 400
         msg, retry = friendly_error(E("400 INVALID_ARGUMENT ... API_KEY_INVALID ... API key not valid"))
@@ -144,7 +148,8 @@ class GeminiHelpers(unittest.TestCase):
         class Q(Exception): code = 429
         msg, retry = friendly_error(Q("quota")); self.assertTrue(retry)
         class N(Exception): code = 404
-        msg, retry = friendly_error(N("NOT_FOUND"), "gemini-9"); self.assertIn("gemini-9", msg); self.assertFalse(retry)
+        msg, retry = friendly_error(N("404 NOT_FOUND. {'error': {'message': 'models/gemini-9 is not found for API version v1beta'}}"), "gemini-9")
+        self.assertIn("gemini-9", msg); self.assertIn("서버 메시지", msg); self.assertFalse(retry)
 
 
 if __name__ == "__main__":

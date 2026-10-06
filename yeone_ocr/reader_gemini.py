@@ -3,7 +3,7 @@
 환경 변수: GEMINI_API_KEY (또는 GOOGLE_API_KEY), GEMINI_MODEL (선택).
 """
 from __future__ import annotations
-import os, time, json
+import os, re, time, json, logging
 from PIL import Image
 from .schema import PageReading, RegionReread
 from .layout import to_png_bytes
@@ -25,12 +25,21 @@ def normalize_key(key: str | None) -> str:
 
 
 def key_shape_warning(key: str) -> str:
-    """Gemini(AI Studio) 키는 보통 AIza 로 시작하는 39자다. 모양이 다르면 경고문을 돌려준다."""
+    """Google API 키는 'AIza…'(39자) 또는 새 형식 'AQ.…'(50자 안팎)이다. 그 밖의 모양이면 경고문을 돌려준다."""
     if not key:
         return "API 키가 비어 있습니다."
-    if not key.startswith("AIza") or len(key) != 39:
-        return f"키 모양이 이상합니다 (지금 {len(key)}자, 시작 '{key[:4]}'). AI Studio 키는 보통 AIza 로 시작하는 39자입니다. 키를 두 번 붙여 넣었거나 다른 값을 넣지 않았는지 확인하십시오."
-    return ""
+    if key.startswith("AIza") and len(key) == 39:
+        return ""
+    if key.startswith("AQ.") and 40 <= len(key) <= 80:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9._\-]+", key):
+        return f"키에 쓸 수 없는 글자가 섞여 있습니다 (지금 {len(key)}자). 키만 다시 붙여 넣으십시오."
+    return f"키 모양이 낯섭니다 (지금 {len(key)}자, 시작 '{key[:4]}'). Google 키는 보통 AIza 39자 또는 AQ. 로 시작하는 50자 안팎입니다. [키 확인] 으로 쓸 수 있는지 확인하십시오."
+
+
+def _raw(msg: str) -> str:
+    m = re.search(r"'message':\s*'([^']{5,220})'", msg) or re.search(r'"message":\s*"([^"]{5,220})"', msg)
+    return " (서버 메시지: " + (m.group(1) if m else re.sub(r"\s+", " ", msg)[:220]) + ")"
 
 
 def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
@@ -42,7 +51,7 @@ def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
     if "PERMISSION_DENIED" in msg or code == 403:
         return "이 키로는 Gemini API 를 쓸 수 없습니다(권한 거부). 키의 제한 설정(HTTP 리퍼러 제한 등)을 풀거나 Generative Language API 가 켜진 프로젝트의 키를 쓰십시오.", False
     if "NOT_FOUND" in msg or code == 404:
-        return f"모델 '{model}' 을 찾을 수 없습니다. [키 확인·모델 고르기] 로 쓸 수 있는 모델 이름을 고르십시오.", False
+        return f"모델 '{model}' 을 이 접속 경로에서 호출할 수 없습니다(404). 퇴역했거나 이 키 종류에서는 다른 이름을 써야 합니다. [키 확인·모델 고르기] 로 다른 모델을 고르십시오." + _raw(msg), False
     if "RESOURCE_EXHAUSTED" in msg or code == 429:
         return "요청 한도(쿼터)를 넘었습니다. 잠시 뒤 다시 하거나 쪽 범위를 줄이십시오. 무료 등급이면 분당 요청 수 제한이 있습니다.", True
     if code and 500 <= int(code) < 600:
@@ -54,45 +63,72 @@ def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
     return f"{type(e).__name__}: {msg[:300]}", True
 
 
-def list_models(api_key: str) -> list[str]:
-    """generateContent 를 지원하는 모델 이름 목록(models/ 머리 제거). 키가 틀리면 예외."""
+def make_client(api_key: str, vertexai: bool = False, timeout_ms: int = 180_000):
+    """vertexai=False: AI Studio(Gemini Developer API). True: Vertex AI 익스프레스(API 키만으로 쓰는 Vertex)."""
     from google import genai
     from google.genai import types
-    client = genai.Client(api_key=normalize_key(api_key), http_options=types.HttpOptions(timeout=30_000))
+    logging.getLogger("google_genai").setLevel(logging.ERROR)     # AFC 권고문 같은 잡음 숨김
+    return genai.Client(vertexai=vertexai, api_key=normalize_key(api_key), http_options=types.HttpOptions(timeout=timeout_ms))
+
+
+def model_sort_key(name: str):
+    """최신 버전·pro 계열이 앞에 오게. 'gemini-3.1-pro-preview' → (-3.1, 0, 1, name)."""
+    m = re.search(r"gemini-(\d+(?:\.\d+)?)", name)
+    ver = float(m.group(1)) if m else -1.0
+    fam = 0 if "pro" in name else (1 if "flash" in name and "lite" not in name else (2 if "flash" in name else 3))
+    preview = 1 if ("preview" in name or "exp" in name) else 0
+    return (-ver, fam, preview, name)
+
+
+def list_models(api_key: str, vertexai: bool = False) -> list[str]:
+    """generateContent 를 지원하는 모델 이름 목록(models/ 머리 제거), 최신 순. 키가 틀리면 예외."""
+    client = make_client(api_key, vertexai, timeout_ms=30_000)
     names = []
     for m in client.models.list():
         acts = getattr(m, "supported_actions", None)
         if acts and "generateContent" not in acts:
             continue
-        n = (getattr(m, "name", "") or "").removeprefix("models/")
-        if n:
+        n = (getattr(m, "name", "") or "")
+        n = n.split("/")[-1] if "/" in n else n          # models/… 또는 publishers/google/models/…
+        if n and "gemini" in n:
             names.append(n)
-    return sorted(set(names))
+    return sorted(set(names), key=model_sort_key)
 
 
 def check_key(api_key: str, model: str = "") -> dict:
-    """키가 쓸 수 있는지, 지정한 모델이 있는지 확인한다. 네트워크 한 번."""
+    """키가 쓸 수 있는지, 어느 접속 경로(AI Studio / Vertex 익스프레스)에서 쓰이는지, 지정한 모델이 있는지 확인한다."""
     k = normalize_key(api_key)
-    out = {"ok": False, "key_len": len(k), "shape_warning": key_shape_warning(k), "models": [], "model_ok": None, "message": ""}
+    out = {"ok": False, "key_len": len(k), "shape_warning": key_shape_warning(k), "models": [], "model_ok": None,
+           "message": "", "api": "", "endpoints": {}}
     if not k:
         out["message"] = "API 키가 비어 있습니다."; return out
-    try:
-        models = list_models(k)
-    except Exception as e:
-        out["message"] = friendly_error(e, model)[0]; return out
-    out["ok"] = True; out["models"] = models
+    tries = [("studio", False), ("vertex", True)] if k.startswith("AQ.") else [("studio", False)]
+    for name, vx in tries:
+        try:
+            out["endpoints"][name] = {"ok": True, "models": list_models(k, vx)}
+        except Exception as e:
+            out["endpoints"][name] = {"ok": False, "error": friendly_error(e, model)[0]}
+    good = [n for n, r in out["endpoints"].items() if r["ok"]]
+    if not good:
+        out["message"] = out["endpoints"]["studio"].get("error", "확인 실패"); return out
+    out["ok"] = True; out["api"] = good[0]
+    seen = set(); models = []
+    for n in good:
+        for m in out["endpoints"][n]["models"]:
+            if m not in seen: seen.add(m); models.append(m)
+    out["models"] = sorted(models, key=model_sort_key)
     if model:
         out["model_ok"] = model in models
-    out["message"] = f"키 확인됨. 쓸 수 있는 모델 {len(models)}개." + ("" if not model else (f" '{model}' 사용 가능." if out["model_ok"] else f" 그러나 '{model}' 은 목록에 없음 — 다른 이름을 고르십시오."))
+    where = " · ".join(("AI Studio" if n == "studio" else "Vertex 익스프레스") + f" {len(out['endpoints'][n]['models'])}개" for n in good)
+    out["message"] = f"키 확인됨 ({where})." + ("" if not model else (f" '{model}' 목록에 있음." if out["model_ok"] else f" 그러나 '{model}' 은 목록에 없음 — 다른 이름을 고르십시오."))
     return out
 
 
 class GeminiReader:
     name = "gemini"
 
-    def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3):
-        from google import genai           # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
-        from google.genai import types
+    def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto"):
+        from google.genai import types     # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
         key = normalize_key(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         if not key:
             raise ReaderError("GEMINI_API_KEY 가 없습니다. 창 프로그램의 'Gemini API 키' 칸에 넣거나 (PowerShell) $env:GEMINI_API_KEY='...' 로 설정하십시오.")
@@ -100,8 +136,11 @@ class GeminiReader:
         if warn:
             print("주의: " + warn, flush=True)
         self.types = types
-        # 응답 제한 시간(ms). 없으면 네트워크 문제 때 창이 영영 기다릴 수 있다.
-        self.client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=180_000))
+        self.key = key
+        self.api = api                                   # auto | studio | vertex
+        self.vertexai = (api == "vertex")
+        self._switched = False
+        self.client = make_client(key, self.vertexai)    # 응답 제한 시간 180초. 없으면 네트워크 문제 때 영영 기다릴 수 있다
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
         self.thinking_budget = thinking_budget
         self.retries = retries
@@ -111,7 +150,8 @@ class GeminiReader:
     def _config(self, schema):
         t = self.types
         kw = dict(system_instruction=self._system, response_mime_type="application/json",
-                  response_schema=schema, temperature=0.0)
+                  response_schema=schema, temperature=0.0,
+                  automatic_function_calling=t.AutomaticFunctionCallingConfig(disable=True))
         if self.thinking_budget is not None:
             kw["thinking_config"] = t.ThinkingConfig(thinking_budget=self.thinking_budget)
         return t.GenerateContentConfig(**kw)
@@ -132,7 +172,19 @@ class GeminiReader:
                 return schema.model_validate_json(text)
             except Exception as e:
                 last_msg, retry = friendly_error(e, self.model)
+                code = getattr(e, "code", None) or getattr(e, "status_code", None)
+                if code in (403, 404) and self.api == "auto" and not self._switched and self.key.startswith("AQ."):
+                    self._switched = True; self.vertexai = not self.vertexai
+                    self.client = make_client(self.key, self.vertexai)
+                    print(f"주의: {'Vertex 익스프레스' if self.vertexai else 'AI Studio'} 접속 경로로 바꿔 다시 시도합니다 ({last_msg[:60]}…)", flush=True)
+                    continue
                 if not retry:                      # 키·권한·모델 이름 오류는 다시 해도 같다
+                    if code == 404:
+                        try:
+                            ex = list_models(self.key, self.vertexai)[:6]
+                            if ex: last_msg += " 쓸 수 있는 모델 예: " + ", ".join(ex)
+                        except Exception:
+                            pass
                     raise ReaderError(last_msg) from e
                 time.sleep(2 ** i)                 # 한도·서버·형식 오류는 잠시 뒤 다시
         raise ReaderError(f"{self.retries}회 시도 뒤에도 실패: {last_msg}")

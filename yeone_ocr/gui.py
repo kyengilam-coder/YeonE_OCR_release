@@ -137,13 +137,12 @@ class ModelDialog(tk.Toplevel):
         f = ttk.Frame(self, padding=12); f.grid()
         cur = app.v_model.get().strip()
         ttk.Label(f, text=f"키 확인됨. 모델 {len(models)}개 중 고르십시오." + (f"  (지금 '{cur}' 은 목록에 {'있음' if cur in models else '없음'})" if cur else "")).grid(row=0, column=0, columnspan=2, sticky="w")
-        pref = [m for m in models if "gemini" in m and "pro" in m] + [m for m in models if "gemini" in m and "flash" in m and "pro" not in m]
-        ordered = pref + [m for m in models if m not in pref]
+        ordered = list(models)                     # reader 가 이미 최신·pro 순으로 정렬해 줌
         self.cb = ttk.Combobox(f, values=ordered, width=48, state="readonly")
         if cur in ordered: self.cb.set(cur)
         elif ordered: self.cb.current(0)
         self.cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
-        ttk.Label(f, text="판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다.").grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Label(f, text="위쪽이 최신입니다. 판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다. preview·exp 는 시험판입니다.").grid(row=2, column=0, columnspan=2, sticky="w")
         b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(b, text="이 모델로", command=self.ok).pack(side="left", padx=4)
         ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=4)
