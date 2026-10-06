@@ -62,11 +62,24 @@ class SchemaMerge(unittest.TestCase):
         m, st = merge_passes(p1, rr)
         self.assertEqual(st["columns_compared"], 4); self.assertEqual(st["columns_differ"], 0); self.assertEqual(m.uncertain, [])
         self.assertEqual([c.col_from_right for p in m.regions[0].paragraphs for c in p.columns], [1, 2, 3, 4])   # 영역 전체 번호로 통일
-        # 2차에 열이 하나 빠지면 글자 단위 표시 대신 '대응 열 없음' 한 건
+        # 2차에 열이 하나 빠지면 긴 구간을 본문 안에 표시하지 않고 확인 항목 한 건으로
         rr2 = {"b": RegionReread(columns=[rr["b"].columns[0], rr["b"].columns[2], rr["b"].columns[3]])}
         m2, st2 = merge_passes(p1, rr2)
-        self.assertEqual(st2["columns_only_pass1"], 1); self.assertEqual(st2["marks"], 0)
-        self.assertTrue(any("대응하는 열이 없음" in u.context for u in m2.uncertain))
+        self.assertEqual(st2["long_segments"], 1); self.assertEqual(st2["marks"], 0)
+        self.assertTrue(any("1차에만" in u.context and "甲丙戊庚壬子" in u.context for u in m2.uncertain))
+        self.assertNotIn("〔", paragraph_text(m2.regions[0].paragraphs[0]))
+        # 1차가 두 열을 한 열로 묶어 읽어도 글이 같으면 표시하지 않는다(9쪽 사례)
+        p3 = PageReading(pdf_page=9, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[
+            Column(col_from_right=1, text="天紀六十龍은 賴公에 依해 傳해졌다고 하나 或 一說에는 邱公의 所作이라는 말도 있다."),
+            Column(col_from_right=2, text="이는 위로 天星의 瀾狹에 應하는 故로 盈縮이라 한다.")])])])
+        rr3 = {"b": RegionReread(columns=[Column(col_from_right=1, text="天紀六十龍은 賴公에 依해 傳"), Column(col_from_right=2, text="해졌다고 하나 或 一說에는 邱公의 所作이라는 말"),
+                                            Column(col_from_right=3, text="도 있다."), Column(col_from_right=4, text="이는 위로 天星의 瀾狹에 應하는 故로 盈縮이라 한다.")])}
+        m3, st3 = merge_passes(p3, rr3)
+        self.assertEqual(m3.uncertain, []); self.assertEqual(st3["marks"], 0); self.assertEqual(st3["column_count_mismatch"], [("b", 2, 4)])
+        # 열 경계가 다르면서 글자 하나가 다르면 그 글자만 표시
+        rr3["b"].columns[2].text = "도 있다,"
+        m4, st4 = merge_passes(p3, rr3)
+        self.assertEqual(st4["marks"], 1); self.assertIn("〔./,〕", paragraph_text(m4.regions[0].paragraphs[0]))
 
     def test_remerge_record_and_page_marks(self):
         from yeone_ocr.cli import remerge_record, fill_page_marks

@@ -108,11 +108,29 @@ def align_columns(c1: list[Column], c2: list[Column], min_sim: float = 0.55) -> 
     return list(reversed(pairs))
 
 
+LONG_SEGMENT = 12   # 이 길이 이상의 구간이 한쪽에만 있으면 본문 안에 표시하지 않고 확인 항목으로만 남긴다
+
+
+def _strip_map(cols: list[Column]) -> tuple[str, list[tuple[int, int]], dict[str, str]]:
+    """열들의 글을 공백 없이 이어 붙인 문자열과, 그 글자마다 (열 번호, 열 안 위치) 대응표. 〔…〕 표시는 한 글자 토큰."""
+    table: dict[str, str] = {}
+    out, pos = [], []
+    for ci, c in enumerate(cols):
+        t = _tokenize(_norm(c.text), table)
+        c.text = _detok(t, table)              # 정규화된 글로 바꿔 둔다(공백 하나로)
+        for k, ch in enumerate(t):
+            if ch.isspace():
+                continue
+            out.append(ch); pos.append((ci, k))
+    return "".join(out), pos, table
+
+
 def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[PageReading, dict]:
-    """2차 판독이 있는 문자 영역마다 열을 글 유사도로 맞춘 뒤 비교해 다른 곳을 표시한다. 열 번호는 영역 전체 기준으로 다시 매긴다."""
+    """2차 판독이 있는 문자 영역마다 글 전체(열 경계 무시, 공백 무시)를 비교해 다른 자리를 표시한다.
+    열 경계가 달라도 글이 같으면 표시하지 않는다. 열 번호는 영역 전체 기준으로 다시 매긴다."""
     merged = p1.model_copy(deep=True)
     stats = {"regions_compared": 0, "columns_compared": 0, "columns_differ": 0, "marks": 0,
-             "columns_only_pass1": 0, "columns_only_pass2": 0, "column_count_mismatch": []}
+             "long_segments": 0, "column_count_mismatch": []}
     for r in merged.regions:
         if r.kind not in TEXT_KINDS:
             continue
@@ -120,38 +138,75 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
         for k, c in enumerate(cols, 1):           # 영역 전체에서 오른쪽부터 1, 2, 3… 으로 통일
             c.col_from_right = k
         rr = rereads.get(r.id)
-        if not rr or not rr.columns:
+        if not rr or not rr.columns or not cols:
             continue
         stats["regions_compared"] += 1
         cols2 = sorted(rr.columns, key=lambda c: c.col_from_right)
         if len(cols) != len(cols2):
             stats["column_count_mismatch"].append((r.id, len(cols), len(cols2)))
-        for i, j in align_columns(cols, cols2):
-            if i is not None and j is not None:
-                stats["columns_compared"] += 1
-                c = cols[i]
-                if _norm(c.text) == _norm(cols2[j].text):
-                    continue
-                stats["columns_differ"] += 1
-                text, marks = diff_mark(c.text, cols2[j].text)
-                c.text = text
-                for pos, ctx in marks:
-                    stats["marks"] += 1
-                    merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=c.col_from_right,
-                                                      position=_pos(pos, len(_norm(c.text))), context=ctx))
-            elif i is not None:
-                stats["columns_only_pass1"] += 1
-                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=cols[i].col_from_right, position="",
-                    context=f"2차 판독에 대응하는 열이 없음 — 열 경계·순서를 원본에서 확인: 「{_norm(cols[i].text)[:24]}…」"))
+        pairs = align_columns(cols, cols2)
+        stats["columns_compared"] += sum(1 for i, j in pairs if i is not None and j is not None)
+        a, pos, table = _strip_map(cols)
+        b = "".join(ch for ch in _tokenize("".join(_norm(c.text) for c in cols2), table) if not ch.isspace())
+        if a == b:
+            continue
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        ops = [op for op in sm.get_opcodes() if op[0] != "equal"]
+        touched_cols: set[int] = set()
+        # 뒤에서부터 고쳐야 앞쪽 위치가 흔들리지 않는다
+        edits: list[tuple[int, int, int, str]] = []      # (col, start, end, 대체 글)  — 열 안 위치 기준
+        for op, i1, i2, j1, j2 in ops:
+            sa, sb = a[i1:i2], b[j1:j2]
+            ma, mb = any(ch in table for ch in sa), any(ch in table for ch in sb)
+            sa_t, sb_t = _detok(sa, table), _detok(sb, table)
+            ci, k = pos[i1] if i1 < len(pos) else (pos[-1][0], len(cols[pos[-1][0]].text))
+            ctx_col = cols[ci].text
+            if (len(sa_t) >= LONG_SEGMENT and not sb_t) or (len(sb_t) >= LONG_SEGMENT and not sa_t) or (len(sa_t) >= LONG_SEGMENT and len(sb_t) >= LONG_SEGMENT):
+                stats["long_segments"] += 1
+                who = "1차에만" if not sb_t else ("2차에만" if not sa_t else "1차·2차가 크게 다름")
+                shown = sa_t if sa_t else sb_t
+                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=ci + 1, position=_pos(k, len(ctx_col)),
+                    context=f"긴 구간({len(shown)}자)이 {who}: 「{shown[:40]}{'…' if len(shown) > 40 else ''}」" + (f" ↔ 「{sb_t[:40]}」" if sa_t and sb_t else "") + " — 열 누락·열 경계를 원본에서 확인"))
+                continue
+            if ma or mb:
+                seg = sa_t if ma else sb_t
+            elif sa_t and sb_t:
+                seg = f"〔{sa_t}/{sb_t}〕"
             else:
-                stats["columns_only_pass2"] += 1
-                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=0, position="",
-                    context=f"2차 판독에만 있는 열(1차 누락 가능) — 원본 확인: 「{_norm(cols2[j].text)[:24]}…」"))
+                seg = f"〔疑: {sa_t or sb_t}〕"
+            # a 구간이 걸친 열 범위: 첫 글자의 열에 표시를 넣고, 다음 열로 넘어간 글자는 지운다
+            span = [pos[i] for i in range(i1, i2)]
+            if span:
+                first_ci, first_k = span[0]
+                last_in_first = max(kk for cc, kk in span if cc == first_ci)
+                edits.append((first_ci, first_k, last_in_first + 1, seg))
+                for cc in sorted({cc for cc, _ in span if cc != first_ci}):
+                    ks = [kk for c2, kk in span if c2 == cc]
+                    edits.append((cc, min(ks), max(ks) + 1, ""))
+            else:                                   # 삽입: i1 위치 앞에 넣는다
+                edits.append((ci, k, k, seg))
+            touched_cols.add(first_ci if span else ci)
+            stats["marks"] += 1
+            ctx = _detok(a[max(0, i1 - 3):i1], table) + seg + _detok(a[i2:i2 + 3], table)
+            merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=(span[0][0] if span else ci) + 1,
+                                              position=_pos(k, len(ctx_col)), context="「" + ctx + "」"))
+        # 공백 제거 위치 → 원래 열 글 위치로 되돌려 적용
+        for ci in sorted({e[0] for e in edits}):
+            cols[ci].text = _apply_edits(cols[ci].text, [(e[1], e[2], e[3]) for e in edits if e[0] == ci], table)
+        stats["columns_differ"] += len(touched_cols)
         for u in rr.uncertain:            # 2차가 따로 적은 불확실 항목도 보탠다
             u2 = u.model_copy(); u2.region_id = u2.region_id or r.id
             if all(not (x.region_id == u2.region_id and x.context == u2.context) for x in merged.uncertain):
                 merged.uncertain.append(u2)
     return merged, stats
+
+
+def _apply_edits(text: str, edits: list[tuple[int, int, str]], table: dict[str, str]) -> str:
+    """열 글(공백 포함)에 (시작, 끝, 대체) 편집을 적용한다. 위치는 토큰화된(표시 1글자) 문자열 기준이며 공백 글자도 센다."""
+    tok = list(_tokenize(text, table))
+    for st, en, seg in sorted(edits, key=lambda e: -e[0]):
+        tok[st:en] = list(seg)
+    return _detok("".join(tok), table)
 
 
 def compare_textlayer(reading: PageReading, layer_plain: str, max_items: int = 60) -> dict:
