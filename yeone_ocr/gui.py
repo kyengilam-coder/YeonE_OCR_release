@@ -130,17 +130,23 @@ class MarkDialog(tk.Toplevel):
 
 
 class ModelDialog(tk.Toplevel):
-    """키 확인 뒤 쓸 수 있는 모델 목록에서 고른다. gemini 가 든 이름을 앞에 둔다."""
-    def __init__(self, app: "App", models: list[str]):
+    """키 확인 뒤 쓸 수 있는 모델 목록에서 고른다. 실제 호출이 확인된 모델을 미리 골라 둔다."""
+    def __init__(self, app: "App", models: list[str], probe: dict | None = None, working: str = ""):
         super().__init__(app)
         self.app = app; self.title("쓸 수 있는 모델 고르기"); self.resizable(False, False)
         f = ttk.Frame(self, padding=12); f.grid()
-        cur = app.v_model.get().strip()
-        ttk.Label(f, text=f"키 확인됨. 모델 {len(models)}개 중 고르십시오." + (f"  (지금 '{cur}' 은 목록에 {'있음' if cur in models else '없음'})" if cur else "")).grid(row=0, column=0, columnspan=2, sticky="w")
-        ordered = list(models)                     # reader 가 이미 최신·pro 순으로 정렬해 줌
-        self.cb = ttk.Combobox(f, values=ordered, width=48, state="readonly")
-        if cur in ordered: self.cb.set(cur)
-        elif ordered: self.cb.current(0)
+        cur = app.v_model.get().strip(); probe = probe or {}
+        head = f"키 확인됨. 모델 {len(models)}개 중 고르십시오."
+        if cur:
+            head += f"\n지금 '{cur}': " + ("호출 확인됨" if probe.get(cur) == "호출 확인됨" else ("목록에 있지만 호출 거부됨 — " + probe.get(cur, "") if cur in models else "목록에 없음"))
+        if working and working != cur:
+            head += f"\n→ 호출 확인된 모델 '{working}' 을 미리 골라 두었습니다."
+        ttk.Label(f, text=head, justify="left", wraplength=560).grid(row=0, column=0, columnspan=2, sticky="w")
+        ordered = [(m + ("   ✓ 호출 확인" if probe.get(m) == "호출 확인됨" else ("   ✗ 거부" if m in probe else ""))) for m in models]
+        self._names = list(models)
+        self.cb = ttk.Combobox(f, values=ordered, width=56, state="readonly")
+        pick = working if working in models else (cur if cur in models else (models[0] if models else ""))
+        if pick: self.cb.current(models.index(pick))
         self.cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
         ttk.Label(f, text="위쪽이 최신입니다. 판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다. preview·exp 는 시험판입니다.").grid(row=2, column=0, columnspan=2, sticky="w")
         b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=2, pady=(10, 0))
@@ -149,9 +155,11 @@ class ModelDialog(tk.Toplevel):
         self.transient(app); self.grab_set()
 
     def ok(self):
-        if self.cb.get():
-            self.app.v_model.set(self.cb.get()); self.app.save_settings(quiet=True)
-            self.app.v_status.set(f"모델 '{self.cb.get()}' 로 설정됨")
+        i = self.cb.current()
+        if i >= 0:
+            name = self._names[i]
+            self.app.v_model.set(name); self.app.save_settings(quiet=True)
+            self.app.v_status.set(f"모델 '{name}' 로 설정됨")
         self.destroy()
 
 
@@ -393,7 +401,7 @@ class App(tk.Tk):
         from .reader_gemini import normalize_key
         key = normalize_key(self.v_key.get()); self.v_key.set(key)
         model = self.v_model.get().strip()
-        self._set_running(True); self.v_status.set("키 확인 중…")
+        self._set_running(True); self.v_status.set("키 확인 중… (모델을 실제로 짧게 호출해 봅니다)")
         def t():
             try:
                 from .reader_gemini import check_key
@@ -410,7 +418,7 @@ class App(tk.Tk):
         if not res["ok"]:
             messagebox.showerror(APP_NAME, res["message"] + ("\n\n" + res["shape_warning"] if res.get("shape_warning") else "")); return
         self.save_settings(quiet=True)
-        ModelDialog(self, res["models"])
+        ModelDialog(self, res["models"], res.get("probe"), res.get("working_model", ""))
 
     def _reader_changed(self):
         st = "normal" if self.v_reader.get() == "gemini" else "disabled"

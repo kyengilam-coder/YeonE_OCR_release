@@ -95,11 +95,23 @@ def list_models(api_key: str, vertexai: bool = False) -> list[str]:
     return sorted(set(names), key=model_sort_key)
 
 
-def check_key(api_key: str, model: str = "") -> dict:
+def probe_model(api_key: str, model: str, vertexai: bool = False) -> tuple[bool, str]:
+    """모델을 아주 짧게 실제로 호출해 본다(토큰 몇 개). 목록에 있어도 호출이 거부되는 퇴역 모델을 가려낸다."""
+    from google.genai import types
+    try:
+        client = make_client(api_key, vertexai, timeout_ms=40_000)
+        client.models.generate_content(model=model, contents="1", config=types.GenerateContentConfig(
+            max_output_tokens=5, temperature=0.0, automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)))
+        return True, "호출 확인됨"
+    except Exception as e:
+        return False, friendly_error(e, model)[0]
+
+
+def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int = 8) -> dict:
     """키가 쓸 수 있는지, 어느 접속 경로(AI Studio / Vertex 익스프레스)에서 쓰이는지, 지정한 모델이 있는지 확인한다."""
     k = normalize_key(api_key)
     out = {"ok": False, "key_len": len(k), "shape_warning": key_shape_warning(k), "models": [], "model_ok": None,
-           "message": "", "api": "", "endpoints": {}}
+           "message": "", "api": "", "endpoints": {}, "probe": {}, "working_model": ""}
     if not k:
         out["message"] = "API 키가 비어 있습니다."; return out
     tries = [("studio", False), ("vertex", True)] if k.startswith("AQ.") else [("studio", False)]
@@ -120,7 +132,28 @@ def check_key(api_key: str, model: str = "") -> dict:
     if model:
         out["model_ok"] = model in models
     where = " · ".join(("AI Studio" if n == "studio" else "Vertex 익스프레스") + f" {len(out['endpoints'][n]['models'])}개" for n in good)
-    out["message"] = f"키 확인됨 ({where})." + ("" if not model else (f" '{model}' 목록에 있음." if out["model_ok"] else f" 그러나 '{model}' 은 목록에 없음 — 다른 이름을 고르십시오."))
+    msg = f"키 확인됨 ({where})."
+    vx = (out["api"] == "vertex")
+    if probe:
+        # 지정한 모델부터 실제로 불러 보고, 안 되면 최신 순으로 되는 모델을 찾는다
+        order = ([model] if model else []) + [m for m in out["models"] if m != model]
+        for m in order[:max_probe]:
+            ok, pm = probe_model(k, m, vx)
+            out["probe"][m] = pm
+            if ok:
+                out["working_model"] = m; break
+        if model:
+            if out["probe"].get(model) == "호출 확인됨":
+                msg += f" '{model}' 호출 확인됨."
+            else:
+                msg += f" '{model}' 은 {'목록에 있지만 ' if out['model_ok'] else '목록에 없고 '}호출이 거부됨 — {out['probe'].get(model, '')}"
+        if out["working_model"] and out["working_model"] != model:
+            msg += f" → 호출 확인된 모델: '{out['working_model']}'. 이 모델로 바꾸십시오."
+        elif not out["working_model"]:
+            msg += f" 위 {min(max_probe, len(order))}개 모델 모두 호출 거부 — 키의 API 제한이나 결제 상태를 확인하십시오."
+    else:
+        msg += "" if not model else (f" '{model}' 목록에 있음." if out["model_ok"] else f" 그러나 '{model}' 은 목록에 없음.")
+    out["message"] = msg
     return out
 
 
@@ -159,7 +192,7 @@ class GeminiReader:
     def _call(self, img: Image.Image, prompt: str, schema):
         t = self.types
         part = t.Part.from_bytes(data=to_png_bytes(img), mime_type="image/png")
-        last_msg = ""
+        last_msg = ""; tried_msgs: list[str] = []
         for i in range(self.retries):
             try:
                 resp = self.client.models.generate_content(model=self.model, contents=[part, prompt], config=self._config(schema))
@@ -174,18 +207,22 @@ class GeminiReader:
                 last_msg, retry = friendly_error(e, self.model)
                 code = getattr(e, "code", None) or getattr(e, "status_code", None)
                 if code in (403, 404) and self.api == "auto" and not self._switched and self.key.startswith("AQ."):
+                    tried_msgs.append(("AI Studio 경로: " if not self.vertexai else "Vertex 경로: ") + last_msg)
                     self._switched = True; self.vertexai = not self.vertexai
                     self.client = make_client(self.key, self.vertexai)
-                    print(f"주의: {'Vertex 익스프레스' if self.vertexai else 'AI Studio'} 접속 경로로 바꿔 다시 시도합니다 ({last_msg[:60]}…)", flush=True)
+                    print(f"주의: {'Vertex 익스프레스' if self.vertexai else 'AI Studio'} 접속 경로로 바꿔 다시 시도합니다.", flush=True)
                     continue
                 if not retry:                      # 키·권한·모델 이름 오류는 다시 해도 같다
-                    if code == 404:
-                        try:
-                            ex = list_models(self.key, self.vertexai)[:6]
-                            if ex: last_msg += " 쓸 수 있는 모델 예: " + ", ".join(ex)
+                    tried_msgs.append(("Vertex 경로: " if self.vertexai else "AI Studio 경로: ") + last_msg) if tried_msgs else None
+                    final = " / ".join(tried_msgs) if tried_msgs else last_msg
+                    if code in (403, 404):
+                        try:                       # 되는 모델을 찾아 바로 제안한다
+                            res = check_key(self.key, self.model, probe=True, max_probe=6)
+                            if res.get("working_model"):
+                                final += f" → 호출 확인된 모델: '{res['working_model']}'. [키 확인·모델 고르기] 에서 이 모델로 바꾸십시오."
                         except Exception:
                             pass
-                    raise ReaderError(last_msg) from e
+                    raise ReaderError(final) from e
                 time.sleep(2 ** i)                 # 한도·서버·형식 오류는 잠시 뒤 다시
         raise ReaderError(f"{self.retries}회 시도 뒤에도 실패: {last_msg}")
 
