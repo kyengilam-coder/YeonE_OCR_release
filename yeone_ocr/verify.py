@@ -95,4 +95,12 @@ def check_hwpx_file(path: str) -> list[dict]:
             issues.append({"level": "error", "rule": "필수 항목", "where": path, "msg": f"{need} 없음"})
     if any(n.startswith("word/") for n in names):
         issues.append({"level": "error", "rule": "DOCX 구조", "where": path, "msg": "word/ 폴더가 있음 — DOCX 를 이름만 바꾼 파일"})
+    # 개요 스타일 문단이 있으면 한컴이 "가. 나. 다." 자동 번호를 붙여 원본에 없는 글자가 보인다
+    import re
+    for n in names:
+        if n.startswith("Contents/section") and n.endswith(".xml"):
+            xml = z.read(n).decode("utf-8", "replace")
+            bad = [m for m in re.findall(r'<hp:p\b[^>]*styleIDRef="(\d+)"', xml) if m != "0"]
+            if bad:
+                issues.append({"level": "error", "rule": "개요 문단", "where": n, "msg": f"바탕글이 아닌 스타일 문단 {len(bad)}개 — 자동 번호가 붙을 수 있음"})
     return issues

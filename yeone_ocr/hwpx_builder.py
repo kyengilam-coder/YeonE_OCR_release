@@ -14,6 +14,9 @@ MARK_RE = re.compile(r"(〔[^〔〕]*〕)")
 NOTE_PREFIXES = ("〔→", "〔소주〕", "〔작업 메모〕", "〔판독 메모〕", "〔도판 미삽입", "〔이어짐〕")
 
 FONT_BODY, FONT_HEAD = "함초롬바탕", "함초롬돋움"
+HEADING_FORMAT = {"h1": dict(alignment="CENTER", spacing_before_pt=14, spacing_after_pt=7),
+                  "h2": dict(alignment="LEFT", spacing_before_pt=10, spacing_after_pt=4),
+                  "h3": dict(alignment="LEFT", spacing_before_pt=6, spacing_after_pt=2)}
 COLOR_MARK, SHADE_MARK, COLOR_NOTE, COLOR_META = "#C00000", "#FFFF00", "#666666", "#8A8A8A"
 
 
@@ -59,9 +62,11 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
     }
     stats = {"paragraphs": 0, "headings": 0, "images": 0, "tables": 0, "uncertain_items": 0, "marks": 0, "page_breaks": 0}
 
+    # 모든 문단은 '바탕글'(문단 모양 0, 스타일 0)을 명시한다. python-hwpx 는 앞 문단의 모양을 물려주므로,
+    # 제목(개요 스타일) 다음 문단들이 개요 모양을 받아 한컴이 "가. 나. 다." 자동 번호를 붙이던 문제를 막는다.
     def para(text: str, style: str, *, page_break: bool = False, marks: bool = False):
         attrs = {"pageBreak": "1"} if page_break else {}
-        p = doc.add_paragraph("", char_pr_id_ref=S[style], include_run=False, **attrs)
+        p = doc.add_paragraph("", para_pr_id_ref=0, style_id_ref=0, char_pr_id_ref=S[style], include_run=False, inherit_style=False, **attrs)
         if marks:
             for seg, kind in split_marks(text):
                 st = S[style] if kind == "body" else (S["mark"] if kind == "mark" else S["note"])
@@ -79,11 +84,14 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
             para(b.text, "meta", page_break=(page_breaks and not first_meta))
             first_meta = False
         elif b.type == "heading":
+            # 개요 스타일(add_heading)을 쓰지 않는다: 한컴이 개요 번호("1." "가.")를 덧붙여 원본에 없는 글자가 생긴다.
+            # 제목은 바탕글 문단에 굵은 큰 글자로 두고, 자리 잡기(가운데·앞뒤 간격)만 문단 모양으로 준다.
             lvl = "h1" if b.level <= 1 else ("h2" if b.level == 2 else "h3")
+            para(b.text, lvl)
             try:
-                doc.add_heading(b.text, level=min(3, max(1, b.level)), char_pr_id_ref=S[lvl])
+                doc.set_paragraph_format(paragraph_index=len(doc.paragraphs) - 1, **HEADING_FORMAT[lvl])
             except Exception:
-                para(b.text, lvl)
+                pass
             stats["headings"] += 1
         elif b.type == "para":
             para(b.text, "small" if b.kind == "소주" else "body", marks=True)

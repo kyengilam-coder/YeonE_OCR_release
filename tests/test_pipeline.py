@@ -264,6 +264,10 @@ class Build(unittest.TestCase):
             z = zipfile.ZipFile(out); self.assertEqual(z.namelist()[0], "mimetype")
             allxml = (z.read("Contents/header.xml") + z.read("Contents/section0.xml")).decode("utf-8")
             self.assertIn("FFFF00", allxml.upper()); self.assertIn("C00000", allxml.upper()); self.assertIn('pageBreak="1"', allxml)
+            import re
+            refs = re.findall(r'<hp:p\b[^>]*styleIDRef="(\d+)"', allxml)
+            self.assertTrue(refs and set(refs) == {"0"}, f"개요 스타일 문단이 있으면 한컴이 자동 번호를 붙인다: {set(refs)}")
+            self.assertIn('horizontal="CENTER"', allxml)                 # 제목·도판 가운데 정렬 문단 모양
             from yeone_ocr.hwpx_builder import split_marks
             self.assertEqual(split_marks("가〔疑: 龍〕나〔→PDF 2쪽〕"), [("가", "body"), ("〔疑: 龍〕", "mark"), ("나", "body"), ("〔→PDF 2쪽〕", "note")])
             # DOCX 를 이름만 바꾼 가짜는 걸러낸다
