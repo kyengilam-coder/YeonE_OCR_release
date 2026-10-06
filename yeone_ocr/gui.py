@@ -357,7 +357,8 @@ class App(tk.Tk):
             self._btn(sf, t, c, width=12).grid(row=0, column=i, padx=3, pady=2)
         for i, (t, c) in enumerate([("검수 결과 기록…", self.do_mark), ("비교 다시 계산", self.do_remerge), ("패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
             self._btn(sf, t, c, width=12).grid(row=1, column=i, padx=3, pady=(6, 2))
-        ttk.Label(sf, text="검수 뒤 사람이 확인한 쪽은 [검수 결과 기록…], 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산]", style="Hint.TLabel").grid(row=1, column=4, columnspan=2, sticky="w", padx=6)
+        ttk.Label(sf, text="검수 뒤 사람이 확인한 쪽은 [검수 결과 기록…] · 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산](모델 호출 없음)",
+                  style="Hint.TLabel", wraplength=900).grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(4, 0))
 
         # ---- 진행 ----
         pf2 = ttk.Frame(root); pf2.pack(fill="x", pady=(10, 0))
