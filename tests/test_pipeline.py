@@ -1,0 +1,133 @@
+"""모델 없이 돌아가는 검사: 스키마·병합·검증 규칙·도판 외곽 맞춤·HWPX 조립과 파일 구조.
+실행: python -m unittest discover -s YeonE_OCR/tests -v   (저장소 루트에서)"""
+import io, os, sys, json, tempfile, unittest, zipfile
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from PIL import Image, ImageDraw
+from yeone_ocr.schema import PageReading, Region, Paragraph, Column, RegionReread, Uncertain, frac_bbox, bbox_frac, paragraph_text
+from yeone_ocr.merge import diff_mark, merge_passes, compare_textlayer
+from yeone_ocr.verify import verify_page, check_hwpx_file
+from yeone_ocr.layout import fit_figure_bbox, edge_ink, detect_figures, crop_frac
+from yeone_ocr.blocks import assemble_blocks
+from yeone_ocr.hwpx_builder import build_hwpx
+
+
+def page_with_circle(W=900, H=1300):
+    im = Image.new("L", (W, H), 245); d = ImageDraw.Draw(im)
+    for r in (300, 230, 150):
+        d.ellipse([450 - r, 850 - r, 450 + r, 850 + r], outline=20, width=3)
+    for x in range(820, 600, -30):                   # 세로 열 흉내(검은 사각 점)
+        for y in range(100, 500, 24):
+            d.rectangle([x - 8, y, x + 8, y + 16], fill=30)
+    d.rectangle([120, 1200, 200, 1220], fill=30)       # 도판 아래 가까운 글자 흉내
+    return im
+
+
+class SchemaMerge(unittest.TestCase):
+    def test_bbox_roundtrip(self):
+        fr = (0.1, 0.2, 0.6, 0.9)
+        self.assertEqual(tuple(round(v, 3) for v in bbox_frac(frac_bbox(fr))), fr)
+
+    def test_paragraph_join_no_insert(self):
+        p = Paragraph(columns=[Column(col_from_right=2, text="在乎陰陽"), Column(col_from_right=1, text="風水之理")])
+        self.assertEqual(paragraph_text(p), "風水之理在乎陰陽")
+
+    def test_diff_mark(self):
+        t, marks = diff_mark("山은 높고 水는 낮으며", "山은 높고 氷는 낮으며")
+        self.assertIn("〔水/氷〕", t); self.assertEqual(len(marks), 1)
+        t2, m2 = diff_mark("甲乙丙", "甲乙丙")          # 같으면 표시 없음
+        self.assertEqual((t2, m2), ("甲乙丙", []))
+        t3, _ = diff_mark("甲 乙丙", "甲乙丙")           # 공백만 다르면 무시
+        self.assertNotIn("〔", t3)
+        t4, _ = diff_mark("納甲", "納〔疑: 甲〕")        # 한쪽의 불확실 표시는 살린다
+        self.assertIn("〔疑: 甲〕", t4)
+
+    def test_merge_passes_marks_and_counts(self):
+        p1 = PageReading(pdf_page=1, regions=[Region(id="b1", kind="본문", paragraphs=[Paragraph(columns=[
+            Column(col_from_right=1, text="納甲은 乾으로서"), Column(col_from_right=2, text="老陽이라")])])])
+        rr = {"b1": RegionReread(columns=[Column(col_from_right=1, text="納화은 乾으로서"), Column(col_from_right=2, text="老陽이라")])}
+        m, st = merge_passes(p1, rr)
+        self.assertEqual(st["columns_compared"], 2); self.assertEqual(st["columns_differ"], 1)
+        self.assertIn("〔甲/화〕", paragraph_text(m.regions[0].paragraphs[0]))
+        self.assertEqual(len(m.uncertain), 1); self.assertEqual(m.uncertain[0].col_from_right, 1)
+
+    def test_compare_textlayer(self):
+        pr = PageReading(pdf_page=1, regions=[Region(id="b1", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="納甲은 乾")])])])
+        d = compare_textlayer(pr, "納화은乾")
+        self.assertEqual(len(d["items"]), 1); self.assertEqual(d["items"][0]["layer"], "화")
+
+
+class Verify(unittest.TestCase):
+    def test_rules(self):
+        pr = PageReading(pdf_page=1, page_label="- 30 -", regions=[
+            Region(id="b1", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="乾卦 === 坤卦 ㅅ - 30 - 〔疑: 龍")])]),
+            Region(id="f1", kind="원형나경도", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="子癸丑")])])])
+        rules = {i["rule"] for i in verify_page(pr)}
+        self.assertTrue({"괘상 ASCII 대체", "한글 자모 분리", "쪽번호 혼입", "표시 괄호 불균형", "그림 안 글자 전사"} <= rules)
+        clean = PageReading(pdf_page=1, regions=[Region(id="b1", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="山은 높고")])])])
+        self.assertEqual(verify_page(clean), [])
+
+
+class Layout(unittest.TestCase):
+    def test_detect_and_fit(self):
+        im = page_with_circle()
+        figs = detect_figures(im)
+        self.assertTrue(figs, "OpenCV 가 있으면 원을 찾아야 함")
+        f = figs[0]
+        self.assertAlmostEqual((f[0] + f[2]) / 2, 0.5, delta=0.05)
+        # 모델이 준 좌표가 원을 조금 잘랐다고 가정 → 바깥으로 넓혀 복구
+        cut = (f[0] + 0.02, f[1] + 0.02, f[2] - 0.02, f[3] - 0.02)
+        fit = fit_figure_bbox(im, cut)
+        self.assertEqual(fit["touching"], [])
+        crop = crop_frac(im, fit["bbox"], pad=0.01)
+        self.assertTrue(all(v == 0 for v in edge_ink(crop).values()))
+
+
+class Build(unittest.TestCase):
+    def test_hwpx_structure_and_images(self):
+        with tempfile.TemporaryDirectory() as td:
+            im = page_with_circle(); fig = im.crop((100, 500, 800, 1200)); figp = os.path.join(td, "f1.png"); fig.save(figp)
+            rec = {"file": "x.pdf", "pdf_page": 3, "reader": "test", "verify": [],
+                   "merged": PageReading(pdf_page=3, print_page="32", regions=[
+                       Region(id="t1", kind="제목", title_text="第十四層 順排六十龍先天卦", title_level=2),
+                       Region(id="f1", kind="원형나경도", bbox=[380, 100, 920, 900]),
+                       Region(id="c1", kind="설명문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="一層 地盤正針")])]),
+                       Region(id="tb", kind="단순표", table_rows=[{"cells": ["甲山", "庚山"]}, {"cells": ["항목", "항목"]}]),
+                       Region(id="n1", kind="쪽번호", title_text="- 32 -")],
+                       uncertain=[Uncertain(region_id="c1", col_from_right=1, position="위", context="「〔疑: 針〕」")]).model_dump(),
+                   "crops": {"f1": {"path": figp, "frac_w": 0.8, "ratio": fig.height / fig.width}}}
+            blocks = assemble_blocks([rec])
+            types = [b.type for b in blocks]
+            self.assertEqual(types, ["meta", "heading", "image", "para", "table", "uncertain"])
+            out = os.path.join(td, "o.hwpx")
+            st = build_hwpx(blocks, out)
+            self.assertEqual(st["images"], 1); self.assertEqual(st["images_in_file"], 1); self.assertEqual(st["tables"], 1)
+            self.assertEqual(check_hwpx_file(out), [])
+            z = zipfile.ZipFile(out); self.assertEqual(z.namelist()[0], "mimetype")
+            # DOCX 를 이름만 바꾼 가짜는 걸러낸다
+            fake = os.path.join(td, "fake.hwpx")
+            with zipfile.ZipFile(fake, "w") as zf: zf.writestr("word/document.xml", "<x/>")
+            self.assertTrue(any(i["rule"] == "DOCX 구조" for i in check_hwpx_file(fake)))
+
+    def test_join_pages(self):
+        r1 = {"file": "x.pdf", "pdf_page": 1, "reader": "test", "verify": [], "crops": {},
+              "merged": PageReading(pdf_page=1, print_page="30", regions=[Region(id="b1", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="風水之理")])])]).model_dump()}
+        r2 = {"file": "x.pdf", "pdf_page": 2, "reader": "test", "verify": [], "crops": {},
+              "merged": PageReading(pdf_page=2, print_page="31", regions=[Region(id="b1", kind="본문", paragraphs=[Paragraph(continues_from_previous=True, columns=[Column(col_from_right=1, text="在乎陰陽")])])]).model_dump()}
+        paras = [b for b in assemble_blocks([r1, r2]) if b.type == "para"]
+        self.assertEqual(len(paras), 1); self.assertEqual(paras[0].text, "風水之理〔→PDF 2쪽/인쇄 31쪽〕在乎陰陽")
+        paras2 = [b for b in assemble_blocks([r1, r2], join_pages=False) if b.type == "para"]
+        self.assertEqual(len(paras2), 2)
+
+
+class Guide(unittest.TestCase):
+    def test_guide_is_real(self):
+        """지침 전문이 패키지 안에 있어 모델 시스템 지시로 들어가야 한다."""
+        from yeone_ocr.prompts import load_guide, system_prompt
+        g = load_guide()
+        self.assertIn("## 36. 최종 품질 기준", g)
+        self.assertIn("## 출력 형식 규칙", system_prompt())
+
+
+if __name__ == "__main__":
+    unittest.main()
