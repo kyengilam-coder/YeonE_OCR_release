@@ -138,9 +138,21 @@ class GeminiHelpers(unittest.TestCase):
         self.assertEqual(key_shape_warning(k), "")
         self.assertEqual(key_shape_warning("AQ." + "B" * 50), "")   # 새 형식 키
         self.assertIn("78자", key_shape_warning(k + k))          # 두 번 붙여 넣음
-        from yeone_ocr.reader_gemini import model_sort_key
+        from yeone_ocr.reader_gemini import model_sort_key, is_text_model, recommended_model, retry_delay_seconds
         names = ["gemini-2.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3.1-flash", "gemini-2.0-flash-lite"]
         self.assertEqual(sorted(names, key=model_sort_key)[:3], ["gemini-3.1-pro-preview", "gemini-3.1-flash", "gemini-2.5-pro"])
+        self.assertFalse(is_text_model("gemini-3.8-flash-tts")); self.assertFalse(is_text_model("gemini-embedding-001"))
+        self.assertFalse(is_text_model("gemini-2.5-flash-image")); self.assertTrue(is_text_model("gemini-3.1-pro-preview"))
+        m404 = "404 NOT_FOUND. {'error': {'code': 404, 'message': 'This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview for the latest features'}}"
+        self.assertEqual(recommended_model(m404), "gemini-3.1-pro-preview")
+        class N4(Exception): code = 404
+        msg, _ = friendly_error(N4(m404), "gemini-2.5-pro"); self.assertIn("gemini-3.1-pro-preview", msg)
+        self.assertEqual(retry_delay_seconds("429 ... Please retry in 23.5s."), 23.5)
+        self.assertEqual(retry_delay_seconds("{'retryDelay': '41s'}"), 41.0)
+        self.assertEqual(retry_delay_seconds("no hint"), 20.0)
+        class Q4(Exception): code = 429
+        msg, retry = friendly_error(Q4("429 RESOURCE_EXHAUSTED ... limit: 0, model: gemini-3.1-pro-preview"), "gemini-3.1-pro-preview")
+        self.assertIn("한도가 0", msg); self.assertFalse(retry)
         self.assertTrue(key_shape_warning(""))
         class E(Exception): code = 400
         msg, retry = friendly_error(E("400 INVALID_ARGUMENT ... API_KEY_INVALID ... API key not valid"))

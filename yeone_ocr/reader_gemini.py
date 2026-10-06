@@ -51,9 +51,13 @@ def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
     if "PERMISSION_DENIED" in msg or code == 403:
         return "이 키로는 Gemini API 를 쓸 수 없습니다(권한 거부). 키의 제한 설정(HTTP 리퍼러 제한 등)을 풀거나 Generative Language API 가 켜진 프로젝트의 키를 쓰십시오.", False
     if "NOT_FOUND" in msg or code == 404:
-        return f"모델 '{model}' 을 이 접속 경로에서 호출할 수 없습니다(404). 퇴역했거나 이 키 종류에서는 다른 이름을 써야 합니다. [키 확인·모델 고르기] 로 다른 모델을 고르십시오." + _raw(msg), False
+        rec = recommended_model(msg)
+        return (f"모델 '{model}' 을 호출할 수 없습니다(404). " + (f"서버가 권하는 모델: '{rec}'. " if rec else "퇴역했거나 이 키 종류에서는 다른 이름을 써야 합니다. ")
+                + "[키 확인·모델 고르기] 로 바꾸십시오." + _raw(msg)), False
     if "RESOURCE_EXHAUSTED" in msg or code == 429:
-        return "요청 한도(쿼터)를 넘었습니다. 잠시 뒤 다시 하거나 쪽 범위를 줄이십시오. 무료 등급이면 분당 요청 수 제한이 있습니다.", True
+        if re.search(r"limit:\s*0\b", msg):
+            return f"이 키(무료 등급)에서는 모델 '{model}' 의 요청 한도가 0 입니다. Google AI Studio 에서 결제를 켜거나, flash 계열 모델을 고르십시오." + _raw(msg), False
+        return "요청 한도(쿼터)를 넘었습니다. 서버가 알려 준 시간만큼 기다렸다 다시 시도합니다. 자주 나면 쪽 범위를 줄이거나 결제를 켜십시오." + _raw(msg), True
     if code and 500 <= int(code) < 600:
         return f"Gemini 서버 오류({code}). 잠시 뒤 다시 시도하십시오.", True
     if "timeout" in msg.lower() or "timed out" in msg.lower():
@@ -69,6 +73,31 @@ def make_client(api_key: str, vertexai: bool = False, timeout_ms: int = 180_000)
     from google.genai import types
     logging.getLogger("google_genai").setLevel(logging.ERROR)     # AFC 권고문 같은 잡음 숨김
     return genai.Client(vertexai=vertexai, api_key=normalize_key(api_key), http_options=types.HttpOptions(timeout=timeout_ms))
+
+
+# 글·그림 판독에 쓸 수 없는 모델(음성 합성, 이미지·영상 생성, 임베딩, 실시간 음성 등)은 목록에서 뺀다
+NON_TEXT_HINTS = ("tts", "image", "imagen", "veo", "embedding", "embed", "audio", "live", "robotics",
+                  "computer-use", "deep-research", "aqa", "gemma", "learnlm", "lyria", "music", "speech")
+
+
+def is_text_model(name: str) -> bool:
+    n = name.lower()
+    return "gemini" in n and not any(h in n for h in NON_TEXT_HINTS)
+
+
+def recommended_model(msg: str) -> str:
+    """404 메시지의 'Please update your code to use models/XXX' 에서 권장 모델 이름을 꺼낸다."""
+    m = re.search(r"use models/([A-Za-z0-9._\-]+)", msg)
+    return m.group(1) if m else ""
+
+
+def retry_delay_seconds(msg: str, default: float = 20.0) -> float:
+    """429 메시지의 'retry in 23.5s' 또는 'retryDelay': '23s' 를 읽는다."""
+    m = re.search(r"[Rr]etry in ([\d.]+)\s*s", msg) or re.search(r"retryDelay'?:?\s*'?(\d+)s", msg)
+    try:
+        return min(120.0, max(3.0, float(m.group(1)))) if m else default
+    except Exception:
+        return default
 
 
 def model_sort_key(name: str):
@@ -90,7 +119,7 @@ def list_models(api_key: str, vertexai: bool = False) -> list[str]:
             continue
         n = (getattr(m, "name", "") or "")
         n = n.split("/")[-1] if "/" in n else n          # models/… 또는 publishers/google/models/…
-        if n and "gemini" in n:
+        if n and is_text_model(n):
             names.append(n)
     return sorted(set(names), key=model_sort_key)
 
@@ -137,11 +166,17 @@ def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int 
     if probe:
         # 지정한 모델부터 실제로 불러 보고, 안 되면 최신 순으로 되는 모델을 찾는다
         order = ([model] if model else []) + [m for m in out["models"] if m != model]
-        for m in order[:max_probe]:
+        tried = 0
+        while order and tried < max_probe:
+            m = order.pop(0); tried += 1
             ok, pm = probe_model(k, m, vx)
             out["probe"][m] = pm
             if ok:
                 out["working_model"] = m; break
+            rec = recommended_model(pm)
+            if rec and rec not in out["probe"] and rec not in order:
+                order.insert(0, rec)                     # 서버가 권한 모델을 바로 다음에 시험
+                if rec not in out["models"]: out["models"].insert(0, rec)
         if model:
             if out["probe"].get(model) == "호출 확인됨":
                 msg += f" '{model}' 호출 확인됨."
@@ -193,7 +228,8 @@ class GeminiReader:
         t = self.types
         part = t.Part.from_bytes(data=to_png_bytes(img), mime_type="image/png")
         last_msg = ""; tried_msgs: list[str] = []
-        for i in range(self.retries):
+        attempts = max(self.retries, 5)
+        for i in range(attempts):
             try:
                 resp = self.client.models.generate_content(model=self.model, contents=[part, prompt], config=self._config(schema))
                 self.usage["calls"] += 1
@@ -223,8 +259,13 @@ class GeminiReader:
                         except Exception:
                             pass
                     raise ReaderError(final) from e
-                time.sleep(2 ** i)                 # 한도·서버·형식 오류는 잠시 뒤 다시
-        raise ReaderError(f"{self.retries}회 시도 뒤에도 실패: {last_msg}")
+                if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
+                    d = retry_delay_seconds(str(e))
+                    print(f"주의: 요청 한도 초과 — {d:.0f}초 뒤 다시 시도 ({i + 1}/{attempts})", flush=True)
+                    time.sleep(d)
+                else:
+                    time.sleep(2 ** i)             # 서버·형식 오류는 잠시 뒤 다시
+        raise ReaderError(f"{attempts}회 시도 뒤에도 실패: {last_msg}")
 
     def read_page(self, img: Image.Image, file_name: str, pdf_page: int, total: int, extra: str = "") -> PageReading:
         r = self._call(img, prompts.page_prompt(file_name, pdf_page, total, extra), PageReading)
