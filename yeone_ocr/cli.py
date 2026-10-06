@@ -174,13 +174,31 @@ def cover_check(img: Image.Image, p1: PageReading) -> list[str]:
     return notes
 
 
+def nfc_reading(pr: PageReading) -> PageReading:
+    """모델이 돌려준 모든 글을 NFC 로 정규화한다(호환 한자 → 표준 한자). 자형은 같고 부호값만 바뀐다."""
+    import unicodedata
+    from .merge import INVISIBLE
+    f = lambda t: INVISIBLE.sub("", unicodedata.normalize("NFC", t or ""))
+    for r in pr.regions:
+        r.title_text = f(r.title_text); r.note = f(r.note)
+        for p in r.paragraphs:
+            for c in p.columns:
+                c.text = f(c.text)
+        for row in r.table_rows:
+            row.cells = [f(x) for x in row.cells]
+    for u in pr.uncertain:
+        u.context = f(u.context)
+    pr.page_label = f(pr.page_label); pr.running_header = f(pr.running_header)
+    return pr
+
+
 def read_one(work: Work, doc, reader, n: int, args) -> dict:
     total = len(doc)
     img, src = _load_page_image(work, doc, n, args.dpi)
     model_img = upscale(img, args.upscale) if max(img.size) * args.upscale <= 4200 else img
     t0 = time.time()
     u0 = dict(getattr(reader, "usage", {}) or {})
-    p1 = reader.read_page(model_img, Path(args.pdf).name, n, total)
+    p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total))
     coverage_notes = cover_check(img, p1)
     for line in coverage_notes:
         log("    " + line)
@@ -195,6 +213,9 @@ def read_one(work: Work, doc, reader, n: int, args) -> dict:
                 log(f"    {reg.id}: 2차 조각 가장자리 {fit['steps']}단계 넓힘" + (f" (여전히 닿음: {fit['touching']})" if fit["touching"] else ""))
             f = max(1.0, min(4.0, 1600 / max(1, crop.height)))      # 열 글자가 또렷하도록 세로 1600px 안팎으로 확대
             rr = reader.reread_region(upscale(crop, f), reg.kind, reg.id, n)
+            import unicodedata as _ud
+            for c in rr.columns:
+                c.text = _ud.normalize("NFC", c.text or "")
             if rr.columns:
                 rereads[reg.id] = rr
                 rec_fit = rr.model_dump(); rec_fit["crop_bbox"] = list(fit["bbox"]); rec_fit["crop_steps"] = fit["steps"]

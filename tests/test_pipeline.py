@@ -111,6 +111,27 @@ class Verify(unittest.TestCase):
         self.assertEqual(verify_page(clean), [])
 
 
+class Gua(unittest.TestCase):
+    def test_hexagram_table_and_check(self):
+        from yeone_ocr.verify import HEXAGRAM, check_gua_symbols
+        self.assertEqual((HEXAGRAM["乾"], HEXAGRAM["坤"], HEXAGRAM["豫"], HEXAGRAM["賁"], HEXAGRAM["困"], HEXAGRAM["未濟"]), ("䷀", "䷁", "䷏", "䷕", "䷮", "䷿"))
+        self.assertEqual(HEXAGRAM["豊"], HEXAGRAM["豐"])
+        ok = check_gua_symbols("丙子卦 困卦(䷮) 戊子卦 師卦(䷆)")
+        self.assertEqual(ok, [])
+        bad = check_gua_symbols("庚子卦 解卦(䷧) 壬子卦 解卦(䷯)")
+        self.assertEqual(len(bad), 1); self.assertEqual(bad[0][0], "error"); self.assertIn("䷧", bad[0][3])
+        tri = check_gua_symbols("甲子卦 坎卦(☵)")
+        self.assertEqual(tri[0][0], "warn"); self.assertIn("䷜", tri[0][3])
+        two = check_gua_symbols("雷地豫卦(☷☳)")
+        self.assertEqual(two[0][0], "error"); self.assertIn("䷏", two[0][3])
+
+    def test_nfc_in_merge(self):
+        p1 = PageReading(pdf_page=15, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="音樂이 廣潤하고")])])])
+        rr = {"b": RegionReread(columns=[Column(col_from_right=1, text="音\uf914이 廣潤하고")])}   # 호환 한자 潤
+        m, st = merge_passes(p1, rr)
+        self.assertEqual(st["marks"], 0); self.assertEqual(m.uncertain, [])
+
+
 class Layout(unittest.TestCase):
     def test_detect_and_fit(self):
         im = page_with_circle()

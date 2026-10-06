@@ -1,13 +1,15 @@
 """1차(쪽 전체) 판독과 2차(영역 확대) 독립 판독의 비교·병합, 기존 텍스트 레이어와의 대조."""
 from __future__ import annotations
-import difflib, re
+import difflib, re, unicodedata
 from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_columns, region_text
 
 WS = re.compile(r"\s+")
+INVISIBLE = re.compile(r"[\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufe00-\ufe0f\ufeff]")   # 폭 없는 글자·이체자 선택자 등
 
 
 def _norm(s: str) -> str:
-    return WS.sub(" ", s).strip()
+    """공백을 하나로, 호환 한자(潤 U+F9A6 등)는 표준 글자(NFC)로. 같은 글자가 부호값만 달라 다른 글자로 비교되는 일을 막는다."""
+    return WS.sub(" ", INVISIBLE.sub("", unicodedata.normalize("NFC", s))).strip()
 
 
 def _pos(i: int, n: int) -> str:

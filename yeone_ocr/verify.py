@@ -4,6 +4,36 @@ import re
 from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, region_text, region_columns
 
 ASCII_GUA = re.compile(r"(={3,}|-{3,}|1{3,}|l{3,}|\|{3,})")
+
+# 64괘 이름 → 육획 기호(文王 차례, U+4DC0~4DFF). 이체·약자도 같이 받는다.
+HEX_NAMES = ["乾", "坤", "屯", "蒙", "需", "訟", "師", "比", "小畜", "履", "泰", "否", "同人", "大有", "謙", "豫", "隨", "蠱", "臨", "觀",
+             "噬嗑", "賁", "剝", "復", "无妄", "大畜", "頤", "大過", "坎", "離", "咸", "恒", "遯", "大壯", "晉", "明夷", "家人", "睽", "蹇", "解",
+             "損", "益", "夬", "姤", "萃", "升", "困", "井", "革", "鼎", "震", "艮", "漸", "歸妹", "豐", "旅", "巽", "兌", "渙", "節",
+             "中孚", "小過", "既濟", "未濟"]
+HEXAGRAM = {name: chr(0x4DC0 + i) for i, name in enumerate(HEX_NAMES)}
+HEXAGRAM.update({"無妄": HEXAGRAM["无妄"], "恆": HEXAGRAM["恒"], "遁": HEXAGRAM["遯"], "豊": HEXAGRAM["豐"], "旣濟": HEXAGRAM["既濟"],
+                 "剥": HEXAGRAM["剝"], "噬嗑": HEXAGRAM["噬嗑"], "兑": HEXAGRAM["兌"], "巽": HEXAGRAM["巽"]})
+TRIGRAM_NAMES = {"乾", "坤", "坎", "離", "震", "巽", "艮", "兌", "兑"}
+TRIGRAM_CHAR = {"乾": "☰", "兌": "☱", "兑": "☱", "離": "☲", "震": "☳", "巽": "☴", "坎": "☵", "艮": "☶", "坤": "☷"}
+GUA_RE = re.compile("(" + "|".join(sorted(HEXAGRAM, key=len, reverse=True)) + r")卦\s*[(（]\s*([☰-☷䷀-䷿]{1,2})\s*[)）]")
+
+
+def check_gua_symbols(text: str) -> list[tuple[str, str, str, str]]:
+    """'困卦(䷯)' 처럼 괘 이름 옆에 적힌 기호가 이름과 맞는지 본다. (level, 이름, 적힌 기호, 설명) 목록."""
+    out = []
+    for m in GUA_RE.finditer(text):
+        name, sym = m.group(1), m.group(2)
+        want = HEXAGRAM[name]
+        if sym == want:
+            continue
+        if all("☰" <= ch <= "☷" for ch in sym):
+            if len(sym) == 1 and name in TRIGRAM_NAMES and sym == TRIGRAM_CHAR[name]:
+                out.append(("warn", name, sym, f"{name}卦({sym}) 는 삼획 기호. 원본이 육획(重卦)이면 {want} — 획 수 확인(지침 13)"))
+            else:
+                out.append(("error", name, sym, f"{name}卦 옆에 삼획 기호 '{sym}' — 이름대로면 육획 {want}. 원본 확인(지침 13)"))
+        else:
+            out.append(("error", name, sym, f"괘상 불일치: {name}卦 는 {want} 인데 '{sym}' 로 적힘 — 원본 확인(지침 13)"))
+    return out
 JAMO = re.compile(r"[ㄱ-ㆎᄀ-ᇿꥠ-꥿ힰ-퟿]")
 LABEL_IN_BODY = re.compile(r"[-–—]\s*\d{1,4}\s*[-–—]")
 
@@ -23,6 +53,8 @@ def verify_page(r: PageReading) -> list[dict]:
                 add("warn", "한글 자모 분리", reg.id, f"'{m.group(0)}' — 음절이 자모로 분리된 오인식 의심(지침 8). 옛한글이면 note 에 기록")
             for m in LABEL_IN_BODY.finditer(t):
                 add("error", "쪽번호 혼입", reg.id, f"'{m.group(0)}' — 쪽번호 표기가 본문에 섞임(지침 15)")
+            for level, name, sym, msg in check_gua_symbols(t):
+                add(level, "괘상 기호", reg.id, msg)
             for c in region_columns(reg):
                 if c.col_from_right <= 0:
                     add("warn", "열 번호 없음", reg.id, "col_from_right 가 0 이하")
