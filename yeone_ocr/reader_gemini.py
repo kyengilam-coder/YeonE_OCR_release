@@ -112,6 +112,25 @@ def model_sort_key(name: str):
     return (-ver, fam, preview, name)
 
 
+def pick_second_model(models: list[str], primary: str) -> str:
+    """2차 판독용 모델 자동 선택: 1차와 같은 세대의 flash(lite 제외, 정식판 우선). 없으면 더 새 세대 flash, 그것도 없으면 1차 모델."""
+    m = re.search(r"gemini-(\d+(?:\.\d+)?)", primary or "")
+    ver = float(m.group(1)) if m else None
+    cands = [x for x in models if is_text_model(x) and "flash" in x and "lite" not in x]
+    if ver is not None:
+        same = [x for x in cands if f"gemini-{m.group(1)}-" in x]
+        if same:
+            return sorted(same, key=lambda x: (("preview" in x or "exp" in x), x))[0]
+        newer = []
+        for x in cands:
+            mm = re.search(r"gemini-(\d+(?:\.\d+)?)", x)
+            if mm and float(mm.group(1)) >= ver:
+                newer.append(x)
+        if newer:
+            return sorted(newer, key=model_sort_key)[0]
+    return primary
+
+
 def list_models(api_key: str, vertexai: bool = False) -> list[str]:
     """generateContent 를 지원하는 모델 이름 목록(models/ 머리 제거), 최신 순. 키가 틀리면 예외."""
     client = make_client(api_key, vertexai, timeout_ms=30_000)
@@ -199,7 +218,7 @@ class GeminiReader:
     name = "gemini"
 
     def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto",
-                 use_cache: bool = True):
+                 use_cache: bool = True, thinking: str | None = None):
         from google.genai import types     # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
         key = normalize_key(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         if not key:
@@ -215,6 +234,8 @@ class GeminiReader:
         self.client = make_client(key, self.vertexai)    # 응답 제한 시간 180초. 없으면 네트워크 문제 때 영영 기다릴 수 있다
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
         self.thinking_budget = thinking_budget
+        self.thinking = thinking          # None=모델 기본, "low"=생각 줄임(2차 전사용). 거부되면 자동 해제
+        self.n_429 = 0                    # 한도 초과 횟수(동시 쪽 수 조절에 씀)
         self.retries = retries
         self._system = prompts.system_prompt()
         self.usage = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cached_tokens": 0}
@@ -247,6 +268,9 @@ class GeminiReader:
             kw["system_instruction"] = self._system
         if self.thinking_budget is not None:
             kw["thinking_config"] = t.ThinkingConfig(thinking_budget=self.thinking_budget)
+        elif self.thinking == "low":
+            # 3.x 는 thinking_level, 2.5 는 thinking_budget 으로 생각을 줄인다(전사 작업이라 깊은 생각이 필요 없음)
+            kw["thinking_config"] = t.ThinkingConfig(thinking_level="LOW") if re.search(r"gemini-[3-9]", self.model) else t.ThinkingConfig(thinking_budget=512)
         return t.GenerateContentConfig(**kw)
 
     def _call(self, img: Image.Image, prompt: str, schema, extra_parts: list | None = None):
@@ -276,6 +300,13 @@ class GeminiReader:
             except Exception as e:
                 last_msg, retry = friendly_error(e, self.model)
                 code = getattr(e, "code", None) or getattr(e, "status_code", None)
+                if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
+                    with self._lock:
+                        self.n_429 += 1
+                if (self.thinking or self.thinking_budget is not None) and code == 400 and "think" in str(e).lower():
+                    print(f"주의: {self.model} 이 생각 설정을 받지 않아 모델 기본값으로 계속합니다.", flush=True)
+                    self.thinking = None; self.thinking_budget = None
+                    continue
                 if self.cache_name and ("cachedContent" in str(e) or "cached content" in str(e).lower() or (code == 403 and "cache" in str(e).lower())):
                     self._make_cache()                       # 캐시가 만료·소실되면 다시 만들고 재시도
                     if not self.cache_name:

@@ -309,16 +309,27 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     try:
         reader = make_reader(args, doc, work)
         reader2 = reader
-        if args.reader == "gemini" and args.second_model and args.second_model.strip() and args.second_model.strip() != getattr(reader, "model", ""):
-            from .reader_gemini import GeminiReader
-            reader2 = GeminiReader(model=args.second_model.strip(), thinking_budget=args.thinking_budget, use_cache=not args.no_cache)
+        if args.reader == "gemini":
+            from .reader_gemini import GeminiReader, list_models, pick_second_model
+            want = (args.second_model or "").strip()
+            if want.lower() == "auto":
+                try:
+                    want = pick_second_model(list_models(reader.key, reader.vertexai), reader.model)
+                    log(f"  2차 판독 모델 자동 선택: {want}" + ("" if want != reader.model else " (같은 세대 flash 가 없어 1차와 같은 모델)"))
+                except Exception as e:
+                    want = ""; log(f"  2차 모델 자동 선택 실패({str(e)[:60]}) → 1차와 같은 모델")
+            think2 = "low" if args.second_thinking == "low" else None
+            if (want and want != reader.model) or think2:
+                reader2 = GeminiReader(model=want or reader.model, thinking_budget=args.thinking_budget, use_cache=not args.no_cache, thinking=think2)
     except Exception as e:
         log(f"오류: {e}"); return 1
     todo = [n for n in pages if args.force or not work.load_record(n)]
     skipped = len(pages) - len(todo)
-    workers = max(1, int(args.workers or 1))
-    log(f"read: 판독기 {reader.name} {getattr(reader, 'model', '')}" + (f" · 2차 {reader2.model}" if reader2 is not reader else "")
-        + f" · {len(pages)}쪽 중 읽을 쪽 {len(todo)}개 · 동시 {workers}쪽 · 2차 판독 {'묶음 호출' if args.second_mode == 'batch' else '영역별 호출'}"
+    ceiling = max(1, int(args.workers or 1))
+    cur = max(1, min(ceiling, int(args.workers_start or ceiling)))     # 동시 쪽 수: 여기서 시작해 한도(429)가 나면 줄이고, 안정되면 늘린다
+    log(f"read: 판독기 {reader.name} {getattr(reader, 'model', '')}"
+        + (f" · 2차 {reader2.model}{' (생각 줄임)' if getattr(reader2, 'thinking', None) == 'low' else ''}" if reader2 is not reader else "")
+        + f" · {len(pages)}쪽 중 읽을 쪽 {len(todo)}개 · 동시 {cur}쪽(최대 {ceiling}, 자동 조절) · 2차 판독 {'묶음 호출' if args.second_mode == 'batch' else '영역별 호출'}"
         + (f" · {reader.cache_note}" if getattr(reader, "cache_note", "") else ""))
     if skipped:
         log(f"  기록이 있어 건너뛴 쪽 {skipped}개 (다시 읽으려면 '기록 있는 쪽도 다시 판독' 또는 --force)")
@@ -337,18 +348,28 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
 
     it = iter(todo)
     futures: dict = {}
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    readers = list({id(reader): reader, id(reader2): reader2}.values())
+    def n429() -> int:
+        return sum(getattr(r, "n_429", 0) for r in readers)
+    seen_429 = n429(); clean_since = 0; pause_until = 0.0; exhausted = False
+    with ThreadPoolExecutor(max_workers=ceiling) as ex:
         def submit_next() -> bool:
-            if fatal is not None or CANCEL.is_set():
+            nonlocal exhausted
+            if fatal is not None or CANCEL.is_set() or exhausted:
                 return False
             for n in it:
                 futures[ex.submit(read_one, work, doc, reader, reader2, n, args)] = n
                 return True
+            exhausted = True
             return False
-        for _ in range(workers):
-            submit_next()
-        while futures:
-            done_set, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+        while True:
+            while len(futures) < cur and time.time() >= pause_until and submit_next():
+                pass
+            if not futures:
+                if not exhausted and fatal is None and not CANCEL.is_set() and time.time() < pause_until:
+                    time.sleep(1); continue
+                break
+            done_set, _ = wait(list(futures), return_when=FIRST_COMPLETED, timeout=5)
             for fut in done_set:
                 n = futures.pop(fut)
                 try:
@@ -368,10 +389,21 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                 except Exception as e:
                     failed.append(n); work.set_status(n, "판독 확인 필요", note=f"판독 중 예외: {type(e).__name__}: {e}")
                     log(f"  {n}쪽: 판독 중 예외 {type(e).__name__}: {str(e)[:120]} → 건너뛰고 계속")
-                submit_next()
-            if done_now and done_now % 10 == 0 and len(todo) > 10:
+                clean_since += 1
+            # 동시 쪽 수 자동 조절: 한도 초과가 새로 보이면 하나 줄이고 20초 쉼, 10쪽 연속 깨끗하면 하나 늘림
+            now429 = n429()
+            if now429 > seen_429:
+                seen_429 = now429; clean_since = 0
+                if cur > 1:
+                    cur -= 1; log(f"  — 한도 초과(429) 감지 → 동시 {cur}쪽으로 줄이고 20초 쉼")
+                else:
+                    log("  — 한도 초과(429) 감지 → 20초 쉼")
+                pause_until = time.time() + 20
+            elif clean_since >= 10 and cur < ceiling:
+                cur += 1; clean_since = 0; log(f"  — 안정적 → 동시 {cur}쪽으로 늘림")
+            if done_set and done_now and done_now % 10 == 0 and len(todo) > 10:
                 per = (time.time() - t_start) / done_now; left = len(todo) - done_now - len(failed)
-                log(f"  — 진행 {done_now}/{len(todo)}쪽 · 쪽당 {per:.0f}초(동시 {workers}) · 남은 {left}쪽 예상 {left * per / 60:.0f}분")
+                log(f"  — 진행 {done_now}/{len(todo)}쪽 · 실효 쪽당 {per:.0f}초(동시 {cur}) · 남은 {left}쪽 예상 {left * per / 60:.0f}분")
             if args.checkpoint and since_ckpt >= args.checkpoint:
                 checkpoint(f"{done_now}쪽 진행")
     if fatal is not None or CANCEL.is_set():
@@ -578,9 +610,11 @@ def build_parser():
         p.add_argument("--batch", type=int, default=5, help="묶음 쪽수(지침 25: 본문 3~5, 복잡한 판면 1~3)")
         p.add_argument("--force", action="store_true", help="기존 기록이 있어도 다시 판독")
         p.add_argument("--print-offset", type=int, default=None, help="인쇄 쪽수 = PDF 쪽수 + N 인지 어긋남만 표시")
-        p.add_argument("--workers", type=int, default=3, help="동시에 판독할 쪽 수(기본 3). 한도(429)가 잦으면 줄이십시오")
+        p.add_argument("--workers", type=int, default=6, help="동시에 판독할 쪽 수의 최대(기본 6). 한도(429)가 나면 자동으로 줄인다")
+        p.add_argument("--workers-start", type=int, default=4, help="시작 동시 쪽 수(기본 4). 10쪽 연속 문제없으면 하나씩 늘린다")
         p.add_argument("--second-mode", choices=["batch", "each"], default="batch", help="2차 판독을 조각 묶음 한 호출(batch, 기본)로 할지 영역별 호출(each)로 할지")
-        p.add_argument("--second-model", default="", help="2차 판독에 쓸 모델(비우면 1차와 같음). 예: flash 계열로 빠르게")
+        p.add_argument("--second-model", default="auto", help="2차 판독 모델. auto(기본)=1차와 같은 세대의 flash 자동 선택, 비우면 1차와 같음")
+        p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
         p.add_argument("--checkpoint", type=int, default=20, help="N쪽 판독마다 '<이름>_진행중.hwpx' 를 중간 저장(0=안 함). run 에서만")
 

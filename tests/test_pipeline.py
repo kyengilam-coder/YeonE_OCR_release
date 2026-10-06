@@ -111,6 +111,27 @@ class Verify(unittest.TestCase):
         self.assertEqual(verify_page(clean), [])
 
 
+class SpeedHelpers(unittest.TestCase):
+    def test_pick_second_model(self):
+        from yeone_ocr.reader_gemini import pick_second_model
+        models = ["gemini-3.1-pro-preview", "gemini-3.1-flash", "gemini-3.1-flash-lite", "gemini-3.1-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.8-flash-tts"]
+        self.assertEqual(pick_second_model(models, "gemini-3.1-pro-preview"), "gemini-3.1-flash")
+        self.assertEqual(pick_second_model(models, "gemini-2.5-pro"), "gemini-2.5-flash")
+        self.assertEqual(pick_second_model(["gemini-2.5-pro", "gemini-3.1-flash"], "gemini-2.5-pro"), "gemini-3.1-flash")   # 같은 세대 없으면 더 새 flash
+        self.assertEqual(pick_second_model(["gemini-2.5-pro"], "gemini-2.5-pro"), "gemini-2.5-pro")
+
+    def test_short_json_keys_roundtrip(self):
+        """모델은 짧은 키로 답하고, 코드·저장 파일은 긴 이름을 쓴다."""
+        js = '{"pdf_page": 3, "print": "32", "header": "", "label": "- 32 -", "note": "", "unc": [{"r": "b1", "n": 2, "pos": "위", "ctx": "「〔疑: 子〕」"}],' \
+             ' "regions": [{"id": "b1", "k": "본문", "bbox": [500, 100, 870, 650], "dir": "세로", "title": "", "lv": 0, "rows": [],' \
+             ' "paras": [{"cont": false, "cols": [{"n": 1, "t": "이것은 十二地支下에"}, {"n": 2, "t": "各排五子位이니"}]}], "note": ""}]}'
+        pr = PageReading.model_validate_json(js)
+        self.assertEqual(pr.print_page, "32"); self.assertEqual(pr.regions[0].kind, "본문"); self.assertEqual(pr.regions[0].paragraphs[0].columns[1].text, "各排五子位이니")
+        d = pr.model_dump(); self.assertIn("print_page", d); self.assertIn("paragraphs", d["regions"][0]); self.assertIn("col_from_right", d["regions"][0]["paragraphs"][0]["columns"][0])
+        self.assertEqual(PageReading.model_validate(d).regions[0].paragraphs[0].columns[0].col_from_right, 1)   # 긴 이름으로도 다시 읽힘
+        self.assertIn("cols", json.dumps(Paragraph.model_json_schema())); self.assertNotIn('"columns"', json.dumps(Paragraph.model_json_schema()))
+
+
 class Gua(unittest.TestCase):
     def test_hexagram_table_and_check(self):
         from yeone_ocr.verify import HEXAGRAM, check_gua_symbols
@@ -307,3 +328,20 @@ class GeminiHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuiConfig(unittest.TestCase):
+    def test_upgrade_old_config_adopts_speed_defaults(self):
+        from yeone_ocr.gui import upgrade_config, DEFAULTS, SPEED_DEFAULTS_VERSION
+        old = dict(DEFAULTS); old.update({"workers": 3, "second_model": "", "checkpoint": 20}); old.pop("speed_defaults", None)
+        up = upgrade_config(old)
+        self.assertEqual(up["workers"], 6); self.assertEqual(up["second_model"], "auto")
+        self.assertEqual(up["speed_defaults"], SPEED_DEFAULTS_VERSION)
+        # 사용자가 직접 바꾼 값은 유지
+        mine = dict(DEFAULTS); mine.update({"workers": 5, "second_model": "gemini-2.5-flash"}); mine.pop("speed_defaults", None)
+        up2 = upgrade_config(mine)
+        self.assertEqual(up2["workers"], 5); self.assertEqual(up2["second_model"], "gemini-2.5-flash")
+        # 이미 새 판이면 손대지 않음
+        new = {"speed_defaults": SPEED_DEFAULTS_VERSION, "workers": 2, "second_model": ""}
+        up3 = upgrade_config(new)
+        self.assertEqual(up3["workers"], 2); self.assertEqual(up3["second_model"], "")

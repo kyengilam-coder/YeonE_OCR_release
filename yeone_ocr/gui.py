@@ -18,7 +18,7 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 3, "second_model": "", "checkpoint": 20, "use_cache": True, "last_pdf": ""}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "last_pdf": ""}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -46,13 +46,29 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 """
 
 
+SPEED_DEFAULTS_VERSION = 2  # 0.4.1: 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기
+
+
+def upgrade_config(cfg: dict) -> dict:
+    """이전 판이 저장한 설정에 새 속도 기본값을 입힌다(사용자가 바꾼 값은 그대로)."""
+    ver = int(cfg.get("speed_defaults", 1) or 1)
+    if ver < 2:
+        if int(cfg.get("workers", 3) or 3) <= 3:
+            cfg["workers"] = DEFAULTS["workers"]
+        if not str(cfg.get("second_model", "")).strip():
+            cfg["second_model"] = DEFAULTS["second_model"]
+        cfg.setdefault("use_cache", True); cfg.setdefault("second_thinking_low", True)
+    cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
+    return cfg
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     try:
         cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except Exception:
         pass
-    return cfg
+    return upgrade_config(cfg)
 
 
 def save_config(cfg: dict) -> None:
@@ -301,6 +317,7 @@ class App(tk.Tk):
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
+        self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
         rf.columnconfigure(1, weight=1)
         r = 0
         ttk.Label(rf, text="판독기", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
@@ -314,7 +331,7 @@ class App(tk.Tk):
         r += 1
         ttk.Label(rf, text="2차 판독 모델", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
         self.e_model2 = ttk.Entry(rf, textvariable=self.v_model2, width=26); self.e_model2.grid(row=r, column=1, sticky="w", **pad)
-        ttk.Label(rf, text="비우면 1차와 같음. flash 계열이면 빠르고 쌈", style="Hint.TLabel").grid(row=r, column=2, columnspan=2, sticky="w", **pad)
+        ttk.Label(rf, text="auto = 1차와 같은 세대의 flash 자동 선택. 비우면 1차와 같음", style="Hint.TLabel").grid(row=r, column=2, columnspan=2, sticky="w", **pad)
         r += 1
         ttk.Label(rf, text="Gemini API 키", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
         self.e_key = ttk.Entry(rf, textvariable=self.v_key, width=40, show="•"); self.e_key.grid(row=r, column=1, columnspan=2, sticky="ew", **pad)
@@ -322,9 +339,9 @@ class App(tk.Tk):
         r += 1
         ttk.Label(rf, text="속도", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
         sp = ttk.Frame(rf, style="Panel.TFrame"); sp.grid(row=r, column=1, columnspan=3, sticky="w")
-        ttk.Label(sp, text="동시", style="Panel.TLabel").pack(side="left", padx=(4, 2))
+        ttk.Label(sp, text="동시 최대", style="Panel.TLabel").pack(side="left", padx=(4, 2))
         ttk.Spinbox(sp, from_=1, to=8, width=3, textvariable=self.v_workers).pack(side="left")
-        ttk.Label(sp, text="쪽 ·  확대", style="Panel.TLabel").pack(side="left", padx=(8, 2))
+        ttk.Label(sp, text="쪽(자동 조절) ·  확대", style="Panel.TLabel").pack(side="left", padx=(8, 2))
         ttk.Entry(sp, textvariable=self.v_up, width=4).pack(side="left")
         ttk.Label(sp, text="배 ·  중간 저장", style="Panel.TLabel").pack(side="left", padx=(8, 2))
         ttk.Entry(sp, textvariable=self.v_ckpt, width=4).pack(side="left")
@@ -332,7 +349,8 @@ class App(tk.Tk):
         r += 1
         ck = ttk.Frame(rf, style="Panel.TFrame"); ck.grid(row=r, column=0, columnspan=4, sticky="w")
         ttk.Checkbutton(ck, text="영역 확대 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=(4, 10))
-        ttk.Checkbutton(ck, text="지침 캐시(빠르고 쌈)", variable=self.v_cache).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(ck, text="지침 캐시", variable=self.v_cache).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(ck, text="2차 생각 줄이기", variable=self.v_think2).pack(side="left", padx=(0, 10))
         ttk.Checkbutton(ck, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
         # 문서
         ttk.Checkbutton(df, text="의심 자리 붉은 글자 · 노란 형광펜", variable=self.v_hl).grid(row=0, column=0, sticky="w", **pad)
@@ -408,9 +426,9 @@ class App(tk.Tk):
             o += ["--print-offset", self.v_off.get().strip()]
         if self.v_force.get():
             o.append("--force")
-        o += ["--workers", (self.v_workers.get().strip() or "3")]
-        if self.v_model2.get().strip():
-            o += ["--second-model", self.v_model2.get().strip()]
+        o += ["--workers", (self.v_workers.get().strip() or "6")]
+        o += ["--second-model", self.v_model2.get().strip()]          # 빈 값이면 1차와 같은 모델, auto 면 자동
+        o += ["--second-thinking", "low" if self.v_think2.get() else "full"]
         if not self.v_cache.get():
             o.append("--no-cache")
         o += ["--checkpoint", (self.v_ckpt.get().strip() or "0")]
@@ -563,8 +581,8 @@ class App(tk.Tk):
         self.cfg.update({"pages": self.v_pages.get(), "print_offset": self.v_off.get(), "upscale": self.v_up.get(), "reader": self.v_reader.get(),
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(),
-                         "workers": int(self.v_workers.get() or 3), "second_model": self.v_model2.get().strip(),
-                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "last_pdf": self.pdf()})
+                         "workers": int(self.v_workers.get() or 6), "second_model": self.v_model2.get().strip(),
+                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "last_pdf": self.pdf()})
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
