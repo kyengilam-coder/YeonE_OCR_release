@@ -113,6 +113,33 @@ class Layout(unittest.TestCase):
         self.assertTrue(all(v == 0 for v in edge_ink(crop).values()))
 
 
+class ExpandText(unittest.TestCase):
+    def test_expand_until_clean_recovers_cut_glyphs(self):
+        from yeone_ocr.layout import expand_until_clean
+        im = Image.new("L", (900, 1300), 245); d = ImageDraw.Draw(im)
+        for x in range(820, 500, -30):                    # 세로 열 흉내: 글자 블록이 y 100~700
+            for y in range(100, 700, 24):
+                d.rectangle([x - 8, y, x + 8, y + 16], fill=30)
+        tight = (520 / 900, 110 / 1300, 820 / 900, 690 / 1300)   # 모델 좌표가 글자 반 개 안쪽으로 들어온 경우
+        fit = expand_until_clean(im, tight, pad=0.012)
+        self.assertEqual(fit["touching"], []); self.assertGreater(fit["steps"], 0)
+        x0, y0, x1, y1 = fit["bbox"]; pad = 0.012
+        self.assertLess((x0 - pad) * 900, 512); self.assertGreater((x1 + pad) * 900, 828)
+        self.assertLess((y0 - pad) * 1300, 100); self.assertGreater((y1 + pad) * 1300, 692)   # 마지막 글자 블록 676~692
+
+    def test_uncovered_column_attached(self):
+        from yeone_ocr.layout import uncovered_ink_boxes, attach_uncovered
+        im = Image.new("L", (900, 1300), 245); d = ImageDraw.Draw(im)
+        for x in (820, 790, 760):                      # 열 셋
+            for y in range(600, 760, 24):
+                d.rectangle([x - 8, y, x + 8, y + 16], fill=30)
+        region = (775 / 900, 595 / 1300, 832 / 900, 780 / 1300)   # 모델이 두 열만 감싼 좌표
+        boxes = uncovered_ink_boxes(im, [region])
+        self.assertEqual(len(boxes), 1); self.assertAlmostEqual((boxes[0][0] + boxes[0][2]) / 2 * 900, 760, delta=6)
+        grown, orphans = attach_uncovered(boxes, [("r3", region)])
+        self.assertEqual(orphans, []); self.assertLess(grown["r3"][0] * 900, 753)
+
+
 class Build(unittest.TestCase):
     def test_hwpx_structure_and_images(self):
         with tempfile.TemporaryDirectory() as td:

@@ -67,6 +67,75 @@ def fit_figure_bbox(im: Image.Image, fr: Frac, pad: float = 0.01, thr: float = 0
     return {"bbox": tuple(round(v, 4) for v in bb), "touching": bad, "steps": len(history), "history": history}
 
 
+def expand_until_clean(im: Image.Image, fr: Frac, pad: float = 0.0, thr: float = 0.0005,
+                       step: float = 0.004, max_steps: int = 10) -> dict:
+    """문자 영역 좌표를 바깥으로만 넓혀 네 변에 먹이 닿지 않게 한다(2차 판독 조각이 열의 마지막 글자나 가장자리 열을
+    잘라 먹지 않도록). 모델이 준 좌표는 글자 반 개쯤 안쪽으로 들어오는 일이 잦다."""
+    bb = list(fr)
+    def touching(b):
+        e = edge_ink(crop_frac(im, tuple(b), pad))
+        return [k for k, v in e.items() if v > thr]
+    bad = touching(bb); steps = 0
+    while bad and steps < max_steps:
+        for k in bad:
+            if k == "left": bb[0] = max(0.0, bb[0] - step)
+            if k == "right": bb[2] = min(1.0, bb[2] + step)
+            if k == "top": bb[1] = max(0.0, bb[1] - step)
+            if k == "bottom": bb[3] = min(1.0, bb[3] + step)
+        steps += 1; bad = touching(bb)
+    return {"bbox": tuple(round(v, 4) for v in bb), "touching": bad, "steps": steps}
+
+
+def uncovered_ink_boxes(im: Image.Image, regions: list[Frac], thr: int = 110, margin: float = 0.004,
+                        min_w: float = 0.006, min_h: float = 0.03, density: float = 0.004) -> list[Frac]:
+    """어느 영역에도 들지 않은 먹 기둥(세로 글 열)을 찾는다. 모델이 영역 좌표를 좁게 잡아 열 하나를 통째로 빠뜨린 경우를
+    잡기 위한 것으로, 지침 36 '원본에 있는 본문이 누락되지 않아야 한다' 의 기계적 보조 수단이다."""
+    a = np.asarray(im.convert("L")) < thr
+    H, W = a.shape
+    mask = np.zeros_like(a)
+    for (x0, y0, x1, y1) in regions:
+        mask[max(0, int((y0 - margin) * H)):min(H, int((y1 + margin) * H) + 1),
+             max(0, int((x0 - margin) * W)):min(W, int((x1 + margin) * W) + 1)] = True
+    rest = a & ~mask
+    col = rest.mean(axis=0)
+    on = col > density
+    boxes: list[Frac] = []
+    x = 0
+    while x < W:
+        if not on[x]:
+            x += 1; continue
+        x2 = x
+        while x2 < W and on[x2]:
+            x2 += 1
+        if (x2 - x) >= min_w * W:
+            rows = np.where(rest[:, x:x2].any(axis=1))[0]
+            if len(rows) and (rows[-1] - rows[0]) >= min_h * H:
+                boxes.append((round(x / W, 4), round(rows[0] / H, 4), round(x2 / W, 4), round((rows[-1] + 1) / H, 4)))
+        x = x2
+    return boxes
+
+
+def attach_uncovered(boxes: list[Frac], text_regions: list[tuple[str, Frac]], max_gap: float = 0.06, min_overlap: float = 0.5) -> tuple[dict[str, Frac], list[Frac]]:
+    """빠진 먹 기둥을 세로로 겹치고 가로로 가까운 문자 영역에 붙인다. 붙일 곳이 없으면 따로 돌려준다."""
+    grown: dict[str, Frac] = {}
+    orphans: list[Frac] = []
+    for b in boxes:
+        best, best_gap = None, None
+        for rid, r in text_regions:
+            r = grown.get(rid, r)
+            oy = max(0.0, min(b[3], r[3]) - max(b[1], r[1]))
+            if oy / max(1e-9, b[3] - b[1]) < min_overlap:
+                continue
+            gap = max(0.0, max(b[0], r[0]) - min(b[2], r[2]))
+            if gap <= max_gap and (best_gap is None or gap < best_gap):
+                best, best_gap = rid, gap
+        if best is None:
+            orphans.append(b); continue
+        r = grown.get(best, dict(text_regions)[best])
+        grown[best] = (min(r[0], b[0]), min(r[1], b[1]), max(r[2], b[2]), max(r[3], b[3]))
+    return grown, orphans
+
+
 def detect_figures(im: Image.Image, min_w: float = 0.22, min_h: float = 0.15) -> list[Frac]:
     """큰 연결 성분(원형 나경도의 테두리, 계통도의 선)으로 도판 후보 좌표를 찾는다. OpenCV가 없으면 빈 목록.
     모델이 준 좌표를 교차 확인하거나, 모델 없이(mock) 돌릴 때 쓰는 보조 수단이다."""

@@ -19,7 +19,7 @@ from . import __version__
 from .state import Work, HUMAN_ONLY, STATUSES
 from .pdfio import open_pdf, parse_pages, page_image, text_layer
 from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac
-from .layout import upscale, crop_frac, fit_figure_bbox, detect_figures, overlap_ratio
+from .layout import upscale, crop_frac, fit_figure_bbox, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered
 from .merge import merge_passes, compare_textlayer
 from .verify import verify_page, check_hwpx_file
 from .blocks import assemble_blocks, Block
@@ -153,22 +153,50 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
     return 0
 
 
+def cover_check(img: Image.Image, p1: PageReading) -> list[str]:
+    """영역 밖에 남은 글 기둥을 찾아 가까운 문자 영역의 좌표를 넓히거나(2차 조각에 포함되게), 붙일 곳이 없으면 확인 항목으로 남긴다."""
+    from .schema import bbox_frac as _bf, frac_bbox as _fb
+    all_fr = [_bf(r.bbox) for r in p1.regions]
+    boxes = uncovered_ink_boxes(img, all_fr)
+    if not boxes:
+        return []
+    text_regions = [(r.id, _bf(r.bbox)) for r in p1.regions if r.kind in TEXT_KINDS]
+    grown, orphans = attach_uncovered(boxes, text_regions)
+    notes = []
+    for r in p1.regions:
+        if r.id in grown:
+            r.bbox = _fb(grown[r.id])
+            notes.append(f"{r.id}: 영역 밖 글 기둥을 포함하도록 좌표를 넓힘 → {r.bbox}")
+    for b in orphans:
+        p1.uncertain.append(Uncertain(region_id="", context=f"어느 영역에도 들지 않은 글 기둥 (x {b[0]:.2f}~{b[2]:.2f}, y {b[1]:.2f}~{b[3]:.2f}) — 누락된 열·주석·쪽번호인지 원본 확인"))
+        notes.append(f"영역 밖 글 기둥 x {b[0]:.2f}~{b[2]:.2f} → 확인 항목으로 남김")
+    return notes
+
+
 def read_one(work: Work, doc, reader, n: int, args) -> dict:
     total = len(doc)
     img, src = _load_page_image(work, doc, n, args.dpi)
     model_img = upscale(img, args.upscale) if max(img.size) * args.upscale <= 4200 else img
     t0 = time.time()
     p1 = reader.read_page(model_img, Path(args.pdf).name, n, total)
+    coverage_notes = cover_check(img, p1)
+    for line in coverage_notes:
+        log("    " + line)
     rereads: dict[str, RegionReread] = {}
     if not args.no_second_pass:
         for reg in p1.regions:
             if reg.kind not in TEXT_KINDS:
                 continue
-            crop = crop_frac(img, bbox_frac(reg.bbox), pad=0.008)
+            fit = expand_until_clean(img, bbox_frac(reg.bbox), pad=0.012)   # 가장자리 글자가 잘리지 않게 넓힌 뒤 자른다
+            crop = crop_frac(img, fit["bbox"], pad=0.012)
+            if fit["steps"]:
+                log(f"    {reg.id}: 2차 조각 가장자리 {fit['steps']}단계 넓힘" + (f" (여전히 닿음: {fit['touching']})" if fit["touching"] else ""))
             f = max(1.0, min(4.0, 1600 / max(1, crop.height)))      # 열 글자가 또렷하도록 세로 1600px 안팎으로 확대
             rr = reader.reread_region(upscale(crop, f), reg.kind, reg.id, n)
             if rr.columns:
                 rereads[reg.id] = rr
+                rec_fit = rr.model_dump(); rec_fit["crop_bbox"] = list(fit["bbox"]); rec_fit["crop_steps"] = fit["steps"]
+                rereads_meta = locals().setdefault("rereads_meta", {}); rereads_meta[reg.id] = rec_fit
     merged, mstats = merge_passes(p1, rereads)
     fill_page_marks(merged)
     # 도판 교차 확인(자동 감지)
@@ -187,7 +215,7 @@ def read_one(work: Work, doc, reader, n: int, args) -> dict:
     issues = verify_page(merged)
     rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": reader.name, "model": getattr(reader, "model", ""),
            "image_source": src, "upscale": args.upscale, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(time.time() - t0, 1),
-           "pass1": p1.model_dump(), "pass2": {k: v.model_dump() for k, v in rereads.items()},
+           "pass1": p1.model_dump(), "pass2": {k: (locals().get("rereads_meta") or {}).get(k) or v.model_dump() for k, v in rereads.items()},
            "merged": merged.model_dump(), "merge_stats": mstats, "textlayer_diff": tdiff, "verify": issues, "crops": {}}
     work.save_record(n, rec)
     work.set_status(n, "영역 분류 완료"); work.set_status(n, "1차 OCR 완료")
