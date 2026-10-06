@@ -69,6 +69,17 @@ class RegionReread(BaseModel):
     uncertain: list[Uncertain] = Field(default_factory=list)
 
 
+class RegionRereadItem(BaseModel):
+    region_id: str
+    columns: list[Column] = Field(default_factory=list)
+    uncertain: list[Uncertain] = Field(default_factory=list)
+
+
+class MultiRegionReread(BaseModel):
+    """한 쪽의 문자 영역 조각 여러 장을 한 호출로 다시 판독한 결과."""
+    regions: list[RegionRereadItem] = Field(default_factory=list)
+
+
 # ---- 도우미 ----
 def bbox_frac(bbox: list[int]) -> tuple[float, float, float, float]:
     """[ymin,xmin,ymax,xmax] 0~1000 → (x0,y0,x1,y1) 0~1 비율."""

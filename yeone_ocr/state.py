@@ -1,6 +1,6 @@
 """작업 폴더와 쪽별 상태·판독 기록. '완료'는 실제 수행한 범위에만 붙는다(지침 33)."""
 from __future__ import annotations
-import json, time
+import json, time, threading
 from pathlib import Path
 
 STATUSES = ["미처리", "영역 분류 완료", "1차 OCR 완료", "2차 독립 판독 비교 완료", "판독 확인 필요",
@@ -9,6 +9,8 @@ HUMAN_ONLY = {"원본 대조 완료(사람)"}   # 프로그램이 스스로 붙�
 
 
 class Work:
+    _lock = threading.RLock()      # 여러 쪽을 동시에 판독할 때 state.json 읽기-고치기-쓰기가 겹치지 않게
+
     def __init__(self, pdf_path: str, work_dir: str | None = None):
         self.pdf_path = Path(pdf_path)
         self.dir = Path(work_dir) if work_dir else Path("work") / self.pdf_path.stem
@@ -33,6 +35,10 @@ class Work:
     def set_status(self, page: int, status: str, note: str | None = None, remove: list[str] | None = None) -> None:
         if status not in STATUSES:
             raise ValueError(f"알 수 없는 상태: {status}. 가능: {STATUSES}")
+        with self._lock:
+            self._set_status_locked(page, status, note, remove)
+
+    def _set_status_locked(self, page, status, note, remove):
         st = self.load_state()
         p = st["pages"].setdefault(str(page), {"statuses": ["미처리"], "notes": []})
         s = [x for x in p["statuses"] if x != "미처리" and x not in (remove or [])]

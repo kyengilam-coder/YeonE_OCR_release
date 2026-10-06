@@ -16,8 +16,9 @@ APP_NAME = "YeonE_OCR"
 CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx")]
-DEFAULTS = {"pages": "1-5", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
-            "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "last_pdf": ""}
+DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
+            "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
+            "prices": {}, "fx_krw": "", "workers": 3, "second_model": "", "checkpoint": 20, "use_cache": True, "last_pdf": ""}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -28,8 +29,10 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 차례
  1. [필요한 패키지 설치·점검] — 처음 한 번.
  2. API 키를 넣고 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다. (https://aistudio.google.com/apikey)
- 3. [PDF 고르기…] 로 파일을 고르고 쪽 범위(예 1-5)와 인쇄 쪽수 차이를 적습니다.
- 4. [▶ 한 번에 실행] 을 누르면 준비 → 판독 → 문서 만들기 → 검수 화면 → 보고 까지 갑니다.
+ 3. [PDF 고르기…] 로 파일을 고릅니다. 쪽 범위는 비워 두면 전체이고, 인쇄 쪽수 차이(예 29)를 적어 두면 쪽수 어긋남을 잡아 줍니다.
+ 4. [▶ PDF 전체를 HWPX로] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
+    준비 → 판독 → 문서 만들기 → 검수 화면 → 보고 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
+    쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
  5. [⑤ 검수 화면 열기] 에서 원본과 대조하고, 글자를 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다.
     [비교 다시 계산] 은 저장된 1차·2차 판독으로 확인 표시만 다시 만듭니다(모델 호출 없음). "기록 있는 쪽도 다시 판독" 을 켜면 ③ 판독이 기존 기록을 덮어씁니다.
  6. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 "원본 대조 완료(사람)" 을 남깁니다.
@@ -164,12 +167,50 @@ class ModelDialog(tk.Toplevel):
         self.destroy()
 
 
+class EstimateDialog(tk.Toplevel):
+    """판독 전 호출·토큰·비용 어림. 단가와 환율을 넣어 저장하면 금액도 보여 준다. go=True 면 [계속] 단추로 실행을 잇는다."""
+    def __init__(self, app: "App", text: str, go: bool = False):
+        super().__init__(app)
+        self.app = app; self.proceed = False
+        self.title("비용 미리 보기"); self.resizable(False, False)
+        f = ttk.Frame(self, padding=12); f.grid()
+        self.lbl = ttk.Label(f, text=text, justify="left", wraplength=620); self.lbl.grid(row=0, column=0, columnspan=6, sticky="w")
+        model = app.v_model.get().strip(); pr = (app.cfg.get("prices") or {}).get(model, {})
+        ttk.Label(f, text=f"'{model}' 단가 (USD / 100만 토큰)  입력").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.e_in = ttk.Entry(f, width=8); self.e_in.insert(0, str(pr.get("in", "") or "")); self.e_in.grid(row=1, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="출력").grid(row=1, column=2, sticky="e", pady=(10, 0))
+        self.e_out = ttk.Entry(f, width=8); self.e_out.insert(0, str(pr.get("out", "") or "")); self.e_out.grid(row=1, column=3, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="원/달러").grid(row=1, column=4, sticky="e", pady=(10, 0))
+        self.e_fx = ttk.Entry(f, width=8); self.e_fx.insert(0, str(app.cfg.get("fx_krw", "") or "")); self.e_fx.grid(row=1, column=5, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="요금표: https://ai.google.dev/pricing  (단가는 모델마다 저장됩니다)", foreground="#666").grid(row=2, column=0, columnspan=6, sticky="w")
+        b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=6, pady=(10, 0))
+        ttk.Button(b, text="단가 저장·다시 계산", command=self.save).pack(side="left", padx=4)
+        if go:
+            ttk.Button(b, text="계속 실행", command=self.ok).pack(side="left", padx=4)
+        ttk.Button(b, text="닫기" if not go else "취소", command=self.destroy).pack(side="left", padx=4)
+        self.transient(app); self.grab_set()
+
+    def save(self):
+        model = self.app.v_model.get().strip()
+        prices = dict(self.app.cfg.get("prices") or {})
+        def num(s):
+            try: return float(s.strip()) if s.strip() else 0.0
+            except ValueError: return 0.0
+        prices[model] = {"in": num(self.e_in.get()), "out": num(self.e_out.get())}
+        self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = self.e_fx.get().strip(); save_config(self.app.cfg)
+        self.lbl.configure(text=self.app.estimate_text())
+
+    def ok(self):
+        self.proceed = True; self.destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} · 연어OCR {__version__}")
-        self.geometry("1040x760"); self.minsize(900, 640)
+        self.geometry("1140x880"); self.minsize(980, 720)
         self.cfg = load_config()
+        self._style()
         self.q: queue.Queue = queue.Queue()
         self.running = False
         self.open_after: Path | None = None
@@ -182,83 +223,155 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- 화면 ----------
+    def _style(self):
+        """차분한 종이색 바탕에 옻칠색 머리띠. clam 테마 위에 색·여백·글꼴을 통일한다."""
+        st = ttk.Style(self)
+        try:
+            st.theme_use("clam")
+        except tk.TclError:
+            pass
+        base = "맑은 고딕" if sys.platform.startswith("win") else ("Apple SD Gothic Neo" if sys.platform == "darwin" else "Noto Sans CJK KR")
+        self.font_base, self.font_small, self.font_h = (base, 10), (base, 9), (base, 10, "bold")
+        self.font_title, self.font_sub = (base, 17, "bold"), (base, 10)
+        self.font_mono = ("Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono", 10)
+        self.option_add("*Font", self.font_base)
+        C = self.colors = dict(BG="#f3efe7", PANEL="#fbf9f4", LINE="#d9d2c3", INK="#2a2420", MUTED="#7a7066",
+                               ACC="#3b1b14", ACC_HI="#55281e", GOLD="#b99552", RED="#b3261e", FIELD="#ffffff")
+        self.configure(bg=C["BG"])
+        st.configure(".", background=C["BG"], foreground=C["INK"], font=self.font_base, bordercolor=C["LINE"])
+        st.configure("TFrame", background=C["BG"]); st.configure("Panel.TFrame", background=C["PANEL"])
+        st.configure("TLabel", background=C["BG"]); st.configure("Panel.TLabel", background=C["PANEL"])
+        st.configure("Hint.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=self.font_small)
+        st.configure("Status.TLabel", background=C["BG"], foreground=C["ACC"], font=self.font_h)
+        st.configure("TLabelframe", background=C["PANEL"], bordercolor=C["LINE"], relief="solid", borderwidth=1, padding=10)
+        st.configure("TLabelframe.Label", background=C["PANEL"], foreground=C["ACC"], font=self.font_h)
+        st.configure("TButton", padding=(10, 5), background="#efeae0", lightcolor="#f6f3ec", darkcolor="#e2dccd", focuscolor=C["PANEL"])
+        st.map("TButton", background=[("active", "#e6dfd2"), ("disabled", "#f0ece4")], foreground=[("disabled", "#a39a90")])
+        st.configure("Accent.TButton", background=C["ACC"], foreground="#fff7ea", font=self.font_h, padding=(18, 9),
+                     lightcolor=C["ACC"], darkcolor=C["ACC"], focuscolor=C["ACC"])
+        st.map("Accent.TButton", background=[("active", C["ACC_HI"]), ("disabled", "#b8a79d")], foreground=[("disabled", "#f3eee6")])
+        st.configure("Stop.TButton", foreground=C["RED"], padding=(12, 9))
+        st.configure("TCheckbutton", background=C["PANEL"]); st.configure("TRadiobutton", background=C["PANEL"])
+        st.configure("TEntry", fieldbackground=C["FIELD"], padding=3); st.configure("TSpinbox", fieldbackground=C["FIELD"], padding=3)
+        st.configure("TNotebook", background=C["BG"], tabmargins=(2, 4, 2, 0))
+        st.configure("TNotebook.Tab", padding=(14, 6), background="#e9e3d6")
+        st.map("TNotebook.Tab", background=[("selected", C["PANEL"])], foreground=[("selected", C["ACC"])])
+        st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], rowheight=24)
+        st.configure("Treeview.Heading", background="#efeae0", font=self.font_h, relief="flat")
+        st.configure("Horizontal.TProgressbar", troughcolor="#e8e2d6", background=C["GOLD"], lightcolor=C["GOLD"], darkcolor=C["GOLD"])
+
     def _build(self):
-        pad = {"padx": 6, "pady": 3}
-        root = ttk.Frame(self, padding=8); root.pack(fill="both", expand=True)
+        C = self.colors
+        # ---- 머리띠 ----
+        hd = tk.Frame(self, bg=C["ACC"], padx=18, pady=10); hd.pack(fill="x")
+        tk.Label(hd, text=APP_NAME, font=self.font_title, bg=C["ACC"], fg="#f1e7cf").pack(side="left")
+        tk.Label(hd, text="  연어OCR · 세로쓰기 한자·한글 문헌을 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#d9c9a8").pack(side="left", pady=(6, 0))
+        self.v_pkg = tk.StringVar(value="패키지 점검 중…")
+        tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", pady=(6, 0))
+        tk.Label(hd, text=f"v{__version__}   ", font=self.font_small, bg=C["ACC"], fg="#bfae8e").pack(side="right", pady=(6, 0))
 
-        # PDF 줄
-        fr = ttk.Frame(root); fr.pack(fill="x")
-        ttk.Label(fr, text="PDF 파일").pack(side="left")
+        root = ttk.Frame(self, padding=(14, 10, 14, 10)); root.pack(fill="both", expand=True)
+        pad = {"padx": 4, "pady": 3}
+
+        # ---- 파일 ----
+        ff = ttk.LabelFrame(root, text="파일"); ff.pack(fill="x")
+        ff.columnconfigure(1, weight=1)
+        ttk.Label(ff, text="PDF", style="Panel.TLabel").grid(row=0, column=0, sticky="w", **pad)
         self.v_pdf = tk.StringVar()
-        ttk.Entry(fr, textvariable=self.v_pdf, state="readonly").pack(side="left", fill="x", expand=True, padx=6)
-        self._btn(fr, "PDF 고르기…", self.choose_pdf).pack(side="left")
-
-        # 설정
-        st = ttk.LabelFrame(root, text="설정", padding=8); st.pack(fill="x", pady=(8, 0))
+        ttk.Entry(ff, textvariable=self.v_pdf, state="readonly").grid(row=0, column=1, columnspan=6, sticky="ew", **pad)
+        self._btn(ff, "PDF 고르기…", self.choose_pdf, width=12).grid(row=0, column=7, sticky="e", **pad)
         self.v_pages = tk.StringVar(value=self.cfg["pages"]); self.v_off = tk.StringVar(value=self.cfg["print_offset"])
+        ttk.Label(ff, text="쪽 범위", style="Panel.TLabel").grid(row=1, column=0, sticky="w", **pad)
+        pf = ttk.Frame(ff, style="Panel.TFrame"); pf.grid(row=1, column=1, columnspan=3, sticky="w")
+        ttk.Entry(pf, textvariable=self.v_pages, width=12).pack(side="left", padx=(4, 2))
+        self._btn(pf, "전체", lambda: self.v_pages.set(""), width=5).pack(side="left")
+        ttk.Label(pf, text="비우면 PDF 전체(기본). 일부만 할 때 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=8)
+        ttk.Label(ff, text="인쇄 쪽수 = PDF 쪽수 +", style="Panel.TLabel").grid(row=1, column=4, sticky="e", **pad)
+        ttk.Entry(ff, textvariable=self.v_off, width=6).grid(row=1, column=5, sticky="w", **pad)
+        ttk.Label(ff, text="예: PDF 1쪽이 인쇄 30쪽이면 29. 어긋남만 표시", style="Hint.TLabel").grid(row=1, column=6, columnspan=2, sticky="w", **pad)
+
+        # ---- 판독 / 문서 ----
+        mid = ttk.Frame(root); mid.pack(fill="x", pady=(8, 0)); mid.columnconfigure(0, weight=3); mid.columnconfigure(1, weight=2)
+        rf = ttk.LabelFrame(mid, text="판독"); rf.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        df = ttk.LabelFrame(mid, text="문서"); df.grid(row=0, column=1, sticky="nsew")
         self.v_up = tk.StringVar(value=self.cfg["upscale"]); self.v_reader = tk.StringVar(value=self.cfg["reader"])
         self.v_model = tk.StringVar(value=self.cfg["model"]); self.v_key = tk.StringVar(value=self.cfg["api_key"])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
+        self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
+        self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
+        self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
+        rf.columnconfigure(1, weight=1)
         r = 0
-        ttk.Label(st, text="쪽 범위").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(st, textvariable=self.v_pages, width=12).grid(row=r, column=1, sticky="w", **pad)
-        ttk.Label(st, text="예 1-5, 8   (비우면 전체. 본문 3~5쪽, 복잡한 판면 1~3쪽씩)").grid(row=r, column=2, columnspan=3, sticky="w", **pad)
+        ttk.Label(rf, text="판독기", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
+        rr = ttk.Frame(rf, style="Panel.TFrame"); rr.grid(row=r, column=1, columnspan=3, sticky="w")
+        ttk.Radiobutton(rr, text="Gemini (원본 이미지 판독)", variable=self.v_reader, value="gemini", command=self._reader_changed).pack(side="left", padx=(4, 14))
+        ttk.Radiobutton(rr, text="기존 텍스트 레이어만 (API 없이 시험)", variable=self.v_reader, value="mock", command=self._reader_changed).pack(side="left")
         r += 1
-        ttk.Label(st, text="인쇄 쪽수 = PDF 쪽수 +").grid(row=r, column=0, sticky="w", **pad)
-        ttk.Entry(st, textvariable=self.v_off, width=12).grid(row=r, column=1, sticky="w", **pad)
-        ttk.Label(st, text="어긋남만 표시하고 추정으로 확정하지 않음 (예: PDF 1쪽이 인쇄 30쪽이면 29)").grid(row=r, column=2, columnspan=3, sticky="w", **pad)
+        ttk.Label(rf, text="모델", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
+        self.e_model = ttk.Entry(rf, textvariable=self.v_model, width=26); self.e_model.grid(row=r, column=1, sticky="w", **pad)
+        self._btn(rf, "키 확인·모델 고르기", self.check_key, width=17).grid(row=r, column=2, sticky="w", **pad)
         r += 1
-        ttk.Label(st, text="판독기").grid(row=r, column=0, sticky="w", **pad)
-        rf = ttk.Frame(st); rf.grid(row=r, column=1, columnspan=4, sticky="w")
-        ttk.Radiobutton(rf, text="Gemini (원본 이미지 판독)", variable=self.v_reader, value="gemini", command=self._reader_changed).pack(side="left", padx=(6, 12))
-        ttk.Radiobutton(rf, text="기존 텍스트 레이어만 (API 없이 뼈대 시험, 원본 대조 전)", variable=self.v_reader, value="mock", command=self._reader_changed).pack(side="left")
+        ttk.Label(rf, text="2차 판독 모델", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
+        self.e_model2 = ttk.Entry(rf, textvariable=self.v_model2, width=26); self.e_model2.grid(row=r, column=1, sticky="w", **pad)
+        ttk.Label(rf, text="비우면 1차와 같음. flash 계열이면 빠르고 쌈", style="Hint.TLabel").grid(row=r, column=2, columnspan=2, sticky="w", **pad)
         r += 1
-        ttk.Label(st, text="모델 이름").grid(row=r, column=0, sticky="w", **pad)
-        self.e_model = ttk.Entry(st, textvariable=self.v_model, width=24); self.e_model.grid(row=r, column=1, columnspan=2, sticky="w", **pad)
-        ttk.Label(st, text="확대 배율").grid(row=r, column=3, sticky="e", **pad)
-        ttk.Entry(st, textvariable=self.v_up, width=6).grid(row=r, column=4, sticky="w", **pad)
+        ttk.Label(rf, text="Gemini API 키", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
+        self.e_key = ttk.Entry(rf, textvariable=self.v_key, width=40, show="•"); self.e_key.grid(row=r, column=1, columnspan=2, sticky="ew", **pad)
+        self._btn(rf, "보기", self.toggle_key, width=5).grid(row=r, column=3, sticky="w", **pad)
         r += 1
-        ttk.Label(st, text="Gemini API 키").grid(row=r, column=0, sticky="w", **pad)
-        self.e_key = ttk.Entry(st, textvariable=self.v_key, width=48, show="•"); self.e_key.grid(row=r, column=1, columnspan=3, sticky="w", **pad)
-        kb = ttk.Frame(st); kb.grid(row=r, column=4, sticky="w")
-        self._btn(kb, "보기", self.toggle_key, width=5).pack(side="left", padx=(6, 2))
-        self._btn(kb, "키 확인·모델 고르기", self.check_key, width=18).pack(side="left")
+        ttk.Label(rf, text="속도", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
+        sp = ttk.Frame(rf, style="Panel.TFrame"); sp.grid(row=r, column=1, columnspan=3, sticky="w")
+        ttk.Label(sp, text="동시", style="Panel.TLabel").pack(side="left", padx=(4, 2))
+        ttk.Spinbox(sp, from_=1, to=8, width=3, textvariable=self.v_workers).pack(side="left")
+        ttk.Label(sp, text="쪽 ·  확대", style="Panel.TLabel").pack(side="left", padx=(8, 2))
+        ttk.Entry(sp, textvariable=self.v_up, width=4).pack(side="left")
+        ttk.Label(sp, text="배 ·  중간 저장", style="Panel.TLabel").pack(side="left", padx=(8, 2))
+        ttk.Entry(sp, textvariable=self.v_ckpt, width=4).pack(side="left")
+        ttk.Label(sp, text="쪽마다", style="Panel.TLabel").pack(side="left", padx=(2, 0))
         r += 1
-        cf = ttk.Frame(st); cf.grid(row=r, column=0, columnspan=5, sticky="w")
-        ttk.Checkbutton(cf, text="영역을 확대해 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=6)
-        ttk.Checkbutton(cf, text="DOCX 도 만들기", variable=self.v_docx).pack(side="left", padx=6)
-        ttk.Checkbutton(cf, text="앞 쪽에서 이어지는 문단 잇기", variable=self.v_join).pack(side="left", padx=6)
-        ttk.Checkbutton(cf, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left", padx=6)
-        self._btn(cf, "설정 저장", self.save_settings).pack(side="left", padx=18)
+        ck = ttk.Frame(rf, style="Panel.TFrame"); ck.grid(row=r, column=0, columnspan=4, sticky="w")
+        ttk.Checkbutton(ck, text="영역 확대 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=(4, 10))
+        ttk.Checkbutton(ck, text="지침 캐시(빠르고 쌈)", variable=self.v_cache).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(ck, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
+        # 문서
+        ttk.Checkbutton(df, text="의심 자리 붉은 글자 · 노란 형광펜", variable=self.v_hl).grid(row=0, column=0, sticky="w", **pad)
+        ttk.Checkbutton(df, text="원본 쪽마다 쪽 나누기", variable=self.v_pb).grid(row=1, column=0, sticky="w", **pad)
+        ttk.Checkbutton(df, text="앞 쪽에서 이어지는 문단 잇기", variable=self.v_join).grid(row=2, column=0, sticky="w", **pad)
+        ttk.Checkbutton(df, text="DOCX 도 함께 만들기", variable=self.v_docx).grid(row=3, column=0, sticky="w", **pad)
+        ttk.Label(df, text="가로쓰기 정리본 · 함초롬바탕 · 도판은 원본 이미지", style="Hint.TLabel").grid(row=4, column=0, sticky="w", **pad)
+        self._btn(df, "설정 저장", self.save_settings, width=10).grid(row=5, column=0, sticky="e", pady=(6, 0))
 
-        # 차례 단추
-        sf = ttk.LabelFrame(root, text="차례대로 누르기", padding=8); sf.pack(fill="x", pady=(8, 0))
+        # ---- 실행 ----
+        act = ttk.Frame(root, style="Panel.TFrame", padding=10); act.pack(fill="x", pady=(8, 0))
+        self._btn(act, "▶  PDF 전체를 HWPX로", self.do_run, style="Accent.TButton").pack(side="left")
+        self.b_stop = ttk.Button(act, text="■ 중지", command=self.do_stop, state="disabled", style="Stop.TButton"); self.b_stop.pack(side="left", padx=(8, 0))
+        for t, c in (("HWPX 열기", self.open_hwpx), ("결과 폴더", self.open_work), ("비용 미리 보기", self.do_estimate)):
+            self._btn(act, t, c, width=13).pack(side="right", padx=(6, 0))
+
+        # ---- 단계별 / 도구 ----
+        sf = ttk.LabelFrame(root, text="단계별 · 도구"); sf.pack(fill="x", pady=(8, 0))
         steps = [("① 구조 보기", self.do_inspect), ("② 준비", self.do_prepare), ("③ 판독", self.do_read),
-                 ("④ 문서 만들기", self.do_build), ("⑤ 검수 화면 열기", self.do_review), ("⑥ 보고 보기", self.do_report)]
+                 ("④ 문서 만들기", self.do_build), ("⑤ 검수 화면", self.do_review), ("⑥ 보고", self.do_report)]
         for i, (t, c) in enumerate(steps):
-            self._btn(sf, t, c, width=14).grid(row=0, column=i, padx=3, pady=2)
-        self._btn(sf, "▶ 한 번에 실행 (②~⑥)", self.do_run, width=24).grid(row=1, column=0, columnspan=3, padx=3, pady=(6, 2), sticky="w")
-        self.b_stop = ttk.Button(sf, text="■ 중지", command=self.do_stop, state="disabled", width=10); self.b_stop.grid(row=1, column=3, padx=3, pady=(6, 2))
+            self._btn(sf, t, c, width=12).grid(row=0, column=i, padx=3, pady=2)
+        ttk.Separator(sf, orient="vertical").grid(row=0, column=6, sticky="ns", padx=8)
+        for i, (t, c) in enumerate([("검수 결과 기록…", self.do_mark), ("비교 다시 계산", self.do_remerge), ("패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
+            self._btn(sf, t, c, width=14 if i < 3 else 8).grid(row=0, column=7 + i, padx=3, pady=2)
 
-        # 그 밖에
-        ef = ttk.LabelFrame(root, text="그 밖에", padding=8); ef.pack(fill="x", pady=(8, 0))
-        for i, (t, c) in enumerate([("결과 폴더 열기", self.open_work), ("HWPX 열기", self.open_hwpx), ("검수 결과 기록…", self.do_mark),
-                                    ("비교 다시 계산", self.do_remerge), ("필요한 패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
-            self._btn(ef, t, c, width=22 if i == 4 else 15).grid(row=0, column=i, padx=3, pady=2)
+        # ---- 진행 ----
+        pf2 = ttk.Frame(root); pf2.pack(fill="x", pady=(10, 0))
+        self.progress = ttk.Progressbar(pf2, mode="indeterminate", length=260); self.progress.pack(side="left")
+        self.v_status = tk.StringVar(value="준비됨"); ttk.Label(pf2, textvariable=self.v_status, style="Status.TLabel").pack(side="left", padx=12)
 
-        # 진행 표시
-        pf = ttk.Frame(root); pf.pack(fill="x", pady=(8, 0))
-        self.progress = ttk.Progressbar(pf, mode="indeterminate", length=220); self.progress.pack(side="left")
-        self.v_status = tk.StringVar(value="준비됨"); ttk.Label(pf, textvariable=self.v_status).pack(side="left", padx=10)
-        self.v_pkg = tk.StringVar(value="패키지 점검 중…"); ttk.Label(pf, textvariable=self.v_pkg, foreground="#8a4b00").pack(side="right")
-
-        # 기록 / 쪽별 상태
+        # ---- 기록 / 쪽별 상태 ----
         nb = ttk.Notebook(root); nb.pack(fill="both", expand=True, pady=(8, 0))
-        self.log = ScrolledText(nb, height=14, wrap="word", state="disabled"); nb.add(self.log, text="진행 기록")
+        self.log = ScrolledText(nb, height=14, wrap="word", state="disabled", font=self.font_mono, bg="#fffdf8", fg=C["INK"],
+                                relief="flat", padx=10, pady=8, insertbackground=C["INK"])
+        nb.add(self.log, text="진행 기록")
         tf = ttk.Frame(nb); nb.add(tf, text="쪽별 상태")
         self.table = ttk.Treeview(tf, columns=("pdf", "print", "status", "unc", "figs"), show="headings")
-        for c, t, w in (("pdf", "PDF 쪽", 70), ("print", "인쇄 쪽", 70), ("status", "상태", 520), ("unc", "확인 필요", 80), ("figs", "도판", 60)):
+        for c, t, w in (("pdf", "PDF 쪽", 70), ("print", "인쇄 쪽", 70), ("status", "상태", 560), ("unc", "확인 필요", 80), ("figs", "도판", 60)):
             self.table.heading(c, text=t); self.table.column(c, width=w, anchor="center" if c != "status" else "w")
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.table.yview); self.table.configure(yscrollcommand=sb.set)
         self.table.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
@@ -294,12 +407,20 @@ class App(tk.Tk):
             o += ["--print-offset", self.v_off.get().strip()]
         if self.v_force.get():
             o.append("--force")
+        o += ["--workers", (self.v_workers.get().strip() or "3")]
+        if self.v_model2.get().strip():
+            o += ["--second-model", self.v_model2.get().strip()]
+        if not self.v_cache.get():
+            o.append("--no-cache")
+        o += ["--checkpoint", (self.v_ckpt.get().strip() or "0")]
         return o
 
     def _build_opts(self) -> list[str]:
         o = []
         if self.v_docx.get(): o.append("--docx")
         if not self.v_join.get(): o.append("--no-join-pages")
+        if not self.v_hl.get(): o.append("--no-highlight")
+        if not self.v_pb.get(): o.append("--no-page-breaks")
         return o
 
     def _prepare_env(self) -> bool:
@@ -317,8 +438,17 @@ class App(tk.Tk):
         self.save_settings(quiet=True)
         return True
 
+    MAX_LOG_LINES = 4000
+
     def _append(self, s: str):
-        self.log.configure(state="normal"); self.log.insert("end", s); self.log.see("end"); self.log.configure(state="disabled")
+        self.log.configure(state="normal"); self.log.insert("end", s)
+        try:
+            n = int(self.log.index("end-1c").split(".")[0])
+            if n > self.MAX_LOG_LINES:                       # 700쪽 작업에서도 창이 무거워지지 않게 오래된 줄을 지운다
+                self.log.delete("1.0", f"{n - self.MAX_LOG_LINES + 500}.0")
+        except Exception:
+            pass
+        self.log.see("end"); self.log.configure(state="disabled")
 
     def _set_running(self, on: bool):
         self.running = on
@@ -384,7 +514,7 @@ class App(tk.Tk):
         self._last_writer = None
         if ok and self.open_after and Path(self.open_after).exists():
             open_path(self.open_after)
-        elif ok and label.startswith("한 번에 실행"):
+        elif ok and ("HWPX로" in label):
             if messagebox.askyesno(APP_NAME, "끝났습니다. 검수 화면(review.html)을 열까요?"):
                 self.do_review()
         self.open_after = None
@@ -426,15 +556,47 @@ class App(tk.Tk):
 
     def _reader_changed(self):
         st = "normal" if self.v_reader.get() == "gemini" else "disabled"
-        self.e_model.configure(state=st); self.e_key.configure(state=st)
+        self.e_model.configure(state=st); self.e_key.configure(state=st); self.e_model2.configure(state=st)
 
     def save_settings(self, quiet=False):
         self.cfg.update({"pages": self.v_pages.get(), "print_offset": self.v_off.get(), "upscale": self.v_up.get(), "reader": self.v_reader.get(),
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
-                         "join_pages": self.v_join.get(), "force": self.v_force.get(), "last_pdf": self.pdf()})
+                         "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(),
+                         "workers": int(self.v_workers.get() or 3), "second_model": self.v_model2.get().strip(),
+                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "last_pdf": self.pdf()})
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
+
+    def estimate_text(self) -> str:
+        """현재 설정으로 호출·토큰·비용 어림 글."""
+        try:
+            from .estimate import estimate, format_estimate
+            from .pdfio import open_pdf, parse_pages
+            from .state import Work
+            doc = open_pdf(self.pdf()); pages = parse_pages(self.v_pages.get().strip() or None, len(doc))
+            w = Work(self.pdf(), str(self.work()))
+            fx = self.cfg.get("fx_krw") or ""
+            e = estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
+                         prices=self.cfg.get("prices") or {}, fx_krw=float(fx) if fx else None, records=[] if self.v_force.get() else w.records(pages))
+            return format_estimate(e)
+        except ModuleNotFoundError as e:
+            return f"패키지가 없어 계산하지 못했습니다: {e.name}. [필요한 패키지 설치·점검] 을 누르십시오."
+        except Exception as e:
+            return f"계산 실패: {e}"
+
+    def do_estimate(self):
+        if self._need_pdf(): EstimateDialog(self, self.estimate_text())
+
+    def _confirm_cost(self) -> bool:
+        """Gemini 판독 전에 어림을 보여 주고 계속할지 묻는다. 읽을 쪽이 없으면 묻지 않는다."""
+        if self.v_reader.get() != "gemini":
+            return True
+        text = self.estimate_text()
+        if "예상 호출 0회" in text:
+            return True
+        d = EstimateDialog(self, text, go=True); self.wait_window(d)
+        return d.proceed
 
     def do_inspect(self):
         if self._need_pdf(): self.start(["inspect", self.pdf()], "① 구조 보기")
@@ -443,7 +605,7 @@ class App(tk.Tk):
         if self._need_pdf(): self.start(["prepare", self.pdf(), "--work", str(self.work())] + self._pages(), "② 준비")
 
     def do_read(self):
-        if self._need_pdf() and self._prepare_env():
+        if self._need_pdf() and self._prepare_env() and self._confirm_cost():
             self.start(["read", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts(), "③ 판독")
 
     def do_build(self):
@@ -460,9 +622,9 @@ class App(tk.Tk):
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
     def do_run(self):
-        if self._need_pdf() and self._prepare_env():
+        if self._need_pdf() and self._prepare_env() and self._confirm_cost():
             self.nb.select(0)
-            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._build_opts(), "한 번에 실행")
+            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._build_opts(), "PDF 전체를 HWPX로" if not self.v_pages.get().strip() else f"{self.v_pages.get().strip()}쪽을 HWPX로")
 
     def do_stop(self):
         try:

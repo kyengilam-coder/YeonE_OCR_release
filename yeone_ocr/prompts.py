@@ -59,3 +59,13 @@ def region_prompt(kind: str, region_id: str, pdf_page: int) -> str:
             "이 영역만 독립적으로 다시 판독하라. 다른 영역이나 앞서 읽은 결과를 참고하지 말고 이 이미지의 자형만 본다.\n"
             "열은 오른쪽부터 1, 2, 3… 으로 세고 각 열을 위→아래로 읽어 columns 에 넣는다. "
             "확정할 수 없는 글자는 〔疑: ○〕〔○/△〕〔판독불명〕 으로 표시하고 uncertain 에 적는다. JSON 으로만 답한다.")
+
+
+def regions_prompt(items: list[tuple[str, str]], pdf_page: int) -> str:
+    """items = [(region_id, kind), ...] 순서대로 이미지가 붙는다."""
+    listing = ", ".join(f"{rid}({kind})" for rid, kind in items)
+    return (f"첨부한 이미지 {len(items)}장은 PDF {pdf_page}쪽의 문자 영역을 하나씩 확대한 조각이다. 순서대로 {listing} 이다. "
+            "각 이미지 바로 앞에 【region_id】 표시가 있다.\n"
+            "영역마다 독립적으로 다시 판독하라. 다른 영역이나 앞서 읽은 결과를 참고하지 말고 그 조각의 자형만 본다.\n"
+            "열은 오른쪽부터 1, 2, 3… 으로 세고 각 열을 위→아래로 읽어 columns 에 넣는다. 결과는 regions 에 같은 region_id 로 넣고, "
+            "확정할 수 없는 글자는 〔疑: ○〕〔○/△〕〔판독불명〕 으로 표시하고 uncertain 에 적는다. JSON 으로만 답한다.")

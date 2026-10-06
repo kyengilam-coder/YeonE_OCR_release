@@ -3,9 +3,9 @@
 환경 변수: GEMINI_API_KEY (또는 GOOGLE_API_KEY), GEMINI_MODEL (선택).
 """
 from __future__ import annotations
-import os, re, time, json, logging
+import os, re, time, json, logging, threading
 from PIL import Image
-from .schema import PageReading, RegionReread
+from .schema import PageReading, RegionReread, MultiRegionReread
 from .layout import to_png_bytes
 from . import prompts
 
@@ -13,7 +13,10 @@ DEFAULT_MODEL = "gemini-2.5-pro"
 
 
 class ReaderError(RuntimeError):
-    """사용자에게 그대로 보여 줄 수 있는 한 줄 오류."""
+    """사용자에게 그대로 보여 줄 수 있는 한 줄 오류. fatal=True 면 다른 쪽도 같은 이유로 실패하므로 전체를 멈춘다(키·권한·모델·한도 0).
+    fatal=False 면 이 쪽만 건너뛰고 계속한다(여러 번 시도해도 응답 형식이 맞지 않음 등)."""
+    def __init__(self, msg: str, fatal: bool = True):
+        super().__init__(msg); self.fatal = fatal
 
 
 def normalize_key(key: str | None) -> str:
@@ -195,7 +198,8 @@ def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int 
 class GeminiReader:
     name = "gemini"
 
-    def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto"):
+    def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto",
+                 use_cache: bool = True):
         from google.genai import types     # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
         key = normalize_key(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         if not key:
@@ -213,35 +217,70 @@ class GeminiReader:
         self.thinking_budget = thinking_budget
         self.retries = retries
         self._system = prompts.system_prompt()
-        self.usage = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0}
+        self.usage = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cached_tokens": 0}
+        self._lock = threading.Lock()
+        self._tls = threading.local()
+        self.cache_name: str | None = None
+        self.cache_note = ""
+        if use_cache:
+            self._make_cache()
+
+    def _make_cache(self) -> None:
+        """지침 전문을 컨텍스트 캐시에 올린다. 호출마다 지침을 다시 보내지 않아 빠르고 싸다. 모델이 지원하지 않으면 그냥 넘어간다."""
+        t = self.types
+        try:
+            c = self.client.caches.create(model=self.model, config=t.CreateCachedContentConfig(
+                system_instruction=self._system, ttl="7200s", display_name="yeone-ocr-guide"))
+            self.cache_name = getattr(c, "name", None)
+            self.cache_note = f"지침 캐시 사용({self.cache_name})" if self.cache_name else ""
+        except Exception as e:
+            self.cache_name = None
+            self.cache_note = f"지침 캐시 미사용({friendly_error(e, self.model)[0][:80]})"
 
     def _config(self, schema):
         t = self.types
-        kw = dict(system_instruction=self._system, response_mime_type="application/json",
-                  response_schema=schema, temperature=0.0,
+        kw = dict(response_mime_type="application/json", response_schema=schema, temperature=0.0,
                   automatic_function_calling=t.AutomaticFunctionCallingConfig(disable=True))
+        if self.cache_name:
+            kw["cached_content"] = self.cache_name          # 캐시를 쓰면 system_instruction 을 따로 보내지 않는다
+        else:
+            kw["system_instruction"] = self._system
         if self.thinking_budget is not None:
             kw["thinking_config"] = t.ThinkingConfig(thinking_budget=self.thinking_budget)
         return t.GenerateContentConfig(**kw)
 
-    def _call(self, img: Image.Image, prompt: str, schema):
+    def _call(self, img: Image.Image, prompt: str, schema, extra_parts: list | None = None):
+        """이미지 한 장(또는 extra_parts 로 여러 장)과 지시문을 보내 schema 대로 받는다."""
         t = self.types
-        part = t.Part.from_bytes(data=to_png_bytes(img), mime_type="image/png")
+        contents = extra_parts if extra_parts is not None else [t.Part.from_bytes(data=to_png_bytes(img), mime_type="image/png"), prompt]
         last_msg = ""; tried_msgs: list[str] = []
         attempts = max(self.retries, 5)
         for i in range(attempts):
             try:
-                resp = self.client.models.generate_content(model=self.model, contents=[part, prompt], config=self._config(schema))
-                self.usage["calls"] += 1
+                resp = self.client.models.generate_content(model=self.model, contents=contents, config=self._config(schema))
                 um = getattr(resp, "usage_metadata", None)
-                if um:
-                    self.usage["prompt_tokens"] += getattr(um, "prompt_token_count", 0) or 0
-                    self.usage["output_tokens"] += getattr(um, "candidates_token_count", 0) or 0
+                delta = {"calls": 1,
+                         "prompt_tokens": (getattr(um, "prompt_token_count", 0) or 0) if um else 0,
+                         "output_tokens": (getattr(um, "candidates_token_count", 0) or 0) if um else 0,
+                         "thinking_tokens": (getattr(um, "thoughts_token_count", 0) or 0) if um else 0,      # 출력 요금으로 과금
+                         "cached_tokens": (getattr(um, "cached_content_token_count", 0) or 0) if um else 0}
+                with self._lock:
+                    for k, v in delta.items():
+                        self.usage[k] += v
+                page = getattr(self._tls, "page", None)
+                if page is not None:
+                    for k, v in delta.items():
+                        page[k] = page.get(k, 0) + v
                 text = resp.text or ""
                 return schema.model_validate_json(text)
             except Exception as e:
                 last_msg, retry = friendly_error(e, self.model)
                 code = getattr(e, "code", None) or getattr(e, "status_code", None)
+                if self.cache_name and ("cachedContent" in str(e) or "cached content" in str(e).lower() or (code == 403 and "cache" in str(e).lower())):
+                    self._make_cache()                       # 캐시가 만료·소실되면 다시 만들고 재시도
+                    if not self.cache_name:
+                        print("주의: 지침 캐시를 다시 만들지 못해 일반 호출로 계속합니다.", flush=True)
+                    continue
                 if code in (403, 404) and self.api == "auto" and not self._switched and self.key.startswith("AQ."):
                     tried_msgs.append(("AI Studio 경로: " if not self.vertexai else "Vertex 경로: ") + last_msg)
                     self._switched = True; self.vertexai = not self.vertexai
@@ -265,7 +304,16 @@ class GeminiReader:
                     time.sleep(d)
                 else:
                     time.sleep(2 ** i)             # 서버·형식 오류는 잠시 뒤 다시
-        raise ReaderError(f"{attempts}회 시도 뒤에도 실패: {last_msg}")
+        raise ReaderError(f"{attempts}회 시도 뒤에도 실패: {last_msg}", fatal=False)
+
+    def usage_begin(self) -> None:
+        """이 스레드에서 이어지는 호출들의 토큰을 쪽 단위로 따로 센다(여러 쪽을 동시에 읽어도 섞이지 않게)."""
+        self._tls.page = {}
+
+    def usage_end(self) -> dict:
+        d = getattr(self._tls, "page", None) or {}
+        self._tls.page = None
+        return d
 
     def read_page(self, img: Image.Image, file_name: str, pdf_page: int, total: int, extra: str = "") -> PageReading:
         r = self._call(img, prompts.page_prompt(file_name, pdf_page, total, extra), PageReading)
@@ -274,3 +322,12 @@ class GeminiReader:
 
     def reread_region(self, crop: Image.Image, kind: str, region_id: str, pdf_page: int) -> RegionReread:
         return self._call(crop, prompts.region_prompt(kind, region_id, pdf_page), RegionReread)
+
+    def reread_regions(self, crops: list[tuple[str, str, Image.Image]], pdf_page: int) -> dict[str, RegionReread]:
+        """여러 문자 영역 조각을 한 호출로 다시 판독한다. 돌려주는 사전에 빠진 영역은 호출자가 낱개로 다시 묻는다."""
+        t = self.types
+        parts = [prompts.regions_prompt([(rid, kind) for rid, kind, _ in crops], pdf_page)]
+        for rid, kind, im in crops:
+            parts.append(f"【{rid}】"); parts.append(t.Part.from_bytes(data=to_png_bytes(im), mime_type="image/png"))
+        res = self._call(None, "", MultiRegionReread, extra_parts=parts)
+        return {it.region_id: RegionReread(columns=it.columns, uncertain=it.uncertain) for it in res.regions if it.columns}

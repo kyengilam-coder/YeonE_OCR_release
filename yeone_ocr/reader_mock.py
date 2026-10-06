@@ -50,3 +50,6 @@ class MockReader:
 
     def reread_region(self, crop: Image.Image, kind: str, region_id: str, pdf_page: int) -> RegionReread:
         return RegionReread()   # 2차 판독 없음
+
+    def reread_regions(self, crops, pdf_page: int) -> dict[str, RegionReread]:
+        return {}

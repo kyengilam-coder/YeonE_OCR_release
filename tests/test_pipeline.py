@@ -199,6 +199,21 @@ class ReportUsage(unittest.TestCase):
             self.assertIn("호출 8회", rep); self.assertIn("쪽당 평균: 호출 4.0회", rep); self.assertIn("입력 8,000", rep)
 
 
+class Estimate(unittest.TestCase):
+    def test_image_tokens_and_estimate(self):
+        from yeone_ocr.estimate import image_tokens, estimate, format_estimate
+        self.assertEqual(image_tokens(300, 300), 258); self.assertEqual(image_tokens(1788, 2518), 3 * 4 * 258)
+        e = estimate("x.pdf", [1, 2, 3, 4], model="m", prices={"m": {"in": 2.0, "out": 12.0}}, fx_krw=1400, page_size_px=(894, 1261), guide_chars=13000)
+        self.assertEqual(e["pages"], 4); self.assertEqual(e["basis"], "기본값"); self.assertGreater(e["calls"], 4)
+        self.assertGreater(e["in_high"], e["in_low"]); self.assertIsNotNone(e["usd_low"]); self.assertGreater(e["krw_high"], e["krw_low"])
+        txt = format_estimate(e); self.assertIn("예상 비용 $", txt); self.assertIn("원)", txt)
+        # 실측이 있으면 그 평균으로, 이미 읽은 쪽은 뺀다
+        recs = [{"pdf_page": 1, "pass1": {}, "usage": {"calls": 4, "prompt_tokens": 40000, "output_tokens": 6000, "thinking_tokens": 2000}}]
+        e2 = estimate("x.pdf", [1, 2, 3], model="m", prices={}, records=recs, page_size_px=(894, 1261), guide_chars=13000)
+        self.assertEqual(e2["already_read"], 1); self.assertEqual(e2["calls"], 8); self.assertTrue(e2["basis"].startswith("실측")); self.assertIsNone(e2["usd_low"])
+        self.assertEqual(e2["in_low"], round(40000 * 2 * 0.85))
+
+
 class Build(unittest.TestCase):
     def test_hwpx_structure_and_images(self):
         with tempfile.TemporaryDirectory() as td:
@@ -216,10 +231,20 @@ class Build(unittest.TestCase):
             types = [b.type for b in blocks]
             self.assertEqual(types, ["meta", "heading", "image", "para", "table", "uncertain"])
             out = os.path.join(td, "o.hwpx")
+            rec2 = dict(rec); rec2["pdf_page"] = 4; rec2["merged"] = PageReading(pdf_page=4, print_page="33", regions=[
+                Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="山은 높고 〔疑: 龍〕 水는 〔낮/낯〕다 〔→PDF 4쪽〕")])])]).model_dump()
+            rec2["crops"] = {}
+            blocks = assemble_blocks([rec, rec2])
             st = build_hwpx(blocks, out)
             self.assertEqual(st["images"], 1); self.assertEqual(st["images_in_file"], 1); self.assertEqual(st["tables"], 1)
+            self.assertEqual(st["page_breaks"], 1)                     # 둘째 쪽 앞에서만
+            self.assertGreaterEqual(st["marks"], 3)                    # 〔疑: 針〕(확인 목록) + 〔疑: 龍〕 + 〔낮/낯〕 ; 〔→PDF 4쪽〕 은 작업 표시
             self.assertEqual(check_hwpx_file(out), [])
             z = zipfile.ZipFile(out); self.assertEqual(z.namelist()[0], "mimetype")
+            allxml = (z.read("Contents/header.xml") + z.read("Contents/section0.xml")).decode("utf-8")
+            self.assertIn("FFFF00", allxml.upper()); self.assertIn("C00000", allxml.upper()); self.assertIn('pageBreak="1"', allxml)
+            from yeone_ocr.hwpx_builder import split_marks
+            self.assertEqual(split_marks("가〔疑: 龍〕나〔→PDF 2쪽〕"), [("가", "body"), ("〔疑: 龍〕", "mark"), ("나", "body"), ("〔→PDF 2쪽〕", "note")])
             # DOCX 를 이름만 바꾼 가짜는 걸러낸다
             fake = os.path.join(td, "fake.hwpx")
             with zipfile.ZipFile(fake, "w") as zf: zf.writestr("word/document.xml", "<x/>")
