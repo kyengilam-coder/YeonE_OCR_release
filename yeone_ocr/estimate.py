@@ -122,7 +122,8 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
     n = len(pages)
     out = {"pages": n, "model": model, "second_model": "", "basis": "기본값", "calls": 0, "in_low": 0, "in_high": 0, "out_low": 0, "out_high": 0,
            "usd_low": None, "usd_high": None, "krw_low": None, "krw_high": None, "fx": None, "fx_source": "",
-           "already_read": 0, "price_lines": [], "notes": []}
+           "already_read": 0, "use_cache": use_cache, "price_source": "", "page_px": page_size_px, "upscale": upscale,
+           "rows": [], "price_lines": [], "notes": []}
     if n == 0:
         return out
     done = {r["pdf_page"] for r in (records or []) if "pass1" in r}
@@ -151,14 +152,19 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
             for u in measured:
                 bm = u.get("by_model") or {model or "?": u}
                 for name, uu in bm.items():
-                    b = buckets.setdefault(name, {"prompt_tokens": 0, "cached_tokens": 0, "out": 0})
-                    b["prompt_tokens"] += uu.get("prompt_tokens", 0); b["cached_tokens"] += uu.get("cached_tokens", 0)
+                    b = buckets.setdefault(name, {"prompt_tokens": 0, "cached_tokens": 0, "out": 0, "calls": 0})
+                    b["prompt_tokens"] += uu.get("prompt_tokens", 0); b["cached_tokens"] += uu.get("cached_tokens", 0); b["calls"] += uu.get("calls", 0)
                     b["out"] += uu.get("output_tokens", 0) + uu.get("thinking_tokens", 0)
             for name, b in buckets.items():
                 pr = resolve_price(name, prices) or p1
                 scale = len(todo) / k
                 c = _cost((b["prompt_tokens"] - b["cached_tokens"]) * scale, b["cached_tokens"] * scale, b["out"] * scale, pr)
                 usd_low += c * 0.8; usd_high += c * 1.25
+                out["rows"].append({"label": "1차 · 쪽 전체 판독" if _norm_model(name) == _norm_model(model) or len(buckets) == 1 else "2차 · 확대 조각 확인",
+                                    "model": name, "calls": round(b.get("calls", 0) * scale),
+                                    "in_low": round(b["prompt_tokens"] * scale * 0.85), "in_high": round(b["prompt_tokens"] * scale * 1.15),
+                                    "out_low": round(b["out"] * scale * 0.7), "out_high": round(b["out"] * scale * 1.3),
+                                    "usd_low": c * 0.8, "usd_high": c * 1.25})
             if not any(u.get("by_model") for u in measured) and m2 != model:
                 out["notes"].append("이전 판 기록이라 모델별 실측이 없어 전부 1차 단가로 계산했습니다(실제는 더 쌉니다).")
     else:
@@ -185,9 +191,16 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
             lo1, hi1 = pass_cost(in1, out1, p1, 1.4, THINK_HIGH)
             lo2, hi2 = pass_cost(in2, out2, p2, 1.4, THINK_HIGH_LOW) if second_pass else (0.0, 0.0)
             usd_low, usd_high = lo1 + lo2, hi1 + hi2
+            out["rows"].append({"label": "1차 · 쪽 전체 판독", "model": model, "calls": t, "in_low": round(in1 * t), "in_high": round(in1 * t * 1.4),
+                                "out_low": round(out1 * t), "out_high": round(out1 * THINK_HIGH * t), "usd_low": lo1, "usd_high": hi1})
+            if second_pass:
+                out["rows"].append({"label": "2차 · 확대 조각 확인", "model": m2 + (" (auto)" if (second_model or "").strip().lower() == "auto" else ""),
+                                    "calls": t, "in_low": round(in2 * t), "in_high": round(in2 * t * 1.4),
+                                    "out_low": round(out2 * t), "out_high": round(out2 * THINK_HIGH_LOW * t), "usd_low": lo2, "usd_high": hi2})
 
     if priced:
         out["usd_low"], out["usd_high"] = usd_low, usd_high
+        out["price_source"] = p1.get("source", "")
         fx = fx_krw or DEFAULT_FX_KRW
         out["fx"] = fx; out["fx_source"] = fx_source or ("직접 입력" if fx_krw else f"기본값(조회 실패 시 {DEFAULT_FX_KRW:,.0f}원)")
         out["krw_low"], out["krw_high"] = usd_low * fx, usd_high * fx
@@ -200,6 +213,25 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
         out["notes"].append(f"'{model}' 은 내장 요금표에 없는 모델이라 금액을 내지 못했습니다. 단가(입력·출력 USD/100만 토큰)를 넣으면 계산합니다. 요금표: https://ai.google.dev/pricing")
     out["notes"].append("추정치입니다. 생각(thinking) 토큰은 출력으로 과금되어 편차가 크고, 캐시 보관료(시간당 몇 센트)는 넣지 않았습니다.")
     return out
+
+
+def fmt_tokens(n: float) -> str:
+    """토큰 수를 읽기 쉽게: 1,511,500 → '151만'."""
+    n = float(n or 0)
+    if n >= 1e8:
+        return f"{n / 1e8:.1f}억"
+    if n >= 1e4:
+        return f"{n / 1e4:,.0f}만"
+    return f"{n:,.0f}"
+
+
+def fmt_range(lo, hi, f) -> str:
+    return f"{f(lo)}~{f(hi)}"
+
+
+def fmt_krw(v: float) -> str:
+    """원화는 100원 단위로 끊어 보여 준다(추정치라는 뜻)."""
+    return f"{round(v / 100) * 100:,.0f}원"
 
 
 def format_estimate(e: dict) -> str:

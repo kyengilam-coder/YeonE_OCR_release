@@ -187,32 +187,107 @@ class ModelDialog(tk.Toplevel):
 
 
 class EstimateDialog(tk.Toplevel):
-    """판독 전 호출·토큰·비용 어림. 단가와 환율을 넣어 저장하면 금액도 보여 준다. go=True 면 [계속] 단추로 실행을 잇는다."""
-    def __init__(self, app: "App", text: str, go: bool = False):
+    """판독 전 비용 어림. 큰 글씨의 금액 → 단계별 표 → 바탕 정보 순으로 보여 주고, 단가·환율 고치기는 접어 둔다.
+    go=True 면 [계속 실행] 단추로 실행을 잇는다."""
+    def __init__(self, app: "App", e: dict, go: bool = False):
         super().__init__(app)
-        self.app = app; self.proceed = False
-        self.title("비용 미리 보기"); self.resizable(False, False)
-        f = ttk.Frame(self, padding=12); f.grid()
-        self.lbl = ttk.Label(f, text=text, justify="left", wraplength=620); self.lbl.grid(row=0, column=0, columnspan=6, sticky="w")
-        from .estimate import resolve_price, PRICES_DATE
-        model = app.v_model.get().strip(); pr = resolve_price(model, app.cfg.get("prices") or {}) or {}
-        fx, _ = app.fx_setting()
-        ttk.Label(f, text=f"단가·환율은 자동으로 넣습니다(내장 요금표 {PRICES_DATE} · 환율 자동 조회). 요금이 바뀌었을 때만 아래를 고쳐 저장하십시오.",
-                  foreground="#666", wraplength=620, justify="left").grid(row=1, column=0, columnspan=6, sticky="w", pady=(10, 0))
-        ttk.Label(f, text=f"'{model}' 단가 (USD / 100만 토큰)  입력").grid(row=2, column=0, sticky="w", pady=(6, 0))
-        self.e_in = ttk.Entry(f, width=8); self.e_in.insert(0, f"{pr['in']:g}" if pr else ""); self.e_in.grid(row=2, column=1, sticky="w", pady=(6, 0))
-        ttk.Label(f, text="출력").grid(row=2, column=2, sticky="e", pady=(6, 0))
-        self.e_out = ttk.Entry(f, width=8); self.e_out.insert(0, f"{pr['out']:g}" if pr else ""); self.e_out.grid(row=2, column=3, sticky="w", pady=(6, 0))
-        ttk.Label(f, text="원/달러").grid(row=2, column=4, sticky="e", pady=(6, 0))
-        self.e_fx = ttk.Entry(f, width=8); self.e_fx.insert(0, f"{fx:.0f}" if fx else ""); self.e_fx.grid(row=2, column=5, sticky="w", pady=(6, 0))
-        b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=6, pady=(10, 0))
-        ttk.Button(b, text="고친 값으로 다시 계산", command=self.save).pack(side="left", padx=4)
-        ttk.Button(b, text="자동값으로 되돌리기", command=self.reset).pack(side="left", padx=4)
+        self.app = app; self.proceed = False; self.e = e
+        C = app.colors
+        self.title("비용 미리 보기"); self.resizable(False, False); self.configure(bg=C["PANEL"])
+        base = app.font_base[0]
+        f = ttk.Frame(self, padding=(20, 16, 20, 14), style="Panel.TFrame"); f.grid(sticky="nsew")
+        # 머리: 금액
+        self.v_cap, self.v_head, self.v_usd, self.v_sub = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
+        tk.Label(f, textvariable=self.v_cap, font=app.font_small, fg=C["MUTED"], bg=C["PANEL"]).grid(row=0, column=0, columnspan=2, sticky="w")
+        tk.Label(f, textvariable=self.v_head, font=(base, 24, "bold"), fg=C["ACC"], bg=C["PANEL"]).grid(row=1, column=0, sticky="w")
+        tk.Label(f, textvariable=self.v_usd, font=(base, 12), fg=C["MUTED"], bg=C["PANEL"]).grid(row=1, column=1, sticky="sw", padx=(12, 0), pady=(0, 5))
+        tk.Label(f, textvariable=self.v_sub, font=app.font_base, fg=C["INK"], bg=C["PANEL"]).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 12))
+        # 단계별 표
+        cols = ("step", "model", "calls", "tin", "tout", "cost")
+        self.tv = ttk.Treeview(f, columns=cols, show="headings", height=3, selectmode="none")
+        for c, (t, w, a) in {"step": ("단계", 160, "w"), "model": ("모델", 230, "w"), "calls": ("호출", 60, "e"),
+                             "tin": ("입력 토큰", 110, "e"), "tout": ("출력 토큰", 100, "e"), "cost": ("비용", 140, "e")}.items():
+            self.tv.heading(c, text=t, anchor=a); self.tv.column(c, width=w, anchor=a, stretch=(c == "model"))
+        self.tv.tag_configure("sum", font=app.font_h)
+        self.tv.grid(row=3, column=0, columnspan=2, sticky="we")
+        f.columnconfigure(0, weight=1)
+        # 바탕 정보
+        self.v_info = tk.StringVar(); self.v_note = tk.StringVar()
+        ttk.Label(f, textvariable=self.v_info, style="Hint.TLabel", wraplength=800, justify="left").grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(f, textvariable=self.v_note, style="Hint.TLabel", wraplength=800, justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        # 단가·환율 고치기(접힘)
+        self.adj = ttk.Frame(f, style="Panel.TFrame", padding=(0, 10, 0, 0))
+        self.e_in = ttk.Entry(self.adj, width=7); self.e_out = ttk.Entry(self.adj, width=7); self.e_fx = ttk.Entry(self.adj, width=7)
+        self.l_model = ttk.Label(self.adj, text=""); self.l_model.grid(row=0, column=0, sticky="w")
+        ttk.Label(self.adj, text="입력 $").grid(row=0, column=1, sticky="e", padx=(10, 2)); self.e_in.grid(row=0, column=2)
+        ttk.Label(self.adj, text="출력 $").grid(row=0, column=3, sticky="e", padx=(10, 2)); self.e_out.grid(row=0, column=4)
+        ttk.Label(self.adj, text="원/달러").grid(row=0, column=5, sticky="e", padx=(10, 2)); self.e_fx.grid(row=0, column=6)
+        ttk.Button(self.adj, text="이 값으로 다시 계산", command=self.save).grid(row=0, column=7, padx=(12, 4))
+        ttk.Button(self.adj, text="자동값으로", command=self.reset).grid(row=0, column=8)
+        ttk.Label(self.adj, text="100만 토큰당 미국 달러. 요금표 https://ai.google.dev/pricing 과 다를 때만 고치십시오. 고친 값은 이 모델에 저장됩니다.",
+                  style="Hint.TLabel").grid(row=1, column=0, columnspan=9, sticky="w", pady=(4, 0))
+        self.adj_shown = False
+        # 단추
+        b = ttk.Frame(f, style="Panel.TFrame"); b.grid(row=7, column=0, columnspan=2, sticky="we", pady=(14, 0))
         if go:
-            ttk.Button(b, text="계속 실행", command=self.ok).pack(side="left", padx=4)
-        ttk.Button(b, text="닫기" if not go else "취소", command=self.destroy).pack(side="left", padx=4)
+            ttk.Button(b, text="▶  계속 실행", command=self.ok, style="Accent.TButton").pack(side="left")
+        ttk.Button(b, text="취소" if go else "닫기", command=self.destroy).pack(side="left", padx=(8, 0))
+        self.b_adj = ttk.Button(b, text="단가·환율 고치기 ▾", command=self.toggle_adj); self.b_adj.pack(side="right")
+        self.render(e)
         self.transient(app); self.grab_set()
 
+    # ----- 그리기 -----
+    def render(self, e: dict):
+        from .estimate import fmt_tokens, fmt_krw, resolve_price
+        self.e = e
+        pages = f"{e['pages']}쪽" + (f"(이미 판독한 {e['already_read']}쪽 제외)" if e.get("already_read") else "")
+        if e["usd_low"] is None:
+            self.v_cap.set("예상 비용"); self.v_head.set("금액을 낼 수 없음"); self.v_usd.set("")
+            self.v_sub.set(f"{pages} · {e['model']} 은 내장 요금표에 없는 모델입니다. 아래에서 단가를 넣으면 계산합니다.")
+        else:
+            self.v_cap.set("예상 비용 (범위는 생각 토큰 양에 따른 편차)")
+            self.v_head.set(f"약 {fmt_krw(e['krw_low'])} ~ {fmt_krw(e['krw_high'])}")
+            self.v_usd.set(f"$ {e['usd_low']:.2f} ~ {e['usd_high']:.2f}")
+            basis = "기본값으로 어림" if e["basis"] == "기본값" else e["basis"] + "으로 보정"
+            self.v_sub.set(f"{pages} · 1차 {e['model']}" + (f" · 2차 {e['second_model']}" if e.get("second_model") and e["second_model"] != e["model"] else "") + f" · {basis}")
+        for i in self.tv.get_children():
+            self.tv.delete(i)
+        tot = {"calls": 0, "in_low": 0, "in_high": 0, "out_low": 0, "out_high": 0, "usd_low": 0.0, "usd_high": 0.0}
+        for r in e.get("rows") or []:
+            self.tv.insert("", "end", values=(r["label"], r["model"], f"{r['calls']:,}", f"{fmt_tokens(r['in_low'])}~{fmt_tokens(r['in_high'])}",
+                                              f"{fmt_tokens(r['out_low'])}~{fmt_tokens(r['out_high'])}", f"${r['usd_low']:.2f}~{r['usd_high']:.2f}"))
+            for k in tot:
+                tot[k] += r.get(k, 0)
+        if e.get("rows"):
+            self.tv.insert("", "end", tags=("sum",), values=("합계", "", f"{tot['calls']:,}", f"{fmt_tokens(tot['in_low'])}~{fmt_tokens(tot['in_high'])}",
+                                                             f"{fmt_tokens(tot['out_low'])}~{fmt_tokens(tot['out_high'])}", f"${tot['usd_low']:.2f}~{tot['usd_high']:.2f}"))
+        else:
+            self.tv.insert("", "end", values=("전체", e["model"], f"{e['calls']:,}", f"{fmt_tokens(e['in_low'])}~{fmt_tokens(e['in_high'])}",
+                                              f"{fmt_tokens(e['out_low'])}~{fmt_tokens(e['out_high'])}", "-"))
+        info = []
+        if e.get("fx"):
+            info.append(f"환율 {e['fx']:,.0f}원/달러 ({e['fx_source']})")
+        if e.get("price_source"):
+            info.append(f"단가 {e['price_source']}")
+        info.append("지침 캐시 " + ("적용" if e.get("use_cache") else "없음"))
+        if e.get("page_px"):
+            info.append(f"쪽 이미지 {e['page_px'][0]}×{e['page_px'][1]} · 확대 {e.get('upscale', 2)}배")
+        self.v_info.set(" · ".join(info))
+        self.v_note.set("추정치입니다. 출력 토큰에는 생각(thinking) 토큰이 들어가며, 캐시 보관료(시간당 몇 센트)는 넣지 않았습니다.")
+        model = self.app.v_model.get().strip(); pr = resolve_price(model, self.app.cfg.get("prices") or {}) or {}
+        fx, _ = self.app.fx_setting()
+        self.l_model.configure(text=f"'{model}' 단가")
+        for ent, v in ((self.e_in, f"{pr['in']:g}" if pr else ""), (self.e_out, f"{pr['out']:g}" if pr else ""), (self.e_fx, f"{fx:.0f}" if fx else "")):
+            ent.delete(0, "end"); ent.insert(0, v)
+
+    def toggle_adj(self):
+        self.adj_shown = not self.adj_shown
+        if self.adj_shown:
+            self.adj.grid(row=6, column=0, columnspan=2, sticky="we"); self.b_adj.configure(text="단가·환율 접기 ▴")
+        else:
+            self.adj.grid_forget(); self.b_adj.configure(text="단가·환율 고치기 ▾")
+
+    # ----- 단추 -----
     def save(self):
         model = self.app.v_model.get().strip()
         prices = dict(self.app.cfg.get("prices") or {})
@@ -221,17 +296,13 @@ class EstimateDialog(tk.Toplevel):
             except ValueError: return 0.0
         prices[model] = {"in": num(self.e_in.get()), "out": num(self.e_out.get())}
         self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = self.e_fx.get().strip(); save_config(self.app.cfg)
-        self.lbl.configure(text=self.app.estimate_text())
+        self.render(self.app.estimate_data())
 
     def reset(self):
         model = self.app.v_model.get().strip()
         prices = dict(self.app.cfg.get("prices") or {}); prices.pop(model, None)
         self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = ""; save_config(self.app.cfg)
-        from .estimate import resolve_price
-        pr = resolve_price(model, {}) or {}; fx, _ = self.app.fx_setting()
-        for e, v in ((self.e_in, f"{pr['in']:g}" if pr else ""), (self.e_out, f"{pr['out']:g}" if pr else ""), (self.e_fx, f"{fx:.0f}" if fx else "")):
-            e.delete(0, "end"); e.insert(0, v)
-        self.lbl.configure(text=self.app.estimate_text())
+        self.render(self.app.estimate_data())
 
     def ok(self):
         self.proceed = True; self.destroy()
@@ -631,35 +702,48 @@ class App(tk.Tk):
             return self._fx
         return None, ""
 
+    def estimate_data(self) -> dict:
+        """현재 설정으로 호출·토큰·비용 어림. 단가는 내장 요금표, 환율은 자동 조회라 따로 넣을 것이 없다."""
+        from .estimate import estimate
+        from .pdfio import open_pdf, parse_pages
+        from .state import Work
+        doc = open_pdf(self.pdf()); pages = parse_pages(self.v_pages.get().strip() or None, len(doc))
+        w = Work(self.pdf(), str(self.work()))
+        fx, fx_src = self.fx_setting()
+        return estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
+                        second_model=self.v_model2.get().strip(), use_cache=self.v_cache.get(),
+                        prices=self.cfg.get("prices") or {}, fx_krw=fx, fx_source=fx_src, records=[] if self.v_force.get() else w.records(pages))
+
     def estimate_text(self) -> str:
-        """현재 설정으로 호출·토큰·비용 어림 글. 단가는 내장 요금표, 환율은 자동 조회라 따로 넣을 것이 없다."""
         try:
-            from .estimate import estimate, format_estimate
-            from .pdfio import open_pdf, parse_pages
-            from .state import Work
-            doc = open_pdf(self.pdf()); pages = parse_pages(self.v_pages.get().strip() or None, len(doc))
-            w = Work(self.pdf(), str(self.work()))
-            fx, fx_src = self.fx_setting()
-            e = estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
-                         second_model=self.v_model2.get().strip(), use_cache=self.v_cache.get(),
-                         prices=self.cfg.get("prices") or {}, fx_krw=fx, fx_source=fx_src, records=[] if self.v_force.get() else w.records(pages))
-            return format_estimate(e)
+            from .estimate import format_estimate
+            return format_estimate(self.estimate_data())
         except ModuleNotFoundError as e:
             return f"패키지가 없어 계산하지 못했습니다: {e.name}. [필요한 패키지 설치·점검] 을 누르십시오."
         except Exception as e:
             return f"계산 실패: {e}"
 
     def do_estimate(self):
-        if self._need_pdf(): EstimateDialog(self, self.estimate_text())
+        if not self._need_pdf():
+            return
+        try:
+            EstimateDialog(self, self.estimate_data())
+        except ModuleNotFoundError as e:
+            messagebox.showerror(APP_NAME, f"패키지가 없어 계산하지 못했습니다: {e.name}. [필요한 패키지 설치·점검] 을 누르십시오.")
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"비용 계산 실패: {e}")
 
     def _confirm_cost(self) -> bool:
         """Gemini 판독 전에 어림을 보여 주고 계속할지 묻는다. 읽을 쪽이 없으면 묻지 않는다."""
         if self.v_reader.get() != "gemini":
             return True
-        text = self.estimate_text()
-        if "예상 호출 0회" in text:
+        try:
+            e = self.estimate_data()
+        except Exception as ex:
+            return messagebox.askyesno(APP_NAME, f"비용을 어림하지 못했습니다({ex}). 그래도 판독을 시작할까요?")
+        if e["calls"] == 0:
             return True
-        d = EstimateDialog(self, text, go=True); self.wait_window(d)
+        d = EstimateDialog(self, e, go=True); self.wait_window(d)
         return d.proceed
 
     def do_inspect(self):

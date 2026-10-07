@@ -576,6 +576,7 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
     if getattr(args, "price_in", None) or getattr(args, "price_out", None):
         prices[args.model or ""] = {"in": args.price_in or 0, "out": args.price_out or 0}
     e = estimate(args.pdf, pages, upscale=args.upscale, second_pass=not args.no_second_pass, model=args.model or "",
+                 second_model=getattr(args, "second_model", "") or "", use_cache=not getattr(args, "no_cache", False),
                  prices=prices, fx_krw=getattr(args, "fx", None), records=work.records(pages) if not getattr(args, "force", False) else [])
     log(format_estimate(e))
     return 0
