@@ -86,9 +86,15 @@ def cmd_prepare(args, work: Work | None = None, doc=None):
 
 
 # ---------- read ----------
-def make_reader(args, doc, work):
-    from . import prompts
+def apply_mode(args) -> None:
+    """읽기 모드를 지시문(prompts)과 비교 규칙(merge)에 함께 적용한다."""
+    from . import prompts, merge
     prompts.set_mode(getattr(args, "mode", None))
+    merge.FOLD_ZH = prompts.MODE == "horizontal_zh"
+
+
+def make_reader(args, doc, work):
+    apply_mode(args)
     if args.reader == "mock":
         from .reader_mock import MockReader
         tls = {}
@@ -143,6 +149,7 @@ def remerge_record(rec: dict, layer_plain: str) -> dict:
 
 
 def cmd_remerge(args, work: Work | None = None, doc=None):
+    apply_mode(args)                                   # 가로쓰기 한문이면 간체·부호 차이를 접어 비교
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     records = work.records(parse_pages(args.pages, len(doc)))
@@ -426,10 +433,13 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
         checkpoint("멈춤")
     if failed:
         log(f"오류: 판독에 실패한 쪽 {len(failed)}개: {', '.join(map(str, sorted(failed)[:30]))}{'…' if len(failed) > 30 else ''} — ③ 판독을 다시 누르면 이 쪽들만 다시 시도합니다")
-    if getattr(reader, "usage", None) and reader.usage.get("calls"):
-        u = reader.usage
-        log(f"모델 호출 통계(이번 실행): 호출 {u['calls']}회 · 토큰 입력 {u['prompt_tokens']:,} 출력 {u['output_tokens'] + u.get('thinking_tokens', 0):,}"
-            + (f" · 캐시 적중 {u['cached_tokens']:,}" if u.get("cached_tokens") else "") + f" · {time.time() - t_start:.0f}초  — 쪽별 누적은 ⑥ 보고에 있음")
+    u = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cached_tokens": 0}
+    for r in {id(reader): reader, id(reader2): reader2}.values():
+        for k in u:
+            u[k] += (getattr(r, "usage", None) or {}).get(k, 0)
+    if u["calls"]:
+        log(f"모델 호출 통계(이번 실행, 1차+2차): 호출 {u['calls']}회 · 토큰 입력 {u['prompt_tokens']:,} 출력 {u['output_tokens'] + u['thinking_tokens']:,}"
+            + (f" · 캐시 적중 {u['cached_tokens']:,}" if u["cached_tokens"] else "") + f" · {time.time() - t_start:.0f}초  — 쪽별 누적은 ⑥ 보고에 있음")
     if fatal is not None:
         return 1
     if CANCEL.is_set():
@@ -659,7 +669,9 @@ def build_parser():
     p.add_argument("--price-in", type=float, help="입력 토큰 100만 개당 USD"); p.add_argument("--price-out", type=float, help="출력 토큰 100만 개당 USD")
     p.add_argument("--fx", type=float, help="원/달러 환율(원화 표시)"); p.set_defaults(fn=cmd_estimate)
     p = sub.add_parser("build"); common(p); build_opts(p); p.set_defaults(fn=cmd_build)
-    p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p); p.set_defaults(fn=cmd_remerge)
+    p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p)
+    p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical", help="읽기 모드(가로쓰기 한문이면 horizontal_zh — 간체·부호 차이를 접어 비교)")
+    p.set_defaults(fn=cmd_remerge)
     p = sub.add_parser("review"); common(p); p.set_defaults(fn=cmd_review)
     p = sub.add_parser("report"); common(p); p.set_defaults(fn=cmd_report)
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")

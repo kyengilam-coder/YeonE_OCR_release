@@ -154,8 +154,10 @@ def ensure_pages_read(args, work, doc, pages: tuple[int, int]) -> None:
 
 
 def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matches, idx: int) -> dict:
-    from .. import prompts
-    prompts.set_mode(getattr(args, "mode", None) or "horizontal_zh")
+    from ..cli import apply_mode
+    if not getattr(args, "mode", None):
+        args.mode = "horizontal_zh"
+    apply_mode(args)
     a = anchors[idx]; m = matches[idx]
     sec = book.section(anchors, idx)
     hw_paras = book.section_texts(sec)

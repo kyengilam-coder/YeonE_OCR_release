@@ -220,3 +220,31 @@ class Edit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MergeFold(unittest.TestCase):
+    def _merge(self, t1, t2, fold_zh):
+        from yeone_ocr import merge
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, RegionReread
+        p1 = PageReading(pdf_page=1, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text=t1)])])])
+        rr = {"b": RegionReread(columns=[Column(col_from_right=1, text=t2)])}
+        old = merge.FOLD_ZH; merge.FOLD_ZH = fold_zh
+        try:
+            m, st = merge.merge_passes(p1, rr)
+        finally:
+            merge.FOLD_ZH = old
+        return m.regions[0].paragraphs[0].columns[0].text, st["marks"]
+
+    def test_punctuation_variants_are_not_differences(self):
+        text, marks = self._merge("冬瓜，性凉。治水肿、小便不利；", "冬瓜,性凉.治水肿,小便不利;", fold_zh=False)
+        self.assertEqual(marks, 0); self.assertEqual(text, "冬瓜，性凉。治水肿、小便不利；")        # 1차 글(전각 부호) 그대로
+
+    def test_simplified_traditional_only_folded_in_horizontal_mode(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+        text, marks = self._merge("中医古籍之有药论", "中醫古籍之有藥論", fold_zh=True)
+        self.assertEqual(marks, 0); self.assertEqual(text, "中医古籍之有药论")                       # 간체 모드: 자형 차이는 접고, 저장 글은 1차(간체) 그대로
+        text, marks = self._merge("中医古籍之有药论", "中醫古籍之有藥論", fold_zh=False)
+        self.assertGreater(marks, 0)                                                                 # 세로쓰기 모드: 자형이 다르면 표시
+        text, marks = self._merge("冬瓜性凉", "冬瓜性温", fold_zh=True)
+        self.assertEqual(marks, 1); self.assertIn("〔凉/温〕", text)                                   # 진짜 다른 글자는 그대로 표시

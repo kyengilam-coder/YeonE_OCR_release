@@ -12,6 +12,30 @@ def _norm(s: str) -> str:
     return WS.sub(" ", INVISIBLE.sub("", unicodedata.normalize("NFC", s))).strip()
 
 
+FOLD_ZH = False        # 가로쓰기 한문(간체) 모드에서 켠다: 비교할 때만 간체·이체자를 접는다(저장되는 글은 1차 판독 그대로)
+_PUNCT_FOLD = {ord(a): b for a, b in {"，": ",", "。": ".", "：": ":", "；": ";", "！": "!", "？": "?", "（": "(", "）": ")", "、": ",",
+                                        "～": "~", "－": "-", "．": ".", "“": '"', "”": '"', "‘": "'", "’": "'", "ㆍ": "·", "・": "·", "•": "·",
+                                        "［": "[", "］": "]", "｛": "{", "｝": "}", "〈": "<", "〉": ">", "《": "<", "》": ">", "「": "'", "」": "'", "『": '"', "』": '"'}.items()}
+
+
+def _fold(s: str) -> str:
+    """비교 전용 접기 — 글자 수를 바꾸지 않는다. 전각 부호는 반각으로(，↔, 같은 모델 표기 차이는 판독 차이가 아니다),
+    FOLD_ZH 면 한자를 간체·이체자 대표 글자로. 〔〕 표시 토큰(사용자 영역 글자)은 그대로 둔다."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if 0xE000 <= o <= 0xF8FF:
+            out.append(ch); continue
+        ch = ch.translate(_PUNCT_FOLD)
+        if FOLD_ZH and (0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF):
+            from .collate import zh
+            k = zh.compare_key(ch)
+            if len(k) == 1:
+                ch = k
+        out.append(ch)
+    return "".join(out)
+
+
 def _pos(i: int, n: int) -> str:
     if n <= 0: return "위"
     r = i / n
@@ -150,9 +174,10 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
         stats["columns_compared"] += sum(1 for i, j in pairs if i is not None and j is not None)
         a, pos, table = _strip_map(cols)
         b = "".join(ch for ch in _tokenize("".join(_norm(c.text) for c in cols2), table) if not ch.isspace())
-        if a == b:
+        fa, fb = _fold(a), _fold(b)                # 부호 표기·(간체 모드) 자형 차이는 접고 비교한다. 위치는 a·b 와 1:1
+        if fa == fb:
             continue
-        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        sm = difflib.SequenceMatcher(None, fa, fb, autojunk=False)
         ops = [op for op in sm.get_opcodes() if op[0] != "equal"]
         touched_cols: set[int] = set()
         # 뒤에서부터 고쳐야 앞쪽 위치가 흔들리지 않는다

@@ -62,7 +62,11 @@ class TextLayer:
     page_height: float = 0
 
     def plain(self) -> str:
-        return "\n".join(c["text"] for c in self.vertical_columns)
+        """비교용 평문. 세로 열이 있으면 열 순서(오른쪽→왼쪽), 없으면(가로쓰기 책) 가로 줄을 위→아래 순서로."""
+        if self.vertical_columns:
+            return "\n".join(c["text"] for c in self.vertical_columns)
+        lines = sorted(self.horizontal_lines, key=lambda l: (round(l["bbox"][1] / 3), l["bbox"][0]))
+        return "\n".join(l["text"] for l in lines)
 
 
 def text_layer(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0) -> TextLayer:
