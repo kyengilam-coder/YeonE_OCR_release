@@ -62,6 +62,9 @@ def page_range(pdf_anchors: list[PdfAnchor], idx: int, n_pages: int) -> tuple[in
     return a.page, max(a.page, min(end, n_pages))
 
 
+HOW_LABELS = {"exact": "정확", "contains": "품음", "fuzzy": "비슷", "pdf": "PDF→본문", "none": "없음"}   # 짝 종류 → 화면 표시
+
+
 @dataclass
 class Match:
     anchor: Anchor

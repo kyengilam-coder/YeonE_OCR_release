@@ -108,6 +108,8 @@ class Outline(unittest.TestCase):
         pdf = [PdfAnchor("第三节 冬瓜(附：冬瓜子) 123", 1, 123), PdfAnchor("大蓟 ……… 130", 1, 130), PdfAnchor("人参", 1, 140)]
         ms = match_anchors(an, pdf)
         self.assertEqual([m.how for m in ms], ["contains", "exact", "exact"]); self.assertEqual(ms[0].pdf.page, 123)
+        from yeone_ocr.collate.pdf_outline import HOW_LABELS
+        self.assertTrue(all(m.how in HOW_LABELS for m in ms)); self.assertIn("pdf", HOW_LABELS); self.assertIn("none", HOW_LABELS)   # 화면 표시 이름이 모두 있어야 색인이 실패하지 않는다
 
     def test_hangul_pdf_bookmarks_match_hanja_headings(self):
         """PDF 책갈피가 한글 독음(동과, 백과(은행) …)이어도 HWPX 한자 제목과 짝이 맞는다."""

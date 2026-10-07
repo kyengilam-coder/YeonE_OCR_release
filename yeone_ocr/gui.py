@@ -661,12 +661,13 @@ class App(tk.Tk):
             try:
                 from .collate.sections import HwpxBook
                 from .collate.run import index_both
+                from .collate.pdf_outline import HOW_LABELS as _HOW
                 from .pdfio import open_pdf
                 doc = open_pdf(pdf); book = HwpxBook(hwpx)
                 anchors, pdf_anchors, matches = index_both(doc, book, src, styles)
                 from .collate import reading as _rd
                 rows = [{"no": i + 1, "lv": a.level, "name": a.name, "read": _rd.reading(a.name), "para": a.para, "pdf": m.pdf.title if m.pdf else "", "page": m.pdf.page if m.pdf else "",
-                         "how": {"exact": "정확", "fuzzy": f"비슷 {m.score:.2f}", "none": "없음", "pdf": "PDF→본문"}[m.how]} for i, (a, m) in enumerate(zip(anchors, matches))]
+                         "how": _HOW.get(m.how, m.how) + (f" {m.score:.2f}" if m.how in ("fuzzy", "contains") else "")} for i, (a, m) in enumerate(zip(anchors, matches))]
                 kinds = {"bookmark": "책갈피", "heading": "제목 스타일", "pdf": "PDF 책갈피로 본문 검색"}
                 basis = ", ".join(f"{kinds[k]} {n}" for k in ("bookmark", "heading", "pdf") if (n := sum(1 for a in anchors if a.kind == k)))
                 matched = sum(1 for m in matches if m.pdf)

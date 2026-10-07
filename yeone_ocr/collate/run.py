@@ -46,7 +46,8 @@ def index_both(pdf_doc, book: HwpxBook, source: str = "auto", styles: list[str] 
 def list_text(anchors, pdf_anchors, matches, limit: int = 0) -> str:
     lines = [f"HWPX 기준 {len(anchors)}개(책갈피 {sum(1 for a in anchors if a.kind == 'bookmark')}, 제목 {sum(1 for a in anchors if a.kind == 'heading')}, "
              f"PDF 책갈피로 찾음 {sum(1 for a in anchors if a.kind == 'pdf')}) · PDF 책갈피 {len(pdf_anchors)}개 · "
-             f"짝: 정확 {sum(1 for m in matches if m.how in ('exact', 'pdf'))}, 비슷 {sum(1 for m in matches if m.how == 'fuzzy')}, 없음 {sum(1 for m in matches if m.how == 'none')}"]
+             f"짝: 정확 {sum(1 for m in matches if m.how in ('exact', 'pdf'))}, 품음 {sum(1 for m in matches if m.how == 'contains')}, "
+             f"비슷 {sum(1 for m in matches if m.how == 'fuzzy')}, 없음 {sum(1 for m in matches if m.how == 'none')}"]
     for i, m in enumerate(matches):
         if limit and i >= limit:
             lines.append(f"… {len(matches) - limit}개 더"); break
