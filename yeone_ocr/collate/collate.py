@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from . import zh
 
 LONG = 20                      # 이 길이 이상이 한쪽에만 있으면 글자 오탈이 아니라 구조 차이(C)로 본다
+CTX = 6                        # 보고에 보여 줄 앞뒤 글자 수
+# 자형이 비슷해 판독기가 서로 헷갈리기 쉬운 글자 묶음(간체 기준). 번체 후보까지 여럿(B2)이면 자동 반영하지 않고 표시만 한다
+CONFUSABLES = [set(g) for g in ("干于千", "日曰", "己已巳", "土士", "未末", "天夭", "人入", "刀力", "木本", "戊戌戍", "冶治", "乌鸟", "纲网", "问间闻",
+                                 "王玉", "大太犬", "子于", "几凡", "血皿", "目日月", "白自", "戈弋", "丸九", "旦且", "田由甲申", "史吏", "宫官",
+                                 "侯候", "兔免", "祟崇", "荼茶", "午牛", "币市", "师帅", "凤风", "析折", "斤斥", "卯卵", "微徽")]
 MAX_DELETE_AUTO = 2            # HWPX 에만 있는 글자를 자동으로 지우는 최대 길이(그 이상은 C 로 표시만)
 MARK_RE = re.compile(r"〔[^〔〕]*〕")
 PUNCT_RE = re.compile(r"[\s　·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥]+")
@@ -44,6 +49,8 @@ class Item:
     pdf_page: int = 0
     note: str = ""
     auto: bool = False         # 정책에 따라 실제로 반영할지
+    hw_ctx: str = ""           # HWPX 앞뒤 글자(「」 안이 해당 자리)
+    oc_ctx: str = ""           # 판독 앞뒤 글자
 
 
 def strip_marks(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -104,6 +111,16 @@ def _s2t_context(ocr: list[Char], i0: int, i1: int) -> str:
     return zh.to_traditional("".join(c.ch for c in ocr[i0:i1]))
 
 
+def _confusable(a: str, b: str) -> bool:
+    return a != b and any(a in g and b in g for g in CONFUSABLES)
+
+
+def _ctx(cells: list[Char], lo: int, hi: int) -> str:
+    """cells[lo:hi] 를 「」 로 감싸고 앞뒤 CTX 글자를 붙인다."""
+    pre = "".join(c.ch for c in cells[max(0, lo - CTX):lo]); mid = "".join(c.ch for c in cells[lo:hi]); post = "".join(c.ch for c in cells[hi:hi + CTX])
+    return f"{pre}「{mid}」{post}"
+
+
 def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item]:
     """정렬해 차이 항목을 만든다. policy: memo(아무것도 자동 반영 안 함) | sure(A만) | all(A+B2+누락 삽입)."""
     a = "".join(c.key for c in hw); b = "".join(c.key for c in oc)
@@ -131,29 +148,31 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item
                 para, pos = hw[0].para, hw[0].pos
             else:
                 para, pos = 0, 0
+            hctx, octx = _ctx(hw, i1, i1), _ctx(oc, j1, j2)
             if uncertain:
-                items.append(Item("B1", "mark", para, pos, pos, "", oc_text, "", pdf_page=page, note="판독이 불확실한 자리라 넣지 않음"))
+                items.append(Item("B1", "mark", para, pos, pos, "", oc_text, "", pdf_page=page, note="판독이 불확실한 자리라 넣지 않음", hw_ctx=hctx, oc_ctx=octx))
             elif len(oc_span) >= LONG:
-                items.append(Item("C", "insert", para, pos, pos, "", oc_text, _s2t_context(oc, j1, j2), pdf_page=page, note=f"HWPX 에 없는 긴 구간({len(oc_span)}자)"))
+                items.append(Item("C", "insert", para, pos, pos, "", oc_text, _s2t_context(oc, j1, j2), pdf_page=page, note=f"HWPX 에 없는 긴 구간({len(oc_span)}자)", hw_ctx=hctx, oc_ctx=octx))
             else:
                 new = _s2t_context(oc, j1, j2)
                 amb = [c.ch for c in oc_span if zh.is_ambiguous(c.ch)]
                 kind = "B2" if amb else "A"
                 cands = sorted({x for ch in amb for x in zh.candidates(ch)}) if amb else []
-                items.append(Item(kind, "insert", para, pos, pos, "", oc_text, new, cands, page, "빠진 글자"))
+                items.append(Item(kind, "insert", para, pos, pos, "", oc_text, new, cands, page, "빠진 글자", hw_ctx=hctx, oc_ctx=octx))
             continue
         for g in groups:
             para, start, end = g[0].para, g[0].pos, g[-1].pos + 1
             g_text = "".join(c.ch for c in g)
+            gi = hw.index(g[0]); hctx = _ctx(hw, gi, gi + len(g)); octx = _ctx(oc, j1, j2)
             if op == "delete" or not oc_span:
                 if uncertain:
-                    items.append(Item("B1", "mark", para, start, end, g_text, "", "", pdf_page=page, note="판독이 불확실한 자리"))
+                    items.append(Item("B1", "mark", para, start, end, g_text, "", "", pdf_page=page, note="판독이 불확실한 자리", hw_ctx=hctx, oc_ctx=octx))
                 elif len(hw_span) >= LONG:
-                    items.append(Item("C", "mark", para, start, end, g_text, "", "", pdf_page=page, note=f"판독에 없는 긴 구간({len(hw_span)}자) — PDF 범위·누락 확인"))
+                    items.append(Item("C", "mark", para, start, end, g_text, "", "", pdf_page=page, note=f"판독에 없는 긴 구간({len(hw_span)}자) — PDF 범위·누락 확인", hw_ctx=hctx, oc_ctx=octx))
                 elif len(hw_span) <= MAX_DELETE_AUTO:
-                    items.append(Item("A", "delete", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자"))
+                    items.append(Item("A", "delete", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자", hw_ctx=hctx, oc_ctx=octx))
                 else:
-                    items.append(Item("C", "mark", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자(여러 자)"))
+                    items.append(Item("C", "mark", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자(여러 자)", hw_ctx=hctx, oc_ctx=octx))
                 continue
             # replace: 이 문단 조각에 대응하는 판독 글자 — 길이 비례로 나눈다
             share = len(g) / max(1, len(hw_span))
@@ -161,20 +180,26 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item
             k2 = j2 if g is groups[-1] else min(j2, k1 + max(1, round(share * (j2 - j1))))
             seg = oc[k1:k2]
             seg_text = "".join(c.ch for c in seg)
+            octx = _ctx(oc, k1, k2)
             if uncertain or any(c.uncertain for c in seg):
-                items.append(Item("B1", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="판독이 불확실한 자리"))
+                items.append(Item("B1", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="판독이 불확실한 자리", hw_ctx=hctx, oc_ctx=octx))
             elif len(g) >= LONG and len(seg) >= LONG:
-                items.append(Item("C", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="긴 구간이 서로 다름 — 문단 순서·범위 확인"))
+                items.append(Item("C", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="긴 구간이 서로 다름 — 문단 순서·범위 확인", hw_ctx=hctx, oc_ctx=octx))
             else:
                 new = _s2t_context(oc, k1, k2) if seg else ""
                 amb = [c.ch for c in seg if zh.is_ambiguous(c.ch)]
                 if not seg:
-                    items.append(Item("A", "delete", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자"))
+                    items.append(Item("A", "delete", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자", hw_ctx=hctx, oc_ctx=octx))
                 elif amb:
                     cands = sorted({x for ch in amb for x in zh.candidates(ch)})
-                    items.append(Item("B2", "replace", para, start, end, g_text, seg_text, new, cands, page, "간체 한 글자가 여러 번체로 갈라짐"))
+                    items.append(Item("B2", "replace", para, start, end, g_text, seg_text, new, cands, page, "간체 한 글자가 여러 번체로 갈라짐", hw_ctx=hctx, oc_ctx=octx))
                 else:
-                    items.append(Item("A", "replace", para, start, end, g_text, seg_text, new, [], page, "판독과 다름"))
+                    items.append(Item("A", "replace", para, start, end, g_text, seg_text, new, [], page, "판독과 다름", hw_ctx=hctx, oc_ctx=octx))
+    # 혼동하기 쉬운 글자 + 번체 후보 여럿(B2) → 판독 오류일 수 있으니 표시만
+    for it in items:
+        if it.kind == "B2" and it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and _confusable(zh.compare_key(it.hwpx), it.ocr):
+            it.kind, it.action, it.new = "B1", "mark", ""
+            it.note = f"판독 글자 「{it.ocr}」 는 「{zh.compare_key(it.hwpx)}」 와 자형이 비슷해 헷갈리기 쉽고 번체 후보도 여럿({'/'.join(it.candidates)}) — 원본 확인"
     # 정책에 따라 자동 반영 여부
     for it in items:
         if it.kind == "A" and it.action in ("replace", "insert", "delete"):

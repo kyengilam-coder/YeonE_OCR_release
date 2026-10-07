@@ -183,6 +183,19 @@ class Collate(unittest.TestCase):
         same = collate(hwpx_cells(["人蔘, 大補元氣."], 0), ocr_cells([(1, "人参，大补元气。")]))
         self.assertEqual(same, [])
 
+    def test_korean_variants_and_confusables(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+        # 幷(한국식)↔并: 차이가 아니다
+        self.assertEqual(collate(hwpx_cells(["則在上者幷自吐去"], 0), ocr_cells([(1, "则在上者并自吐去")])), [])
+        # 幹(→干) vs 판독 于: 자형 혼동 + 번체 후보 여럿 → 자동 반영하지 않고 표시만
+        items = collate(hwpx_cells(["苦瓠之肉能幹"], 0), ocr_cells([(1, "苦瓠之肉能于")]), policy="all")
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)]); self.assertIn("헷갈리기", items[0].note)
+        self.assertIn("「幹」", items[0].hw_ctx); self.assertIn("「于」", items[0].oc_ctx)
+        # 問 vs 间(1:1)은 그대로 A 자동
+        items = collate(hwpx_cells(["津液充滿無問"], 0), ocr_cells([(1, "津液充满无间")]), policy="all")
+        self.assertEqual([(it.kind, it.new, it.auto) for it in items], [("A", "間", True)]); self.assertEqual(items[0].hw_ctx, "津液充滿無「問」")
+
     def test_trim(self):
         paras = [(5, "앞 구획 끝 문장"), (5, "大蓟"), (5, "1. 本草经疏"), (6, "2. 本草新编"), (6, "小蓟"), (6, "小蓟 本문")]
         cut, note = trim_to_section(paras, "大薊", "小薊")

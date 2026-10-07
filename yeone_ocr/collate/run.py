@@ -113,8 +113,9 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     rows = []
     for it in items:
         cls = {"A": "a", "B1": "b1", "B2": "b2", "C": "c"}.get(it.kind, "")
-        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}</td><td>{it.para}</td><td>{esc(it.hwpx) or '—'}</td>"
-                    f"<td>{esc(it.ocr) or '—'}</td><td>{esc(it.new) or '—'}</td><td>{esc('/'.join(it.candidates))}</td><td>{it.pdf_page}</td><td>{esc(it.note)}</td></tr>")
+        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}</td><td>{it.para}</td>"
+                    f"<td class=ctx>{esc(it.hw_ctx) or esc(it.hwpx) or '—'}</td><td class=ctx>{esc(it.oc_ctx) or esc(it.ocr) or '—'}</td>"
+                    f"<td><b>{esc(it.new) or '—'}</b></td><td>{esc('/'.join(it.candidates))}</td><td>{it.pdf_page}</td><td>{esc(it.note)}</td></tr>")
     appl = ""
     if applied is not None:
         bad = [a for a in applied if not a.ok]
@@ -125,13 +126,14 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     h1{font-size:18px;margin:0}main{padding:16px 20px}table{border-collapse:collapse;width:100%;font-size:13px;background:#fff}td,th{border:1px solid #d9d2c3;padding:4px 6px;vertical-align:top}
     tr.a td:first-child{background:#d8f5c8}tr.b2 td:first-child{background:#e6f0ff}tr.b1 td:first-child,tr.c td:first-child{background:#ffe9a8}
     .cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}.cols>div{background:#fff;padding:10px;border:1px solid #d9d2c3;max-height:520px;overflow:auto;font-size:14px;line-height:1.7}
-    .sum span{display:inline-block;margin-right:12px;padding:2px 8px;border-radius:10px;background:#e4d7b4}"""
+    .sum span{display:inline-block;margin-right:12px;padding:2px 8px;border-radius:10px;background:#e4d7b4}
+    td.ctx{font-size:15px;letter-spacing:.02em}td.ctx b{color:#b3261e}"""
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>교정 · {esc(section.anchor.name)}</title><style>{css}</style></head><body>"
            f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start}~{section.end - 1} · PDF {pages[0]}~{pages[1]}쪽"
            + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}</small></header><main>"
            f"<p class=sum><span>자동 교정 {sm['auto']}</span><span>표시만 {sm['mark']}</span><span>A {sm['A']}</span><span>B1 {sm['B1']}</span><span>B2 {sm['B2']}</span><span>C {sm['C']}</span></p>"
            + (f"<p><b>참고:</b> {esc(note)}</p>" if note else "") + appl +
-           f"<table><tr><th>갈래</th><th>처리</th><th>문단</th><th>HWPX</th><th>판독(간체)</th><th>반영</th><th>다른 후보</th><th>PDF 쪽</th><th>설명</th></tr>{''.join(rows) or '<tr><td colspan=9>차이 없음</td></tr>'}</table>"
+           f"<table><tr><th>갈래</th><th>처리</th><th>문단</th><th>HWPX (「」 안이 해당 자리)</th><th>판독(간체)</th><th>반영</th><th>다른 후보</th><th>PDF 쪽</th><th>설명</th></tr>{''.join(rows) or '<tr><td colspan=9>차이 없음</td></tr>'}</table>"
            f"<h3>원문 대조</h3><div class=cols><div><b>HWPX 구획(교정 전)</b>{hw}</div><div><b>PDF 판독</b>{oc}</div></div></main></body></html>")
     out_path.write_text(doc, encoding="utf-8")
     return str(out_path)
