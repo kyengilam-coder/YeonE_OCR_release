@@ -261,3 +261,33 @@ class MergeFold(unittest.TestCase):
         self.assertGreater(marks, 0)                                                                 # 세로쓰기 모드: 자형이 다르면 표시
         text, marks = self._merge("冬瓜性凉", "冬瓜性温", fold_zh=True)
         self.assertEqual(marks, 1); self.assertIn("〔凉/温〕", text)                                   # 진짜 다른 글자는 그대로 표시
+
+
+class Accumulate(unittest.TestCase):
+    def test_second_section_keeps_first_and_rerun_is_idempotent(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+        from yeone_ocr.collate.run import corrected_path
+        with tempfile.TemporaryDirectory() as td:
+            src = make_book(os.path.join(td, "b.hwpx")); out = corrected_path(src)
+            self.assertTrue(out.endswith("b_교정.hwpx")); self.assertEqual(corrected_path(out), out)
+            # 1) 大薊 구획 교정 → 교정본 저장
+            bk = HwpxBook(src); an = bk.anchors(); sec = bk.section(an, 1)
+            ocr = Collate._ocr(Collate("test_classification"))
+            items = collate(hwpx_cells(bk.section_texts(sec), sec.start), ocr_cells([(7, "\n".join(ocr))]))
+            Editor(bk).apply(items); Editor(bk).save_copy(out)
+            # 2) 교정본을 열어 人參 구획 교정(人蔘 → 판독 '人参大补元气甚速' 로 누락 글자 삽입)
+            bk2 = HwpxBook(out); an2 = bk2.anchors(); self.assertEqual([a.para for a in an2], [a.para for a in an])
+            sec2 = bk2.section(an2, 3)
+            items2 = collate(hwpx_cells(bk2.section_texts(sec2), sec2.start), ocr_cells([(9, "人参\n人参,大补元气甚速。")]))
+            self.assertTrue(items2); Editor(bk2).apply(items2); Editor(bk2).save_copy(out)
+            t = HwpxBook(out).texts()
+            self.assertIn("陶云無毒", t[sec.start + 1]); self.assertIn("甚速", t[-1])          # 첫 구획 교정이 남아 있고 둘째 구획도 고쳐짐
+            # 3) 같은 구획(大薊)을 한 번 더 돌려도 메모가 겹치지 않는다(이미 고친 글자는 차이가 없고, 표시만 한 자리는 다시 표시하지 않음)
+            bk3 = HwpxBook(out); sec3 = bk3.section(bk3.anchors(), 1)
+            items3 = collate(hwpx_cells(bk3.section_texts(sec3), sec3.start), ocr_cells([(7, "\n".join(ocr))]))
+            self.assertEqual({it.kind for it in items3}, {"B1"})                             # 고쳐진 것은 사라지고 표시만 하던 B1 만 남음
+            ed3 = Editor(bk3); log3 = ed3.apply(items3); ed3.save_copy(out)
+            self.assertTrue(all(l.ok for l in log3)); self.assertTrue(all("이미 표시" in l.note for l in log3))
+            x = zipfile.ZipFile(out).read("Contents/section0.xml").decode()
+            self.assertEqual(x.count('type="MEMO"'), 4 + len(items2))                        # 첫 구획 4 + 둘째 구획 메모, 세 번째 실행은 0

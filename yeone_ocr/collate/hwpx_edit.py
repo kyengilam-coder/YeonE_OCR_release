@@ -47,6 +47,10 @@ class Slot:
         setattr(self.holder, self.attr, v)
 
 
+class _AlreadyMarked(Exception):
+    """이전 실행에서 이미 색·메모를 붙인 자리 — 다시 붙이지 않는다."""
+
+
 @dataclass
 class Applied:
     item: Item
@@ -106,6 +110,17 @@ class Editor:
         self._memo_no = self._count_memos()
         self._short = ""
         self.log: list[Applied] = []
+        self._ours: set[str] = self._marked_char_prs()      # 이전 실행이 만든 색 글자 모양 id — 같은 자리를 또 표시하지 않기 위해
+
+    def _marked_char_prs(self) -> set[str]:
+        out = set()
+        try:
+            for el in self.doc.headers[0].element.iter(f"{HH}charPr"):
+                if (el.get("textColor") or "").upper() in (BLUE.upper(), RED.upper()):
+                    out.add(el.get("id", ""))
+        except Exception:
+            pass
+        return out
 
     # ----- 글자 모양 -----
     def _style_for(self, base_pr: str | None, color: str, shade: str) -> str:
@@ -256,6 +271,8 @@ class Editor:
             for it in sorted(its, key=lambda x: (x.start, x.end), reverse=True):
                 try:
                     self._apply_one(pel, it); self.log.append(Applied(it, True))
+                except _AlreadyMarked as e:
+                    self.log.append(Applied(it, True, str(e)))
                 except Exception as e:
                     self.log.append(Applied(it, False, f"{type(e).__name__}: {e}"))
             # python-hwpx 는 '바뀐' 섹션만 다시 쓴다. XML 을 직접 고쳤으니 바뀌었다고 알려 준다.
@@ -274,6 +291,13 @@ class Editor:
         slots = _slots(pel)
         if not slots:
             raise ValueError("문단에 글 노드가 없음")
+        if not auto:
+            if it.end > it.start:
+                over = [s for s in slots if s.start < it.end and s.end > it.start and s.end > s.start]
+                if over and all(s.run.get("charPrIDRef") in self._ours for s in over):
+                    raise _AlreadyMarked("이미 표시된 자리")
+            elif any(s.run.get("charPrIDRef") in self._ours and s.start <= it.start <= s.end for s in slots):
+                raise _AlreadyMarked("이미 표시된 자리")        # 폭 없는 표시(빈 run + 메모)가 그 자리에 이미 있음
         base_pr = self._locate(slots, it.start).run.get("charPrIDRef")
         pr = self._style_for(base_pr, color, shade)
         if auto:

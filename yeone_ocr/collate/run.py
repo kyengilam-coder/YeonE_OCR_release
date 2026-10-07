@@ -205,9 +205,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
         else:
             ed = Editor(book, memo=not getattr(args, "no_memo", False))
             applied = ed.apply(items)
-            out = getattr(args, "out", None) or str(Path(book.path).with_name(Path(book.path).stem.replace("_교정", "") + "_교정.hwpx"))
-            if os.path.abspath(out) == os.path.abspath(book.path) and "_교정" not in Path(book.path).stem:
-                out = str(Path(book.path).with_name(Path(book.path).stem + "_교정.hwpx"))
+            out = getattr(args, "out", None) or corrected_path(book.path)
             saved = ed.save_copy(out)
             ok = sum(1 for x in applied if x.ok); bad = [x for x in applied if not x.ok]
             log(f"반영 {ok}건" + (f", 실패 {len(bad)}건" if bad else "") + f" → 저장: {saved}")
@@ -221,6 +219,13 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     return {"section": a.name, "pages": pages, "summary": sm, "report": rep, "saved": saved, "items": items}
 
 
+def corrected_path(hwpx_path: str) -> str:
+    """원본 → <이름>_교정.hwpx. 이미 교정본이면 그 자리(같은 이름)."""
+    p = Path(hwpx_path)
+    stem = p.stem if p.stem.endswith("_교정") else p.stem + "_교정"
+    return str(p.with_name(stem + ".hwpx"))
+
+
 def cmd_collate(args):
     """명령줄 진입점. --list 면 색인만, --section 이면 그 구획을 대조(--apply 면 반영·저장)."""
     from ..pdfio import open_pdf
@@ -228,9 +233,22 @@ def cmd_collate(args):
     if not getattr(args, "hwpx", None) or not Path(args.hwpx).exists():
         log("--hwpx 파일이 필요합니다."); return 2
     pdf_doc = open_pdf(args.pdf); work = Work(args.pdf, args.work)
-    book = HwpxBook(args.hwpx)
     styles = [s for s in (getattr(args, "heading_styles", "") or "").split(",") if s.strip()] or None
-    anchors, pdf_anchors, matches = index_both(pdf_doc, book, getattr(args, "anchor_source", "auto") or "auto", styles)
+    src = getattr(args, "anchor_source", "auto") or "auto"
+    book = HwpxBook(args.hwpx)
+    anchors, pdf_anchors, matches = index_both(pdf_doc, book, src, styles)
+    # 교정본(<이름>_교정.hwpx)이 이미 있으면 거기에 이어서 고친다 — 앞서 고친 구획이 지워지지 않게.
+    # 구획 번호가 원본 기준으로 매겨지므로, 교정본의 기준 목록이 원본과 같을 때만 바꿔 탄다.
+    if True:   # 대조만 할 때도 교정본이 있으면 그 상태를 기준으로 비교한다(이미 고친 자리는 차이로 나오지 않게)
+        target = Path(getattr(args, "out", None) or corrected_path(args.hwpx))
+        if target.exists() and os.path.abspath(target) != os.path.abspath(args.hwpx):
+            book2 = HwpxBook(str(target))
+            a2, _, m2 = index_both(pdf_doc, book2, src, styles)
+            if len(a2) == len(anchors) and all(x.para == y.para for x, y in zip(a2, anchors)):
+                book, anchors, matches = book2, a2, m2
+                log(f"기존 교정본에 이어서 작업합니다(앞서 고친 구획 유지): {target.name}")
+            else:
+                log(f"⚠ 교정본 {target.name} 의 구획 목록이 원본과 달라 원본에서 다시 시작합니다. 저장하면 교정본이 덮어써집니다.")
     if not anchors:
         log("구획 기준을 찾지 못했습니다. HWPX 에 책갈피·제목 스타일이 없고 PDF 책갈피 이름도 본문에서 찾지 못했습니다. "
             "--anchor-source pdf 로 다시 하거나, 한컴에서 제목에 '제목' 스타일 또는 책갈피를 넣어 주십시오."); return 2

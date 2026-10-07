@@ -552,6 +552,8 @@ class App(tk.Tk):
         r2 = ttk.Frame(f, style="Panel.TFrame"); r2.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Label(r2, text="판독기·모델·API 키·속도는 [세로쓰기 인식] 탭의 설정을 따릅니다 · 읽기 모드: 가로쓰기 한문(간체)", style="Hint.TLabel").pack(side="left")
         ttk.Checkbutton(r2, text="세로쓰기 문헌(지침 그대로)", variable=self.v_cvert).pack(side="right", padx=(12, 0))
+        self.v_cforce = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r2, text="기록 있는 쪽도 다시 판독", variable=self.v_cforce).pack(side="right", padx=(12, 0))
 
         g = ttk.LabelFrame(tab, text="구획(책갈피·제목)"); g.pack(fill="both", expand=True, pady=(8, 0))
         r3 = ttk.Frame(g, style="Panel.TFrame"); r3.pack(fill="x", padx=8, pady=(6, 4))
@@ -738,7 +740,7 @@ class App(tk.Tk):
         else:
             extra = []
         argv = ["collate", self.pdf2(), "--work", str(self.work2()), "--hwpx", self.v_hwpx.get().strip(), "--anchor-index", str(idx),
-                "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts(print_offset=False)
+                "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts(print_offset=False, force=self.v_cforce.get())
         if apply: argv.append("--apply")
         if not self.v_cmemo.get(): argv.append("--no-memo")
         argv += ["--mode", "vertical" if self.v_cvert.get() else "horizontal_zh"]
@@ -782,7 +784,7 @@ class App(tk.Tk):
         p = self.v_pages.get().strip()
         return ["--pages", p] if p else []
 
-    def _read_opts(self, print_offset: bool = True) -> list[str]:
+    def _read_opts(self, print_offset: bool = True, force: bool | None = None) -> list[str]:
         o = ["--reader", self.v_reader.get(), "--upscale", self.v_up.get().strip() or "2"]
         if self.v_reader.get() == "gemini" and self.v_model.get().strip():
             o += ["--model", self.v_model.get().strip()]
@@ -790,7 +792,7 @@ class App(tk.Tk):
             o.append("--no-second-pass")
         if print_offset and self.v_off.get().strip():
             o += ["--print-offset", self.v_off.get().strip()]          # 책갈피 OCR 은 다른 책이라 인식 탭의 보정값을 쓰지 않는다
-        if self.v_force.get():
+        if (self.v_force.get() if force is None else force):
             o.append("--force")
         o += ["--workers", (self.v_workers.get().strip() or "6")]
         o += ["--second-model", self.v_model2.get().strip()]          # 빈 값이면 1차와 같은 모델, auto 면 자동
