@@ -188,10 +188,12 @@ class Collate(unittest.TestCase):
             self.skipTest("opencc 없음")
         # 幷(한국식)↔并: 차이가 아니다
         self.assertEqual(collate(hwpx_cells(["則在上者幷自吐去"], 0), ocr_cells([(1, "则在上者并自吐去")])), [])
-        # 幹(→干) vs 판독 于: 자형 혼동 + 번체 후보 여럿 → 자동 반영하지 않고 표시만
-        items = collate(hwpx_cells(["苦瓠之肉能幹"], 0), ocr_cells([(1, "苦瓠之肉能于")]), policy="all")
+        # 幹(→干) vs 판독 于: 干/于 묶음은 문맥 규칙(能 뒤 → 干)으로 HWPX 편 → 차이에서 뺀다
+        self.assertEqual(collate(hwpx_cells(["苦瓠之肉能幹"], 0), ocr_cells([(1, "苦瓠之肉能于")]), policy="all"), [])
+        # 凡 vs 판독 几(幾/几): 자형 혼동 + 번체 후보 여럿 → 자동 반영하지 않고 표시만
+        items = collate(hwpx_cells(["凡例十則"], 0), ocr_cells([(1, "几例十则")]), policy="all")
         self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)]); self.assertIn("헷갈리기", items[0].note)
-        self.assertIn("「幹」", items[0].hw_ctx); self.assertIn("「于」", items[0].oc_ctx)
+        self.assertIn("「凡」", items[0].hw_ctx); self.assertIn("「几」", items[0].oc_ctx)
         # 問 vs 间(1:1)은 그대로 A 자동
         items = collate(hwpx_cells(["津液充滿無問"], 0), ocr_cells([(1, "津液充满无间")]), policy="all")
         self.assertEqual([(it.kind, it.new, it.auto) for it in items], [("A", "間", True)]); self.assertEqual(items[0].hw_ctx, "津液充滿無「問」")
@@ -291,3 +293,40 @@ class Accumulate(unittest.TestCase):
             self.assertTrue(all(l.ok for l in log3)); self.assertTrue(all("이미 표시" in l.note for l in log3))
             x = zipfile.ZipFile(out).read("Contents/section0.xml").decode()
             self.assertEqual(x.count('type="MEMO"'), 4 + len(items2))                        # 첫 구획 4 + 둘째 구획 메모, 세 번째 실행은 0
+
+
+class GanYu(unittest.TestCase):
+    """于·干·於·幹·乾 묶음 — 문맥 규칙과 PDF 글자층 증인."""
+    def setUp(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+
+    def test_context_rule_trusts_hwpx(self):
+        from yeone_ocr.collate.collate import gan_yu_guess
+        self.assertEqual(gan_yu_guess("有從「於」走而性急"), "于"); self.assertEqual(gan_yu_guess("苦瓠之肉能「幹」冬瓜"), "干"); self.assertEqual(gan_yu_guess("「乾」薑"), "干")
+        self.assertEqual(gan_yu_guess("甲「於」乙"), "")
+        # 판독이 于→干 으로 잘못 읽어 幹 이 되는 경우: HWPX 於 가 전치사 자리 → 차이로 세지 않음
+        self.assertEqual(collate(hwpx_cells(["有從於走而性急也"], 0), ocr_cells([(1, "有从干走而性急也")])), [])
+        # 반대로 干→于: HWPX 幹 앞이 能 → HWPX 편
+        self.assertEqual(collate(hwpx_cells(["苦瓠之肉能幹"], 0), ocr_cells([(1, "苦瓠之肉能于")])), [])
+        # 문맥으로 못 가리면 표시만
+        items = collate(hwpx_cells(["甲於乙"], 0), ocr_cells([(1, "甲干乙")]), policy="all")
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)]); self.assertIn("干/于 혼동", items[0].note)
+        # 문맥 규칙이 판독 편이면 교정 후보로 남는다(HWPX 오탈): 生干 → 生於
+        items = collate(hwpx_cells(["生干斯長干斯"], 0), ocr_cells([(1, "生于斯长于斯")]), policy="all")
+        self.assertTrue(items); self.assertTrue(all(it.witness == "ocr" and it.new == "於" and it.auto for it in items))
+
+    def test_layer_witness(self):
+        from yeone_ocr.collate.collate import witness_filter
+        # 문맥으로 못 가린 B1 자리: 글자층이 HWPX 편이면 뺀다
+        items = collate(hwpx_cells(["甲於乙丙丁"], 0), ocr_cells([(3, "甲干乙丙丁")]), policy="all")
+        st = witness_filter(items, {3: "甲于乙丙丁"}); self.assertEqual(items, []); self.assertEqual((st["checked"], st["hwpx"]), (1, 1))
+        # 글자층이 판독 편이면 두 증인이 겹쳐 교정 후보(B2)로
+        items = collate(hwpx_cells(["甲於乙丙丁"], 0), ocr_cells([(3, "甲干乙丙丁")]), policy="all")
+        st = witness_filter(items, {3: "甲干乙丙丁"}); self.assertEqual([(it.kind, it.auto) for it in items], [("B2", True)]); self.assertIn("모두", items[0].note)
+        # 일반 A 차이도 글자층이 HWPX 편이면 뺀다(판독 오류)
+        items = collate(hwpx_cells(["津液充滿無問"], 0), ocr_cells([(5, "津液充满无间")]), policy="all")
+        witness_filter(items, {5: "津液充满无问"}); self.assertEqual(items, [])
+        # 글자층이 없으면 그대로
+        items = collate(hwpx_cells(["津液充滿無問"], 0), ocr_cells([(5, "津液充满无间")]), policy="all")
+        st = witness_filter(items, {}); self.assertEqual(len(items), 1); self.assertEqual(st["checked"], 0)

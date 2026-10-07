@@ -51,6 +51,7 @@ class Item:
     auto: bool = False         # 정책에 따라 실제로 반영할지
     hw_ctx: str = ""           # HWPX 앞뒤 글자(「」 안이 해당 자리)
     oc_ctx: str = ""           # 판독 앞뒤 글자
+    witness: str = ""          # 문맥 규칙·글자층이 어느 쪽 편인지(hwpx | ocr | "")
 
 
 def strip_marks(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -113,6 +114,52 @@ def _s2t_context(ocr: list[Char], i0: int, i1: int) -> str:
 
 def _confusable(a: str, b: str) -> bool:
     return a != b and any(a in g and b in g for g in CONFUSABLES)
+
+
+# ---------- 于·干·於·幹·乾 묶음: 판독기가 자주 섞는 자리라 문맥으로 가린다 ----------
+GAN_YU = set("于干於幹乾")
+YU_PREV = set("生至属由对关在甚大等见出始过归利合宜从行施用发成得走入居处位寓寄流注达通倍胜优劣异同基鉴源起终止限介存安死忠败毁立传闻问系乃莫及急缓近远轻重强弱多少高低先后易难善恶美丑长短久速溢伤益损助趋散聚托")   # 于 앞에 흔한 글자(간체)
+GAN_NEXT = set("姜燥涸枯渴涉支净预扰戈系犯结枝果货草品粮")      # 干 뒤에 흔한 글자
+GAN_PREV = set("能若相不焙晒阴风曝晾树主饼")                  # 干 앞에 흔한 글자
+
+
+def _split_ctx(ctx: str) -> tuple[str, str]:
+    """「」 앞뒤 글자를 (앞, 뒤)로."""
+    i, j = ctx.find("「"), ctx.find("」")
+    if i < 0 or j < 0:
+        return "", ""
+    return ctx[:i], ctx[j + 1:]
+
+
+def gan_yu_guess(hw_ctx: str) -> str:
+    """HWPX 문맥(앞뒤 글자)으로 그 자리가 于(於)인지 干(幹·乾)인지 짐작한다. 모르면 ""."""
+    pre, post = _split_ctx(hw_ctx)
+    pk = zh.compare_key(pre[-1]) if pre else ""; nk = zh.compare_key(post[0]) if post else ""
+    if nk and nk in GAN_NEXT:
+        return "干"
+    if pk and pk in GAN_PREV:
+        return "干"
+    if pk and pk in YU_PREV:
+        return "于"
+    return ""
+
+
+def resolve_gan_yu(items: list[Item]) -> None:
+    """于·干 묶음의 한 글자 차이: 문맥 규칙이 HWPX 편이면 차이에서 빼고(D), 판독 편이면 그대로 두되 혼동 규칙을 면제하고, 모르면 표시만(B1)."""
+    for it in items:
+        if it.action != "replace" or len(it.hwpx) != 1 or len(it.ocr) != 1:
+            continue
+        hk, ok = zh.compare_key(it.hwpx), zh.compare_key(it.ocr)
+        if not (it.hwpx in GAN_YU and it.ocr in GAN_YU and hk != ok and {hk, ok} <= {"于", "干"}):
+            continue
+        g = gan_yu_guess(it.hw_ctx)
+        if g == hk:
+            it.kind, it.witness = "D", "hwpx"; it.note = f"干/于 문맥 규칙: HWPX 「{it.hwpx}」 가 맞고 판독 「{it.ocr}」 이 자형 혼동으로 보임 — 차이에서 뺌"
+        elif g == ok:
+            it.witness = "ocr"; it.note = f"干/于 문맥 규칙도 판독 「{it.ocr}」 편 — HWPX 오탈로 보임"
+        else:
+            it.kind, it.action, it.new, it.auto = "B1", "mark", "", False
+            it.note = f"干/于 혼동 가능성: HWPX 「{it.hwpx}」 ↔ 판독 「{it.ocr}」, 문맥으로 가리지 못함 — 원본 확인"
 
 
 def _ctx(cells: list[Char], lo: int, hi: int) -> str:
@@ -195,9 +242,11 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item
                     items.append(Item("B2", "replace", para, start, end, g_text, seg_text, new, cands, page, "간체 한 글자가 여러 번체로 갈라짐", hw_ctx=hctx, oc_ctx=octx))
                 else:
                     items.append(Item("A", "replace", para, start, end, g_text, seg_text, new, [], page, "판독과 다름", hw_ctx=hctx, oc_ctx=octx))
-    # 혼동하기 쉬운 글자 + 번체 후보 여럿(B2) → 판독 오류일 수 있으니 표시만
+    # 于·干·於·幹·乾 묶음은 문맥으로 먼저 가린다
+    resolve_gan_yu(items)
+    # 혼동하기 쉬운 글자 + 번체 후보 여럿(B2) → 판독 오류일 수 있으니 표시만(문맥 규칙이 판독 편을 든 자리는 예외)
     for it in items:
-        if it.kind == "B2" and it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and _confusable(zh.compare_key(it.hwpx), it.ocr):
+        if it.kind == "B2" and it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and it.witness != "ocr" and _confusable(zh.compare_key(it.hwpx), it.ocr):
             it.kind, it.action, it.new = "B1", "mark", ""
             it.note = f"판독 글자 「{it.ocr}」 는 「{zh.compare_key(it.hwpx)}」 와 자형이 비슷해 헷갈리기 쉽고 번체 후보도 여럿({'/'.join(it.candidates)}) — 원본 확인"
     # 정책에 따라 자동 반영 여부
@@ -222,3 +271,56 @@ def summary(items: list[Item]) -> dict:
         if it.auto: out["auto"] += 1
         else: out["mark"] += 1
     return out
+
+
+# ---------- PDF 글자층을 제3의 증인으로 ----------
+def _layer_key(text: str) -> str:
+    return "".join(c.key for c in _cells(text or "", 0))
+
+
+def witness_filter(items: list[Item], layers: dict[int, str], policy: str = "all") -> dict:
+    """한 글자 차이마다 그 쪽 PDF 글자층(다른 OCR 엔진)에서 같은 자리를 찾아 본다.
+    글자층이 HWPX 와 같으면 판독 오류로 보고 차이에서 뺀다. 글자층이 판독과 같으면 두 증인이 겹치므로 표시만 하던 干/于 자리도 교정 후보(B2)로 올린다.
+    돌려주는 값은 통계 {"checked", "hwpx", "ocr", "none"}."""
+    import re
+    keys = {pg: _layer_key(t) for pg, t in (layers or {}).items() if t}
+    st = {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0}
+    for it in items:
+        if it.action not in ("replace", "mark") or len(it.hwpx) != 1 or len(it.ocr) != 1 or it.kind == "D":
+            continue
+        lk = keys.get(it.pdf_page)
+        if not lk:
+            continue
+        pre, post = _split_ctx(it.oc_ctx)
+        pk, nk = _layer_key(pre), _layer_key(post)
+        found = None
+        for a, b in ((4, 4), (3, 3), (4, 0), (0, 4), (2, 2), (3, 1), (1, 3), (3, 0), (0, 3)):
+            if len(pk) < a or len(nk) < b or a + b < 3:
+                continue
+            pat = (re.escape(pk[-a:]) if a else "") + "(.)" + (re.escape(nk[:b]) if b else "")
+            if not a: pat = "(?:^|(?<=.))" + pat        # 앞 문맥이 없으면 어디서든
+            ms = re.findall(pat, lk)
+            if len(ms) == 1:
+                found = ms[0]; break
+            if len(ms) > 1 and a + b >= 4:
+                found = ms[0]; break
+        st["checked"] += 1
+        if found is None:
+            st["none"] += 1; continue
+        hk, ok = zh.compare_key(it.hwpx), zh.compare_key(it.ocr)
+        if found == hk:
+            st["hwpx"] += 1
+            it.kind, it.witness = "D", "layer=hwpx"; it.note = f"PDF 글자층도 HWPX 「{it.hwpx}」 와 같음 — 판독 「{it.ocr}」 이 오류로 보여 차이에서 뺌"
+        elif found == ok:
+            st["ocr"] += 1
+            it.witness = (it.witness + "+" if it.witness else "") + "layer=ocr"
+            if it.kind == "B1" and "혼동" in it.note:          # 두 증인이 겹치는 干/于 자리 → 교정 후보로
+                new = zh.to_traditional(it.ocr)
+                cands = zh.candidates(it.ocr)
+                it.kind, it.action, it.new, it.candidates = ("B2" if len(cands) > 1 else "A"), "replace", new, (cands if len(cands) > 1 else [])
+                it.auto = policy == "all" if it.kind == "B2" else policy in ("sure", "all")
+                it.note = f"판독과 PDF 글자층이 모두 「{it.ocr}」 — HWPX 「{it.hwpx}」 가 오탈로 보임"
+        else:
+            st["none"] += 1
+    items[:] = [it for it in items if it.kind != "D"]
+    return st

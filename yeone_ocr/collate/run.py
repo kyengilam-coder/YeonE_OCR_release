@@ -11,7 +11,7 @@ from pathlib import Path
 from . import zh
 from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name
 from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages
-from .collate import hwpx_cells, ocr_cells, collate, summary, Item
+from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter
 from .hwpx_edit import Editor
 
 POLICIES = {"memo": "메모만(글자 안 바꿈)", "sure": "확실한 것만(A) 자동", "all": "전부 자동(A·B2·누락 삽입), B1·C 는 표시"}
@@ -177,16 +177,21 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
         log(f"PDF 책갈피에 짝이 없어 PDF 글자층에서 「{a.name}」 을 찾음 → {pages[0]}~{pages[1]}쪽")
     log(f"구획 「{a.name}」: HWPX 문단 {sec.start}~{sec.end - 1}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
     ensure_pages_read(args, work, pdf_doc, pages)
-    oc_all = []
+    oc_all = []; layers: dict[int, str] = {}
     from ..cli import remerge_record
+    from ..pdfio import text_layer
     for n in range(pages[0], pages[1] + 1):
         rec = work.load_record(n)
         if rec:
+            try:
+                tlp = work.textlayer_path(n)
+                layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else text_layer(pdf_doc, n).plain()
+            except Exception:
+                layer = ""
+            layers[n] = layer
             if rec.get("pass1") and rec.get("pass2"):
                 # 저장된 1차·2차로 비교 표시를 현재 모드 규칙(부호·간체 접기)으로 다시 계산한다. 모델 호출 없음
                 try:
-                    tlp = work.textlayer_path(n)
-                    layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else ""
                     rec = remerge_record(rec, layer); work.save_record(n, rec)
                 except Exception as e:
                     log(f"  {n}쪽 비교 다시 계산 실패(기존 기록 사용): {e}")
@@ -194,6 +199,9 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     oc_paras, note = trim_to_section(oc_all, a.name, sec.next_anchor.name if sec.next_anchor else (m.pdf and None))
     policy = getattr(args, "policy", "all") or "all"
     items = collate(hwpx_cells(hw_paras, sec.start), ocr_cells(oc_paras), policy=policy)
+    wst = witness_filter(items, layers, policy)
+    if wst["checked"]:
+        log(f"PDF 글자층 대조: 한 글자 차이 {wst['checked']}건 중 글자층이 HWPX 편 {wst['hwpx']}건(차이에서 뺌) · 판독 편 {wst['ocr']}건 · 못 찾음 {wst['none']}건")
     sm = summary(items)
     log(f"대조: 자동 교정 {sm['auto']}건 · 표시만 {sm['mark']}건 (A {sm['A']} · B1 {sm['B1']} · B2 {sm['B2']} · C {sm['C']})" + (f" · {note}" if note else ""))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
