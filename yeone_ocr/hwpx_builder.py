@@ -116,12 +116,9 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
                     t.cell(i, j).text = cell
             stats["tables"] += 1
         elif b.type == "uncertain":
-            para("[판독 확인 필요]", "chk_h")
-            if b.items:
-                for it in b.items:
-                    para("· " + it, "chk", marks=True); stats["uncertain_items"] += 1
-            else:
-                para("없음", "chk")
+            para(b.text or "[판독 확인 필요]", "chk_h")
+            for it in b.items:
+                para("· " + it, "chk", marks=True); stats["uncertain_items"] += 1
         elif b.type == "report":
             para("〔작업 기록〕", "h2")
             for line in b.text.splitlines():

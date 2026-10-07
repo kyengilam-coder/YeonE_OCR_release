@@ -349,3 +349,35 @@ class GuiConfig(unittest.TestCase):
         new = {"speed_defaults": SPEED_DEFAULTS_VERSION, "workers": 2, "second_model": ""}
         up3 = upgrade_config(new)
         self.assertEqual(up3["workers"], 2); self.assertEqual(up3["second_model"], "")
+
+
+class CheckList(unittest.TestCase):
+    def _rec(self):
+        return {"file": "x.pdf", "pdf_page": 5, "reader": "test", "verify": [], "crops": {},
+                "merged": PageReading(pdf_page=5, print_page="34", regions=[
+                    Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="三層 六十〔睿/透〕卦 山은 〔疑: 龍〕이다")])])],
+                    uncertain=[Uncertain(region_id="b", col_from_right=1, position="아래", context="「層六十〔睿/透〕卦」"),
+                               Uncertain(region_id="b", col_from_right=1, position="위", context="「山은 〔疑: 龍〕이다」"),
+                               Uncertain(region_id="", context="어느 영역에도 들지 않은 글 기둥 (x 0.81~0.82, y 0.13~0.32) — 원본 확인"),
+                               Uncertain(region_id="b", col_from_right=2, context="「〔疑: 針〕」 — 본문에 표시 못 함")]).model_dump()}
+
+    def test_extra_keeps_only_items_not_shown_inline(self):
+        unc = [b for b in assemble_blocks([self._rec()]) if b.type == "uncertain"]
+        self.assertEqual(len(unc), 1)
+        self.assertEqual(len(unc[0].items), 2)                                  # 글 기둥 + 본문에 없는 〔疑: 針〕
+        self.assertTrue(unc[0].items[0].startswith("어느 영역에도"))
+        self.assertIn("본문에 표시하지 못한", unc[0].text)
+
+    def test_all_and_none(self):
+        unc = [b for b in assemble_blocks([self._rec()], check_list="all") if b.type == "uncertain"]
+        self.assertEqual(len(unc[0].items), 4); self.assertEqual(unc[0].text, "[판독 확인 필요]")
+        self.assertEqual([b for b in assemble_blocks([self._rec()], check_list="none") if b.type == "uncertain"], [])
+        rec = self._rec(); rec["merged"]["uncertain"] = rec["merged"]["uncertain"][:2]   # 전부 본문에 표시된 쪽 → 목록 자체가 없음
+        self.assertEqual([b for b in assemble_blocks([rec]) if b.type == "uncertain"], [])
+        with self.assertRaises(ValueError): assemble_blocks([self._rec()], check_list="some")
+
+    def test_builds_without_check_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            rec = self._rec(); rec["merged"]["uncertain"] = rec["merged"]["uncertain"][:2]
+            out = os.path.join(td, "o.hwpx"); st = build_hwpx(assemble_blocks([rec]), out)
+            self.assertEqual(st["uncertain_items"], 0); self.assertGreaterEqual(st["marks"], 2); self.assertEqual(check_hwpx_file(out), [])

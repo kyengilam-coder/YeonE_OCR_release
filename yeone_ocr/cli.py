@@ -467,7 +467,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         chunks = [records[i:i + args.split] for i in range(0, len(records), args.split)] if getattr(args, "split", 0) and args.split > 0 else [records]
     ok = True
     for ci, chunk in enumerate(chunks):
-        blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset)
+        blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
+                                 check_list=getattr(args, "check_list", "extra") or "extra")
         if not interim and args.append_report and ci == len(chunks) - 1:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
@@ -628,6 +629,8 @@ def build_parser():
         p.add_argument("--append-report", action="store_true", help="문서 끝에 〔작업 기록〕 덧붙임")
         p.add_argument("--no-highlight", action="store_true", help="의심 자리를 붉은 글자·노란 형광펜으로 칠하지 않음")
         p.add_argument("--no-page-breaks", action="store_true", help="원본 쪽마다 쪽 나누기를 넣지 않음")
+        p.add_argument("--check-list", choices=["extra", "none", "all"], default="extra",
+                       help="쪽 끝 확인 목록: extra=본문에 표시 못 한 항목만(기본), none=없음, all=전부(본문 표시와 겹침)")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)

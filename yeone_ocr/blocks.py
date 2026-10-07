@@ -1,5 +1,6 @@
 """쪽별 판독 기록을 문서 블록(제목·문단·그림·표·확인 필요 목록)의 한 줄기로 엮는다. HWPX/DOCX 조립이 공통으로 쓴다."""
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from .schema import PageReading, Region, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, SKIP_KINDS, paragraph_text
@@ -29,7 +30,27 @@ def meta_line(rec: dict, whole_offset: int | None) -> str:
     return "[" + " / ".join(parts) + "]"
 
 
-def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: int | None = None) -> list[Block]:
+MARK_RE = re.compile(r"〔[^〔〕]*〕")
+CHECK_LIST_MODES = ("extra", "none", "all")   # 쪽 끝 확인 목록: 본문에 표시 못 한 것만 | 없음 | 전부
+CHECK_HEADER = {"extra": "[확인 필요 — 본문에 표시하지 못한 항목]", "all": "[판독 확인 필요]"}
+
+
+def page_text_of(pr: PageReading) -> str:
+    """쪽의 본문·제목·표 글을 한 줄로. 확인 항목이 본문에 이미 표시돼 있는지 볼 때 쓴다."""
+    parts = []
+    for reg in pr.regions:
+        if reg.kind in SKIP_KINDS:
+            continue
+        parts.append(reg.title_text)
+        parts.extend(paragraph_text(p) for p in reg.paragraphs)
+        parts.extend(c for r in reg.table_rows for c in r.cells)
+    return "".join(parts)
+
+
+def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: int | None = None,
+                    check_list: str = "extra") -> list[Block]:
+    if check_list not in CHECK_LIST_MODES:
+        raise ValueError(f"check_list 는 {CHECK_LIST_MODES} 중 하나: {check_list!r}")
     blocks: list[Block] = []
     for rec in records:
         pr = PageReading.model_validate(rec["merged"])
@@ -81,7 +102,12 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     if t:
                         blocks.append(Block(type="para", text=t, kind="기타", page=n))
         items = []
+        shown = page_text_of(pr) if check_list == "extra" else ""
         for u in pr.uncertain:
+            if check_list == "extra":
+                marks = MARK_RE.findall(u.context)
+                if marks and all(m in shown for m in marks):
+                    continue                       # 본문에 〔a/b〕·〔疑: ○〕 로 이미 표시된 자리 — 목록에 되풀이하지 않음
             where = []
             if u.region_id: where.append(u.region_id)
             if u.col_from_right: where.append(f"오른쪽에서 {u.col_from_right}번째 열")
@@ -90,5 +116,6 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         for iss in rec.get("verify") or []:
             if iss["level"] == "error":
                 items.append(f"구조 검사: {iss['rule']} ({iss['where']}) — {iss['msg']}")
-        blocks.append(Block(type="uncertain", items=items, page=n))
+        if check_list != "none" and items:
+            blocks.append(Block(type="uncertain", items=items, page=n, text=CHECK_HEADER[check_list]))
     return blocks

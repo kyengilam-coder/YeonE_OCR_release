@@ -18,7 +18,8 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "last_pdf": ""}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "extra", "last_pdf": ""}
+CHECK_LIST_LABELS = {"extra": "본문에 표시 못 한 것만", "none": "없음", "all": "전부(본문 표시와 겹침)"}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -315,6 +316,7 @@ class App(tk.Tk):
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
+        self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "extra"), CHECK_LIST_LABELS["extra"]))
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
         self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
@@ -357,8 +359,11 @@ class App(tk.Tk):
         ttk.Checkbutton(df, text="원본 쪽마다 쪽 나누기", variable=self.v_pb).grid(row=1, column=0, sticky="w", **pad)
         ttk.Checkbutton(df, text="앞 쪽에서 이어지는 문단 잇기", variable=self.v_join).grid(row=2, column=0, sticky="w", **pad)
         ttk.Checkbutton(df, text="DOCX 도 함께 만들기", variable=self.v_docx).grid(row=3, column=0, sticky="w", **pad)
-        ttk.Label(df, text="가로쓰기 정리본 · 함초롬바탕 · 도판은 원본 이미지", style="Hint.TLabel").grid(row=4, column=0, sticky="w", **pad)
-        self._btn(df, "설정 저장", self.save_settings, width=10).grid(row=5, column=0, sticky="e", pady=(6, 0))
+        cl = ttk.Frame(df, style="Panel.TFrame"); cl.grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(cl, text="쪽 끝 확인 목록").pack(side="left", padx=(0, 6))
+        ttk.Combobox(cl, textvariable=self.v_chk, values=list(CHECK_LIST_LABELS.values()), state="readonly", width=22).pack(side="left")
+        ttk.Label(df, text="가로쓰기 정리본 · 함초롬바탕 · 도판은 원본 이미지", style="Hint.TLabel").grid(row=5, column=0, sticky="w", **pad)
+        self._btn(df, "설정 저장", self.save_settings, width=10).grid(row=6, column=0, sticky="e", pady=(6, 0))
 
         # ---- 실행 ----
         act = ttk.Frame(root, style="Panel.TFrame", padding=10); act.pack(fill="x", pady=(8, 0))
@@ -440,7 +445,11 @@ class App(tk.Tk):
         if not self.v_join.get(): o.append("--no-join-pages")
         if not self.v_hl.get(): o.append("--no-highlight")
         if not self.v_pb.get(): o.append("--no-page-breaks")
+        o += ["--check-list", self.check_list_mode()]
         return o
+
+    def check_list_mode(self) -> str:
+        return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "extra")
 
     def _prepare_env(self) -> bool:
         if self.v_reader.get() == "gemini":
@@ -580,7 +589,7 @@ class App(tk.Tk):
     def save_settings(self, quiet=False):
         self.cfg.update({"pages": self.v_pages.get(), "print_offset": self.v_off.get(), "upscale": self.v_up.get(), "reader": self.v_reader.get(),
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
-                         "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(),
+                         "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
                          "workers": int(self.v_workers.get() or 6), "second_model": self.v_model2.get().strip(),
                          "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "last_pdf": self.pdf()})
         save_config(self.cfg)

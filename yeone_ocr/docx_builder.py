@@ -70,9 +70,9 @@ def build_docx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
                     t.cell(i, j).text = cell
             stats["tables"] += 1
         elif b.type == "uncertain":
-            para("[판독 확인 필요]", 9.5, bold=True, color="#666666", font=FONT_HEAD)
-            for it in (b.items or ["없음"]):
-                para(("· " + it) if b.items else it, 9, color="#666666", marks=True)
+            para(b.text or "[판독 확인 필요]", 9.5, bold=True, color="#666666", font=FONT_HEAD)
+            for it in b.items:
+                para("· " + it, 9, color="#666666", marks=True)
         elif b.type == "report":
             para("〔작업 기록〕", 14, bold=True, font=FONT_HEAD)
             for line in b.text.splitlines():
