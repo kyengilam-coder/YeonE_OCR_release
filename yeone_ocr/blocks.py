@@ -31,7 +31,7 @@ def meta_line(rec: dict, whole_offset: int | None) -> str:
 
 
 MARK_RE = re.compile(r"〔[^〔〕]*〕")
-CHECK_LIST_MODES = ("extra", "none", "all")   # 쪽 끝 확인 목록: 본문에 표시 못 한 것만 | 없음 | 전부
+CHECK_LIST_MODES = ("none", "extra", "all")   # 쪽 끝 확인 목록: 없음(기본) | 본문에 표시 못 한 것만 | 전부. 전체 목록은 검수 화면에
 CHECK_HEADER = {"extra": "[확인 필요 — 본문에 표시하지 못한 항목]", "all": "[판독 확인 필요]"}
 
 
@@ -48,7 +48,7 @@ def page_text_of(pr: PageReading) -> str:
 
 
 def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: int | None = None,
-                    check_list: str = "extra") -> list[Block]:
+                    check_list: str = "none") -> list[Block]:
     if check_list not in CHECK_LIST_MODES:
         raise ValueError(f"check_list 는 {CHECK_LIST_MODES} 중 하나: {check_list!r}")
     blocks: list[Block] = []

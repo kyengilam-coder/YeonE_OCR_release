@@ -1,9 +1,9 @@
 """검수용 정적 HTML. 왼쪽 원본 쪽 이미지, 오른쪽 판독문·확인 필요 목록·기존 OCR 과의 차이·구조 검사 결과."""
 from __future__ import annotations
-import html, os
+import html, os, re
 from pathlib import Path
 from .state import Work
-from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, paragraph_text
+from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, paragraph_text, bbox_frac
 
 CSS = """
 body{font-family:'Noto Serif KR','Batang','NanumMyeongjo',serif;margin:0;background:#f4efe4;color:#231c18}
@@ -11,7 +11,14 @@ header{padding:12px 20px;background:#3b1b14;color:#f1e7cf;display:flex;gap:16px;
 header h1{font-size:18px;margin:0}header small{opacity:.8}
 .page{display:grid;grid-template-columns:minmax(280px,42%) 1fr;gap:16px;padding:16px 20px;border-top:3px solid #b99552;background:#faf6ec}
 .page:nth-child(even){background:#f1e9d6}
-.img img{width:100%;height:auto;border:1px solid #c9b88a;background:#fff}
+.img img{width:100%;height:auto;border:1px solid #c9b88a;background:#fff;display:block}
+.sheet{position:relative;display:inline-block;width:100%}
+.box{position:absolute;box-sizing:border-box;border:1px solid rgba(90,74,62,.55);pointer-events:none}
+.box span{position:absolute;left:0;top:-14px;font-size:10px;line-height:12px;padding:0 3px;background:rgba(90,74,62,.75);color:#fff;border-radius:2px;white-space:nowrap}
+.box.img-kind{border-color:rgba(31,95,191,.8)}.box.img-kind span{background:rgba(31,95,191,.85)}
+.box.title{border-color:rgba(193,52,31,.8)}.box.title span{background:rgba(193,52,31,.85)}
+.box.orphan{border:2px dashed #b3261e;background:rgba(179,38,30,.12)}.box.orphan span{background:#b3261e;top:auto;bottom:-14px}
+.legend{font-size:11px;color:#5a4a3e;margin-top:4px}
 .img .crops{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.img .crops img{width:120px}
 .meta{font-size:13px;color:#5a4a3e;margin-bottom:8px}.meta b{color:#c1341f}
 .reg{margin:8px 0;padding:8px 10px;border-left:4px solid #b99552;background:rgba(255,255,255,.55);border-radius:4px}
@@ -31,6 +38,39 @@ def _mark(t: str) -> str:
     return t.replace("〔", "<mark>〔").replace("〕", "〕</mark>")
 
 
+ORPHAN_RE = re.compile(r"가로 (\d+)~(\d+)%, 세로 (\d+)~(\d+)%")
+ORPHAN_RE_OLD = re.compile(r"x (\d\.\d+)~(\d\.\d+), y (\d\.\d+)~(\d\.\d+)")
+
+
+def orphan_boxes(pr: PageReading) -> list[tuple[float, float, float, float]]:
+    """확인 항목 글에서 '영역 밖 글줄' 좌표를 읽어 (x0,y0,x1,y1) 비율로. 새 표기(가로 a~b%)와 옛 표기(x 0.48~0.49) 모두 읽는다."""
+    out = []
+    for u in pr.uncertain:
+        m = ORPHAN_RE.search(u.context)
+        if m:
+            x0, x1, y0, y1 = (int(v) / 100 for v in m.groups()); out.append((x0, y0, x1, y1)); continue
+        m = ORPHAN_RE_OLD.search(u.context)
+        if m:
+            x0, x1, y0, y1 = (float(v) for v in m.groups()); out.append((x0, y0, x1, y1))
+    return out
+
+
+def overlay_boxes(pr: PageReading) -> str:
+    """원본 이미지 위에 겹쳐 그릴 상자들: 모델이 나눈 영역(회색=문자, 파랑=도판, 빨강=제목)과 영역 밖 글줄 흔적(붉은 점선)."""
+    def style(fr):
+        x0, y0, x1, y1 = fr
+        return f"left:{x0 * 100:.2f}%;top:{y0 * 100:.2f}%;width:{max(0.3, (x1 - x0) * 100):.2f}%;height:{max(0.3, (y1 - y0) * 100):.2f}%"
+    parts = []
+    for reg in pr.regions:
+        if len(reg.bbox) != 4:
+            continue
+        cls = "img-kind" if reg.kind in IMAGE_KINDS else ("title" if reg.kind in TITLE_KINDS else "")
+        parts.append(f"<div class='box {cls}' style='{style(bbox_frac(reg.bbox))}'><span>{html.escape(reg.id)} {html.escape(reg.kind)}</span></div>")
+    for i, fr in enumerate(orphan_boxes(pr), 1):
+        parts.append(f"<div class='box orphan' style='{style(fr)}'><span>영역 밖 글줄 {i}</span></div>")
+    return "".join(parts)
+
+
 def make_review(work: Work, records: list[dict], out_path: str | None = None) -> str:
     out = Path(out_path) if out_path else work.dir / "review.html"
     parts = [f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>검수 · {html.escape(work.pdf_path.name)}</title><style>{CSS}</style></head><body>",
@@ -40,7 +80,8 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None) ->
         n = pr.pdf_page
         img = os.path.relpath(work.page_image_path(n), out.parent)
         sts = " ".join(f"<span>{html.escape(s)}</span>" for s in work.statuses(n))
-        parts.append(f"<section class=page id=p{n}><div class=img><img src='{img}' loading=lazy alt='PDF {n}쪽'>")
+        parts.append(f"<section class=page id=p{n}><div class=img><div class=sheet><img src='{img}' loading=lazy alt='PDF {n}쪽'>{overlay_boxes(pr)}</div>"
+                     "<div class=legend>상자: 회색 = 문자 영역 · 파랑 = 도판 · 빨강 = 제목 · 붉은 점선 = 영역 밖 글줄 흔적(모델이 어느 영역에도 넣지 않음, 확인 필요)</div>")
         crops = rec.get("crops") or {}
         if crops:
             parts.append("<div class=crops>" + "".join(f"<figure><img src='{os.path.relpath(c['path'], out.parent)}' alt='{k}'><figcaption style='font-size:11px'>{k} {'⚠ 외곽 '+','.join(c['touching']) if c.get('touching') else '외곽 OK'}</figcaption></figure>" for k, c in crops.items()) + "</div>")
@@ -67,7 +108,7 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None) ->
             if reg.note:
                 parts.append(f"<small>메모: {html.escape(reg.note)}</small>")
             parts.append("</div>")
-        parts.append("<h4>판독 확인 필요</h4><ul class=unc>" + ("".join(f"<li>{html.escape(u.region_id)} {('오른쪽에서 '+str(u.col_from_right)+'번째 열 ') if u.col_from_right else ''}{html.escape(u.position)} {_mark(u.context)}</li>" for u in pr.uncertain) or "<li>없음</li>") + "</ul>")
+        parts.append("<h4>판독 확인 필요 <small style='font-weight:normal'>(HWPX 에는 넣지 않음. 본문의 〔 〕 표시와 이 목록으로 원본과 대조)</small></h4><ul class=unc>" + ("".join(f"<li>{html.escape(u.region_id)} {('오른쪽에서 '+str(u.col_from_right)+'번째 열 ') if u.col_from_right else ''}{html.escape(u.position)} {_mark(u.context)}</li>" for u in pr.uncertain) or "<li>없음</li>") + "</ul>")
         ver = rec.get("verify") or []
         parts.append("<h4>구조 검사</h4><ul class=ver>" + ("".join(f"<li class={i['level']}>{html.escape(i['rule'])} ({html.escape(i['where'])}) — {html.escape(i['msg'])}</li>" for i in ver) or "<li>이상 없음</li>") + "</ul>")
         td = rec.get("textlayer_diff") or {}

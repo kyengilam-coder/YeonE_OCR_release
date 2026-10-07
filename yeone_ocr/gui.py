@@ -18,8 +18,8 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "extra", "last_pdf": ""}
-CHECK_LIST_LABELS = {"extra": "본문에 표시 못 한 것만", "none": "없음", "all": "전부(본문 표시와 겹침)"}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": ""}
+CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -47,7 +47,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 """
 
 
-SPEED_DEFAULTS_VERSION = 2  # 0.4.1: 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기
+SPEED_DEFAULTS_VERSION = 3  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음
 
 
 def upgrade_config(cfg: dict) -> dict:
@@ -59,6 +59,8 @@ def upgrade_config(cfg: dict) -> dict:
         if not str(cfg.get("second_model", "")).strip():
             cfg["second_model"] = DEFAULTS["second_model"]
         cfg.setdefault("use_cache", True); cfg.setdefault("second_thinking_low", True)
+    if ver < 3 and cfg.get("check_list", "none") == "extra":
+        cfg["check_list"] = "none"
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
     return cfg
 
@@ -192,16 +194,20 @@ class EstimateDialog(tk.Toplevel):
         self.title("비용 미리 보기"); self.resizable(False, False)
         f = ttk.Frame(self, padding=12); f.grid()
         self.lbl = ttk.Label(f, text=text, justify="left", wraplength=620); self.lbl.grid(row=0, column=0, columnspan=6, sticky="w")
-        model = app.v_model.get().strip(); pr = (app.cfg.get("prices") or {}).get(model, {})
-        ttk.Label(f, text=f"'{model}' 단가 (USD / 100만 토큰)  입력").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        self.e_in = ttk.Entry(f, width=8); self.e_in.insert(0, str(pr.get("in", "") or "")); self.e_in.grid(row=1, column=1, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="출력").grid(row=1, column=2, sticky="e", pady=(10, 0))
-        self.e_out = ttk.Entry(f, width=8); self.e_out.insert(0, str(pr.get("out", "") or "")); self.e_out.grid(row=1, column=3, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="원/달러").grid(row=1, column=4, sticky="e", pady=(10, 0))
-        self.e_fx = ttk.Entry(f, width=8); self.e_fx.insert(0, str(app.cfg.get("fx_krw", "") or "")); self.e_fx.grid(row=1, column=5, sticky="w", pady=(10, 0))
-        ttk.Label(f, text="요금표: https://ai.google.dev/pricing  (단가는 모델마다 저장됩니다)", foreground="#666").grid(row=2, column=0, columnspan=6, sticky="w")
+        from .estimate import resolve_price, PRICES_DATE
+        model = app.v_model.get().strip(); pr = resolve_price(model, app.cfg.get("prices") or {}) or {}
+        fx, _ = app.fx_setting()
+        ttk.Label(f, text=f"단가·환율은 자동으로 넣습니다(내장 요금표 {PRICES_DATE} · 환율 자동 조회). 요금이 바뀌었을 때만 아래를 고쳐 저장하십시오.",
+                  foreground="#666", wraplength=620, justify="left").grid(row=1, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        ttk.Label(f, text=f"'{model}' 단가 (USD / 100만 토큰)  입력").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.e_in = ttk.Entry(f, width=8); self.e_in.insert(0, f"{pr['in']:g}" if pr else ""); self.e_in.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(f, text="출력").grid(row=2, column=2, sticky="e", pady=(6, 0))
+        self.e_out = ttk.Entry(f, width=8); self.e_out.insert(0, f"{pr['out']:g}" if pr else ""); self.e_out.grid(row=2, column=3, sticky="w", pady=(6, 0))
+        ttk.Label(f, text="원/달러").grid(row=2, column=4, sticky="e", pady=(6, 0))
+        self.e_fx = ttk.Entry(f, width=8); self.e_fx.insert(0, f"{fx:.0f}" if fx else ""); self.e_fx.grid(row=2, column=5, sticky="w", pady=(6, 0))
         b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=6, pady=(10, 0))
-        ttk.Button(b, text="단가 저장·다시 계산", command=self.save).pack(side="left", padx=4)
+        ttk.Button(b, text="고친 값으로 다시 계산", command=self.save).pack(side="left", padx=4)
+        ttk.Button(b, text="자동값으로 되돌리기", command=self.reset).pack(side="left", padx=4)
         if go:
             ttk.Button(b, text="계속 실행", command=self.ok).pack(side="left", padx=4)
         ttk.Button(b, text="닫기" if not go else "취소", command=self.destroy).pack(side="left", padx=4)
@@ -215,6 +221,16 @@ class EstimateDialog(tk.Toplevel):
             except ValueError: return 0.0
         prices[model] = {"in": num(self.e_in.get()), "out": num(self.e_out.get())}
         self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = self.e_fx.get().strip(); save_config(self.app.cfg)
+        self.lbl.configure(text=self.app.estimate_text())
+
+    def reset(self):
+        model = self.app.v_model.get().strip()
+        prices = dict(self.app.cfg.get("prices") or {}); prices.pop(model, None)
+        self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = ""; save_config(self.app.cfg)
+        from .estimate import resolve_price
+        pr = resolve_price(model, {}) or {}; fx, _ = self.app.fx_setting()
+        for e, v in ((self.e_in, f"{pr['in']:g}" if pr else ""), (self.e_out, f"{pr['out']:g}" if pr else ""), (self.e_fx, f"{fx:.0f}" if fx else "")):
+            e.delete(0, "end"); e.insert(0, v)
         self.lbl.configure(text=self.app.estimate_text())
 
     def ok(self):
@@ -235,6 +251,8 @@ class App(tk.Tk):
         self._build()
         self.after(100, self._poll)
         self.after(400, self.check_packages)
+        self._fx: tuple[float, str] | None = None
+        threading.Thread(target=self._fetch_fx, daemon=True).start()
         if self.cfg.get("last_pdf") and Path(self.cfg["last_pdf"]).exists():
             self.v_pdf.set(self.cfg["last_pdf"]); self.refresh_table()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -316,7 +334,7 @@ class App(tk.Tk):
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
-        self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "extra"), CHECK_LIST_LABELS["extra"]))
+        self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "none"), CHECK_LIST_LABELS["none"]))
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
         self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
@@ -449,7 +467,7 @@ class App(tk.Tk):
         return o
 
     def check_list_mode(self) -> str:
-        return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "extra")
+        return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "none")
 
     def _prepare_env(self) -> bool:
         if self.v_reader.get() == "gemini":
@@ -596,17 +614,35 @@ class App(tk.Tk):
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
 
+    def _fetch_fx(self):
+        try:
+            from .estimate import fetch_fx_krw
+            self._fx = fetch_fx_krw()
+        except Exception:
+            self._fx = None
+
+    def fx_setting(self) -> tuple[float | None, str]:
+        """환율: 직접 입력값 > 자동 조회값 > (없음 → estimate 가 기본값을 씀)."""
+        fx = str(self.cfg.get("fx_krw") or "").strip()
+        if fx:
+            try: return float(fx), "직접 입력"
+            except ValueError: pass
+        if self._fx:
+            return self._fx
+        return None, ""
+
     def estimate_text(self) -> str:
-        """현재 설정으로 호출·토큰·비용 어림 글."""
+        """현재 설정으로 호출·토큰·비용 어림 글. 단가는 내장 요금표, 환율은 자동 조회라 따로 넣을 것이 없다."""
         try:
             from .estimate import estimate, format_estimate
             from .pdfio import open_pdf, parse_pages
             from .state import Work
             doc = open_pdf(self.pdf()); pages = parse_pages(self.v_pages.get().strip() or None, len(doc))
             w = Work(self.pdf(), str(self.work()))
-            fx = self.cfg.get("fx_krw") or ""
+            fx, fx_src = self.fx_setting()
             e = estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
-                         prices=self.cfg.get("prices") or {}, fx_krw=float(fx) if fx else None, records=[] if self.v_force.get() else w.records(pages))
+                         second_model=self.v_model2.get().strip(), use_cache=self.v_cache.get(),
+                         prices=self.cfg.get("prices") or {}, fx_krw=fx, fx_source=fx_src, records=[] if self.v_force.get() else w.records(pages))
             return format_estimate(e)
         except ModuleNotFoundError as e:
             return f"패키지가 없어 계산하지 못했습니다: {e.name}. [필요한 패키지 설치·점검] 을 누르십시오."

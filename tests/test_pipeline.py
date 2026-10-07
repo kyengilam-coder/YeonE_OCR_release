@@ -66,7 +66,7 @@ class SchemaMerge(unittest.TestCase):
         rr2 = {"b": RegionReread(columns=[rr["b"].columns[0], rr["b"].columns[2], rr["b"].columns[3]])}
         m2, st2 = merge_passes(p1, rr2)
         self.assertEqual(st2["long_segments"], 1); self.assertEqual(st2["marks"], 0)
-        self.assertTrue(any("1차에만" in u.context and "甲丙戊庚壬子" in u.context for u in m2.uncertain))
+        self.assertTrue(any("1차 판독만으로" in u.context and "甲丙戊庚壬子" in u.context for u in m2.uncertain))
         self.assertNotIn("〔", paragraph_text(m2.regions[0].paragraphs[0]))
         # 1차가 두 열을 한 열로 묶어 읽어도 글이 같으면 표시하지 않는다(9쪽 사례)
         p3 = PageReading(pdf_page=9, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[
@@ -225,14 +225,42 @@ class Estimate(unittest.TestCase):
         from yeone_ocr.estimate import image_tokens, estimate, format_estimate
         self.assertEqual(image_tokens(300, 300), 258); self.assertEqual(image_tokens(1788, 2518), 3 * 4 * 258)
         e = estimate("x.pdf", [1, 2, 3, 4], model="m", prices={"m": {"in": 2.0, "out": 12.0}}, fx_krw=1400, page_size_px=(894, 1261), guide_chars=13000)
-        self.assertEqual(e["pages"], 4); self.assertEqual(e["basis"], "기본값"); self.assertGreater(e["calls"], 4)
+        self.assertEqual(e["pages"], 4); self.assertEqual(e["basis"], "기본값"); self.assertEqual(e["calls"], 8)     # 쪽당 1차 1회 + 묶음 2차 1회
         self.assertGreater(e["in_high"], e["in_low"]); self.assertIsNotNone(e["usd_low"]); self.assertGreater(e["krw_high"], e["krw_low"])
-        txt = format_estimate(e); self.assertIn("예상 비용 $", txt); self.assertIn("원)", txt)
+        txt = format_estimate(e); self.assertIn("예상 비용 $", txt); self.assertIn("원 ·", txt); self.assertIn("직접 입력", txt)
         # 실측이 있으면 그 평균으로, 이미 읽은 쪽은 뺀다
         recs = [{"pdf_page": 1, "pass1": {}, "usage": {"calls": 4, "prompt_tokens": 40000, "output_tokens": 6000, "thinking_tokens": 2000}}]
         e2 = estimate("x.pdf", [1, 2, 3], model="m", prices={}, records=recs, page_size_px=(894, 1261), guide_chars=13000)
         self.assertEqual(e2["already_read"], 1); self.assertEqual(e2["calls"], 8); self.assertTrue(e2["basis"].startswith("실측")); self.assertIsNone(e2["usd_low"])
         self.assertEqual(e2["in_low"], round(40000 * 2 * 0.85))
+
+    def test_builtin_prices_and_auto_second_model(self):
+        from yeone_ocr.estimate import default_price, resolve_price, guess_second_model, estimate, format_estimate, DEFAULT_FX_KRW
+        self.assertEqual(default_price("gemini-3.1-pro-preview")["key"], "gemini-3.1-pro")
+        self.assertEqual(default_price("models/gemini-2.5-flash-lite-preview-06-17")["key"], "gemini-2.5-flash-lite")
+        self.assertEqual(default_price("gemini-3-flash-preview")["in"], 0.50); self.assertIsNone(default_price("my-model"))
+        self.assertEqual(resolve_price("gemini-3.1-pro-preview", {"gemini-3.1-pro-preview": {"in": 9, "out": 9}})["source"], "직접 입력")
+        self.assertEqual(guess_second_model("gemini-3.1-pro-preview", "auto"), "gemini-3-flash")
+        self.assertEqual(guess_second_model("gemini-2.5-pro", "auto"), "gemini-2.5-flash")
+        self.assertEqual(guess_second_model("gemini-3-flash-preview", "auto"), "gemini-3-flash-preview")
+        self.assertEqual(guess_second_model("gemini-3.1-pro-preview", ""), "gemini-3.1-pro-preview")
+        self.assertEqual(guess_second_model("gemini-3.1-pro-preview", "gemini-2.5-flash"), "gemini-2.5-flash")
+        # 단가·환율을 넣지 않아도 금액이 나온다(내장 요금표 + 기본 환율), 2차는 flash 단가라 1차만 pro 로 읽을 때보다 싸다
+        e = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="auto", page_size_px=(894, 1261), guide_chars=13000)
+        self.assertIsNotNone(e["usd_low"]); self.assertEqual(e["fx"], DEFAULT_FX_KRW); self.assertEqual(len(e["price_lines"]), 2)
+        e_pro = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="", page_size_px=(894, 1261), guide_chars=13000)
+        self.assertLess(e["usd_high"], e_pro["usd_high"])
+        e_nc = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="auto", use_cache=False, page_size_px=(894, 1261), guide_chars=13000)
+        self.assertGreater(e_nc["usd_low"], e["usd_low"])                       # 캐시를 끄면 지침이 전액 과금
+        txt = format_estimate(e); self.assertIn("내장 요금표", txt); self.assertIn("auto 추정", txt)
+        # 모델별 실측이 있으면 모델마다 제 단가로
+        recs = [{"pdf_page": 1, "pass1": {}, "usage": {"calls": 2, "prompt_tokens": 30000, "output_tokens": 4000, "thinking_tokens": 1000, "cached_tokens": 20000,
+                 "by_model": {"gemini-3.1-pro-preview": {"calls": 1, "prompt_tokens": 15000, "cached_tokens": 10000, "output_tokens": 2500, "thinking_tokens": 1000},
+                              "gemini-3-flash-preview": {"calls": 1, "prompt_tokens": 15000, "cached_tokens": 10000, "output_tokens": 1500, "thinking_tokens": 0}}}}]
+        e3 = estimate("x.pdf", [1, 2, 3], model="gemini-3.1-pro-preview", second_model="auto", records=recs, page_size_px=(894, 1261), guide_chars=13000)
+        self.assertTrue(e3["basis"].startswith("실측")); self.assertIsNotNone(e3["usd_low"])
+        pro_only = (5000 * 2.0 + 10000 * 0.20 + 3500 * 12.0) / 1e6; flash = (5000 * 0.5 + 10000 * 0.05 + 1500 * 3.0) / 1e6
+        self.assertAlmostEqual(e3["usd_low"], (pro_only + flash) * 2 * 0.8, places=6)
 
 
 class Build(unittest.TestCase):
@@ -250,7 +278,8 @@ class Build(unittest.TestCase):
                    "crops": {"f1": {"path": figp, "frac_w": 0.8, "ratio": fig.height / fig.width}}}
             blocks = assemble_blocks([rec])
             types = [b.type for b in blocks]
-            self.assertEqual(types, ["meta", "heading", "image", "para", "table", "uncertain"])
+            self.assertEqual(types, ["meta", "heading", "image", "para", "table"])                 # 확인 목록은 기본으로 넣지 않음
+            self.assertEqual([b.type for b in assemble_blocks([rec], check_list="all")][-1], "uncertain")
             out = os.path.join(td, "o.hwpx")
             rec2 = dict(rec); rec2["pdf_page"] = 4; rec2["merged"] = PageReading(pdf_page=4, print_page="33", regions=[
                 Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="山은 높고 〔疑: 龍〕 水는 〔낮/낯〕다 〔→PDF 4쪽〕")])])]).model_dump()
@@ -259,7 +288,7 @@ class Build(unittest.TestCase):
             st = build_hwpx(blocks, out)
             self.assertEqual(st["images"], 1); self.assertEqual(st["images_in_file"], 1); self.assertEqual(st["tables"], 1)
             self.assertEqual(st["page_breaks"], 1)                     # 둘째 쪽 앞에서만
-            self.assertGreaterEqual(st["marks"], 3)                    # 〔疑: 針〕(확인 목록) + 〔疑: 龍〕 + 〔낮/낯〕 ; 〔→PDF 4쪽〕 은 작업 표시
+            self.assertGreaterEqual(st["marks"], 2)                    # 〔疑: 龍〕 + 〔낮/낯〕 ; 〔→PDF 4쪽〕 은 작업 표시
             self.assertEqual(check_hwpx_file(out), [])
             z = zipfile.ZipFile(out); self.assertEqual(z.namelist()[0], "mimetype")
             allxml = (z.read("Contents/header.xml") + z.read("Contents/section0.xml")).decode("utf-8")
@@ -361,8 +390,12 @@ class CheckList(unittest.TestCase):
                                Uncertain(region_id="", context="어느 영역에도 들지 않은 글 기둥 (x 0.81~0.82, y 0.13~0.32) — 원본 확인"),
                                Uncertain(region_id="b", col_from_right=2, context="「〔疑: 針〕」 — 본문에 표시 못 함")]).model_dump()}
 
+    def test_default_is_clean_document(self):
+        blocks = assemble_blocks([self._rec()])
+        self.assertEqual([b.type for b in blocks], ["meta", "para"])                 # 확인 목록·건수 없이 OCR 본문만
+
     def test_extra_keeps_only_items_not_shown_inline(self):
-        unc = [b for b in assemble_blocks([self._rec()]) if b.type == "uncertain"]
+        unc = [b for b in assemble_blocks([self._rec()], check_list="extra") if b.type == "uncertain"]
         self.assertEqual(len(unc), 1)
         self.assertEqual(len(unc[0].items), 2)                                  # 글 기둥 + 본문에 없는 〔疑: 針〕
         self.assertTrue(unc[0].items[0].startswith("어느 영역에도"))
@@ -372,8 +405,8 @@ class CheckList(unittest.TestCase):
         unc = [b for b in assemble_blocks([self._rec()], check_list="all") if b.type == "uncertain"]
         self.assertEqual(len(unc[0].items), 4); self.assertEqual(unc[0].text, "[판독 확인 필요]")
         self.assertEqual([b for b in assemble_blocks([self._rec()], check_list="none") if b.type == "uncertain"], [])
-        rec = self._rec(); rec["merged"]["uncertain"] = rec["merged"]["uncertain"][:2]   # 전부 본문에 표시된 쪽 → 목록 자체가 없음
-        self.assertEqual([b for b in assemble_blocks([rec]) if b.type == "uncertain"], [])
+        rec = self._rec(); rec["merged"]["uncertain"] = rec["merged"]["uncertain"][:2]   # 전부 본문에 표시된 쪽 → extra 에서도 목록 자체가 없음
+        self.assertEqual([b for b in assemble_blocks([rec], check_list="extra") if b.type == "uncertain"], [])
         with self.assertRaises(ValueError): assemble_blocks([self._rec()], check_list="some")
 
     def test_builds_without_check_block(self):
@@ -381,3 +414,17 @@ class CheckList(unittest.TestCase):
             rec = self._rec(); rec["merged"]["uncertain"] = rec["merged"]["uncertain"][:2]
             out = os.path.join(td, "o.hwpx"); st = build_hwpx(assemble_blocks([rec]), out)
             self.assertEqual(st["uncertain_items"], 0); self.assertGreaterEqual(st["marks"], 2); self.assertEqual(check_hwpx_file(out), [])
+
+
+class ReviewOverlay(unittest.TestCase):
+    def test_boxes_from_regions_and_orphans(self):
+        from yeone_ocr.review_html import overlay_boxes, orphan_boxes
+        from yeone_ocr.cli import orphan_message
+        msg = orphan_message((0.48, 0.10, 0.49, 0.48))
+        self.assertIn("쪽 가운데 위", msg); self.assertIn("가로 48~49%, 세로 10~48%", msg)
+        pr = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[100, 200, 900, 800]), Region(id="f1", kind="원형나경도", bbox=[50, 50, 400, 500])],
+                         uncertain=[Uncertain(context=msg), Uncertain(context="어느 영역에도 들지 않은 글 기둥 (x 0.81~0.82, y 0.13~0.32) — 원본 확인")])
+        self.assertEqual(orphan_boxes(pr), [(0.48, 0.10, 0.49, 0.48), (0.81, 0.13, 0.82, 0.32)])
+        h = overlay_boxes(pr)
+        self.assertEqual(h.count("class='box"), 4); self.assertIn("img-kind", h); self.assertIn("영역 밖 글줄 2", h)
+        self.assertIn("left:20.00%;top:10.00%;width:60.00%;height:80.00%", h)      # r1: bbox [y0 100, x0 200, y1 900, x1 800]

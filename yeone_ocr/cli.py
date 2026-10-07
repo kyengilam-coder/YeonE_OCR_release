@@ -168,6 +168,15 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
     return 0
 
 
+def orphan_message(b) -> str:
+    """영역 밖 글줄 흔적을 사람이 읽는 말로. 좌표는 검수 화면이 상자를 그릴 때 다시 읽는다(가로 a~b%, 세로 c~d%)."""
+    hx, hy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+    hpos = "왼쪽" if hx < 0.33 else ("가운데" if hx < 0.67 else "오른쪽")
+    vpos = "위" if hy < 0.33 else ("중간" if hy < 0.67 else "아래")
+    return (f"영역 밖 글줄 흔적 — 쪽 {hpos} {vpos}(가로 {b[0] * 100:.0f}~{b[2] * 100:.0f}%, 세로 {b[1] * 100:.0f}~{b[3] * 100:.0f}%)에 "
+            f"모델이 어느 영역에도 넣지 않은 세로 글줄이 있음. 빠진 열·주석·쪽번호인지 원본 확인(검수 화면의 붉은 점선 상자)")
+
+
 def cover_check(img: Image.Image, p1: PageReading) -> list[str]:
     """영역 밖에 남은 글 기둥을 찾아 가까운 문자 영역의 좌표를 넓히거나(2차 조각에 포함되게), 붙일 곳이 없으면 확인 항목으로 남긴다."""
     from .schema import bbox_frac as _bf, frac_bbox as _fb
@@ -184,7 +193,7 @@ def cover_check(img: Image.Image, p1: PageReading) -> list[str]:
             r.bbox = _fb(grown[r.id])
             notes.append(f"{r.id}: 영역 밖 글 기둥을 포함하도록 좌표를 넓힘 → {r.bbox}")
     for b in orphans:
-        p1.uncertain.append(Uncertain(region_id="", context=f"어느 영역에도 들지 않은 글 기둥 (x {b[0]:.2f}~{b[2]:.2f}, y {b[1]:.2f}~{b[3]:.2f}) — 누락된 열·주석·쪽번호인지 원본 확인"))
+        p1.uncertain.append(Uncertain(region_id="", context=orphan_message(b)))
         notes.append(f"영역 밖 글 기둥 x {b[0]:.2f}~{b[2]:.2f} → 확인 항목으로 남김")
     return notes
 
@@ -277,11 +286,16 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
             layer = {"plain": text_layer(doc, n).plain()}
     tdiff = compare_textlayer(merged, layer.get("plain", ""))
     issues = verify_page(merged)
-    usage = {}
+    usage = {}; by_model = {}
     for r in {id(reader): reader, id(reader2): reader2}.values():
         if hasattr(r, "usage_end"):
-            for k, v in r.usage_end().items():
+            u = r.usage_end()
+            for k, v in u.items():
                 usage[k] = usage.get(k, 0) + v
+            if u.get("calls"):
+                by_model[getattr(r, "model", "?")] = u          # 모델별 실측 — 비용 어림에서 모델마다 제 단가로 계산
+    if by_model:
+        usage["by_model"] = by_model
     pass2 = {}
     for k, v in rereads.items():
         d = v.model_dump(); d.update(meta.get(k, {})); pass2[k] = d
@@ -468,7 +482,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     ok = True
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
-                                 check_list=getattr(args, "check_list", "extra") or "extra")
+                                 check_list=getattr(args, "check_list", "none") or "none")
         if not interim and args.append_report and ci == len(chunks) - 1:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
@@ -629,8 +643,8 @@ def build_parser():
         p.add_argument("--append-report", action="store_true", help="문서 끝에 〔작업 기록〕 덧붙임")
         p.add_argument("--no-highlight", action="store_true", help="의심 자리를 붉은 글자·노란 형광펜으로 칠하지 않음")
         p.add_argument("--no-page-breaks", action="store_true", help="원본 쪽마다 쪽 나누기를 넣지 않음")
-        p.add_argument("--check-list", choices=["extra", "none", "all"], default="extra",
-                       help="쪽 끝 확인 목록: extra=본문에 표시 못 한 항목만(기본), none=없음, all=전부(본문 표시와 겹침)")
+        p.add_argument("--check-list", choices=["none", "extra", "all"], default="none",
+                       help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
