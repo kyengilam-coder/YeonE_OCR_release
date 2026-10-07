@@ -139,3 +139,40 @@ def matches(name: str, query: str) -> bool:
         if all(qsets[j] & nsets[i + j] for j in range(k)):
             return True
     return False
+
+
+# ---------- 이름끼리 맞추기(한자 ↔ 한글 독음, 한자 ↔ 한자, 한글 ↔ 한글) ----------
+def char_eq(a: str, b: str) -> bool:
+    """글자 하나씩: 둘 다 한자면 간체·이체자를 접어 같은 글자인지, 한쪽이 한글이면 그 한글이 한자의 음(두음 변형 포함)인지,
+    둘 다 한글이면 두음 변형끼리 겹치는지. (한자끼리는 음이 같아도 다른 글자면 다르다 — 大薊 ≠ 大計)"""
+    if a == b:
+        return True
+    ha, hb = is_hanja(a), is_hanja(b)
+    if ha and hb:
+        from . import zh
+        return zh.compare_key(a) == zh.compare_key(b)
+    if ha or hb:
+        if not available():
+            return False
+        hanja_ch, hangul_ch = (a, b) if ha else (b, a)
+        return is_hangul(hangul_ch) and bool(dueum_variants(hangul_ch) & set(char_readings(hanja_ch)))
+    return bool(dueum_variants(a) & dueum_variants(b))
+
+
+def seq_equal(x: list[str], y: list[str]) -> bool:
+    return len(x) == len(y) and all(char_eq(a, b) for a, b in zip(x, y))
+
+
+def seq_find(hay: list[str], needle: list[str]) -> int:
+    """needle 이 hay 의 연속 구간과 맞으면 그 시작 위치, 아니면 -1."""
+    k = len(needle)
+    if k == 0 or k > len(hay):
+        return -1
+    for i in range(len(hay) - k + 1):
+        if all(char_eq(hay[i + j], needle[j]) for j in range(k)):
+            return i
+    return -1
+
+
+def syllables(s: str) -> list[str]:
+    return _syllables(s)

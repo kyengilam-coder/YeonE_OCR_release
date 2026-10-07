@@ -67,6 +67,12 @@ class PlainBook(unittest.TestCase):
             self.assertEqual(matches[1].pdf.page, 10)
             sec = bk.section(anchors, 1); self.assertEqual(bk.section_texts(sec)[0], "大薊"); self.assertEqual(sec.next_anchor.name, "小薊")
             hw_only = index_both(FakePdf(), bk, "hwpx")[0]; self.assertEqual(hw_only, [])
+            from yeone_ocr.collate import reading
+            if reading.available():
+                class KoPdf(FakePdf):
+                    def get_toc(self, simple=False): return [[1, "각론", 1, {}], [2, "대계", 10, {}], [2, "소계", 12, {}], [2, "인삼", 15, {}]]
+                ko = index_both(KoPdf(), bk, "pdf")[0]
+                self.assertEqual([a.name for a in ko], ["各論", "大薊", "小薊", "人參"])                       # 한글 책갈피 → 한자 본문
 
 
 class Reading(unittest.TestCase):
@@ -102,6 +108,21 @@ class Outline(unittest.TestCase):
         pdf = [PdfAnchor("第三节 冬瓜(附：冬瓜子) 123", 1, 123), PdfAnchor("大蓟 ……… 130", 1, 130), PdfAnchor("人参", 1, 140)]
         ms = match_anchors(an, pdf)
         self.assertEqual([m.how for m in ms], ["contains", "exact", "exact"]); self.assertEqual(ms[0].pdf.page, 123)
+
+    def test_hangul_pdf_bookmarks_match_hanja_headings(self):
+        """PDF 책갈피가 한글 독음(동과, 백과(은행) …)이어도 HWPX 한자 제목과 짝이 맞는다."""
+        from yeone_ocr.collate import reading
+        if not reading.available():
+            self.skipTest("hanja 없음")
+        an = [Anchor("heading", "白果(銀杏)", 10, 2), Anchor("heading", "冬瓜", 20, 2), Anchor("heading", "大豆(黑大豆·黑豆)", 30, 2),
+              Anchor("heading", "龍眼(桂圓)", 40, 2), Anchor("heading", "三棱", 50, 2), Anchor("heading", "大薊", 60, 2)]
+        pdf = [PdfAnchor("4. 식물류", 1, 400), PdfAnchor("백과(은행)", 2, 409), PdfAnchor("동과", 2, 410), PdfAnchor("대두(흑대두, 흑두)", 2, 412),
+               PdfAnchor("용안(계원)", 2, 415), PdfAnchor("삼능", 2, 420), PdfAnchor("대계", 2, 430)]
+        ms = match_anchors(an, pdf)
+        self.assertEqual([m.pdf.page if m.pdf else None for m in ms], [409, 410, 412, 415, 420, 430])
+        self.assertEqual([m.how for m in ms], ["exact"] * 6)
+        # 한자끼리는 음이 같아도 다른 글자면 안 맞는다
+        self.assertIsNone(match_anchors([Anchor("heading", "大薊", 1, 2)], [PdfAnchor("大計", 1, 5)])[0].pdf)
 
     def test_find_title_in_text_layer(self):
         import pymupdf

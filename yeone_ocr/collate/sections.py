@@ -143,20 +143,21 @@ class HwpxBook:
         """PDF 책갈피 (제목, 급) 목록을 HWPX 본문에서 찾아 기준으로 삼는다(책갈피도 제목 스타일도 없는 HWPX 용).
         문서 순서대로 앞에서부터 찾으며, 제목과 같은 글(정규화·간체 접기)인 문단, 없으면 제목으로 시작하는 짧은 문단(제목 길이+slack 이내)을 고른다.
         돌려주는 값은 [(PDF 책갈피 번호, Anchor 또는 None)]."""
-        from . import zh
-        keys = [zh.compare_key(normalize_name(t)) for t in self.texts()]
+        from . import reading as rd
+        syls = [rd.syllables(t) for t in self.texts()]
         out: list[tuple[int, Anchor | None]] = []
         pos = 0
         for j, (title, level) in enumerate(titles):
-            k = zh.compare_key(normalize_name(title))
+            k = rd.syllables(title)
             found = None
             if k:
-                for i in range(pos, len(keys)):
-                    if keys[i] == k:
+                for i in range(pos, len(syls)):
+                    if len(syls[i]) == len(k) and rd.seq_equal(syls[i], k):
                         found = i; break
                 if found is None:
-                    for i in range(pos, len(keys)):
-                        if keys[i].startswith(k) and len(keys[i]) <= len(k) + slack:
+                    for i in range(pos, len(syls)):
+                        si = syls[i]
+                        if len(k) <= len(si) <= len(k) + slack and rd.seq_find(si[:len(k)], k) == 0:
                             found = i; break
             if found is None:
                 out.append((j, None)); continue

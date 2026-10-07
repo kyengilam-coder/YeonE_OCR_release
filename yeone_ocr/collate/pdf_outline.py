@@ -11,9 +11,13 @@ def _is_cjk_or_hangul(ch: str) -> bool:
             or 0xAC00 <= o <= 0xD7A3 or 0x3040 <= o <= 0x30FF)                                                   # 한글·가나
 
 
+def _only_cjk(s: str) -> str:
+    return "".join(ch for ch in normalize_name(s) if _is_cjk_or_hangul(ch))
+
+
 def match_key(s: str) -> str:
-    """짝짓기용 이름: 정규화 → 한자·한글만 남김(쪽수·번호·병음·부호 제거) → 이체자 접기 → 간체."""
-    return zh.compare_key("".join(ch for ch in normalize_name(s) if _is_cjk_or_hangul(ch)))
+    """글자층 검색용 이름: 정규화 → 한자·한글만 남김(쪽수·번호·병음·부호 제거) → 이체자 접기 → 간체."""
+    return zh.compare_key(_only_cjk(s))
 
 
 @dataclass
@@ -66,48 +70,71 @@ class Match:
     how: str                 # exact | fuzzy | none
 
 
+def _fuzzy_key(s: str, other_has_hangul: bool) -> str:
+    """비슷함 비교용 글자열. 두 이름이 모두 한자면 간체 글자열(음이 같은 다른 글자는 다르게), 한쪽이 한글이면 독음."""
+    from . import reading as rd
+    core = _only_cjk(s)
+    if other_has_hangul or any(rd.is_hangul(ch) for ch in core):
+        return _only_cjk(rd.reading(core))
+    return zh.compare_key(core)
+
+
 def match_anchors(anchors: list[Anchor], pdf_anchors: list[PdfAnchor], min_ratio: float = 0.82) -> list[Match]:
-    """HWPX 기준마다 PDF 책갈피 하나를 고른다. 이름을 정규화(부호·숫자·로마자 제거, 이체자 접기, 간체화)해
-    정확 일치 → 한쪽이 다른 쪽을 품음(冬瓜 ⊂ 第三节冬瓜附冬瓜子) → 비슷한 이름 순.
-    같은 PDF 책갈피를 두 HWPX 기준이 가져가지 않도록 하되, 문서 순서가 어긋나면 점수를 깎는다."""
-    pkeys = [p.key for p in pdf_anchors]
+    """HWPX 기준마다 PDF 책갈피 하나를 고른다. 이름에서 한자·한글만 남겨(쪽수·번호·병음·부호 제거) 음절 단위로 맞춘다.
+    한자↔한자는 간체·이체자를 접어, 한자↔한글은 독음(여러 음·두음법칙 포함)으로 비교하므로 PDF 책갈피가
+    「동과」「백과(은행)」처럼 한글이어도 冬瓜·白果(銀杏) 와 맞는다.
+    세 단계로 돈다: ① 모든 기준의 정확 일치 → ② 남은 것끼리 품음(짧은 쪽이 긴 쪽의 연속 구간) → ③ 남은 것끼리 비슷한 글자열.
+    정확 일치를 먼저 다 끝내므로 약한 짝(蓮子·石蓮子 ⊃ 자석)이 정확한 짝(磁石=자석)의 책갈피를 가로채지 않는다."""
+    from . import reading as rd
+    psyl = [rd.syllables(p.title) for p in pdf_anchors]
+    phangul = [any(rd.is_hangul(ch) for ch in sy) for sy in psyl]
+    asyl = [rd.syllables(a.name) for a in anchors]
+    chosen: dict[int, tuple[float, int, str]] = {}
     taken: set[int] = set()
+
+    def free(j):
+        return j not in taken
+
+    # ① 정확 일치
+    for i, a in enumerate(anchors):
+        if not asyl[i]:
+            continue
+        for j in range(len(pdf_anchors)):
+            if free(j) and psyl[j] and rd.seq_equal(asyl[i], psyl[j]):
+                chosen[i] = (1.0, j, "exact"); taken.add(j); break
+    # ② 품음
+    for i, a in enumerate(anchors):
+        if i in chosen or len(asyl[i]) < 2:
+            continue
+        cands = []
+        for j in range(len(pdf_anchors)):
+            pj = psyl[j]
+            if not free(j) or len(pj) < 2:
+                continue
+            if (len(pj) >= len(asyl[i]) and rd.seq_find(pj, asyl[i]) >= 0) or (len(asyl[i]) > len(pj) and rd.seq_find(asyl[i], pj) >= 0):
+                cands.append((0.9 - min(0.2, abs(len(pj) - len(asyl[i])) * 0.01), j))
+        if cands:
+            r, j = max(cands); chosen[i] = (round(r, 3), j, "contains"); taken.add(j)
+    # ③ 비슷한 글자열
+    for i, a in enumerate(anchors):
+        if i in chosen or not asyl[i]:
+            continue
+        cands = []
+        for j in range(len(pdf_anchors)):
+            if not free(j) or not psyl[j]:
+                continue
+            ka = _fuzzy_key(a.name, phangul[j]); kp = _fuzzy_key(pdf_anchors[j].title, any(rd.is_hangul(ch) for ch in asyl[i]))
+            if not ka or not kp:
+                continue
+            r = difflib.SequenceMatcher(None, ka, kp, autojunk=False).ratio()
+            if r >= min_ratio:
+                cands.append((r, j))
+        if cands:
+            r, j = max(cands); chosen[i] = (round(r, 3), j, "fuzzy"); taken.add(j)
     out: list[Match] = []
-    last_pdf = -1
-    for a in anchors:
-        k = match_key(a.name)
-        best = None
-        if k:
-            for j, pk in enumerate(pkeys):
-                if j in taken or pk != k:
-                    continue
-                best = (1.0, j, "exact"); break
-            if best is None and len(k) >= 2:
-                cands = []
-                for j, pk in enumerate(pkeys):
-                    if j in taken or not pk or len(pk) < 2:
-                        continue
-                    if k in pk or pk in k:
-                        r = 0.9 - (0.05 if j < last_pdf else 0) - min(0.2, abs(len(pk) - len(k)) * 0.01)
-                        cands.append((r, j))
-                if cands:
-                    r, j = max(cands); best = (round(r, 3), j, "contains")
-            if best is None:
-                cands = []
-                for j, pk in enumerate(pkeys):
-                    if j in taken or not pk:
-                        continue
-                    r = difflib.SequenceMatcher(None, k, pk, autojunk=False).ratio()
-                    if r >= min_ratio:
-                        if j < last_pdf:
-                            r -= 0.05          # 순서가 뒤로 가는 짝은 조금 불리하게
-                        cands.append((r, j))
-                if cands:
-                    r, j = max(cands); best = (round(r, 3), j, "fuzzy")
-        if best:
-            score, j, how = best
-            taken.add(j); last_pdf = max(last_pdf, j)
-            out.append(Match(a, pdf_anchors[j], score, how))
+    for i, a in enumerate(anchors):
+        if i in chosen:
+            score, j, how = chosen[i]; out.append(Match(a, pdf_anchors[j], score, how))
         else:
             out.append(Match(a, None, 0.0, "none"))
     return out

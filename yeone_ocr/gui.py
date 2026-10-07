@@ -737,7 +737,7 @@ class App(tk.Tk):
         else:
             extra = []
         argv = ["collate", self.pdf2(), "--work", str(self.work2()), "--hwpx", self.v_hwpx.get().strip(), "--anchor-index", str(idx),
-                "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts()
+                "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts(print_offset=False)
         if apply: argv.append("--apply")
         if not self.v_cmemo.get(): argv.append("--no-memo")
         argv += ["--mode", "vertical" if self.v_cvert.get() else "horizontal_zh"]
@@ -781,14 +781,14 @@ class App(tk.Tk):
         p = self.v_pages.get().strip()
         return ["--pages", p] if p else []
 
-    def _read_opts(self) -> list[str]:
+    def _read_opts(self, print_offset: bool = True) -> list[str]:
         o = ["--reader", self.v_reader.get(), "--upscale", self.v_up.get().strip() or "2"]
         if self.v_reader.get() == "gemini" and self.v_model.get().strip():
             o += ["--model", self.v_model.get().strip()]
         if not self.v_second.get():
             o.append("--no-second-pass")
-        if self.v_off.get().strip():
-            o += ["--print-offset", self.v_off.get().strip()]
+        if print_offset and self.v_off.get().strip():
+            o += ["--print-offset", self.v_off.get().strip()]          # 책갈피 OCR 은 다른 책이라 인식 탭의 보정값을 쓰지 않는다
         if self.v_force.get():
             o.append("--force")
         o += ["--workers", (self.v_workers.get().strip() or "6")]
