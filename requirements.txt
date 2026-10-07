@@ -7,3 +7,4 @@ pydantic>=2.6          # 판독 결과 스키마(Gemini 구조화 출력)
 google-genai>=1.0      # Gemini 판독기 (GEMINI_API_KEY 필요)
 python-hwpx>=6.0       # HWPX 생성
 python-docx>=1.1       # DOCX 생성(선택, --docx)
+opencc-python-reimplemented>=0.1.7   # 책갈피 교정: 간체·번체 변환(순수 파이썬)

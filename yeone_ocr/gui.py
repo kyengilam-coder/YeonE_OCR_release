@@ -7,7 +7,7 @@ from __future__ import annotations
 import contextlib, io, json, os, queue, subprocess, sys, threading, traceback, webbrowser
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
@@ -15,10 +15,10 @@ from . import __version__
 APP_NAME = "YeonE_OCR"
 CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
-            ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx")]
+            ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": ""}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
@@ -312,7 +312,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} · 연어OCR {__version__}")
-        self.geometry("1140x880"); self.minsize(980, 720)
+        self.geometry("1180x1000"); self.minsize(980, 760)
         self.cfg = load_config()
         self._style()
         self.q: queue.Queue = queue.Queue()
@@ -364,6 +364,9 @@ class App(tk.Tk):
         st.map("TNotebook.Tab", background=[("selected", C["PANEL"])], foreground=[("selected", C["ACC"])])
         st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], rowheight=24)
         st.configure("Treeview.Heading", background="#efeae0", font=self.font_h, relief="flat")
+        st.configure("Top.TNotebook", background=C["BG"], borderwidth=0)
+        st.configure("Top.TNotebook.Tab", font=self.font_h, padding=(14, 7))
+        st.map("Top.TNotebook.Tab", background=[("selected", C["PANEL"]), ("!selected", "#e6dfd0")], foreground=[("selected", C["ACC"]), ("!selected", C["MUTED"])])
         st.configure("Horizontal.TProgressbar", troughcolor="#e8e2d6", background=C["GOLD"], lightcolor=C["GOLD"], darkcolor=C["GOLD"])
 
     def _build(self):
@@ -376,7 +379,10 @@ class App(tk.Tk):
         tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", pady=(6, 0))
         tk.Label(hd, text=f"v{__version__}   ", font=self.font_small, bg=C["ACC"], fg="#bfae8e").pack(side="right", pady=(6, 0))
 
-        root = ttk.Frame(self, padding=(14, 10, 14, 10)); root.pack(fill="both", expand=True)
+        self.tabs = ttk.Notebook(self, style="Top.TNotebook"); self.tabs.pack(fill="x", padx=14, pady=(10, 0))
+        root = ttk.Frame(self.tabs, padding=(10, 8, 10, 10)); self.tabs.add(root, text="   PDF → HWPX 만들기   ")
+        tab2 = ttk.Frame(self.tabs, padding=(10, 8, 10, 10)); self.tabs.add(tab2, text="   HWPX 책갈피 교정   ")
+        bottom = ttk.Frame(self, padding=(14, 0, 14, 10)); bottom.pack(fill="both", expand=True)
         pad = {"padx": 4, "pady": 3}
 
         # ---- 파일 ----
@@ -472,13 +478,15 @@ class App(tk.Tk):
         ttk.Label(sf, text="검수 뒤 사람이 확인한 쪽은 [검수 결과 기록…] · 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산](모델 호출 없음)",
                   style="Hint.TLabel", wraplength=900).grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(4, 0))
 
-        # ---- 진행 ----
-        pf2 = ttk.Frame(root); pf2.pack(fill="x", pady=(10, 0))
+        self._build_collate_tab(tab2)
+
+        # ---- 진행(공통) ----
+        pf2 = ttk.Frame(bottom); pf2.pack(fill="x", pady=(10, 0))
         self.progress = ttk.Progressbar(pf2, mode="indeterminate", length=260); self.progress.pack(side="left")
         self.v_status = tk.StringVar(value="준비됨"); ttk.Label(pf2, textvariable=self.v_status, style="Status.TLabel").pack(side="left", padx=12)
 
-        # ---- 기록 / 쪽별 상태 ----
-        nb = ttk.Notebook(root); nb.pack(fill="both", expand=True, pady=(8, 0))
+        # ---- 기록 / 쪽별 상태(공통) ----
+        nb = ttk.Notebook(bottom); nb.pack(fill="both", expand=True, pady=(8, 0))
         self.log = ScrolledText(nb, height=14, wrap="word", state="disabled", font=self.font_mono, bg="#fffdf8", fg=C["INK"],
                                 relief="flat", padx=10, pady=8, insertbackground=C["INK"])
         nb.add(self.log, text="진행 기록")
@@ -490,6 +498,142 @@ class App(tk.Tk):
         self.table.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.nb = nb
         self._reader_changed()
+
+    # ---------- 책갈피 교정 탭 ----------
+    def _build_collate_tab(self, tab):
+        from .collate.run import POLICIES
+        self.v_hwpx = tk.StringVar(value=self.cfg.get("hwpx", "")); self.v_find = tk.StringVar()
+        self.v_policy = tk.StringVar(value=POLICIES.get(self.cfg.get("collate_policy", "all"), POLICIES["all"]))
+        self.v_cmemo = tk.BooleanVar(value=self.cfg.get("collate_memo", True)); self.v_cvert = tk.BooleanVar(value=self.cfg.get("collate_vertical", False))
+        self.collate_rows: list[dict] = []
+        f = ttk.LabelFrame(tab, text="교정할 문서"); f.pack(fill="x")
+        r1 = ttk.Frame(f, style="Panel.TFrame"); r1.pack(fill="x", padx=8, pady=(6, 2))
+        ttk.Label(r1, text="HWPX", style="Panel.TLabel", width=6).pack(side="left")
+        ttk.Entry(r1, textvariable=self.v_hwpx).pack(side="left", fill="x", expand=True, padx=(4, 8))
+        self._btn(r1, "HWPX 고르기…", self.pick_hwpx, width=13).pack(side="left")
+        r2 = ttk.Frame(f, style="Panel.TFrame"); r2.pack(fill="x", padx=8, pady=(2, 8))
+        ttk.Label(r2, text="PDF 는 1번 탭에서 고른 파일을 씁니다 · 판독기·모델·속도 설정도 1번 탭의 것을 따릅니다 · 읽기 모드는 가로쓰기 한문(간체)", style="Hint.TLabel").pack(side="left")
+        ttk.Checkbutton(r2, text="세로쓰기 한자·한글 문헌(지침 그대로)", variable=self.v_cvert).pack(side="right")
+
+        g = ttk.LabelFrame(tab, text="구획(책갈피·제목)"); g.pack(fill="both", expand=True, pady=(8, 0))
+        r3 = ttk.Frame(g, style="Panel.TFrame"); r3.pack(fill="x", padx=8, pady=(6, 4))
+        self._btn(r3, "구획 색인", self.do_collate_index, width=10).pack(side="left")
+        ttk.Label(r3, text="찾기", style="Panel.TLabel").pack(side="left", padx=(12, 4))
+        e = ttk.Entry(r3, textvariable=self.v_find, width=22); e.pack(side="left"); e.bind("<KeyRelease>", lambda _e: self.refresh_collate_table())
+        self.v_cstat = tk.StringVar(value="HWPX 를 고르고 [구획 색인]을 누르십시오.")
+        ttk.Label(r3, textvariable=self.v_cstat, style="Hint.TLabel").pack(side="left", padx=12)
+        tf = ttk.Frame(g); tf.pack(fill="both", expand=True, padx=8)
+        cols = ("no", "lv", "name", "para", "pdf", "page", "how")
+        self.ctable = ttk.Treeview(tf, columns=cols, show="headings", height=8, selectmode="browse")
+        for c, t, w, a in (("no", "번호", 50, "e"), ("lv", "급", 36, "center"), ("name", "HWPX 책갈피·제목", 330, "w"), ("para", "문단", 60, "e"),
+                           ("pdf", "PDF 책갈피", 260, "w"), ("page", "PDF 쪽", 60, "e"), ("how", "짝", 70, "center")):
+            self.ctable.heading(c, text=t); self.ctable.column(c, width=w, anchor=a, stretch=(c in ("name", "pdf")))
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.ctable.yview); self.ctable.configure(yscrollcommand=sb.set)
+        self.ctable.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
+        self.ctable.bind("<Double-1>", lambda _e: self.do_collate(apply=False))
+
+        r4 = ttk.Frame(g, style="Panel.TFrame"); r4.pack(fill="x", padx=8, pady=(6, 8))
+        ttk.Label(r4, text="교정 정책", style="Panel.TLabel").pack(side="left")
+        ttk.Combobox(r4, textvariable=self.v_policy, values=list(POLICIES.values()), state="readonly", width=34).pack(side="left", padx=(4, 10))
+        ttk.Checkbutton(r4, text="한컴 메모로 근거 남기기", variable=self.v_cmemo).pack(side="left")
+        self._btn(r4, "교정본 열기", self.open_collated, width=11).pack(side="right")
+        self._btn(r4, "보고 열기", self.open_collate_report, width=10).pack(side="right", padx=(0, 6))
+        self._btn(r4, "교정 반영·저장", lambda: self.do_collate(apply=True), style="Accent.TButton").pack(side="right", padx=(0, 10))
+        self._btn(r4, "대조만(보고)", lambda: self.do_collate(apply=False), width=12).pack(side="right", padx=(0, 6))
+        ttk.Label(tab, text="구획을 고른 뒤 [대조만]은 차이 보고(HTML)만 만들고, [교정 반영·저장]은 HWPX 사본(<이름>_교정.hwpx)에 고쳐 넣습니다. 원본은 건드리지 않습니다. "
+                           "자동 교정은 파란 글자·연두 형광펜, 확인 요청은 빨간 글자·노란 형광펜으로 표시되고 근거는 메모에 남습니다.", style="Hint.TLabel", wraplength=1080, justify="left").pack(fill="x", pady=(6, 0))
+
+    def pick_hwpx(self):
+        p = filedialog.askopenfilename(title="교정할 HWPX", filetypes=[("HWPX", "*.hwpx"), ("모든 파일", "*.*")])
+        if p:
+            self.v_hwpx.set(p); self.cfg["hwpx"] = p; save_config(self.cfg)
+
+    def collate_policy(self) -> str:
+        from .collate.run import POLICIES
+        return next((k for k, v in POLICIES.items() if v == self.v_policy.get()), "all")
+
+    def _need_hwpx(self) -> bool:
+        if not self._need_pdf():
+            return False
+        if not self.v_hwpx.get().strip() or not Path(self.v_hwpx.get().strip()).exists():
+            messagebox.showinfo(APP_NAME, "교정할 HWPX 파일을 먼저 고르십시오."); return False
+        return True
+
+    def do_collate_index(self):
+        if not self._need_hwpx():
+            return
+        pdf, hwpx = self.pdf(), self.v_hwpx.get().strip()
+        self.v_cstat.set("색인 중…")
+        def t():
+            try:
+                from .collate.sections import HwpxBook
+                from .collate.run import index_both
+                from .pdfio import open_pdf
+                doc = open_pdf(pdf); book = HwpxBook(hwpx)
+                anchors, pdf_anchors, matches = index_both(doc, book)
+                rows = [{"no": i + 1, "lv": a.level, "name": a.name, "para": a.para, "pdf": m.pdf.title if m.pdf else "", "page": m.pdf.page if m.pdf else "",
+                         "how": {"exact": "정확", "fuzzy": f"비슷 {m.score:.2f}", "none": "없음"}[m.how]} for i, (a, m) in enumerate(zip(anchors, matches))]
+                self.q.put(("sections", rows, f"HWPX 기준 {len(anchors)}개 · PDF 책갈피 {len(pdf_anchors)}개 · 짝 맞음 {sum(1 for m in matches if m.pdf)}개"))
+            except Exception as e:
+                self.q.put(("sections", [], f"색인 실패: {e}"))
+        threading.Thread(target=t, daemon=True).start()
+
+    def refresh_collate_table(self):
+        from .collate import zh
+        from .collate.sections import normalize_name
+        q = zh.compare_key(normalize_name(self.v_find.get()))
+        for i in self.ctable.get_children():
+            self.ctable.delete(i)
+        for r in self.collate_rows:
+            if q and q not in zh.compare_key(normalize_name(r["name"])) and q not in zh.compare_key(normalize_name(r["pdf"])):
+                continue
+            self.ctable.insert("", "end", iid=str(r["no"]), values=(r["no"], r["lv"], ("    " * (r["lv"] - 1)) + r["name"], r["para"], r["pdf"], r["page"], r["how"]))
+
+    def _selected_anchor(self) -> int | None:
+        sel = self.ctable.selection()
+        if not sel:
+            messagebox.showinfo(APP_NAME, "표에서 구획(책갈피·제목)을 하나 고르십시오."); return None
+        return int(sel[0])
+
+    def do_collate(self, apply: bool):
+        if not self._need_hwpx() or not self._prepare_env():
+            return
+        idx = self._selected_anchor()
+        if idx is None:
+            return
+        row = next(r for r in self.collate_rows if r["no"] == idx)
+        if not row["pdf"]:
+            pages = simpledialog.askstring(APP_NAME, f"「{row['name']}」 에 맞는 PDF 책갈피가 없습니다.\nPDF 쪽 범위를 직접 넣으십시오 (예 120-123):", parent=self)
+            if not pages:
+                return
+            extra = ["--pdf-pages", pages.strip()]
+        else:
+            extra = []
+        argv = ["collate", self.pdf(), "--work", str(self.work()), "--hwpx", self.v_hwpx.get().strip(), "--anchor-index", str(idx),
+                "--policy", self.collate_policy()] + extra + self._read_opts()
+        if apply: argv.append("--apply")
+        if not self.v_cmemo.get(): argv.append("--no-memo")
+        argv += ["--mode", "vertical" if self.v_cvert.get() else "horizontal_zh"]
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.v_cmemo.get(), "collate_vertical": self.v_cvert.get()}); save_config(self.cfg)
+        self.nb.select(0)
+        self.start(argv, ("교정 반영·저장" if apply else "대조") + f" — {row['name'][:20]}")
+
+    def _latest(self, folder: Path, pattern: str) -> Path | None:
+        files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime) if folder.exists() else []
+        return files[-1] if files else None
+
+    def open_collate_report(self):
+        if not self._need_pdf(): return
+        f = self._latest(self.work() / "collate", "*.html")
+        if f: open_path(f)
+        else: messagebox.showinfo(APP_NAME, "아직 대조 보고가 없습니다. 구획을 고르고 [대조만] 또는 [교정 반영·저장]을 누르십시오.")
+
+    def open_collated(self):
+        h = self.v_hwpx.get().strip()
+        if not h: return
+        out = Path(h).with_name(Path(h).stem.replace("_교정", "") + "_교정.hwpx")
+        if out.exists(): open_path(out)
+        else: messagebox.showinfo(APP_NAME, f"교정본이 아직 없습니다: {out.name}")
 
     def _btn(self, parent, text, cmd, **kw) -> ttk.Button:
         b = ttk.Button(parent, text=text, command=cmd, **kw); self.buttons.append(b); return b
@@ -615,6 +759,8 @@ class App(tk.Tk):
                     self._pkg_result(item[1])
                 elif item[0] == "keycheck":
                     self._keycheck_result(item[1])
+                elif item[0] == "sections":
+                    self.collate_rows = item[1]; self.v_cstat.set(item[2]); self.refresh_collate_table()
         except queue.Empty:
             pass
         self.after(100, self._poll)

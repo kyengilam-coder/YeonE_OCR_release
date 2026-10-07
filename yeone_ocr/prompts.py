@@ -43,23 +43,47 @@ OUTPUT_RULES = f"""
 """
 
 
+# 읽기 모드. vertical(기본): 세로쓰기 한자·한글 문헌(지침 그대로). horizontal_zh: 가로쓰기 한문(간체) 책 — 줄 순서 위→아래, 줄 안 왼쪽→오른쪽.
+MODES = {
+    "vertical": "",
+    "horizontal_zh": (
+        "\n## 읽기 모드: 가로쓰기 한문(간체)\n"
+        "- 이 책은 가로쓰기 중국어(간체) 책이다. 지침의 '열(세로 줄)'은 이 책에서 '가로 한 줄'로 읽는다. "
+        "cols 의 원소 하나가 가로 한 줄이고, n 은 영역 안에서 위에서부터 센 줄 번호(1부터), t 는 그 줄을 왼쪽→오른쪽으로 읽은 글자다.\n"
+        "- 인쇄된 글자 그대로 간체로 적는다. 번체로 바꾸지 않는다. 문장부호(，。；：『』「」)도 인쇄된 대로 적는다.\n"
+        "- 읽기 방향(dir)은 \"가로(좌→우)\" 로 적고, regions 는 위→아래 순서로 나열한다. 쪽번호·머리말은 지침대로 따로 둔다.\n"
+    ),
+}
+MODE = "vertical"
+
+
+def set_mode(mode: str | None) -> None:
+    global MODE
+    if mode and mode in MODES:
+        MODE = mode
+
+
+def mode_note() -> str:
+    return MODES.get(MODE, "")
+
+
 def system_prompt() -> str:
-    return load_guide().rstrip() + "\n\n" + OUTPUT_RULES
+    return load_guide().rstrip() + "\n\n" + OUTPUT_RULES + mode_note()
 
 
 def page_prompt(file_name: str, pdf_page: int, total: int, extra: str = "") -> str:
     return (f"첨부 이미지는 원본 파일 「{file_name}」의 PDF {pdf_page}쪽(전체 {total}쪽)이다.\n"
             "지침 35장의 점검 항목(영역 유형, 읽기 방향, 오른쪽 첫 열, 제목·본문·주석 경계, 그림 안 글자 혼입 위험, "
             "표 대응관계, 도판 밖 설명문 누락, 판독 불가 글자, 앞뒤 쪽 이어짐)을 먼저 살핀 뒤, "
-            "이 쪽의 영역을 나누고 편집 가능한 문자 영역을 오른쪽 열부터 위→아래로 판독하여 JSON 으로만 답하라.\n"
-            "긴 판단 과정은 출력하지 말고 결과만 낸다." + (("\n" + extra) if extra else ""))
+            + ("이 쪽의 영역을 나누고 편집 가능한 문자 영역을 위 줄부터 아래로, 줄 안은 왼쪽→오른쪽으로 판독하여 JSON 으로만 답하라.\n" if MODE == "horizontal_zh"
+               else "이 쪽의 영역을 나누고 편집 가능한 문자 영역을 오른쪽 열부터 위→아래로 판독하여 JSON 으로만 답하라.\n")
+            + "긴 판단 과정은 출력하지 말고 결과만 낸다." + (("\n" + extra) if extra else ""))
 
 
 def region_prompt(kind: str, region_id: str, pdf_page: int) -> str:
     return (f"첨부 이미지는 PDF {pdf_page}쪽의 「{kind}」 영역({region_id})만 확대한 것이다.\n"
             "이 영역만 독립적으로 다시 판독하라. 다른 영역이나 앞서 읽은 결과를 참고하지 말고 이 이미지의 자형만 본다.\n"
-            "열은 오른쪽부터 1, 2, 3… 으로 세어 n 에, 각 열을 위→아래로 읽은 글자를 t 에 넣어 cols 로 돌려준다. "
-            "확정할 수 없는 글자는 〔疑: ○〕〔○/△〕〔판독불명〕 으로 표시하고 unc 에 적는다. JSON 으로만 답한다.")
+            + _cols_rule() + "확정할 수 없는 글자는 〔疑: ○〕〔○/△〕〔판독불명〕 으로 표시하고 unc 에 적는다. JSON 으로만 답한다.")
 
 
 def regions_prompt(items: list[tuple[str, str]], pdf_page: int) -> str:
@@ -68,5 +92,11 @@ def regions_prompt(items: list[tuple[str, str]], pdf_page: int) -> str:
     return (f"첨부한 이미지 {len(items)}장은 PDF {pdf_page}쪽의 문자 영역을 하나씩 확대한 조각이다. 순서대로 {listing} 이다. "
             "각 이미지 바로 앞에 【region_id】 표시가 있다.\n"
             "영역마다 독립적으로 다시 판독하라. 다른 영역이나 앞서 읽은 결과를 참고하지 말고 그 조각의 자형만 본다.\n"
-            "열은 오른쪽부터 1, 2, 3… 으로 세어 n 에, 각 열을 위→아래로 읽은 글자를 t 에 넣어 cols 로 돌려준다. 결과는 regions 에 같은 r(region_id) 로 넣고, "
+            + _cols_rule() + "결과는 regions 에 같은 r(region_id) 로 넣고, "
             "확정할 수 없는 글자는 〔疑: ○〕〔○/△〕〔판독불명〕 으로 표시하고 unc 에 적는다. JSON 으로만 답한다.")
+
+
+def _cols_rule() -> str:
+    if MODE == "horizontal_zh":
+        return "줄은 위에서부터 1, 2, 3… 으로 세어 n 에, 각 줄을 왼쪽→오른쪽으로 읽은 글자를 t 에 넣어 cols 로 돌려준다(간체 그대로). "
+    return "열은 오른쪽부터 1, 2, 3… 으로 세어 n 에, 각 열을 위→아래로 읽은 글자를 t 에 넣어 cols 로 돌려준다. "

@@ -87,6 +87,8 @@ def cmd_prepare(args, work: Work | None = None, doc=None):
 
 # ---------- read ----------
 def make_reader(args, doc, work):
+    from . import prompts
+    prompts.set_mode(getattr(args, "mode", None))
     if args.reader == "mock":
         from .reader_mock import MockReader
         tls = {}
@@ -633,6 +635,8 @@ def build_parser():
         p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
         p.add_argument("--checkpoint", type=int, default=20, help="N쪽 판독마다 '<이름>_진행중.hwpx' 를 중간 저장(0=안 함). run 에서만")
+        if not any(a.dest == "mode" for a in p._actions):
+            p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical", help="읽기 모드: vertical=세로쓰기 한자·한글(기본), horizontal_zh=가로쓰기 한문(간체)")
 
     def build_opts(p):
         p.add_argument("--docx", action="store_true", help="DOCX 도 함께 생성")
@@ -661,6 +665,21 @@ def build_parser():
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")
     p.add_argument("--clear-check", action="store_true", help="'판독 확인 필요' 표시를 지움(사람이 확인한 뒤)"); p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("run"); common(p); read_opts(p); build_opts(p); p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("collate", help="책갈피 교정: HWPX 구획을 PDF 판독과 대조해 고친 사본을 저장"); common(p, pages=False); read_opts(p)
+    p.add_argument("--hwpx", required=True, help="교정할 HWPX")
+    p.add_argument("--list", action="store_true", help="HWPX 책갈피·제목과 PDF 책갈피의 짝 목록만 보여 줌")
+    p.add_argument("--limit", type=int, default=0, help="--list 에서 보여 줄 줄 수(0=전부)")
+    p.add_argument("--section", help="교정할 책갈피·제목 이름(정확히, 또는 일부)")
+    p.add_argument("--nth", type=int, help="같은 이름이 여럿일 때 몇 번째인지(1부터)")
+    p.add_argument("--anchor-index", type=int, help="--list 번호로 구획을 바로 지정(1부터). 화면에서 쓴다")
+    p.add_argument("--pdf-pages", help="PDF 책갈피 짝이 없을 때 쪽 범위를 직접(예 120-123)")
+    p.add_argument("--policy", choices=["all", "sure", "memo"], default="all", help="all=전부 자동(A·B2·누락 삽입, B1·C 는 표시) / sure=확실한 것(A)만 / memo=메모만")
+    p.add_argument("--apply", action="store_true", help="대조 결과를 HWPX 에 반영해 사본(<이름>_교정.hwpx)으로 저장. 없으면 보고만")
+    p.add_argument("--out", help="저장할 HWPX 경로(기본 <이름>_교정.hwpx)")
+    p.add_argument("--no-memo", action="store_true", help="한컴 메모 대신 글 뒤에 〔…〕 로 적음")
+    p.set_defaults(mode="horizontal_zh")
+    from .collate.run import cmd_collate
+    p.set_defaults(fn=cmd_collate)
     return ap
 
 
