@@ -41,13 +41,16 @@ def is_hangul(ch: str) -> bool:
     return "가" <= ch <= "힣"
 
 
-@functools.lru_cache(maxsize=4096)
 def reading(text: str) -> str:
-    """표시용 독음. 한자가 아닌 글자는 그대로 둔다. 패키지가 없으면 원문을 돌려준다."""
-    try:
-        import hanja
-    except Exception:
+    """표시용 독음. 한자가 아닌 글자는 그대로 둔다. 패키지가 없으면 원문을 돌려준다(캐시하지 않음)."""
+    if not available():
         return text
+    return _reading_cached(text)
+
+
+@functools.lru_cache(maxsize=4096)
+def _reading_cached(text: str) -> str:
+    import hanja
     fixed = "".join(DISPLAY_FIX.get(ch, ch) for ch in unicodedata.normalize("NFC", text))
     try:
         return hanja.translate(fixed, "substitution")
@@ -88,8 +91,14 @@ def dueum_variants(syl: str) -> set[str]:
     return out
 
 
-@functools.lru_cache(maxsize=8192)
 def char_readings(ch: str) -> tuple[str, ...]:
+    if is_hanja(ch) and not available():
+        return (ch,)
+    return _char_readings_cached(ch)
+
+
+@functools.lru_cache(maxsize=8192)
+def _char_readings_cached(ch: str) -> tuple[str, ...]:
     """글자 하나의 가능한 음들(두음법칙 변형 포함). 한글은 자기 자신(+두음 변형), 그 밖은 자기 자신."""
     if is_hangul(ch):
         return tuple(sorted(dueum_variants(ch)))

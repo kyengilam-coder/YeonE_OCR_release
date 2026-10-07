@@ -669,8 +669,23 @@ class App(tk.Tk):
                          "how": {"exact": "정확", "fuzzy": f"비슷 {m.score:.2f}", "none": "없음", "pdf": "PDF→본문"}[m.how]} for i, (a, m) in enumerate(zip(anchors, matches))]
                 kinds = {"bookmark": "책갈피", "heading": "제목 스타일", "pdf": "PDF 책갈피로 본문 검색"}
                 basis = ", ".join(f"{kinds[k]} {n}" for k in ("bookmark", "heading", "pdf") if (n := sum(1 for a in anchors if a.kind == k)))
-                msg = (f"HWPX 기준 {len(anchors)}개({basis}) · PDF 책갈피 {len(pdf_anchors)}개 · 짝 맞음 {sum(1 for m in matches if m.pdf)}개" if anchors
+                matched = sum(1 for m in matches if m.pdf)
+                msg = (f"HWPX 기준 {len(anchors)}개({basis}) · PDF 책갈피 {len(pdf_anchors)}개 · 짝 맞음 {matched}개" if anchors
                        else f"구획 기준을 찾지 못했습니다(PDF 책갈피 {len(pdf_anchors)}개). 기준을 'PDF 책갈피 이름으로 HWPX 본문 검색'으로 바꿔 보거나, 한컴에서 제목 스타일·책갈피를 넣으십시오.")
+                from .collate import zh as _zh, reading as _rd2
+                lines = [f"\n▶ 구획 색인\n   {msg}"]
+                if not _zh.available():
+                    lines.append("   ⚠ 간체·번체 변환 패키지(opencc)가 없어 PDF 책갈피(간체)와 HWPX 제목(번체)이 맞지 않습니다. [세로쓰기 인식] 탭의 [패키지 설치·점검] 뒤 프로그램을 다시 시작하십시오.")
+                if not _rd2.available():
+                    lines.append("   ⚠ 독음 변환 패키지(hanja)가 없어 한글 발음으로 찾기가 되지 않습니다. 같은 방법으로 설치하십시오.")
+                if pdf_anchors:
+                    lines.append("   PDF 책갈피 표본: " + " | ".join(f"{p.title}({p.page}쪽)" for p in pdf_anchors[:12]) + (" | …" if len(pdf_anchors) > 12 else ""))
+                    if anchors and matched == 0:
+                        lines.append("   HWPX 제목 표본: " + " | ".join(a.name[:20] for a in anchors[:12]))
+                    unmatched = [p for p in pdf_anchors if all(m.pdf is not p for m in matches)]
+                    if anchors and 0 < len(unmatched) < len(pdf_anchors):
+                        lines.append(f"   짝 못 찾은 PDF 책갈피 {len(unmatched)}개(앞 10개): " + " | ".join(p.title for p in unmatched[:10]))
+                self.q.put(("log", "\n".join(lines) + "\n"))
                 self.q.put(("sections", rows, msg))
             except Exception as e:
                 self.q.put(("sections", [], f"색인 실패: {e}"))
@@ -1088,6 +1103,8 @@ class App(tk.Tk):
             except Exception:
                 self.q.put(("log", traceback.format_exc()))
             self.q.put(("pkg", missing_packages()))
+            if rc == 0:
+                self.q.put(("log", "설치가 끝났습니다. 새 패키지가 확실히 적용되도록 프로그램을 한 번 다시 시작하십시오.\n"))
             self.q.put(("done", rc, "패키지 설치"))
         threading.Thread(target=t, daemon=True).start()
 

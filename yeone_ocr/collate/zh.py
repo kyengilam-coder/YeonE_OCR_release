@@ -15,13 +15,20 @@ VARIANTS = {
 }
 
 
-@functools.lru_cache(maxsize=None)
+_CC_CACHE: dict[str, object] = {}
+
+
 def _cc(kind: str):
+    """OpenCC 변환기. 패키지가 없으면 None — 실패는 캐시하지 않아 설치 직후부터 쓰인다."""
+    if kind in _CC_CACHE:
+        return _CC_CACHE[kind]
     try:
         import opencc
-        return opencc.OpenCC(kind)
+        c = opencc.OpenCC(kind)
     except Exception:
         return None
+    _CC_CACHE[kind] = c
+    return c
 
 
 def available() -> bool:
