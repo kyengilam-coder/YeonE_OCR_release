@@ -15,10 +15,10 @@ from . import __version__
 APP_NAME = "YeonE_OCR"
 CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
-            ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented")]
+            ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
@@ -184,6 +184,34 @@ class ModelDialog(tk.Toplevel):
             self.app.v_model.set(name); self.app.save_settings(quiet=True)
             self.app.v_status.set(f"모델 '{name}' 로 설정됨")
         self.destroy()
+
+
+class StylePicker(tk.Toplevel):
+    """HWPX 스타일 목록에서 책갈피로 쓸 것을 고른다(여러 개, 고른 순서가 급)."""
+    def __init__(self, app: "App", counts: list[tuple[str, int]]):
+        super().__init__(app)
+        self.app = app; self.title("책갈피로 쓸 스타일 고르기"); self.resizable(False, True)
+        f = ttk.Frame(self, padding=12); f.grid(sticky="nsew")
+        ttk.Label(f, text="문단에 쓰인 스타일입니다. 책갈피처럼 쓸 제목 스타일을 고르십시오(여러 개 가능, 고른 순서가 큰 단위 → 작은 단위).", wraplength=520, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.lb = tk.Listbox(f, selectmode="multiple", height=min(18, max(6, len(counts))), width=48, exportselection=False, font=app.font_base)
+        self.names = [n for n, _ in counts]
+        chosen = app.heading_styles_list()
+        for i, (n, c) in enumerate(counts):
+            self.lb.insert("end", f"{n}   ({c:,}개 문단)")
+            if (chosen and n in chosen) or (not chosen and "제목" in n):
+                self.lb.selection_set(i)
+        self.lb.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        sb = ttk.Scrollbar(f, orient="vertical", command=self.lb.yview); self.lb.configure(yscrollcommand=sb.set); sb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+        b = ttk.Frame(f); b.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        ttk.Button(b, text="이 스타일들을 책갈피로", command=self.ok, style="Accent.TButton").pack(side="left", padx=4)
+        ttk.Button(b, text="취소", command=self.destroy).pack(side="left", padx=4)
+        self.transient(app); self.grab_set()
+
+    def ok(self):
+        sel = [self.names[i] for i in self.lb.curselection()]
+        if not sel:
+            messagebox.showinfo(APP_NAME, "하나 이상 고르십시오."); return
+        self.app.set_heading_styles(sel); self.destroy()
 
 
 class EstimateDialog(tk.Toplevel):
@@ -515,6 +543,12 @@ class App(tk.Tk):
         ttk.Label(r1, text="HWPX", style="Panel.TLabel", width=6).pack(side="left")
         ttk.Entry(r1, textvariable=self.v_hwpx).pack(side="left", fill="x", expand=True, padx=(4, 8))
         self._btn(r1, "HWPX 고르기…", self.pick_hwpx, width=13).pack(side="left")
+        rs = ttk.Frame(f, style="Panel.TFrame"); rs.pack(fill="x", padx=8, pady=(2, 2))
+        ttk.Label(rs, text="책갈피로 쓸 스타일", style="Panel.TLabel").pack(side="left")
+        self.v_hstyles = tk.StringVar(value=self.cfg.get("heading_styles", ""))
+        ttk.Entry(rs, textvariable=self.v_hstyles).pack(side="left", fill="x", expand=True, padx=(6, 8))
+        self._btn(rs, "스타일 고르기…", self.pick_styles, width=13).pack(side="left")
+        ttk.Label(rs, text="비우면 이름에 '제목'이 든 스타일 전부 · 앞에 적은 것이 큰 단위", style="Hint.TLabel").pack(side="left", padx=(10, 0))
         r2 = ttk.Frame(f, style="Panel.TFrame"); r2.pack(fill="x", padx=8, pady=(2, 8))
         ttk.Label(r2, text="판독기·모델·API 키·속도는 [세로쓰기 인식] 탭의 설정을 따릅니다 · 읽기 모드: 가로쓰기 한문(간체)", style="Hint.TLabel").pack(side="left")
         ttk.Checkbutton(r2, text="세로쓰기 문헌(지침 그대로)", variable=self.v_cvert).pack(side="right", padx=(12, 0))
@@ -522,16 +556,21 @@ class App(tk.Tk):
         g = ttk.LabelFrame(tab, text="구획(책갈피·제목)"); g.pack(fill="both", expand=True, pady=(8, 0))
         r3 = ttk.Frame(g, style="Panel.TFrame"); r3.pack(fill="x", padx=8, pady=(6, 4))
         self._btn(r3, "구획 색인", self.do_collate_index, width=10).pack(side="left")
-        ttk.Label(r3, text="찾기", style="Panel.TLabel").pack(side="left", padx=(12, 4))
-        e = ttk.Entry(r3, textvariable=self.v_find, width=22); e.pack(side="left"); e.bind("<KeyRelease>", lambda _e: self.refresh_collate_table())
+        ttk.Label(r3, text="기준", style="Panel.TLabel").pack(side="left", padx=(12, 4))
+        from .collate.run import ANCHOR_SOURCES
+        self.v_asrc = tk.StringVar(value=ANCHOR_SOURCES.get(self.cfg.get("anchor_source", "auto"), ANCHOR_SOURCES["auto"]))
+        ttk.Combobox(r3, textvariable=self.v_asrc, values=list(ANCHOR_SOURCES.values()), state="readonly", width=44).pack(side="left")
+        ttk.Label(r3, text="찾기(한자·독음)", style="Panel.TLabel").pack(side="left", padx=(12, 4))
+        e = ttk.Entry(r3, textvariable=self.v_find, width=18); e.pack(side="left"); e.bind("<KeyRelease>", lambda _e: self.refresh_collate_table())
         self.v_cstat = tk.StringVar(value="HWPX 를 고르고 [구획 색인]을 누르십시오.")
-        ttk.Label(r3, textvariable=self.v_cstat, style="Hint.TLabel").pack(side="left", padx=12)
+        r3b = ttk.Frame(g, style="Panel.TFrame"); r3b.pack(fill="x", padx=8, pady=(0, 4))
+        ttk.Label(r3b, textvariable=self.v_cstat, style="Hint.TLabel", wraplength=1080, justify="left").pack(side="left")
         tf = ttk.Frame(g); tf.pack(fill="both", expand=True, padx=8)
-        cols = ("no", "lv", "name", "para", "pdf", "page", "how")
+        cols = ("no", "lv", "name", "read", "para", "pdf", "page", "how")
         self.ctable = ttk.Treeview(tf, columns=cols, show="headings", height=8, selectmode="browse")
-        for c, t, w, a in (("no", "번호", 50, "e"), ("lv", "급", 36, "center"), ("name", "HWPX 책갈피·제목", 330, "w"), ("para", "문단", 60, "e"),
-                           ("pdf", "PDF 책갈피", 260, "w"), ("page", "PDF 쪽", 60, "e"), ("how", "짝", 70, "center")):
-            self.ctable.heading(c, text=t); self.ctable.column(c, width=w, anchor=a, stretch=(c in ("name", "pdf")))
+        for c, t, w, a in (("no", "번호", 50, "e"), ("lv", "급", 36, "center"), ("name", "HWPX 책갈피·제목", 280, "w"), ("read", "독음", 150, "w"), ("para", "문단", 60, "e"),
+                           ("pdf", "PDF 책갈피", 220, "w"), ("page", "PDF 쪽", 60, "e"), ("how", "짝", 70, "center")):
+            self.ctable.heading(c, text=t); self.ctable.column(c, width=w, anchor=a, stretch=(c in ("name", "pdf", "read")))
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.ctable.yview); self.ctable.configure(yscrollcommand=sb.set)
         self.ctable.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
         self.ctable.bind("<Double-1>", lambda _e: self.do_collate(apply=False))
@@ -563,6 +602,42 @@ class App(tk.Tk):
         p = filedialog.askopenfilename(title="교정할 HWPX", filetypes=[("HWPX", "*.hwpx"), ("모든 파일", "*.*")])
         if p:
             self.v_hwpx.set(p); self.cfg["hwpx"] = p; save_config(self.cfg)
+            self.suggest_styles()
+
+    def suggest_styles(self):
+        """HWPX 를 고르면 제목으로 보이는 스타일을 뒤에서 읽어 칸을 채운다(비어 있을 때만)."""
+        h = self.v_hwpx.get().strip()
+        if not h or self.v_hstyles.get().strip():
+            return
+        def t():
+            try:
+                from .collate.sections import HwpxBook
+                names = HwpxBook(h).heading_style_names()
+                self.q.put(("styles_suggest", ", ".join(names)))
+            except Exception:
+                pass
+        threading.Thread(target=t, daemon=True).start()
+
+    def pick_styles(self):
+        h = self.v_hwpx.get().strip()
+        if not h or not Path(h).exists():
+            messagebox.showinfo(APP_NAME, "먼저 HWPX 를 고르십시오."); return
+        try:
+            from .collate.sections import HwpxBook
+            counts = HwpxBook(h).style_counts()
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"스타일을 읽지 못했습니다: {e}"); return
+        StylePicker(self, counts)
+
+    def set_heading_styles(self, names: list[str]):
+        self.v_hstyles.set(", ".join(names)); self.cfg["heading_styles"] = self.v_hstyles.get(); save_config(self.cfg)
+
+    def heading_styles_list(self) -> list[str]:
+        return [s.strip() for s in self.v_hstyles.get().split(",") if s.strip()]
+
+    def anchor_source(self) -> str:
+        from .collate.run import ANCHOR_SOURCES
+        return next((k for k, v in ANCHOR_SOURCES.items() if v == self.v_asrc.get()), "auto")
 
     def collate_policy(self) -> str:
         from .collate.run import POLICIES
@@ -578,7 +653,9 @@ class App(tk.Tk):
     def do_collate_index(self):
         if not self._need_hwpx():
             return
-        pdf, hwpx = self.pdf2(), self.v_hwpx.get().strip()
+        pdf, hwpx, src = self.pdf2(), self.v_hwpx.get().strip(), self.anchor_source()
+        styles = self.heading_styles_list() or None
+        self.cfg["anchor_source"] = src; self.cfg["heading_styles"] = self.v_hstyles.get(); save_config(self.cfg)
         self.v_cstat.set("색인 중…")
         def t():
             try:
@@ -586,24 +663,29 @@ class App(tk.Tk):
                 from .collate.run import index_both
                 from .pdfio import open_pdf
                 doc = open_pdf(pdf); book = HwpxBook(hwpx)
-                anchors, pdf_anchors, matches = index_both(doc, book)
-                rows = [{"no": i + 1, "lv": a.level, "name": a.name, "para": a.para, "pdf": m.pdf.title if m.pdf else "", "page": m.pdf.page if m.pdf else "",
-                         "how": {"exact": "정확", "fuzzy": f"비슷 {m.score:.2f}", "none": "없음"}[m.how]} for i, (a, m) in enumerate(zip(anchors, matches))]
-                self.q.put(("sections", rows, f"HWPX 기준 {len(anchors)}개 · PDF 책갈피 {len(pdf_anchors)}개 · 짝 맞음 {sum(1 for m in matches if m.pdf)}개"))
+                anchors, pdf_anchors, matches = index_both(doc, book, src, styles)
+                from .collate import reading as _rd
+                rows = [{"no": i + 1, "lv": a.level, "name": a.name, "read": _rd.reading(a.name), "para": a.para, "pdf": m.pdf.title if m.pdf else "", "page": m.pdf.page if m.pdf else "",
+                         "how": {"exact": "정확", "fuzzy": f"비슷 {m.score:.2f}", "none": "없음", "pdf": "PDF→본문"}[m.how]} for i, (a, m) in enumerate(zip(anchors, matches))]
+                kinds = {"bookmark": "책갈피", "heading": "제목 스타일", "pdf": "PDF 책갈피로 본문 검색"}
+                basis = ", ".join(f"{kinds[k]} {n}" for k in ("bookmark", "heading", "pdf") if (n := sum(1 for a in anchors if a.kind == k)))
+                msg = (f"HWPX 기준 {len(anchors)}개({basis}) · PDF 책갈피 {len(pdf_anchors)}개 · 짝 맞음 {sum(1 for m in matches if m.pdf)}개" if anchors
+                       else f"구획 기준을 찾지 못했습니다(PDF 책갈피 {len(pdf_anchors)}개). 기준을 'PDF 책갈피 이름으로 HWPX 본문 검색'으로 바꿔 보거나, 한컴에서 제목 스타일·책갈피를 넣으십시오.")
+                self.q.put(("sections", rows, msg))
             except Exception as e:
                 self.q.put(("sections", [], f"색인 실패: {e}"))
         threading.Thread(target=t, daemon=True).start()
 
     def refresh_collate_table(self):
-        from .collate import zh
+        from .collate import zh, reading
         from .collate.sections import normalize_name
-        q = zh.compare_key(normalize_name(self.v_find.get()))
+        raw = self.v_find.get().strip(); q = zh.compare_key(normalize_name(raw))
         for i in self.ctable.get_children():
             self.ctable.delete(i)
         for r in self.collate_rows:
-            if q and q not in zh.compare_key(normalize_name(r["name"])) and q not in zh.compare_key(normalize_name(r["pdf"])):
+            if q and q not in zh.compare_key(normalize_name(r["name"])) and q not in zh.compare_key(normalize_name(r["pdf"])) and not reading.matches(r["name"], raw):
                 continue
-            self.ctable.insert("", "end", iid=str(r["no"]), values=(r["no"], r["lv"], ("    " * (r["lv"] - 1)) + r["name"], r["para"], r["pdf"], r["page"], r["how"]))
+            self.ctable.insert("", "end", iid=str(r["no"]), values=(r["no"], r["lv"], ("    " * (r["lv"] - 1)) + r["name"], r.get("read", ""), r["para"], r["pdf"], r["page"], r["how"]))
 
     def _selected_anchor(self) -> int | None:
         sel = self.ctable.selection()
@@ -626,7 +708,7 @@ class App(tk.Tk):
         else:
             extra = []
         argv = ["collate", self.pdf2(), "--work", str(self.work2()), "--hwpx", self.v_hwpx.get().strip(), "--anchor-index", str(idx),
-                "--policy", self.collate_policy()] + extra + self._read_opts()
+                "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts()
         if apply: argv.append("--apply")
         if not self.v_cmemo.get(): argv.append("--no-memo")
         argv += ["--mode", "vertical" if self.v_cvert.get() else "horizontal_zh"]
@@ -777,6 +859,9 @@ class App(tk.Tk):
                     self._keycheck_result(item[1])
                 elif item[0] == "sections":
                     self.collate_rows = item[1]; self.v_cstat.set(item[2]); self.refresh_collate_table()
+                elif item[0] == "styles_suggest":
+                    if not self.v_hstyles.get().strip():
+                        self.v_hstyles.set(item[1])
         except queue.Empty:
             pass
         self.after(100, self._poll)

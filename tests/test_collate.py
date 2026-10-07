@@ -10,13 +10,16 @@ from yeone_ocr.collate.hwpx_edit import Editor, paragraph_text
 from yeone_ocr.collate.run import trim_to_section
 
 
-def make_book(path: str):
-    """개요 스타일 제목 + 본문으로 된 작은 HWPX(번체)."""
+def make_book(path: str, plain: bool = False):
+    """개요 스타일 제목 + 본문으로 된 작은 HWPX(번체). plain=True 면 제목도 바탕글(책갈피·제목 스타일이 전혀 없는 문서)."""
     from hwpx.document import HwpxDocument
     doc = HwpxDocument.new()
     body = doc.ensure_run_style(font="함초롬바탕", size=11)
     def heading(text, level):
-        doc.add_heading(text, level=level)
+        if plain:
+            para(text)
+        else:
+            doc.add_heading(text, level=level)
     def para(text):
         p = doc.add_paragraph("", para_pr_id_ref=0, style_id_ref=0, char_pr_id_ref=body, include_run=False, inherit_style=False)
         p.add_run(text, char_pr_id_ref=body)
@@ -46,6 +49,49 @@ class Sections(unittest.TestCase):
             self.assertEqual(find_anchor(an, "薊"), [an[1], an[2]])
         self.assertEqual(normalize_name(" 三棱 (京三棱·黑三棱) "), "三棱京三棱黑三棱")
         self.assertEqual(heading_styles([("0", "바탕글"), ("6", "제목-장"), ("8", "제목-본초명"), ("9", "제목-본초명(소)")]), {"6": 1, "8": 2, "9": 3})
+
+
+class PlainBook(unittest.TestCase):
+    def test_anchors_from_pdf_titles(self):
+        """책갈피도 제목 스타일도 없는 HWPX: PDF 책갈피 이름을 본문에서 찾아 기준으로 삼는다."""
+        from yeone_ocr.collate.run import index_both
+        class FakePdf:
+            def __len__(self): return 200
+            def get_toc(self, simple=False): return [[1, "各论", 1, {}], [2, "大蓟", 10, {}], [2, "小蓟", 12, {}], [2, "人参", 15, {}], [2, "없는항목", 20, {}]]
+        with tempfile.TemporaryDirectory() as td:
+            bk = HwpxBook(make_book(os.path.join(td, "p.hwpx"), plain=True))
+            self.assertEqual(bk.anchors(), [])                                            # 제목 스타일이 없으니 HWPX 기준은 0개
+            anchors, pdf_anchors, matches = index_both(FakePdf(), bk, "auto")
+            self.assertEqual([a.name for a in anchors], ["各論", "大薊", "小薊", "人參"])   # 간체 책갈피 → 번체 본문 문단
+            self.assertEqual([a.kind for a in anchors], ["pdf"] * 4); self.assertEqual([m.how for m in matches], ["pdf"] * 4)
+            self.assertEqual(matches[1].pdf.page, 10)
+            sec = bk.section(anchors, 1); self.assertEqual(bk.section_texts(sec)[0], "大薊"); self.assertEqual(sec.next_anchor.name, "小薊")
+            hw_only = index_both(FakePdf(), bk, "hwpx")[0]; self.assertEqual(hw_only, [])
+
+
+class Reading(unittest.TestCase):
+    def test_hangul_reading_search(self):
+        from yeone_ocr.collate import reading
+        if not reading.available():
+            self.skipTest("hanja 없음")
+        self.assertEqual(reading.reading("大薊"), "대계"); self.assertEqual(reading.reading("人參"), "인삼"); self.assertEqual(reading.reading("羅經"), "나경")
+        self.assertTrue(reading.matches("大薊", "대계")); self.assertTrue(reading.matches("人參葉", "인삼")); self.assertTrue(reading.matches("人蔘", "인삼"))
+        self.assertTrue(reading.matches("三棱(京三棱·黑三棱)", "삼릉")); self.assertTrue(reading.matches("三棱", "삼능"))      # 두음법칙 어느 쪽이든
+        self.assertTrue(reading.matches("黨參(上黨人參)", "당삼")); self.assertTrue(reading.matches("黨參", "당참"))          # 여러 음 글자
+        self.assertTrue(reading.matches("大薊 與 小薊", "소계")); self.assertFalse(reading.matches("大薊", "소계")); self.assertFalse(reading.matches("大薊", ""))
+        self.assertTrue(reading.matches("羅經必備五行", "나경")); self.assertTrue(reading.matches("羅經必備五行", "라경"))
+        self.assertTrue(reading.matches("大薊", "大薊"))                                                                   # 한자 그대로도
+
+    def test_styles_as_bookmarks(self):
+        with tempfile.TemporaryDirectory() as td:
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx")))
+            names = bk.heading_style_names(); self.assertTrue(any("개요" in n for n in names))
+            only2 = bk.anchors(styles=["개요 2"])
+            self.assertEqual([a.name for a in only2], ["大薊", "小薊", "人參"]); self.assertEqual({a.level for a in only2}, {1})
+            both = bk.anchors(styles=["개요 2", "개요 1"])                                  # 앞에 적은 것이 급 1
+            self.assertEqual([(a.name, a.level) for a in both][:2], [("各論", 2), ("大薊", 1)])
+            self.assertTrue(any(n == "개요 1" for n, _ in bk.style_counts()))
+            an = bk.anchors(); self.assertEqual([a.name for a in find_anchor(an, "대계")], ["大薊"]); self.assertEqual([a.name for a in find_anchor(an, "인삼")], ["人參"])
 
 
 class Outline(unittest.TestCase):

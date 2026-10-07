@@ -672,6 +672,9 @@ def build_parser():
     p.add_argument("--section", help="교정할 책갈피·제목 이름(정확히, 또는 일부)")
     p.add_argument("--nth", type=int, help="같은 이름이 여럿일 때 몇 번째인지(1부터)")
     p.add_argument("--anchor-index", type=int, help="--list 번호로 구획을 바로 지정(1부터). 화면에서 쓴다")
+    p.add_argument("--heading-styles", help="책갈피처럼 쓸 HWPX 스타일 이름(쉼표로 여러 개, 앞이 큰 단위). 예 \"제목-본초명,제목-본초명(소)\". 비우면 이름에 '제목'이 든 스타일 전부")
+    p.add_argument("--anchor-source", choices=["auto", "hwpx", "pdf"], default="auto",
+                   help="구획 기준: auto(기본)=HWPX 책갈피·제목 스타일, 없으면 PDF 책갈피 이름으로 본문 검색 / hwpx / pdf")
     p.add_argument("--pdf-pages", help="PDF 책갈피 짝이 없을 때 쪽 범위를 직접(예 120-123)")
     p.add_argument("--policy", choices=["all", "sure", "memo"], default="all", help="all=전부 자동(A·B2·누락 삽입, B1·C 는 표시) / sure=확실한 것(A)만 / memo=메모만")
     p.add_argument("--apply", action="store_true", help="대조 결과를 HWPX 에 반영해 사본(<이름>_교정.hwpx)으로 저장. 없으면 보고만")

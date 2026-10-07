@@ -101,10 +101,29 @@ class HwpxBook:
             self._texts = [p.text for p in self.paragraphs]
         return self._texts
 
-    def anchors(self, heading_pattern: re.Pattern | None = None) -> list[Anchor]:
-        """책갈피가 있으면 책갈피를, 없으면 제목 스타일 문단을 기준으로 삼는다. 둘 다 있으면 둘 다(책갈피는 급 1)."""
+    def heading_style_names(self) -> list[str]:
+        """제목으로 보이는 스타일 이름들(스타일 목록 순서)."""
+        hs = heading_styles(self.style_names)
+        return [name for sid, name in self.style_names if sid in hs]
+
+    def style_counts(self) -> list[tuple[str, int]]:
+        """(스타일 이름, 글이 있는 문단 수) — 스타일 고르기 창에 보여 준다."""
+        names = dict(self.style_names); cnt: dict[str, int] = {}
+        for i, p in enumerate(self.paragraphs):
+            if self.texts()[i].strip():
+                nm = names.get(p.element.get("styleIDRef", "0"), "?"); cnt[nm] = cnt.get(nm, 0) + 1
+        return [(name, cnt.get(name, 0)) for _, name in self.style_names if cnt.get(name)]
+
+    def anchors(self, heading_pattern: re.Pattern | None = None, styles: list[str] | None = None) -> list[Anchor]:
+        """책갈피(hp:bookmark)와 제목 스타일 문단을 기준으로 삼는다(책갈피는 급 1).
+        styles 를 주면(스타일 이름 목록) 그 스타일 문단만 제목으로 보고, 급은 준 순서대로 1, 2, 3…"""
         out: list[Anchor] = []
-        hs = heading_styles(self.style_names, heading_pattern)
+        if styles:
+            wanted = [s.strip() for s in styles if s.strip()]
+            by_name = {name: sid for sid, name in self.style_names}
+            hs = {by_name[n]: i + 1 for i, n in enumerate(wanted) if n in by_name}
+        else:
+            hs = heading_styles(self.style_names, heading_pattern)
         texts = self.texts()
         for i, p in enumerate(self.paragraphs):
             el = p.element
@@ -117,6 +136,31 @@ class HwpxBook:
             if sid in hs and texts[i].strip():
                 out.append(Anchor("heading", texts[i].strip(), i, hs[sid], dict(self.style_names).get(sid, sid)))
         out.sort(key=lambda a: (a.para, 0 if a.kind == "bookmark" else 1))
+        return out
+
+    def anchors_from_titles(self, titles: list[tuple[str, int]], slack: int = 6) -> list[tuple[int, Anchor | None]]:
+        """PDF 책갈피 (제목, 급) 목록을 HWPX 본문에서 찾아 기준으로 삼는다(책갈피도 제목 스타일도 없는 HWPX 용).
+        문서 순서대로 앞에서부터 찾으며, 제목과 같은 글(정규화·간체 접기)인 문단, 없으면 제목으로 시작하는 짧은 문단(제목 길이+slack 이내)을 고른다.
+        돌려주는 값은 [(PDF 책갈피 번호, Anchor 또는 None)]."""
+        from . import zh
+        keys = [zh.compare_key(normalize_name(t)) for t in self.texts()]
+        out: list[tuple[int, Anchor | None]] = []
+        pos = 0
+        for j, (title, level) in enumerate(titles):
+            k = zh.compare_key(normalize_name(title))
+            found = None
+            if k:
+                for i in range(pos, len(keys)):
+                    if keys[i] == k:
+                        found = i; break
+                if found is None:
+                    for i in range(pos, len(keys)):
+                        if keys[i].startswith(k) and len(keys[i]) <= len(k) + slack:
+                            found = i; break
+            if found is None:
+                out.append((j, None)); continue
+            out.append((j, Anchor("pdf", self.texts()[found].strip() or title, found, max(1, level), "PDF 책갈피로 찾음")))
+            pos = found + 1
         return out
 
     def section(self, anchors: list[Anchor], idx: int) -> Section:
@@ -137,7 +181,7 @@ def find_anchor(anchors: list[Anchor], query: str) -> list[Anchor]:
     q = (query or "").strip()
     if not q:
         return []
-    from . import zh
+    from . import zh, reading
     exact = [a for a in anchors if a.name.strip() == q]
     if exact:
         return exact
@@ -145,4 +189,8 @@ def find_anchor(anchors: list[Anchor], query: str) -> list[Anchor]:
     same = [a for a in anchors if zh.compare_key(a.key) == nq]
     if same:
         return same
-    return [a for a in anchors if nq and nq in zh.compare_key(a.key)]
+    part = [a for a in anchors if nq and nq in zh.compare_key(a.key)]
+    if part:
+        return part
+    # 한글 독음으로(대계 → 大薊, 인삼 → 人參·人蔘)
+    return [a for a in anchors if reading.matches(a.name, q)]

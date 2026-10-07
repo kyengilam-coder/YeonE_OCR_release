@@ -23,22 +23,37 @@ def log(msg: str) -> None:
 
 
 # ---------- 색인 ----------
-def index_both(pdf_doc, book: HwpxBook):
-    anchors = book.anchors()
+ANCHOR_SOURCES = {"auto": "자동(HWPX 책갈피·제목 → 없으면 PDF 책갈피로 본문 검색)", "hwpx": "HWPX 책갈피·제목 스타일", "pdf": "PDF 책갈피 이름으로 HWPX 본문 검색"}
+
+
+def index_both(pdf_doc, book: HwpxBook, source: str = "auto", styles: list[str] | None = None):
+    """구획 기준과 PDF 책갈피를 뽑고 짝짓는다. source: auto | hwpx | pdf.
+    - hwpx: HWPX 의 책갈피(hp:bookmark)와 제목 스타일 문단
+    - pdf : PDF 책갈피 이름을 HWPX 본문에서 찾아 그 문단을 기준으로(책갈피도 제목 스타일도 없는 HWPX 용)
+    - auto: hwpx 로 하나라도 나오면 hwpx, 아니면 pdf"""
+    from .pdf_outline import Match
     pdf_anchors = pdf_bookmarks(pdf_doc)
+    anchors = book.anchors(styles=styles) if source in ("auto", "hwpx") else []
+    if source == "pdf" or (source == "auto" and not anchors):
+        found = book.anchors_from_titles([(p.title, p.level) for p in pdf_anchors])
+        anchors = [a for _, a in found if a is not None]
+        matches = [Match(a, pdf_anchors[j], 1.0, "pdf") for j, a in found if a is not None]
+        return anchors, pdf_anchors, matches
     matches = match_anchors(anchors, pdf_anchors)
     return anchors, pdf_anchors, matches
 
 
 def list_text(anchors, pdf_anchors, matches, limit: int = 0) -> str:
-    lines = [f"HWPX 기준 {len(anchors)}개(책갈피 {sum(1 for a in anchors if a.kind == 'bookmark')}, 제목 {sum(1 for a in anchors if a.kind == 'heading')}) · PDF 책갈피 {len(pdf_anchors)}개 · "
-             f"짝: 정확 {sum(1 for m in matches if m.how == 'exact')}, 비슷 {sum(1 for m in matches if m.how == 'fuzzy')}, 없음 {sum(1 for m in matches if m.how == 'none')}"]
+    lines = [f"HWPX 기준 {len(anchors)}개(책갈피 {sum(1 for a in anchors if a.kind == 'bookmark')}, 제목 {sum(1 for a in anchors if a.kind == 'heading')}, "
+             f"PDF 책갈피로 찾음 {sum(1 for a in anchors if a.kind == 'pdf')}) · PDF 책갈피 {len(pdf_anchors)}개 · "
+             f"짝: 정확 {sum(1 for m in matches if m.how in ('exact', 'pdf'))}, 비슷 {sum(1 for m in matches if m.how == 'fuzzy')}, 없음 {sum(1 for m in matches if m.how == 'none')}"]
     for i, m in enumerate(matches):
         if limit and i >= limit:
             lines.append(f"… {len(matches) - limit}개 더"); break
         a = m.anchor
         pdf = f"PDF 「{m.pdf.title}」 {m.pdf.page}쪽" if m.pdf else "PDF 짝 없음"
-        lines.append(f"{i + 1:4d}. {'  ' * (a.level - 1)}{a.name[:30]:<32} 문단 {a.para:>5}  {pdf}  ({m.how}{'' if m.how != 'fuzzy' else f' {m.score:.2f}'})")
+        from . import reading
+        lines.append(f"{i + 1:4d}. {'  ' * (a.level - 1)}{a.name[:30]:<32} [{reading.reading(a.name)[:16]}] 문단 {a.para:>5}  {pdf}  ({m.how}{'' if m.how != 'fuzzy' else f' {m.score:.2f}'})")
     return "\n".join(lines)
 
 
@@ -196,7 +211,11 @@ def cmd_collate(args):
         log("--hwpx 파일이 필요합니다."); return 2
     pdf_doc = open_pdf(args.pdf); work = Work(args.pdf, args.work)
     book = HwpxBook(args.hwpx)
-    anchors, pdf_anchors, matches = index_both(pdf_doc, book)
+    styles = [s for s in (getattr(args, "heading_styles", "") or "").split(",") if s.strip()] or None
+    anchors, pdf_anchors, matches = index_both(pdf_doc, book, getattr(args, "anchor_source", "auto") or "auto", styles)
+    if not anchors:
+        log("구획 기준을 찾지 못했습니다. HWPX 에 책갈피·제목 스타일이 없고 PDF 책갈피 이름도 본문에서 찾지 못했습니다. "
+            "--anchor-source pdf 로 다시 하거나, 한컴에서 제목에 '제목' 스타일 또는 책갈피를 넣어 주십시오."); return 2
     ai = getattr(args, "anchor_index", None)
     if ai:
         if not 1 <= ai <= len(anchors):
