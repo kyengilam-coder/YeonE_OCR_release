@@ -176,9 +176,18 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     log(f"구획 「{a.name}」: HWPX 문단 {sec.start}~{sec.end - 1}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
     ensure_pages_read(args, work, pdf_doc, pages)
     oc_all = []
+    from ..cli import remerge_record
     for n in range(pages[0], pages[1] + 1):
         rec = work.load_record(n)
         if rec:
+            if rec.get("pass1") and rec.get("pass2"):
+                # 저장된 1차·2차로 비교 표시를 현재 모드 규칙(부호·간체 접기)으로 다시 계산한다. 모델 호출 없음
+                try:
+                    tlp = work.textlayer_path(n)
+                    layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else ""
+                    rec = remerge_record(rec, layer); work.save_record(n, rec)
+                except Exception as e:
+                    log(f"  {n}쪽 비교 다시 계산 실패(기존 기록 사용): {e}")
             oc_all.extend(reading_text(rec))
     oc_paras, note = trim_to_section(oc_all, a.name, sec.next_anchor.name if sec.next_anchor else (m.pdf and None))
     policy = getattr(args, "policy", "all") or "all"
