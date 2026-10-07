@@ -716,7 +716,21 @@ class App(tk.Tk):
             return
         row = next(r for r in self.collate_rows if r["no"] == idx)
         if not row["pdf"]:
-            pages = simpledialog.askstring(APP_NAME, f"「{row['name']}」 에 맞는 PDF 책갈피가 없습니다.\nPDF 쪽 범위를 직접 넣으십시오 (예 120-123):", parent=self)
+            from .collate import zh
+            from .collate.pdf_outline import find_title_pages
+            from .pdfio import open_pdf
+            guess = None
+            try:
+                nxt = next((r2["name"] for r2 in self.collate_rows if r2["no"] > idx and r2["lv"] <= row["lv"]), None)
+                guess = find_title_pages(open_pdf(self.pdf2()), row["name"], nxt)
+            except Exception:
+                guess = None
+            msg = f"「{row['name']}」 에 맞는 PDF 책갈피가 없습니다.\n"
+            if not zh.available():
+                msg += "⚠ 간체·번체 변환 패키지(opencc)가 없어 책갈피 짝을 못 찾습니다. [패키지 설치·점검] 뒤 다시 시작하십시오.\n"
+            msg += (f"PDF 글자층에서 제목을 찾았습니다: {guess[0]}~{guess[1]}쪽. 맞으면 그대로 [OK].\n" if guess else "PDF 글자층에서도 제목을 찾지 못했습니다.\n")
+            msg += "PDF 쪽 범위 (예 120-123):"
+            pages = simpledialog.askstring(APP_NAME, msg, parent=self, initialvalue=(f"{guess[0]}-{guess[1]}" if guess else ""))
             if not pages:
                 return
             extra = ["--pdf-pages", pages.strip()]

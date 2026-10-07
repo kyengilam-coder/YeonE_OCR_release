@@ -41,9 +41,10 @@ _PUNCT = re.compile(r"[\s·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【�
 
 
 def normalize_name(s: str) -> str:
-    """이름 비교용: NFC, 공백·부호 제거, 소문자. 간체·번체 차이는 zh.compare_key 로 따로 접는다."""
+    """이름 비교용: NFC, 공백·부호·기호(…·『』 등 모든 문장부호·기호 범주) 제거, 소문자. 간체·번체 차이는 zh.compare_key 로 따로 접는다."""
     s = unicodedata.normalize("NFC", s or "")
     s = _PUNCT.sub("", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch)[0] not in "PSZC")
     return s.lower()
 
 

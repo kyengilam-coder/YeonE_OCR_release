@@ -95,6 +95,24 @@ class Reading(unittest.TestCase):
 
 
 class Outline(unittest.TestCase):
+    def test_tolerant_matching(self):
+        from yeone_ocr.collate.pdf_outline import match_key
+        self.assertEqual(match_key("冬瓜 ……… 123"), match_key("冬瓜")); self.assertEqual(match_key("121. 冬瓜 Dongguā"), match_key("冬瓜"))
+        an = [Anchor("heading", "冬瓜", 10, 2), Anchor("heading", "大薊", 20, 2), Anchor("heading", "人參", 30, 2)]
+        pdf = [PdfAnchor("第三节 冬瓜(附：冬瓜子) 123", 1, 123), PdfAnchor("大蓟 ……… 130", 1, 130), PdfAnchor("人参", 1, 140)]
+        ms = match_anchors(an, pdf)
+        self.assertEqual([m.how for m in ms], ["contains", "exact", "exact"]); self.assertEqual(ms[0].pdf.page, 123)
+
+    def test_find_title_in_text_layer(self):
+        import pymupdf
+        doc = pymupdf.open()
+        for text in ["目录 大蓟 12 小蓟 13", "大蓟 本草经疏 大蓟根 陶云有毒", "续 大蓟 本草新编", "小蓟 性凉 治吐血", "人参 大补元气"]:
+            pg = doc.new_page(); pg.insert_text((72, 100), text, fontname="china-s", fontsize=14)
+        from yeone_ocr.collate.pdf_outline import find_title_pages
+        self.assertEqual(find_title_pages(doc, "大薊", "小薊", start_page=2), (2, 4))     # 목차 쪽을 건너뛰고 본문에서, 다음 제목 쪽까지
+        self.assertEqual(find_title_pages(doc, "人參", None, start_page=2), (5, 5))
+        self.assertIsNone(find_title_pages(doc, "甘草", None))
+
     def test_match_and_pages(self):
         an = [Anchor("heading", "大薊", 10, 2), Anchor("heading", "小薊", 20, 2), Anchor("heading", "大薊 與 小薊", 30, 2), Anchor("heading", "없는것", 40, 2)]
         pdf = [PdfAnchor("大蓟", 1, 120), PdfAnchor("小蓟", 1, 122), PdfAnchor("大蓟与小蓟", 1, 123), PdfAnchor("人参", 1, 130)]

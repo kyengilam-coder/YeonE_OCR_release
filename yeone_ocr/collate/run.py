@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from . import zh
 from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name
-from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor
+from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages
 from .collate import hwpx_cells, ocr_cells, collate, summary, Item
 from .hwpx_edit import Editor
 
@@ -165,7 +165,11 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     elif m.pdf:
         j = pdf_anchors.index(m.pdf); pages = page_range(pdf_anchors, j, len(pdf_doc))
     else:
-        raise RuntimeError(f"「{a.name}」 에 맞는 PDF 책갈피가 없습니다. --pdf-pages 로 쪽 범위를 주십시오.")
+        guess = find_title_pages(pdf_doc, a.name, sec.next_anchor.name if sec.next_anchor else None)
+        if not guess:
+            raise RuntimeError(f"「{a.name}」 에 맞는 PDF 책갈피가 없고 PDF 글자층에서도 제목을 찾지 못했습니다. --pdf-pages 로 쪽 범위를 주십시오.")
+        pages = guess
+        log(f"PDF 책갈피에 짝이 없어 PDF 글자층에서 「{a.name}」 을 찾음 → {pages[0]}~{pages[1]}쪽")
     log(f"구획 「{a.name}」: HWPX 문단 {sec.start}~{sec.end - 1}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
     ensure_pages_read(args, work, pdf_doc, pages)
     oc_all = []
