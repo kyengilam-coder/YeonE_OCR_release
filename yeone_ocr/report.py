@@ -57,6 +57,13 @@ def make_report(work: Work, total_pages: int) -> str:
         lines.append(f"- 쪽당 평균: 호출 {tot['calls'] / tot['pages']:.1f}회 · 입력 {tot['prompt_tokens'] / tot['pages']:,.0f} 출력 {tot['output_tokens'] / tot['pages']:,.0f} 토큰 · {tot['seconds'] / tot['pages']:.0f}초")
         lines.append("- 출력 토큰에는 생각(thinking) 토큰이 포함되어 있습니다(출력 요금으로 과금). 비용은 Google AI Studio 의 모델별 단가(100만 토큰당)를 곱해 구합니다.")
         lines.append("")
+    try:
+        from .ledger import build_ledger, ledger_text
+        led = build_ledger(work.dir)
+        lines.append("## 다발 오인식 장부 (1차↔2차 갈림 · 판독↔글자층 · HWPX↔판독)")
+        lines.extend(ledger_text(led)); lines.append("")
+    except Exception as e:                       # 보고가 장부 때문에 멈추지 않게
+        lines.append(f"## 다발 오인식 장부\n- (장부를 만들지 못함: {e})\n")
     lines.append("## 주의")
     lines.append("- '원본 대조 완료(사람)' 은 검수자가 `mark` 명령으로 붙일 때만 기록됩니다. 프로그램은 이 상태를 스스로 붙이지 않습니다.")
     lines.append("- 자동 OCR·2차 비교·구조 검사는 전수 교감을 대신하지 않습니다(지침 27).")

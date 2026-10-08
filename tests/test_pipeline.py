@@ -428,3 +428,166 @@ class ReviewOverlay(unittest.TestCase):
         h = overlay_boxes(pr)
         self.assertEqual(h.count("class='box"), 4); self.assertIn("img-kind", h); self.assertIn("영역 밖 글줄 2", h)
         self.assertIn("left:20.00%;top:10.00%;width:60.00%;height:80.00%", h)      # r1: bbox [y0 100, x0 200, y1 900, x1 800]
+
+
+class TextlayerFold(unittest.TestCase):
+    """0.6.0 — 글자층 대조에서 부호 표기와 〔〕 표시는 차이로 세지 않는다(중의역대약론선 실측: 글자층 차이의 60%가 ，↔, 였다)."""
+    def test_punctuation_and_marks_are_folded(self):
+        from yeone_ocr.merge import compare_textlayer
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column
+        pr = PageReading(pdf_page=1, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[
+            Column(col_from_right=1, text="冬瓜，性凉。治水肿〔疑: 、〕小便不利；能〔人/入〕阴分")])])])
+        d = compare_textlayer(pr, "冬瓜,性凉.治水肿、小便不利;能人阴分")
+        self.assertEqual(d["items"], [], d)
+        self.assertEqual(d["ratio"], 1.0)
+        d2 = compare_textlayer(pr, "冬瓜,性温.治水肿、小便不利;能人阴分")       # 진짜 다른 글자는 그대로 잡힌다
+        self.assertEqual([(i["reading"], i["layer"]) for i in d2["items"]], [("凉", "温")])
+
+
+class Chunking(unittest.TestCase):
+    """0.6.0 — 2차 조각: 줄 공백에 스냅, 줄 묶음으로 나누기."""
+    def _page(self, lines=12, line_h=34, gap=25, W=900, margin=60):
+        from PIL import Image, ImageDraw
+        H = margin * 2 + lines * (line_h + gap)
+        im = Image.new("L", (W, H), 255); d = ImageDraw.Draw(im)
+        tops = []
+        for k in range(lines):
+            y = margin + k * (line_h + gap); tops.append(y)
+            d.rectangle((margin, y, W - margin, y + line_h), fill=0)      # 글줄 흉내(검은 띠)
+        return im, tops, line_h, gap
+
+    def test_snap_to_gaps_keeps_out_neighbour_lines(self):
+        from yeone_ocr.layout import snap_to_gaps
+        im, tops, lh, gap = self._page()
+        W, H = im.size
+        # 모델 bbox 가 3번째 줄 한 줄인데 위·아래로 이웃 줄 글자 반쯤까지 걸쳐 있는 경우
+        y0 = (tops[2] - gap - lh * 0.4) / H; y1 = (tops[2] + lh + gap + lh * 0.4) / H
+        fr = snap_to_gaps(im, (0.05, y0, 0.95, y1), axis="y")
+        self.assertGreater(fr[1] * H, tops[1] + lh)            # 위 변이 2번째 줄 아래 공백 안
+        self.assertLess(fr[3] * H, tops[3])                     # 아래 변이 4번째 줄 위 공백 안
+        self.assertLess(fr[1] * H, tops[2]); self.assertGreater(fr[3] * H, tops[2] + lh)   # 3번째 줄은 온전히 포함
+
+    def test_split_bands_groups_lines(self):
+        from yeone_ocr.layout import split_bands
+        im, tops, lh, gap = self._page(lines=12)
+        bands = split_bands(im, axis="y", max_bands=5)
+        self.assertEqual(len(bands), 3)                          # 12줄 → 5+5+2… 끝 묶음이 한 줄이면 앞에 붙이므로 5+5+2
+        self.assertEqual(bands[0][0], 0); self.assertEqual(bands[-1][1], im.height)
+        for (a, b), (c, d) in zip(bands, bands[1:]):
+            self.assertEqual(b, c)                               # 이어 붙으면 조각 전체
+        # 경계가 글줄을 자르지 않는다
+        for a, b in bands:
+            for t in tops:
+                self.assertFalse(a < t < b and not (a < t and t + lh < b) and (a < t + lh), f"경계 {a}~{b} 가 줄 {t}~{t + lh} 를 자름")
+        self.assertEqual(split_bands(im, axis="y", max_bands=20), [(0, im.height)])       # 줄 수가 적으면 하나
+
+
+class SecondPassChunks(unittest.TestCase):
+    """0.6.0 — 긴 영역을 줄 묶음으로 나눠 2차 판독하고 열을 이어 붙여 되돌린다."""
+    def test_chunks_are_recombined_in_order(self):
+        from argparse import Namespace
+        from PIL import Image, ImageDraw
+        from yeone_ocr import prompts
+        from yeone_ocr.cli import _second_pass
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, RegionReread
+        lines, lh, gap, W, margin = 12, 34, 25, 900, 60
+        H = margin * 2 + lines * (lh + gap)
+        im = Image.new("L", (W, H), 255); d = ImageDraw.Draw(im)
+        for k in range(lines):
+            y = margin + k * (lh + gap); d.rectangle((margin, y, W - margin, y + lh), fill=0)
+        y0 = margin / H; y1 = (margin + lines * (lh + gap) - gap) / H
+        reg = Region(id="r1", kind="본문", bbox=[round(y0 * 1000), round(margin / W * 1000), round(y1 * 1000), round((W - margin) / W * 1000)],
+                     paragraphs=[Paragraph(columns=[Column(col_from_right=i + 1, text=f"줄{i + 1}") for i in range(lines)])])
+        p1 = PageReading(pdf_page=1, regions=[reg])
+
+        class Fake:
+            """조각 id 와 조각 높이를 기록하고, 조각마다 열 두 개를 돌려준다."""
+            def __init__(self): self.seen = []
+            def reread_regions(self, items, n):
+                out = {}
+                for rid, kind, img in items:
+                    self.seen.append((rid, img.size))
+                    out[rid] = RegionReread(columns=[Column(col_from_right=1, text=f"{rid}a"), Column(col_from_right=2, text=f"{rid}b")])
+                return out
+            def reread_region(self, im, kind, rid, n):
+                self.seen.append((rid, im.size))                 # 영역이 하나뿐이면 낱개 호출로 간다
+                return RegionReread(columns=[Column(col_from_right=1, text=f"{rid}a")])
+
+        old = prompts.MODE; prompts.set_mode("horizontal_zh")
+        try:
+            fake = Fake()
+            rereads, meta = _second_pass(fake, im, p1, 1, Namespace(second_mode="batch", chunk_lines=5))
+        finally:
+            prompts.set_mode(old)
+        self.assertEqual([rid for rid, _ in fake.seen], ["r1#1", "r1#2", "r1#3"])        # 12줄 → 5+5+2
+        self.assertIn("r1", rereads); self.assertNotIn("r1#1", rereads)
+        cols = rereads["r1"].columns
+        self.assertEqual([c.text for c in cols], ["r1#1a", "r1#1b", "r1#2a", "r1#2b", "r1#3a", "r1#3b"])
+        self.assertEqual([c.col_from_right for c in cols], [1, 2, 3, 4, 5, 6])              # 열 번호는 1부터 다시
+        self.assertEqual(meta["r1"]["chunks"], 3); self.assertEqual(meta["r1"]["chunks_read"], 3)
+        # 조각 높이가 줄 수에 비례한다(5·5·2줄): 마지막 조각이 첫 조각의 절반보다 낮다
+        hs = [sz[1] for _, sz in fake.seen]; self.assertLess(hs[2], hs[0] / 2, hs)
+        # 나누지 않을 때(chunk_lines=0)는 영역 그대로 한 장
+        fake2 = Fake(); prompts.set_mode("horizontal_zh")
+        try:
+            rereads2, meta2 = _second_pass(fake2, im, p1, 1, Namespace(second_mode="batch", chunk_lines=0))
+        finally:
+            prompts.set_mode(old)
+        self.assertEqual([rid for rid, _ in fake2.seen], ["r1"]); self.assertEqual(meta2["r1"]["chunks"], 1)
+
+
+class Adjudicate(unittest.TestCase):
+    """0.6.0 — 3차 글자 판별: 〔a/b〕 자리 찾기, 글자 창 좌표, 확정 적용, 다시 계산 뒤 유지."""
+    def _rec(self):
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, Uncertain
+        reg = Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[
+            Column(col_from_right=1, text="行通乎小肠，能〔入/人〕阴分，治有形之病"),
+            Column(col_from_right=2, text="色赤〔入/人〕心，性下行而通"),
+            Column(col_from_right=3, text="唐容川〔曰/日〕：物下极则反上")])])
+        pr = PageReading(pdf_page=430, regions=[reg], uncertain=[Uncertain(region_id="r1", col_from_right=1, context="「，能〔入/人〕阴分」")])
+        return {"pdf_page": 430, "pass1": pr.model_dump(), "merged": pr.model_dump()}
+
+    def test_find_sites_and_boxes(self):
+        from yeone_ocr.adjudicate import find_sites, glyph_box
+        from yeone_ocr.schema import PageReading
+        sites = find_sites(PageReading.model_validate(self._rec()["merged"]))
+        self.assertEqual([(s.a, s.b, s.col_index, s.char_index) for s in sites], [("入", "人", 0, 7), ("入", "人", 1, 2), ("曰", "日", 2, 3)])
+        self.assertEqual(sites[0].pre, "小肠，能"); self.assertEqual(sites[0].post, "阴分，治")
+        box = glyph_box([100, 50, 300, 950], sites[0], horizontal=True)
+        self.assertTrue(0.05 <= box[0] < box[2] <= 0.95 and 0.0 <= box[1] < box[3] <= 0.3, box)      # 첫 줄 → 영역 위쪽, 글자 7번째 → 왼쪽
+        box3 = glyph_box([100, 50, 300, 950], sites[2], horizontal=True)
+        self.assertGreater(box3[1], box[1])                                                          # 셋째 줄은 더 아래
+        vbox = glyph_box([100, 50, 300, 950], sites[0], horizontal=False)
+        self.assertGreater(vbox[0], 0.5); self.assertGreaterEqual(vbox[2], 0.95)                      # 세로쓰기면 첫 열은 오른쪽 셋째
+
+    def test_adjudicate_page_applies_choice_and_survives_remerge(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page, apply_adjudications
+        from yeone_ocr.schema import PageReading, GlyphChoice, region_text
+        rec = self._rec(); img = Image.new("L", (900, 1300), 255)
+
+        class Fake:
+            def __init__(self): self.calls = []
+            def adjudicate(self, crop, candidates, pre, post, horizontal, pdf_page):
+                self.calls.append((candidates, pre, post, crop.size))
+                if candidates == ["入", "人"] and pre.endswith("能"):
+                    return GlyphChoice(choice="人", evidence="왼쪽 삐침이 위에서 시작")       # 인쇄가 人인 자리
+                if candidates == ["入", "人"]:
+                    return GlyphChoice(choice="入", evidence="오른쪽 삐침이 위로 솟음")
+                return GlyphChoice(choice="", evidence="획이 뭉개짐")                           # 曰/日 은 못 가림
+        fake = Fake()
+        rec = adjudicate_page(rec, img, fake, horizontal=True)
+        self.assertEqual(len(fake.calls), 3); self.assertTrue(all(sz[0] > 4 and sz[1] > 4 for *_, sz in fake.calls))
+        m = PageReading.model_validate(rec["merged"]); body = region_text(m.regions[0])
+        self.assertIn("能人阴分", body); self.assertIn("色赤入心", body); self.assertIn("〔曰/日〕", body)
+        self.assertEqual(rec["adjudicate_stats"], {"sites": 3, "decided": 2, "undecided": 1, "a": 1, "b": 1, "failed": 0})
+        self.assertTrue(any("3차 판별: 「人」 확정" in u.context for u in m.uncertain))
+        # 비교 다시 계산(원본 pass1 에서 다시 병합) 뒤에도 판별 결과를 다시 적용할 수 있다
+        fresh = PageReading.model_validate(rec["pass1"])
+        self.assertEqual(apply_adjudications(fresh, rec["adjudications"]), 2)
+        self.assertIn("能人阴分", region_text(fresh.regions[0])); self.assertIn("〔曰/日〕", region_text(fresh.regions[0]))
+
+    def test_prompt_has_glyph_hint(self):
+        from yeone_ocr.prompts import adjudicate_prompt
+        t = adjudicate_prompt(["入", "人"], "肠，能", "阴分", True, 430)
+        self.assertIn("入", t); self.assertIn("자형 단서", t); self.assertIn("문맥", t)

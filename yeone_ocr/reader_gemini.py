@@ -5,7 +5,7 @@
 from __future__ import annotations
 import os, re, time, json, logging, threading
 from PIL import Image
-from .schema import PageReading, RegionReread, MultiRegionReread
+from .schema import PageReading, RegionReread, MultiRegionReread, GlyphChoice
 from .layout import to_png_bytes
 from . import prompts
 
@@ -218,7 +218,7 @@ class GeminiReader:
     name = "gemini"
 
     def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto",
-                 use_cache: bool = True, thinking: str | None = None):
+                 use_cache: bool = True, thinking: str | None = None, media_resolution: str | None = None):
         from google.genai import types     # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
         key = normalize_key(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         if not key:
@@ -235,6 +235,7 @@ class GeminiReader:
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
         self.thinking_budget = thinking_budget
         self.thinking = thinking          # None=모델 기본, "low"=생각 줄임(2차 전사용). 거부되면 자동 해제
+        self.media_resolution = (media_resolution or "").lower() if media_resolution in ("low", "medium", "high") else None   # 이미지 토큰 예산(2차 조각용 high). 거부되면 자동 해제
         self.n_429 = 0                    # 한도 초과 횟수(동시 쪽 수 조절에 씀)
         self.retries = retries
         self._system = prompts.system_prompt()
@@ -266,6 +267,11 @@ class GeminiReader:
             kw["cached_content"] = self.cache_name          # 캐시를 쓰면 system_instruction 을 따로 보내지 않는다
         else:
             kw["system_instruction"] = self._system
+        if self.media_resolution:
+            try:
+                kw["media_resolution"] = getattr(t.MediaResolution, f"MEDIA_RESOLUTION_{self.media_resolution.upper()}")
+            except AttributeError:                       # 옛 SDK — 설정 없이 간다
+                self.media_resolution = None
         if self.thinking_budget is not None:
             kw["thinking_config"] = t.ThinkingConfig(thinking_budget=self.thinking_budget)
         elif self.thinking == "low":
@@ -283,6 +289,14 @@ class GeminiReader:
             try:
                 resp = self.client.models.generate_content(model=self.model, contents=contents, config=self._config(schema))
                 um = getattr(resp, "usage_metadata", None)
+                if um is not None and not getattr(self, "_usage_fields_logged", False):
+                    # 생각 토큰이 0 으로만 기록되던 문제를 가리기 위해 SDK 가 주는 사용량 필드를 한 번 그대로 적어 둔다
+                    self._usage_fields_logged = True
+                    try:
+                        raw = {k: v for k, v in (um.model_dump() if hasattr(um, "model_dump") else vars(um)).items() if v not in (None, 0, [], {})}
+                        print(f"  사용량 필드({self.model}): {raw}", flush=True)
+                    except Exception:
+                        pass
                 delta = {"calls": 1,
                          "prompt_tokens": (getattr(um, "prompt_token_count", 0) or 0) if um else 0,
                          "output_tokens": (getattr(um, "candidates_token_count", 0) or 0) if um else 0,
@@ -306,6 +320,10 @@ class GeminiReader:
                 if (self.thinking or self.thinking_budget is not None) and code == 400 and "think" in str(e).lower():
                     print(f"주의: {self.model} 이 생각 설정을 받지 않아 모델 기본값으로 계속합니다.", flush=True)
                     self.thinking = None; self.thinking_budget = None
+                    continue
+                if self.media_resolution and code == 400 and "resolution" in str(e).lower():
+                    print(f"주의: {self.model} 이 이미지 해상도 설정(media_resolution)을 받지 않아 기본값으로 계속합니다.", flush=True)
+                    self.media_resolution = None
                     continue
                 if self.cache_name and ("cachedContent" in str(e) or "cached content" in str(e).lower() or (code == 403 and "cache" in str(e).lower())):
                     self._make_cache()                       # 캐시가 만료·소실되면 다시 만들고 재시도
@@ -353,6 +371,10 @@ class GeminiReader:
 
     def reread_region(self, crop: Image.Image, kind: str, region_id: str, pdf_page: int) -> RegionReread:
         return self._call(crop, prompts.region_prompt(kind, region_id, pdf_page), RegionReread)
+
+    def adjudicate(self, crop: Image.Image, candidates: list[str], pre: str, post: str, horizontal: bool, pdf_page: int) -> GlyphChoice:
+        """3차 글자 판별: 글자 하나를 크게 잘라 보내 후보 가운데 어느 것인지 자형만으로 묻는다."""
+        return self._call(crop, prompts.adjudicate_prompt(candidates, pre, post, horizontal, pdf_page), GlyphChoice)
 
     def reread_regions(self, crops: list[tuple[str, str, Image.Image]], pdf_page: int) -> dict[str, RegionReread]:
         """여러 문자 영역 조각을 한 호출로 다시 판독한다. 돌려주는 사전에 빠진 영역은 호출자가 낱개로 다시 묻는다."""
