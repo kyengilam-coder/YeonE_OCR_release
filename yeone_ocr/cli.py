@@ -91,12 +91,101 @@ def cmd_prepare(args, work: Work | None = None, doc=None):
 def apply_mode(args) -> None:
     """읽기 모드를 지시문(prompts)과 비교 규칙(merge)에 함께 적용한다."""
     from . import prompts, merge
-    prompts.set_mode(getattr(args, "mode", None))
+    mode = getattr(args, "mode", None)
+    prompts.set_mode(mode if mode in ("vertical", "horizontal_zh") else "vertical")
     merge.FOLD_ZH = prompts.MODE == "horizontal_zh"
 
 
-def make_reader(args, doc, work):
+def _sample_pages(n: int, k: int = 8) -> list[int]:
+    """앞 표지·목차를 피해 고르게 뽑은 표본 쪽."""
+    if n <= k:
+        return list(range(1, n + 1))
+    start = min(4, n // 10 + 1)
+    return sorted({start + int(i * (n - start - 1) / (k - 1)) for i in range(k)})
+
+
+def detect_mode(doc) -> tuple[str, str]:
+    """글자층으로 읽기 방향을 판정한다. 세로 열 글자가 가로 줄 글자 이상이면 세로쓰기, 아니면 가로쓰기 한문. 글자층이 없으면 세로쓰기(지침 기본)."""
+    v = h = 0; sample = []
+    for n in _sample_pages(len(doc)):
+        try:
+            tl = text_layer(doc, n)
+        except Exception:
+            continue
+        v += sum(len(c["text"]) for c in tl.vertical_columns)
+        hs = "".join(l["text"] for l in tl.horizontal_lines)
+        h += len(hs); sample.append(hs[:400])
+    if v + h < 40:
+        return "vertical", "글자층이 거의 없어 기본값(세로쓰기 한자·한글)"
+    if v >= h:
+        return "vertical", f"글자층 표본에서 세로 열 글자 {v:,} ≥ 가로 줄 글자 {h:,}"
+    note = f"글자층 표본에서 가로 줄 글자 {h:,} > 세로 열 글자 {v:,}"
+    try:
+        from .collate import zh
+        txt = "".join(sample); cjk = "".join(ch for ch in txt if zh.is_cjk(ch))
+        if cjk and zh.available():
+            changed = sum(1 for a, b in zip(cjk, zh.to_traditional(cjk)) if a != b)
+            note += f" · 한자 {len(cjk):,}자 중 번체로 바뀌는 글자 {changed / len(cjk):.0%}" + ("(간체 인쇄)" if changed / len(cjk) > 0.08 else "(번체·한글 혼용으로 보이나 가로쓰기라 같은 모드로 읽음)")
+    except Exception:
+        pass
+    return "horizontal_zh", note
+
+
+def detect_print_offset(doc) -> int | None:
+    """글자층의 쪽번호 표기(- 30 -)로 '인쇄 쪽수 = PDF 쪽수 + N' 의 N 을 짐작한다. 표본 3쪽 이상이 같은 값이면 그 값, 아니면 None."""
+    import re
+    from collections import Counter
+    offs: Counter = Counter()
+    for n in _sample_pages(len(doc), 12):
+        try:
+            tl = text_layer(doc, n)
+        except Exception:
+            continue
+        m = re.search(r"\d{1,4}", tl.page_label or "")
+        if m:
+            offs[int(m.group(0)) - n] += 1
+    if offs:
+        off, cnt = offs.most_common(1)[0]
+        if cnt >= 3:
+            return off
+    return None
+
+
+def resolve_mode(args, doc, work: "Work | None" = None) -> str:
+    """--mode auto 면 결과 폴더에 적힌 모드를 쓰고, 없으면 글자층으로 판정해 적어 둔다. 명시한 모드는 그대로 쓰되 역시 적어 둔다.
+    이렇게 해 두면 다시 계산·3차 판별·책갈피 OCR 이 같은 모드를 저절로 따른다."""
+    mode = getattr(args, "mode", None)
+    st = work.load_state() if work else {}
+    if mode not in ("vertical", "horizontal_zh"):
+        if st.get("mode") in ("vertical", "horizontal_zh"):
+            mode = st["mode"]; why = "결과 폴더에 적힌 값"
+        else:
+            mode, why = detect_mode(doc)
+        log(f"읽기 방향: {'가로쓰기 한문' if mode == 'horizontal_zh' else '세로쓰기 한자·한글'} (자동 — {why})")
+    args.mode = mode
+    if work and st.get("mode") != mode:
+        st["mode"] = mode; work.save_state(st)
     apply_mode(args)
+    return mode
+
+
+def refresh_stale_records(work: "Work", doc, pages: list[int]) -> int:
+    """다른 판에서 만든 판독 기록을 지금 규칙으로 다시 비교·표시한다(모델 호출 없음). '프로그램을 바꾼 뒤 비교 다시 계산' 을 저절로."""
+    n = 0
+    for rec in work.records(pages):
+        if rec.get("version") == __version__ or not rec.get("pass1"):
+            continue
+        tlp = work.textlayer_path(rec["pdf_page"])
+        layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else ""
+        rec = remerge_record(rec, layer); rec["version"] = __version__
+        work.save_record(rec["pdf_page"], rec); n += 1
+    if n:
+        log(f"이전 판의 판독 기록 {n}쪽을 지금 규칙으로 다시 비교했습니다(모델 호출 없음).")
+    return n
+
+
+def make_reader(args, doc, work):
+    resolve_mode(args, doc, work)
     if args.reader == "mock":
         from .reader_mock import MockReader
         tls = {}
@@ -149,14 +238,14 @@ def remerge_record(rec: dict, layer_plain: str) -> dict:
     rec["merged"] = merged.model_dump(); rec["merge_stats"] = mstats
     rec["textlayer_diff"] = compare_textlayer(merged, layer_plain)
     rec["verify"] = verify_page(merged)
-    rec["remerged_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    rec["remerged_at"] = time.strftime("%Y-%m-%d %H:%M:%S"); rec["version"] = __version__
     return rec
 
 
 def cmd_remerge(args, work: Work | None = None, doc=None):
-    apply_mode(args)                                   # 가로쓰기 한문이면 간체·부호 차이를 접어 비교
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    resolve_mode(args, doc, work)                      # 가로쓰기 한문이면 간체·부호 차이를 접어 비교
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
         log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
@@ -357,7 +446,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     pass2 = {}
     for k, v in rereads.items():
         d = v.model_dump(); d.update(meta.get(k, {})); pass2[k] = d
-    rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": reader.name, "model": getattr(reader, "model", ""),
+    rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": reader.name, "model": getattr(reader, "model", ""), "version": __version__, "mode": getattr(args, "mode", ""),
            "second_model": getattr(reader2, "model", "") if reader2 is not reader else "",
            "image_source": src, "upscale": args.upscale, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(time.time() - t0, 1),
            "usage": usage, "coverage_notes": coverage_notes,
@@ -602,10 +691,11 @@ def cmd_build(args, work: Work | None = None, doc=None):
 # ---------- adjudicate / ledger ----------
 def cmd_adjudicate(args, work: Work | None = None, doc=None):
     """3차 글자 판별. 〔a/b〕 자리마다 호출 한 번(flash 로도 충분). 확정한 글자는 merged 와 adjudications 에 남고, remerge 뒤에도 유지된다."""
-    apply_mode(args)
     from . import prompts
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    resolve_mode(args, doc, work)
+    max_sites = int(getattr(args, "max_sites", 0) or 0); zoom = int(getattr(args, "zoom", 6) or 6)
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
         log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
@@ -622,7 +712,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None):
                               media_resolution="high")
     except Exception as e:
         log(f"오류: {e}"); return 1
-    log(f"adjudicate: 판독기 {reader.model} · {len(records)}쪽 · 〔a/b〕 {total_sites}곳 · 조각 확대 {args.zoom}배" + (f" · 쪽당 최대 {args.max_sites}곳" if args.max_sites else ""))
+    log(f"adjudicate: 판독기 {reader.model} · {len(records)}쪽 · 〔a/b〕 {total_sites}곳 · 조각 확대 {zoom}배" + (f" · 쪽당 최대 {max_sites}곳" if max_sites else ""))
     horizontal = prompts.MODE == "horizontal_zh"
     agg = {"sites": 0, "decided": 0, "undecided": 0, "failed": 0}
     for rec, n in todo:
@@ -632,7 +722,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None):
         img, _ = _load_page_image(work, doc, pg, args.dpi)
         if hasattr(reader, "usage_begin"): reader.usage_begin()
         try:
-            rec = adjudicate_page(rec, img, reader, horizontal, max_sites=args.max_sites, zoom=args.zoom)
+            rec = adjudicate_page(rec, img, reader, horizontal, max_sites=max_sites, zoom=zoom)
         except ReaderError as e:
             log(f"오류: {pg}쪽 판별 실패 — {e}")
             if e.fatal: return 1
@@ -713,10 +803,21 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
 
 
 def cmd_run(args):
+    """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
+    사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
     doc = open_pdf(args.pdf)
     work = Work(args.pdf, args.work)
+    log(f"▶ 한 번에 인식: {Path(args.pdf).name} ({len(doc)}쪽) → {work.dir}")
     cmd_prepare(args, work, doc)
     pages = parse_pages(args.pages, len(doc))
+    resolve_mode(args, doc, work)
+    if getattr(args, "print_offset", None) is None:
+        off = detect_print_offset(doc)
+        if off is not None:
+            args.print_offset = off; log(f"인쇄 쪽수 = PDF 쪽수 + {off} (글자층의 쪽번호 표기로 자동 판정)")
+        else:
+            log("인쇄 쪽수 차이는 자동으로 알 수 없어 검사하지 않습니다(설정에 적으면 어긋남을 표시).")
+    refresh_stale_records(work, doc, pages)
 
     def checkpoint(reason: str):
         recs = work.records(pages)
@@ -728,10 +829,22 @@ def cmd_run(args):
         if work.records(pages):
             log("판독이 중간에 멈춰 '진행중' HWPX 를 남겼습니다. 다시 실행하면 남은 쪽부터 이어서 합니다.")
         return rc or 130
+    if args.reader == "gemini" and not getattr(args, "no_adjudicate", False):
+        try:
+            cmd_adjudicate(args, work, doc)
+        except Exception as e:
+            log(f"3차 글자 판별을 건너뜀({e}). 〔a/b〕 표시는 그대로 남습니다.")
+        if CANCEL.is_set(): return 130
     rc = cmd_build(args, work, doc)
     if CANCEL.is_set(): return 130
     cmd_review(args, work, doc)
+    try:
+        from .ledger import write_ledger
+        write_ledger(work.dir)
+    except Exception:
+        pass
     cmd_report(args, work, doc)
+    log("끝. 결과: out/ 의 HWPX · review.html(검수 화면) · report.md(상태·다발 오인식 장부) · confusion.json")
     return rc
 
 
@@ -766,8 +879,10 @@ def build_parser():
         p.add_argument("--media-resolution", choices=["auto", "default", "low", "medium", "high"], default="auto",
                        help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. 모델이 거부하면 자동으로 기본값")
         p.add_argument("--checkpoint", type=int, default=20, help="N쪽 판독마다 '<이름>_진행중.hwpx' 를 중간 저장(0=안 함). run 에서만")
+        p.add_argument("--no-adjudicate", action="store_true", help="run 에서 판독 뒤 3차 글자 판별(〔a/b〕 자리)을 하지 않음")
         if not any(a.dest == "mode" for a in p._actions):
-            p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical", help="읽기 모드: vertical=세로쓰기 한자·한글(기본), horizontal_zh=가로쓰기 한문(간체)")
+            p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto",
+                           help="읽기 모드: auto(기본)=글자층으로 판정(결과 폴더에 적힌 값 우선), vertical=세로쓰기 한자·한글, horizontal_zh=가로쓰기 한문(간체)")
 
     def build_opts(p):
         p.add_argument("--docx", action="store_true", help="DOCX 도 함께 생성")
@@ -791,7 +906,7 @@ def build_parser():
     p.add_argument("--fx", type=float, help="원/달러 환율(원화 표시)"); p.set_defaults(fn=cmd_estimate)
     p = sub.add_parser("build"); common(p); build_opts(p); p.set_defaults(fn=cmd_build)
     p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p)
-    p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical", help="읽기 모드(가로쓰기 한문이면 horizontal_zh — 간체·부호 차이를 접어 비교)")
+    p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto", help="읽기 모드(auto=결과 폴더에 적힌 값·글자층 판정)")
     p.set_defaults(fn=cmd_remerge)
     p = sub.add_parser("adjudicate", help="3차 글자 판별: 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 모델에 자형만으로 묻는다"); common(p)
     p.add_argument("--reader", choices=["gemini", "mock"], default="gemini")
@@ -800,7 +915,7 @@ def build_parser():
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--max-sites", type=int, default=0, help="쪽당 판별할 자리 수 상한(0=전부)")
     p.add_argument("--zoom", type=int, default=6, help="글자 조각 확대 배율(기본 6)")
-    p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical")
+    p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto")
     p.set_defaults(fn=cmd_adjudicate)
     p = sub.add_parser("ledger", help="혼동 장부: 결과 폴더의 판독·대조 기록에서 글자 쌍 빈도를 모아 confusion.json 과 표로"); common(p, pages=False)
     p.add_argument("--top", type=int, default=30); p.set_defaults(fn=cmd_ledger)
@@ -824,7 +939,9 @@ def build_parser():
     p.add_argument("--apply", action="store_true", help="대조 결과를 HWPX 에 반영해 사본(<이름>_교정.hwpx)으로 저장. 없으면 보고만")
     p.add_argument("--out", help="저장할 HWPX 경로(기본 <이름>_교정.hwpx)")
     p.add_argument("--no-memo", action="store_true", help="한컴 메모 대신 글 뒤에 〔…〕 로 적음")
-    p.set_defaults(mode="horizontal_zh")
+    p.add_argument("--all", action="store_true", help="구획 전체를 차례로 대조(--apply 면 교정본 하나에 쌓음). PDF 쪽을 못 찾는 구획은 건너뛰고 요약에 적음")
+    p.add_argument("--no-glyph-check", action="store_true", help="대조 뒤 자형 편향·혼동 자리(入/人 등)를 글자 조각으로 모델에 묻는 3차 판별을 하지 않음")
+    p.set_defaults(mode="auto")
     from .collate.run import cmd_collate
     p.set_defaults(fn=cmd_collate)
     return ap

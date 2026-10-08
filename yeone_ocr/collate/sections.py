@@ -165,11 +165,13 @@ class HwpxBook:
             pos = found + 1
         return out
 
-    def section(self, anchors: list[Anchor], idx: int) -> Section:
+    def section(self, anchors: list[Anchor], idx: int, flat: bool = False) -> Section:
+        """구획 범위. 기본은 다음 '같은 급 이상' 기준 직전까지(하위 구획 포함). flat=True 면 급과 무관하게 바로 다음 기준 직전까지 —
+        전체 교정처럼 구획을 빠짐없이·겹침 없이 차례로 돌 때 쓴다."""
         a = anchors[idx]
         nxt = None
         for b in anchors[idx + 1:]:
-            if b.para > a.para and b.level <= a.level:
+            if b.para > a.para and (flat or b.level <= a.level):
                 nxt = b; break
         end = nxt.para if nxt else len(self.paragraphs)
         return Section(a, a.para, end, nxt)

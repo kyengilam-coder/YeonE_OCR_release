@@ -148,3 +148,39 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
     rec["adjudications"] = done
     rec["adjudicate_stats"] = stats
     return rec
+
+
+_PUNCT = re.compile(r"[\s　·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥0-9０-９]")
+
+
+def locate_in_reading(merged: PageReading, pre: str, ch: str, post: str, max_ctx: int = 4) -> Site | None:
+    """책갈피 OCR 대조 항목(판독 앞뒤 글자 pre「ch」post)의 자리를 병합 판독문에서 찾는다. 부호·숫자는 빼고 맞춘다.
+    찾으면 글자 창 좌표 추정에 쓸 Site(표시 글은 빈 글)를 돌려준다."""
+    pre_k, post_k = _PUNCT.sub("", pre)[-max_ctx:], _PUNCT.sub("", post)[:max_ctx]
+    for a, b in ((4, 4), (3, 3), (2, 2), (4, 1), (1, 4), (4, 0), (0, 4), (2, 1), (1, 2), (3, 0), (0, 3), (1, 1), (2, 0), (0, 2), (1, 0), (0, 1)):   # 문단 첫·끝 글자는 한쪽 문맥만으로
+        pk, nk = pre_k[-a:] if a else "", post_k[:b] if b else ""
+        if (a and len(pk) < a) or (b and len(nk) < b):
+            continue
+        needle = pk + ch + nk
+        hits: list[Site] = []
+        for reg in merged.regions:
+            if reg.kind not in TEXT_KINDS:
+                continue
+            cols = columns_in_reading_order(reg)
+            for ci, col in enumerate(cols):
+                text = plain(col.text or "")
+                stripped = []; idx = []
+                for i, c in enumerate(text):
+                    if not _PUNCT.match(c):
+                        stripped.append(c); idx.append(i)
+                st = "".join(stripped)
+                j = st.find(needle)
+                while j >= 0:
+                    pos = j + len(pk)
+                    hits.append(Site(reg.id, ci, len(cols), idx[pos], len(text), ch, "", text[max(0, idx[pos] - 4):idx[pos]], text[idx[pos] + 1:idx[pos] + 5], ""))
+                    j = st.find(needle, j + 1)
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1 and a + b >= 4:
+            return hits[0]
+    return None

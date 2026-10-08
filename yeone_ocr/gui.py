@@ -19,8 +19,9 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False,
-            "chunk_lines": 8, "media_high": True}
+            "chunk_lines": 8, "media_high": True, "mode": "auto", "advanced_open": False}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
+MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -28,18 +29,24 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 세로쓰기 한자·한글 혼용 문헌(스캔 PDF)을 지침에 따라 OCR·교정해 HWPX 로 만듭니다.
 글자는 Gemini 가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다.
 
+쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② [PDF 고르기…] → ③ [▶ 한 번에 인식].
+읽기 방향·인쇄 쪽수 차이·이전 판 기록 갱신·2차 비교·3차 글자 판별·문서·검수 화면·보고·혼동 장부를 프로그램이 알아서 이어서 합니다.
+아래 단계별 단추는 "고급"을 펼쳤을 때만 보이며, 일부만 다시 하고 싶을 때 씁니다.
+
 차례
- 1. [필요한 패키지 설치·점검] — 처음 한 번.
+ 1. [필요한 패키지 설치·점검] — 처음 한 번(빠진 패키지가 있으면 켤 때 설치할지 묻습니다).
  2. API 키를 넣고 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다. (https://aistudio.google.com/apikey)
- 3. [PDF 고르기…] 로 파일을 고릅니다. 쪽 범위는 비워 두면 전체이고, 인쇄 쪽수 차이(예 29)를 적어 두면 쪽수 어긋남을 잡아 줍니다.
- 4. [▶ PDF 전체를 HWPX로] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
-    준비 → 판독 → 문서 만들기 → 검수 화면 → 보고 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
+ 3. [PDF 고르기…] 로 파일을 고릅니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
+    인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 틀리게 판정했을 때만 직접 고르십시오.
+ 4. [▶ 한 번에 인식 (PDF → HWPX)] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
+    준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 만들기 → 검수 화면 → 보고·혼동 장부 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
+    이전 판으로 만든 판독 기록이 있으면 지금 규칙으로 저절로 다시 비교합니다(모델 호출 없음).
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
- 5. [⑤ 검수 화면 열기] 에서 원본과 대조하고, 글자를 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다.
-    [비교 다시 계산] 은 저장된 1차·2차 판독으로 확인 표시만 다시 만듭니다(모델 호출 없음). "기록 있는 쪽도 다시 판독" 을 켜면 ③ 판독이 기존 기록을 덮어씁니다.
- 6. [3차 글자 판별] 은 1차·2차가 갈린 〔a/b〕 자리마다 그 글자 하나를 크게 잘라 모델에 자형만으로 묻습니다(자리 하나에 호출 한 번).
-    획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. [혼동 장부] 는 어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(호출 없음).
- 7. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 "원본 대조 완료(사람)" 을 남깁니다.
+ 5. 끝나면 [HWPX 열기] 로 결과를 보고 [검수 화면 열기] 에서 원본과 대조합니다. 〔 〕 로 남은 자리만 사람이 보면 됩니다.
+ 6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
+    사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
+ 7. "고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
+    글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
 
 결과는 PDF 와 같은 폴더의 「<PDF 이름>_YeonE_OCR」 안에 생깁니다.
  out/      HWPX (+DOCX)
@@ -484,12 +491,15 @@ class App(tk.Tk):
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
         self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
         self.v_chunk = tk.StringVar(value=str(self.cfg.get("chunk_lines", 8))); self.v_mres = tk.BooleanVar(value=self.cfg.get("media_high", True))
+        self.v_mode = tk.StringVar(value=MODE_LABELS.get(self.cfg.get("mode", "auto"), MODE_LABELS["auto"]))
         rf.columnconfigure(1, weight=1)
         r = 0
         ttk.Label(rf, text="판독기", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
         rr = ttk.Frame(rf, style="Panel.TFrame"); rr.grid(row=r, column=1, columnspan=3, sticky="w")
         ttk.Radiobutton(rr, text="Gemini (원본 이미지 판독)", variable=self.v_reader, value="gemini", command=self._reader_changed).pack(side="left", padx=(4, 14))
         ttk.Radiobutton(rr, text="기존 텍스트 레이어만 (API 없이 시험)", variable=self.v_reader, value="mock", command=self._reader_changed).pack(side="left")
+        ttk.Label(rr, text="읽기 방향", style="Panel.TLabel").pack(side="left", padx=(18, 4))
+        ttk.Combobox(rr, textvariable=self.v_mode, values=list(MODE_LABELS.values()), state="readonly", width=18).pack(side="left")
         r += 1
         ttk.Label(rf, text="모델", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
         self.e_model = ttk.Entry(rf, textvariable=self.v_model, width=26); self.e_model.grid(row=r, column=1, sticky="w", **pad)
@@ -539,13 +549,19 @@ class App(tk.Tk):
 
         # ---- 실행 ----
         act = ttk.Frame(root, style="Panel.TFrame", padding=10); act.pack(fill="x", pady=(8, 0))
-        self._btn(act, "▶  PDF 전체를 HWPX로", self.do_run, style="Accent.TButton").pack(side="left")
+        self._btn(act, "▶  한 번에 인식 (PDF → HWPX)", self.do_run, style="Accent.TButton").pack(side="left")
         self.b_stop = ttk.Button(act, text="■ 중지", command=self.do_stop, state="disabled", style="Stop.TButton"); self.b_stop.pack(side="left", padx=(8, 0))
+        ttk.Label(act, text="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고·장부까지 알아서 이어서 합니다. 멈춰도 끝난 쪽은 남고 다시 누르면 이어서 합니다.",
+                  style="Hint.TLabel", wraplength=520, justify="left").pack(side="left", padx=(12, 0))
         for t, c in (("HWPX 열기", self.open_hwpx), ("결과 폴더", self.open_work), ("비용 미리 보기", self.do_estimate)):
             self._btn(act, t, c, width=13).pack(side="right", padx=(6, 0))
 
-        # ---- 단계별 / 도구 ----
-        sf = ttk.LabelFrame(root, text="단계별 · 도구"); sf.pack(fill="x", pady=(8, 0))
+        # ---- 단계별 / 도구 (고급 — 접힘) ----
+        self.v_adv = tk.BooleanVar(value=bool(self.cfg.get("advanced_open", False)))
+        advbar = ttk.Frame(root); advbar.pack(fill="x", pady=(8, 0))
+        self.b_adv = ttk.Button(advbar, text="고급 — 단계별 실행·도구 ▾", command=self.toggle_advanced, style="Small.TButton"); self.b_adv.pack(side="left")
+        ttk.Label(advbar, text="보통은 필요 없습니다. 일부 단계만 다시 하거나 기록을 손볼 때 펼치십시오.", style="Hint.TLabel").pack(side="left", padx=10)
+        sf = ttk.LabelFrame(root, text="단계별 · 도구"); self.adv_frame = sf
         steps = [("① 구조 보기", self.do_inspect), ("② 준비", self.do_prepare), ("③ 판독", self.do_read),
                  ("④ 문서 만들기", self.do_build), ("⑤ 검수 화면", self.do_review), ("⑥ 보고", self.do_report)]
         for i, (t, c) in enumerate(steps):
@@ -556,6 +572,9 @@ class App(tk.Tk):
         ttk.Label(sf, text="[3차 글자 판별]은 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(자리마다 호출 한 번) · [혼동 장부]는 어느 글자가 어느 글자로 읽혔는지 모읍니다(호출 없음) · "
                            "프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산] · 사람이 확인한 쪽은 [검수 결과 기록…]",
                   style="Hint.TLabel", wraplength=1000, justify="left").grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(4, 0))
+
+        if self.v_adv.get():
+            sf.pack(fill="x", pady=(6, 0)); self.b_adv.configure(text="고급 — 단계별 실행·도구 ▴")
 
         self._build_collate_tab(tab2)
 
@@ -583,7 +602,7 @@ class App(tk.Tk):
         from .collate.run import POLICIES
         self.v_hwpx = tk.StringVar(value=self.cfg.get("hwpx", "")); self.v_pdf2 = tk.StringVar(value=self.cfg.get("collate_pdf", "")); self.v_find = tk.StringVar()
         self.v_policy = tk.StringVar(value=POLICIES.get(self.cfg.get("collate_policy", "all"), POLICIES["all"]))
-        self.v_cmemo = tk.BooleanVar(value=self.cfg.get("collate_memo", True)); self.v_cvert = tk.BooleanVar(value=self.cfg.get("collate_vertical", False))
+        self.v_cmemo = tk.BooleanVar(value=self.cfg.get("collate_memo", True))
         self.collate_rows: list[dict] = []
         f = ttk.LabelFrame(tab, text="교정할 문서"); f.pack(fill="x")
         r0 = ttk.Frame(f, style="Panel.TFrame"); r0.pack(fill="x", padx=8, pady=(6, 2))
@@ -601,8 +620,7 @@ class App(tk.Tk):
         self._btn(rs, "스타일 고르기…", self.pick_styles, width=13).pack(side="left")
         ttk.Label(rs, text="비우면 이름에 '제목'이 든 스타일 전부 · 앞에 적은 것이 큰 단위", style="Hint.TLabel").pack(side="left", padx=(10, 0))
         r2 = ttk.Frame(f, style="Panel.TFrame"); r2.pack(fill="x", padx=8, pady=(2, 8))
-        ttk.Label(r2, text="판독기·모델·API 키·속도는 [세로쓰기 인식] 탭의 설정을 따릅니다 · 읽기 모드: 가로쓰기 한문(간체)", style="Hint.TLabel").pack(side="left")
-        ttk.Checkbutton(r2, text="세로쓰기 문헌(지침 그대로)", variable=self.v_cvert).pack(side="right", padx=(12, 0))
+        ttk.Label(r2, text="판독기·모델·API 키·속도·읽기 방향은 [세로쓰기 인식] 탭의 설정을 따릅니다(읽기 방향 '자동 판정'이면 글자층으로 가로·세로를 정합니다)", style="Hint.TLabel").pack(side="left")
         self.v_cforce = tk.BooleanVar(value=False)
         ttk.Checkbutton(r2, text="기록 있는 쪽도 다시 판독", variable=self.v_cforce).pack(side="right", padx=(12, 0))
 
@@ -634,9 +652,11 @@ class App(tk.Tk):
         ttk.Checkbutton(r4, text="한컴 메모로 근거 남기기", variable=self.v_cmemo).pack(side="left")
         self._btn(r4, "교정본 열기", self.open_collated, width=11).pack(side="right")
         self._btn(r4, "보고 열기", self.open_collate_report, width=10).pack(side="right", padx=(0, 6))
-        self._btn(r4, "교정 반영·저장", lambda: self.do_collate(apply=True), style="Accent.TButton").pack(side="right", padx=(0, 10))
-        self._btn(r4, "대조만(보고)", lambda: self.do_collate(apply=False), width=12).pack(side="right", padx=(0, 6))
-        ttk.Label(tab, text="구획을 고른 뒤 [대조만]은 차이 보고(HTML)만 만들고, [교정 반영·저장]은 HWPX 사본(<이름>_교정.hwpx)에 고쳐 넣습니다. 원본은 건드리지 않습니다. "
+        self._btn(r4, "▶  HWPX 전체 교정", self.do_collate_all, style="Accent.TButton").pack(side="right", padx=(0, 10))
+        self._btn(r4, "이 구획 교정", lambda: self.do_collate(apply=True), width=11).pack(side="right", padx=(0, 6))
+        self._btn(r4, "이 구획 대조만", lambda: self.do_collate(apply=False), width=12).pack(side="right", padx=(0, 6))
+        ttk.Label(tab, text="[▶ HWPX 전체 교정]은 구획을 차례로 전부 대조해 HWPX 사본(<이름>_교정.hwpx) 하나에 고쳐 넣고 요약(_전체_요약.html)을 남깁니다. 원본은 건드리지 않습니다. "
+                           "기록이 없는 쪽은 모델로 읽고, 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다. 표에서 구획 하나를 골라 [이 구획 교정]·[이 구획 대조만]으로 부분만 할 수도 있습니다. "
                            "자동 교정은 파란 글자·연두 형광펜, 확인 요청은 빨간 글자·노란 형광펜으로 표시되고 근거는 메모에 남습니다.", style="Hint.TLabel", wraplength=1080, justify="left").pack(fill="x", pady=(6, 0))
 
     def pick_pdf2(self):
@@ -794,10 +814,29 @@ class App(tk.Tk):
                 "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts(print_offset=False, force=self.v_cforce.get())
         if apply: argv.append("--apply")
         if not self.v_cmemo.get(): argv.append("--no-memo")
-        argv += ["--mode", "vertical" if self.v_cvert.get() else "horizontal_zh"]
-        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.v_cmemo.get(), "collate_vertical": self.v_cvert.get()}); save_config(self.cfg)
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.v_cmemo.get()}); save_config(self.cfg)
         self.nb.select(0)
         self.start(argv, ("교정 반영·저장" if apply else "대조") + f" — {row['name'][:20]}")
+
+    def do_collate_all(self):
+        """구획 전체를 차례로 대조·교정한다. 색인이 아직 없으면 먼저 색인한 뒤 다시 누르게 한다."""
+        if not self._need_hwpx() or not self._prepare_env():
+            return
+        if self.collate_rows:
+            matched = sum(1 for r in self.collate_rows if r["pdf"])
+            head = f"구획 {len(self.collate_rows)}개(PDF 책갈피 짝 {matched}개)를 차례로 대조해 교정본 하나에 고쳐 넣습니다.\n"
+        else:                                           # 색인을 따로 누르지 않아도 된다 — 명령이 스스로 색인한다
+            head = "HWPX 의 책갈피·제목 스타일로 구획을 나눈 뒤(색인은 저절로) 차례로 전부 대조해 교정본 하나에 고쳐 넣습니다.\n"
+        if not messagebox.askyesno(APP_NAME, head + "짝이 없는 구획은 PDF 글자층에서 제목을 찾아 보고, 못 찾으면 건너뛰어 요약에 적습니다.\n"
+                                             "판독 기록이 없는 쪽은 모델로 읽으므로(쪽당 30초~1분) 시간과 비용이 듭니다. [■ 중지]로 멈출 수 있습니다.\n\n시작할까요?"):
+            return
+        argv = ["collate", self.pdf2(), "--work", str(self.work2()), "--hwpx", self.v_hwpx.get().strip(), "--all", "--apply",
+                "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) \
+               + self._read_opts(print_offset=False, force=self.v_cforce.get())
+        if not self.v_cmemo.get(): argv.append("--no-memo")
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.v_cmemo.get()}); save_config(self.cfg)
+        self.nb.select(0)
+        self.start(argv, "HWPX 전체 교정", open_after=self.work2() / "collate" / "_전체_요약.html")
 
     def _latest(self, folder: Path, pattern: str) -> Path | None:
         files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime) if folder.exists() else []
@@ -807,7 +846,7 @@ class App(tk.Tk):
         if not self.pdf2(): return
         f = self._latest(self.work2() / "collate", "*.html")
         if f: open_path(f)
-        else: messagebox.showinfo(APP_NAME, "아직 대조 보고가 없습니다. 구획을 고르고 [대조만] 또는 [교정 반영·저장]을 누르십시오.")
+        else: messagebox.showinfo(APP_NAME, "아직 대조 보고가 없습니다. [▶ HWPX 전체 교정] 을 누르거나, 구획을 고르고 [이 구획 대조만]·[이 구획 교정] 을 누르십시오.")
 
     def open_collated(self):
         h = self.v_hwpx.get().strip()
@@ -859,7 +898,7 @@ class App(tk.Tk):
                 self._append(f"PDF: {other}\n결과 폴더: {self.work()}\n")
                 return True
             return False
-        messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [③ 판독] 또는 [▶ PDF 전체를 HWPX로] 를 하거나, "
+        messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [▶ 한 번에 인식] 을 하거나, "
                                       f"기록이 있는 원본 PDF 를 [PDF 고르기…] 로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
         return False
 
@@ -877,6 +916,7 @@ class App(tk.Tk):
         o += ["--second-model", self.v_model2.get().strip()]          # 빈 값이면 1차와 같은 모델, auto 면 자동
         o += ["--second-thinking", "low" if self.v_think2.get() else "full"]
         o += ["--chunk-lines", (self.v_chunk.get().strip() or "0"), "--media-resolution", "auto" if self.v_mres.get() else "default"]
+        o += ["--mode", self.mode_key()]
         if not self.v_cache.get():
             o.append("--no-cache")
         o += ["--checkpoint", (self.v_ckpt.get().strip() or "0")]
@@ -893,6 +933,17 @@ class App(tk.Tk):
 
     def check_list_mode(self) -> str:
         return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "none")
+
+    def mode_key(self) -> str:
+        return next((k for k, v in MODE_LABELS.items() if v == self.v_mode.get()), "auto")
+
+    def toggle_advanced(self):
+        on = not self.v_adv.get(); self.v_adv.set(on)
+        if on:
+            self.adv_frame.pack(fill="x", pady=(6, 0)); self.b_adv.configure(text="고급 — 단계별 실행·도구 ▴")
+        else:
+            self.adv_frame.pack_forget(); self.b_adv.configure(text="고급 — 단계별 실행·도구 ▾")
+        self.cfg["advanced_open"] = on; save_config(self.cfg)
 
     def _prepare_env(self) -> bool:
         if self.v_reader.get() == "gemini":
@@ -990,7 +1041,7 @@ class App(tk.Tk):
         self._last_writer = None
         if ok and self.open_after and Path(self.open_after).exists():
             open_path(self.open_after)
-        elif ok and ("HWPX로" in label):
+        elif ok and ("HWPX" in label and "인식" in label):
             if messagebox.askyesno(APP_NAME, "끝났습니다. 검수 화면(review.html)을 열까요?"):
                 self.do_review()
         self.open_after = None
@@ -1040,7 +1091,7 @@ class App(tk.Tk):
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
                          "workers": int(self.v_workers.get() or 6), "second_model": self.v_model2.get().strip(),
                          "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "last_pdf": self.pdf(),
-                         "chunk_lines": int(self.v_chunk.get() or 0), "media_high": self.v_mres.get()})
+                         "chunk_lines": int(self.v_chunk.get() or 0), "media_high": self.v_mres.get(), "mode": self.mode_key()})
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
@@ -1132,7 +1183,7 @@ class App(tk.Tk):
     def do_run(self):
         if self._need_pdf() and self._prepare_env() and self._confirm_cost():
             self.nb.select(0)
-            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._build_opts(), "PDF 전체를 HWPX로" if not self.v_pages.get().strip() else f"{self.v_pages.get().strip()}쪽을 HWPX로")
+            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._build_opts(), "한 번에 인식 (PDF 전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
 
     def do_stop(self):
         try:
@@ -1215,6 +1266,10 @@ class App(tk.Tk):
     def _pkg_result(self, missing: list[str]):
         if missing:
             self.v_pkg.set("빠진 패키지: " + ", ".join(missing) + "  → [필요한 패키지 설치·점검]")
+            if not getattr(self, "_asked_install", False) and not self.running:
+                self._asked_install = True
+                if messagebox.askyesno(APP_NAME, "필요한 패키지가 빠져 있습니다:\n  " + ", ".join(missing) + "\n\n지금 설치할까요? (몇 분 걸릴 수 있습니다)"):
+                    self.install_packages()
         else:
             self.v_pkg.set("패키지 모두 있음")
 
