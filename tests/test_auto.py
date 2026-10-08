@@ -291,6 +291,25 @@ class HorizontalCover(unittest.TestCase):
         self.assertEqual(len(notes), 1); self.assertIn("글줄 y", notes[0])
         self.assertEqual(len(p1.uncertain), 1); self.assertIn("가로 글줄", p1.uncertain[0].context); self.assertIn("머리글", p1.uncertain[0].context)
 
+    def test_edge_lines_absorbed_from_layer(self):
+        """머리글 '114 中医历代药论选' 은 확인 항목이 아니라 쪽번호·머리말로(책 전체에서 쪽마다 2건씩 쌓이던 잡음)."""
+        from yeone_ocr.cli import cover_check, absorb_edge_lines
+        im, p1, truth, layer = _drifted_page()
+        for r in p1.regions:
+            y0, y1 = truth[r.id]; r.bbox = [int(y0 * 1000), 100, int(y1 * 1000), 900]
+        cover_check(im, p1, horizontal=True)
+        layer["horizontal_lines"][0]["text"] = "114"
+        layer["horizontal_lines"].insert(1, {"bbox": [300.0, 0.03 * 700, 400.0, 0.05 * 700], "text": "中医历代药论选"})
+        notes = absorb_edge_lines(p1, layer)
+        self.assertEqual(p1.uncertain, []); self.assertEqual((p1.print_page, p1.running_header), ("114", "中医历代药论选")); self.assertIn("머리글·쪽번호로 봄", notes[0])
+        # 글자층에 그 자리 글이 없으면(선·그림) 항목은 남긴다
+        im2, p2, _, _ = _drifted_page()
+        for r in p2.regions:
+            y0, y1 = truth[r.id]; r.bbox = [int(y0 * 1000), 100, int(y1 * 1000), 900]
+        cover_check(im2, p2, horizontal=True)
+        self.assertEqual(absorb_edge_lines(p2, {"page_height": 700.0, "horizontal_lines": [{"bbox": [50.0, 400.0, 450.0, 410.0], "text": "본문"}]}), [])
+        self.assertEqual(len(p2.uncertain), 1)
+
 
 class BatchGuard(unittest.TestCase):
     """묶음 2차 응답이 다른 영역의 글이면(모델이 조각 번호를 섞음) 버리고 낱개로 다시 읽는다. 조각은 --batch-crops 장씩 나눠 보낸다."""

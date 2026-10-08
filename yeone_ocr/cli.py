@@ -340,6 +340,39 @@ def orphan_message(b, horizontal: bool = False) -> str:
             f"모델이 어느 영역에도 넣지 않은 {'가로' if horizontal else '세로'} 글줄이 있음.{edge} 빠진 {'줄' if horizontal else '열'}·주석·쪽번호인지 원본 확인(검수 화면의 붉은 점선 상자)")
 
 
+_EDGE_RE = __import__("re").compile(r"세로 (\d+)~(\d+)%")
+
+
+def absorb_edge_lines(p1: PageReading, layer: dict | None) -> list[str]:
+    """가로쓰기에서 쪽 가장자리의 '영역 밖 글줄'(머리글·꼬리글·쪽번호)을 글자층 글로 확인해 확인 항목 대신 쪽 표지(page_label·running_header)로 삼는다.
+    책 전체를 돌릴 때 쪽마다 2건씩 쌓이던 잡음을 없앤다. 글자층에 그 자리 글이 없으면(선·그림) 항목은 그대로 둔다."""
+    if not layer or not layer.get("horizontal_lines"):
+        return []
+    H = float(layer.get("page_height") or 0)
+    if not H:
+        return []
+    notes = []; keep = []
+    for u in p1.uncertain:
+        ctx = u.context or ""
+        m = _EDGE_RE.search(ctx)
+        if not (ctx.startswith("영역 밖 글줄 흔적") and "가장자리" in ctx and m):
+            keep.append(u); continue
+        y0, y1 = int(m.group(1)) / 100 - 0.01, int(m.group(2)) / 100 + 0.01
+        texts = [(l["bbox"][0], (l.get("text") or "").strip()) for l in layer["horizontal_lines"] if y0 <= (l["bbox"][1] + l["bbox"][3]) / 2 / H <= y1]
+        text = " ".join(t for _, t in sorted(texts) if t)
+        if not text or len(text) > 40:
+            keep.append(u); continue
+        digits = __import__("re").search(r"(?<!\d)\d{1,4}(?!\d)", text)
+        if digits and not p1.print_page:
+            p1.print_page = digits.group(0); p1.page_label = p1.page_label or text
+        rest = __import__("re").sub(r"[-–—ー一·\s]*\d{1,4}[-–—ー一·\s]*", " ", text).strip() if digits else text
+        if rest and not p1.running_header:
+            p1.running_header = rest
+        notes.append(f"쪽 가장자리 글줄을 머리글·쪽번호로 봄(글자층): 「{text}」")
+    p1.uncertain = keep
+    return notes
+
+
 def cover_check(img: Image.Image, p1: PageReading, horizontal: bool = False) -> list[str]:
     """영역 밖에 남은 글 기둥(가로쓰기면 글줄)을 찾아 가까운 문자 영역의 좌표를 넓히거나(2차 조각에 포함되게), 붙일 곳이 없으면 확인 항목으로 남긴다.
     가로쓰기는 줄 단위로 찾아야 머리글 한 줄이 글자 수만큼의 항목으로 쪼개지지 않는다(실측: 머리글 하나가 확인 항목 20건)."""
@@ -528,12 +561,17 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     # 모델의 영역 좌표가 아래로 갈수록 밀리는 일이 있어(실측 최대 7.8%) 글자층 줄·먹 띠에 맞춘 뒤에 조각을 자른다
     bbox_fix = refit_regions(img, p1, horizontal, layer)
     coverage_notes = ([refit_describe(bbox_fix)] if bbox_fix["fixed"] else []) + cover_check(img, p1, horizontal)
+    if horizontal:
+        coverage_notes += absorb_edge_lines(p1, layer)
     rereads: dict[str, RegionReread] = {}
     meta: dict[str, dict] = {}
     if not args.no_second_pass:
         rereads, meta = _second_pass(reader2, img, p1, n, args)
     merged, mstats = merge_passes(p1, rereads)
     fill_page_marks(merged)
+    for f in ("page_label", "print_page", "running_header"):                 # 가장자리 글줄에서 얻은 쪽 표지를 넘긴다
+        if not getattr(merged, f) and getattr(p1, f):
+            setattr(merged, f, getattr(p1, f))
     # 도판 교차 확인(자동 감지)
     cv = detect_figures(img)
     model_figs = [bbox_frac(r.bbox) for r in merged.regions if r.kind in IMAGE_KINDS]
