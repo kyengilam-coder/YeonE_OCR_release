@@ -408,3 +408,7 @@ class TrimDedupe(unittest.TestCase):
         paras = [(1, "车前子"), (1, "车前子"), (1, "1汤液本草东垣"), (2, "车前子"), (2, "2本草纲目"), (2, "小蓟")]
         cut, note = trim_to_section(paras, "車前子", "小薊")
         self.assertEqual([t for _, t in cut], ["车前子", "1汤液本草东垣", "2本草纲目"]); self.assertEqual(note, "")
+        # 구획 제목의 일부만으로 된 소제목·머리 제목(车前子 / 车前草)도 첫 줄 뒤로는 거른다
+        paras = [(1, "车前子车前草"), (1, "车前子"), (1, "车前子"), (1, "1汤液本草"), (2, "车前草"), (2, "车前草"), (2, "1本草衍义陶隐"), (2, "小蓟")]
+        cut, _ = trim_to_section(paras, "車前子·車前草", "小薊")
+        self.assertEqual([t for _, t in cut], ["车前子车前草", "1汤液本草", "1本草衍义陶隐"])

@@ -103,14 +103,14 @@ def trim_to_section(paras: list[tuple[int, str]], title: str, next_title: str | 
         else:
             note.append("다음 구획 제목을 판독 글에서 찾지 못해 마지막 쪽 끝까지 넣음")
     cut = paras[start:end]
-    # 구획 제목이 되풀이된 줄(쪽마다 다시 찍힌 머리 제목, 제목 영역과 첫 문단의 중복)은 첫 번째만 남긴다 — 「车前子车前子」 중복 삽입 방지
+    # 구획 제목이 되풀이된 줄(쪽마다 다시 찍힌 머리 제목, 제목 영역과 첫 문단의 중복)과, 제목의 일부만으로 된 짧은 줄
+    # (「車前子·車前草」 구획 안의 소제목 车前子·车前草, 쪽 머리의 车前子)은 첫 줄 뒤로는 거른다 — 「车前子车前子」 중복 삽입 방지
     if k:
-        seen = False; out = []
-        for pg, t in cut:
-            if _key(t) == k:
-                if seen:
-                    continue
-                seen = True
+        out = []
+        for i, (pg, t) in enumerate(cut):
+            tk = _key(t)
+            if i > 0 and tk and (tk == k or (len(tk) >= 2 and len(tk) <= 8 and tk in k)):
+                continue
             out.append((pg, t))
         cut = out
     return cut, " · ".join(note)

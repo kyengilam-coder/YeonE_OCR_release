@@ -159,7 +159,7 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
     work = work or Work(args.pdf, args.work)
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
-        log("오류: 판독 기록이 없습니다."); return 2
+        log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
     for rec in records:
         n = rec["pdf_page"]
         if not rec.get("pass1"):
@@ -608,7 +608,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None):
     work = work or Work(args.pdf, args.work)
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
-        log("오류: 판독 기록이 없습니다."); return 2
+        log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
     from .adjudicate import find_sites, adjudicate_page
     todo = [(rec, len(find_sites(PageReading.model_validate(rec["merged"])))) for rec in records]
     total_sites = sum(n for _, n in todo)

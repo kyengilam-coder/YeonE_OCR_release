@@ -835,6 +835,34 @@ class App(tk.Tk):
         p = self.v_pages.get().strip()
         return ["--pages", p] if p else []
 
+    @staticmethod
+    def _n_records(pdf: str) -> int:
+        try:
+            return len(list((work_dir_for(pdf) / "readings").glob("p*.json"))) if pdf else 0
+        except Exception:
+            return 0
+
+    def _need_records(self, what: str) -> bool:
+        """판독 기록을 쓰는 도구(비교 다시 계산·3차 판별·장부·보고·검수 화면) 앞에서: 첫 탭 PDF 에 기록이 없고 책갈피 OCR 탭 PDF 에 있으면 그 PDF 로 바꿔 준다.
+        (대조용 복사본 PDF 를 첫 탭에 두면 결과 폴더가 비어 '판독 기록이 없습니다' 가 나던 문제)"""
+        if not self._need_pdf():
+            return False
+        n1 = self._n_records(self.pdf())
+        if n1:
+            return True
+        other = self.v_pdf2.get().strip() if hasattr(self, "v_pdf2") else ""
+        n2 = self._n_records(other) if other and other != self.pdf() else 0
+        if n2:
+            if messagebox.askyesno(APP_NAME, f"첫 탭의 PDF 에는 판독 기록이 없습니다.\n  {self.pdf()}\n  → 결과 폴더 {self.work()}\n\n"
+                                             f"책갈피 OCR 탭의 PDF 에는 {n2}쪽 기록이 있습니다.\n  {other}\n\n{what}을(를) 그 PDF 로 할까요? (첫 탭의 PDF 도 그것으로 바뀝니다)"):
+                self.v_pdf.set(other); self.cfg["last_pdf"] = other; save_config(self.cfg); self.refresh_table()
+                self._append(f"PDF: {other}\n결과 폴더: {self.work()}\n")
+                return True
+            return False
+        messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [③ 판독] 또는 [▶ PDF 전체를 HWPX로] 를 하거나, "
+                                      f"기록이 있는 원본 PDF 를 [PDF 고르기…] 로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
+        return False
+
     def _read_opts(self, print_offset: bool = True, force: bool | None = None) -> list[str]:
         o = ["--reader", self.v_reader.get(), "--upscale", self.v_up.get().strip() or "2"]
         if self.v_reader.get() == "gemini" and self.v_model.get().strip():
@@ -1092,12 +1120,12 @@ class App(tk.Tk):
         if self._need_pdf(): self.start(["build", self.pdf(), "--work", str(self.work())] + self._pages() + self._build_opts(), "④ 문서 만들기")
 
     def do_review(self):
-        if not self._need_pdf(): return
+        if not self._need_records("검수 화면"): return
         rv = self.work() / "review.html"
         self.start(["review", self.pdf(), "--work", str(self.work())] + self._pages(), "⑤ 검수 화면", open_after=rv)
 
     def do_report(self):
-        if self._need_pdf():
+        if self._need_records("보고"):
             self.nb.select(0)
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
@@ -1118,7 +1146,7 @@ class App(tk.Tk):
 
     def do_remerge(self):
         """저장된 1차·2차 판독으로 비교·표시만 다시 계산한다(모델 호출 없음). 프로그램을 고친 뒤 기존 기록에 적용할 때 쓴다."""
-        if not self._need_pdf(): return
+        if not self._need_records("비교 다시 계산"): return
         if not messagebox.askyesno(APP_NAME, "저장된 1차·2차 판독으로 비교와 확인 표시를 다시 계산합니다(모델 호출 없음).\n"
                                              "readings/pNNN.json 의 merged 를 손으로 고친 내용은 사라집니다. 계속할까요?"):
             return
@@ -1127,7 +1155,7 @@ class App(tk.Tk):
 
     def do_adjudicate(self):
         """3차 글자 판별: 〔a/b〕 자리마다 글자 조각을 모델에 묻는다. 자리 수를 먼저 세어 보여 주고 묻는다."""
-        if not self._need_pdf() or not self._prepare_env():
+        if not self._need_records("3차 글자 판별") or not self._prepare_env():
             return
         if self.v_reader.get() != "gemini":
             messagebox.showinfo(APP_NAME, "3차 판별은 자형을 보는 모델이 필요합니다. 판독기를 Gemini 로 바꾸십시오."); return
@@ -1141,8 +1169,10 @@ class App(tk.Tk):
             n_sites = sum(len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs)
         except Exception as e:
             messagebox.showerror(APP_NAME, f"판독 기록을 읽지 못했습니다: {e}"); return
+        if not recs:
+            messagebox.showinfo(APP_NAME, f"이 쪽 범위에 판독 기록이 없습니다.\n결과 폴더: {self.work()}"); return
         if not n_sites:
-            messagebox.showinfo(APP_NAME, "판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."); return
+            messagebox.showinfo(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."); return
         if not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(호출 {n_sites}회, 글자 조각이라 토큰은 적음).\n"
                                              f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. 계속할까요?"):
             return
@@ -1152,7 +1182,7 @@ class App(tk.Tk):
         self.start(argv, "3차 글자 판별")
 
     def do_ledger(self):
-        if not self._need_pdf(): return
+        if not self._need_records("혼동 장부"): return
         self.nb.select(0)
         self.start(["ledger", self.pdf(), "--work", str(self.work())], "혼동 장부")
 
