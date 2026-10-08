@@ -177,11 +177,19 @@ def split_bands(im: Image.Image, axis: str = "y", max_bands: int = 8, density: f
     return out
 
 
+def _swap(fr: Frac) -> Frac:
+    """(x0,y0,x1,y1) ↔ (y0,x0,y1,x1). 가로쓰기용 계산을 세로쓰기 코드로 돌리기 위한 전치."""
+    return (fr[1], fr[0], fr[3], fr[2])
+
+
 def uncovered_ink_boxes(im: Image.Image, regions: list[Frac], thr: int = 110, margin: float = 0.008,
-                        min_w: float = 0.006, min_h: float = 0.03, density: float = 0.004) -> list[Frac]:
-    """어느 영역에도 들지 않은 먹 기둥(세로 글 열)을 찾는다. 모델이 영역 좌표를 좁게 잡아 열 하나를 통째로 빠뜨린 경우를
-    잡기 위한 것으로, 지침 36 '원본에 있는 본문이 누락되지 않아야 한다' 의 기계적 보조 수단이다."""
+                        min_w: float = 0.006, min_h: float = 0.03, density: float = 0.004, axis: str = "x") -> list[Frac]:
+    """어느 영역에도 들지 않은 먹 기둥(axis='x': 세로 글 열)·먹 띠(axis='y': 가로 글줄)를 찾는다. 모델이 영역 좌표를 좁게 잡아
+    열(줄) 하나를 통째로 빠뜨린 경우를 잡기 위한 것으로, 지침 36 '원본에 있는 본문이 누락되지 않아야 한다' 의 기계적 보조 수단이다.
+    가로쓰기 문헌은 axis='y' 로 불러야 머리글 한 줄이 글자 수만큼의 '기둥'으로 쪼개져 잡음이 되지 않는다."""
     a = np.asarray(im.convert("L")) < thr
+    if axis == "y":
+        a = a.T; regions = [_swap(r) for r in regions]
     H, W = a.shape
     mask = np.zeros_like(a)
     for (x0, y0, x1, y1) in regions:
@@ -203,11 +211,18 @@ def uncovered_ink_boxes(im: Image.Image, regions: list[Frac], thr: int = 110, ma
             if len(rows) and (rows[-1] - rows[0]) >= min_h * H:
                 boxes.append((round(x / W, 4), round(rows[0] / H, 4), round(x2 / W, 4), round((rows[-1] + 1) / H, 4)))
         x = x2
+    if axis == "y":
+        boxes = [_swap(b) for b in boxes]
     return boxes
 
 
-def attach_uncovered(boxes: list[Frac], text_regions: list[tuple[str, Frac]], max_gap: float = 0.06, min_overlap: float = 0.5) -> tuple[dict[str, Frac], list[Frac]]:
-    """빠진 먹 기둥을 세로로 겹치고 가로로 가까운 문자 영역에 붙인다. 붙일 곳이 없으면 따로 돌려준다."""
+def attach_uncovered(boxes: list[Frac], text_regions: list[tuple[str, Frac]], max_gap: float = 0.06, min_overlap: float = 0.5,
+                     axis: str = "x") -> tuple[dict[str, Frac], list[Frac]]:
+    """빠진 먹 기둥을 세로로 겹치고 가로로 가까운 문자 영역에 붙인다(axis='y' 면 가로 글줄을 가로로 겹치고 세로로 가까운 영역에).
+    붙일 곳이 없으면 따로 돌려준다."""
+    if axis == "y":
+        grown_t, orphans_t = attach_uncovered([_swap(b) for b in boxes], [(rid, _swap(r)) for rid, r in text_regions], max_gap, min_overlap, "x")
+        return {rid: _swap(fr) for rid, fr in grown_t.items()}, [_swap(b) for b in orphans_t]
     grown: dict[str, Frac] = {}
     orphans: list[Frac] = []
     for b in boxes:
@@ -260,3 +275,33 @@ def overlap_ratio(a: Frac, b: Frac) -> float:
     ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
     area = max(1e-9, (a[2] - a[0]) * (a[3] - a[1]))
     return ix * iy / area
+
+
+def page_bands(im: Image.Image, axis: str = "y", exclude: list[Frac] | None = None, thr: int = 110, density: float = 0.003,
+               min_band_px: int = 6, min_len: float = 0.02) -> list[Frac]:
+    """쪽 전체에서 글줄(axis='y')·글 열(axis='x') 띠를 투영으로 찾는다. exclude(도판 영역)는 먹에서 뺀다.
+    띠마다 (x0,y0,x1,y1) 비율 상자를 돌려준다(다른 축 범위는 그 띠의 먹이 있는 범위). 좌표 보정(refit)의 바탕."""
+    a = np.asarray(im.convert("L")) < thr
+    H, W = a.shape
+    for (x0, y0, x1, y1) in (exclude or []):
+        a[max(0, int(y0 * H)):min(H, int(y1 * H) + 1), max(0, int(x0 * W)):min(W, int(x1 * W) + 1)] = False
+    if axis == "y":
+        a = a.T
+    Ht, Wt = a.shape                 # 전치 뒤: 띠는 열 방향(x)으로 찾는다
+    prof = a.mean(axis=0)
+    on = prof > density
+    out: list[Frac] = []
+    x = 0
+    while x < Wt:
+        if not on[x]:
+            x += 1; continue
+        x2 = x
+        while x2 < Wt and on[x2]:
+            x2 += 1
+        if x2 - x >= min_band_px:
+            rows = np.where(a[:, x:x2].any(axis=1))[0]
+            if len(rows) and (rows[-1] - rows[0]) >= min_len * Ht:
+                b = (round(x / Wt, 4), round(rows[0] / Ht, 4), round(x2 / Wt, 4), round((rows[-1] + 1) / Ht, 4))
+                out.append(_swap(b) if axis == "y" else b)
+        x = x2
+    return out

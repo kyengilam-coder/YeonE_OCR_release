@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pymupdf
 from PIL import Image
-from yeone_ocr.schema import PageReading, Region, Paragraph, Column, RegionReread, Uncertain, region_text
+from yeone_ocr.schema import PageReading, Region, Paragraph, Column, RegionReread, Uncertain, region_text, bbox_frac
 from yeone_ocr.state import Work
 
 
@@ -202,3 +202,214 @@ class Parser(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------- 0.6.1: 좌표 보정·가로쓰기 덮개 검사·묶음 응답 검사·인쇄 쪽수 판정·글자 창 검사 ----------------
+def _drifted_page():
+    """글줄 10개짜리 가로쓰기 쪽. 모델 좌표는 아래로 갈수록 밀렸다(실측 130쪽 모양). 참 좌표와 함께 돌려준다."""
+    from PIL import ImageDraw
+    W, H = 1000, 1400
+    im = Image.new("L", (W, H), 255); d = ImageDraw.Draw(im)
+    tops = [0.10 + i * 0.05 for i in range(10)]                  # 줄 간격 5%, 줄 높이 2.4%
+    for t in tops:
+        d.rectangle([int(0.1 * W), int(t * H), int(0.9 * W), int((t + 0.024) * H)], fill=0)
+    d.rectangle([int(0.45 * W), int(0.03 * H), int(0.55 * W), int(0.05 * H)], fill=0)     # 머리글(어느 영역에도 없음)
+    truth = {"r1": (0.10, 0.174), "r2": (0.20, 0.324), "r3": (0.35, 0.474), "r4": (0.50, 0.574)}    # 줄 2·3·3·2
+    regs = []
+    for rid, n, drift in (("r1", 2, 0.0), ("r2", 3, 0.02), ("r3", 3, 0.045), ("r4", 2, 0.07)):
+        y0, y1 = truth[rid]
+        regs.append(Region(id=rid, kind="본문", bbox=[int((y0 + drift) * 1000), 100, int((y1 + drift) * 1000), 900],
+                           paragraphs=[Paragraph(columns=[Column(col_from_right=k + 1, text=f"{rid}줄{k + 1}의글자들입니다") for k in range(n)])]))
+    layer = {"page_width": 500.0, "page_height": 700.0, "horizontal_lines": [], "vertical_columns": []}
+    k = 0
+    for rid, n, _ in (("r1", 2, 0), ("r2", 3, 0), ("r3", 3, 0), ("r4", 2, 0)):
+        for j in range(n):
+            t = tops[k]; k += 1
+            layer["horizontal_lines"].append({"bbox": [50.0, t * 700, 450.0, (t + 0.024) * 700], "text": f"{rid}줄{j + 1}의글자들입니다"})
+    layer["horizontal_lines"].insert(0, {"bbox": [225.0, 0.03 * 700, 275.0, 0.05 * 700], "text": "114"})
+    return im, PageReading(pdf_page=130, regions=regs), truth, layer
+
+
+class Refit(unittest.TestCase):
+    """모델 영역 좌표가 아래로 밀렸을 때 글자층 줄·먹 띠로 되돌린다(실측: 130쪽 맨 아래 영역 7.8% 밀림 → 2차 조각이 이웃 인용문을 읽음)."""
+    def _check(self, p1, truth, tol=0.008):
+        for r in p1.regions:
+            y0, y1 = truth[r.id]
+            self.assertAlmostEqual(r.bbox[0] / 1000, y0, delta=tol, msg=r.id); self.assertAlmostEqual(r.bbox[2] / 1000, y1, delta=tol, msg=r.id)
+
+    def test_layer_refit(self):
+        from yeone_ocr.refit import refit_by_layer
+        im, p1, truth, layer = _drifted_page()
+        fixes = refit_by_layer(p1, layer, horizontal=True)
+        self.assertEqual(set(fixes), {"r1", "r2", "r3", "r4"}); self._check(p1, truth)
+        self.assertGreater(fixes["r4"]["shift"], 0.06); self.assertEqual(fixes["r4"]["lines"], [9, 10])
+
+    def test_ink_refit_aligns_runs_and_skips_header(self):
+        from yeone_ocr.refit import refit_by_ink, align_runs
+        im, p1, truth, _ = _drifted_page()
+        fixes = refit_by_ink(im, p1, horizontal=True)
+        self.assertEqual(set(fixes), {"r1", "r2", "r3", "r4"}); self._check(p1, truth)
+        self.assertEqual(align_runs([0.15, 0.4], [1, 2], [0.05, 0.15, 0.35, 0.45]), [1, 2])      # 머리글 띠는 건너뛴다
+        self.assertIsNone(align_runs([0.5], [3], [0.1, 0.2]))
+
+    def test_ink_refit_refuses_when_unsure(self):
+        from yeone_ocr.refit import refit_by_ink
+        im, p1, truth, _ = _drifted_page()
+        p1.regions[1].paragraphs[0].columns.append(Column(col_from_right=4, text="줄 수가 틀린 영역"))      # 1차가 줄 수를 잘못 세면
+        self.assertEqual(refit_by_ink(im, p1, horizontal=True), {})
+
+    def test_refit_regions_prefers_layer_and_describes(self):
+        from yeone_ocr.refit import refit_regions, describe
+        im, p1, truth, layer = _drifted_page()
+        fix = refit_regions(im, p1, True, layer)
+        self.assertEqual((fix["fixed"], fix["how"]), (4, "layer")); self.assertGreater(fix["max_shift"], 0.06); self.assertIn("글자층", describe(fix))
+        im2, p2, _, _ = _drifted_page()
+        self.assertEqual(refit_regions(im2, p2, True, None)["how"], "ink")
+
+    def test_title_box_does_not_count_as_drift(self):
+        from yeone_ocr.refit import refit_by_layer
+        reg = Region(id="t", kind="제목", bbox=[300, 400, 320, 600], title_text="石韋")
+        layer = {"page_width": 500.0, "page_height": 700.0, "vertical_columns": [],
+                 "horizontal_lines": [{"bbox": [200.0, 196.0, 300.0, 245.0], "text": "石韋"}, {"bbox": [50.0, 300.0, 450.0, 310.0], "text": "本文"}]}
+        p1 = PageReading(pdf_page=1, regions=[reg])
+        fixes = refit_by_layer(p1, layer, True)
+        self.assertEqual(fixes["t"]["shift"], 0.0); self.assertGreater(fixes["t"]["move"], 0.01)
+
+
+class HorizontalCover(unittest.TestCase):
+    """가로쓰기에서 영역 밖 머리글 한 줄은 항목 하나로(글자 수만큼의 '기둥' 20건이 아니라)."""
+    def test_uncovered_lines_axis_y(self):
+        from yeone_ocr.layout import uncovered_ink_boxes
+        from yeone_ocr.cli import cover_check
+        im, p1, truth, _ = _drifted_page()
+        for r in p1.regions:                                   # 참 좌표로 놓고 머리글만 남긴다
+            y0, y1 = truth[r.id]; r.bbox = [int(y0 * 1000), 100, int(y1 * 1000), 900]
+        cols = uncovered_ink_boxes(im, [bbox_frac(r.bbox) for r in p1.regions], axis="x")
+        rows = uncovered_ink_boxes(im, [bbox_frac(r.bbox) for r in p1.regions], axis="y")
+        self.assertEqual(len(rows), 1); self.assertLess(rows[0][3], 0.06)                 # 세로 기둥 검사(axis x)는 납작한 머리글을 아예 못 보거나 여러 조각으로 쪼갠다
+        notes = cover_check(im, p1, horizontal=True)
+        self.assertEqual(len(notes), 1); self.assertIn("글줄 y", notes[0])
+        self.assertEqual(len(p1.uncertain), 1); self.assertIn("가로 글줄", p1.uncertain[0].context); self.assertIn("머리글", p1.uncertain[0].context)
+
+
+class BatchGuard(unittest.TestCase):
+    """묶음 2차 응답이 다른 영역의 글이면(모델이 조각 번호를 섞음) 버리고 낱개로 다시 읽는다. 조각은 --batch-crops 장씩 나눠 보낸다."""
+    def _p1(self):
+        return PageReading(pdf_page=1, regions=[
+            Region(id="r3", kind="본문", bbox=[279, 77, 333, 889], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="3.《本草汇言》：艾叶暖血温经，行气开郁之药也。治妇人经血不调")])]),
+            Region(id="r4", kind="본문", bbox=[344, 77, 378, 889], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="4.《本草经疏》：艾叶禀天地之阳气以生，故味苦微温，熟则大热")])]),
+            Region(id="r5", kind="본문", bbox=[389, 77, 423, 889], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="5.《本经逢源》：艾性纯阳，故可以取太阳真火，可以回垂绝元阳")])])])
+
+    def test_misassigned_detected(self):
+        from yeone_ocr.cli import _misassigned
+        p1 = self._p1()
+        rr = {"r3": RegionReread(columns=[Column(col_from_right=1, text="4.《本草经疏》:艾叶禀天地之阳气以生,故味苦微温,熟则大热")]),
+              "r4": RegionReread(columns=[Column(col_from_right=1, text="5.《本经逢源》:艾性纯阳,故可以取太阳真火,可以回垂绝元阳")]),
+              "r5#1": RegionReread(columns=[Column(col_from_right=1, text="5.《本经逢源》:艾性纯阳,故可以取太阳真火")])}
+        self.assertEqual(_misassigned(rr, p1), ["r3", "r4"])
+        ok = {"r3": RegionReread(columns=[Column(col_from_right=1, text="3.《本草汇言》:艾叶暖血温经,行气开郁之药也。治妇人经血不调")])}
+        self.assertEqual(_misassigned(ok, p1), [])
+
+    def test_batches_are_split(self):
+        from yeone_ocr.cli import _second_pass
+        from PIL import ImageDraw
+        im = Image.new("L", (1000, 1400), 255); d = ImageDraw.Draw(im)
+        for y in (0.29, 0.355, 0.40):
+            d.rectangle([100, int(y * 1400), 880, int((y + 0.022) * 1400)], fill=0)
+        p1 = self._p1()
+        class Fake:
+            def __init__(self): self.batches = []; self.single = []
+            def reread_regions(self, items, n):
+                self.batches.append([rid for rid, _, _ in items])
+                return {rid: RegionReread(columns=[Column(col_from_right=1, text=next(c.text for r in p1.regions if r.id == rid for p in r.paragraphs for c in p.columns))]) for rid, _, _ in items}
+            def reread_region(self, im, kind, rid, n):
+                self.single.append(rid); return RegionReread(columns=[])
+        from yeone_ocr import prompts
+        prompts.set_mode("horizontal_zh")
+        try:
+            fake = Fake()
+            rr, meta = _second_pass(fake, im, p1, 1, Namespace(chunk_lines=8, second_mode="batch", batch_crops=2))
+        finally:
+            prompts.set_mode("vertical")
+        self.assertEqual([len(b) for b in fake.batches], [2])              # 조각 3개 → 2장 묶음 하나 + 남은 하나는 낱개
+        self.assertEqual(fake.single, ["r5"]); self.assertEqual(set(rr), {"r3", "r4"})
+
+
+class PrintOffset(unittest.TestCase):
+    """인쇄 쪽수 차이: 글자층의 머리글 숫자 → 판독한 쪽번호 순으로 판정하고 어긋난 쪽을 표시한다."""
+    def test_header_digits_in_text_layer(self):
+        from yeone_ocr.cli import detect_print_offset
+        doc = pymupdf.open()
+        for i in range(12):
+            pg = doc.new_page(width=500, height=800)
+            pg.insert_text((60, 50), f"{i + 114}", fontname="helv", fontsize=10)                  # 머리글 자리의 숫자만인 줄
+            pg.insert_text((100, 50), "中医历代药论选", fontname="china-s", fontsize=10)
+            for k in range(6):
+                pg.insert_text((60, 100 + k * 24), "车前子味甘寒无毒主气癃止痛利水道", fontname="china-s", fontsize=12)
+        self.assertEqual(detect_print_offset(doc), 113)
+
+    def test_offset_from_records_and_flag(self):
+        from yeone_ocr.cli import offset_from_records, flag_print_mismatch
+        def rec(pg, pp): return {"pdf_page": pg, "merged": {"print_page": pp, "uncertain": []}}
+        self.assertEqual(offset_from_records([rec(130, "114"), rec(131, "115"), rec(132, "")]), -16)
+        self.assertIsNone(offset_from_records([rec(130, "114")]))                                 # 한 쪽만으로는 정하지 않는다
+        self.assertIsNone(offset_from_records([rec(130, "114"), rec(131, "120")]))
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+            recs = [rec(130, "114"), rec(131, "115"), rec(132, "117")]
+            for r in recs: work.save_record(r["pdf_page"], r)
+            self.assertEqual(flag_print_mismatch(work, recs, -16), 1)
+            ctx = work.load_record(132)["merged"]["uncertain"][0]["context"]
+            self.assertIn("117", ctx); self.assertIn("116", ctx)
+            self.assertEqual(flag_print_mismatch(work, work.records(), -16), 0)                   # 두 번 붙이지 않는다
+
+
+class GlyphWindow(unittest.TestCase):
+    """3차 판별에서 모델이 본 글(w)이 기대한 앞뒤 글자와 안 이어지면 조각 위치가 어긋난 것 — 확정하지 않는다."""
+    def test_window_ok(self):
+        from yeone_ocr.adjudicate import window_ok
+        self.assertTrue(window_ok("", "肠，能", "人", "阴分"))
+        self.assertTrue(window_ok("，能人阴分", "肠，能", "人", "阴分"))
+        self.assertTrue(window_ok("能入阴", "肠，能", "人", "阴分"))             # 앞뒤가 보이면 가운데를 달리 읽어도 자리는 맞다
+        self.assertFalse(window_ok("7.《本草便读》", "", "6", ".《本草分经"))       # 실측: 이웃 인용문을 잘라 '7' 로 확정한 사례
+        self.assertFalse(window_ok("血，逐寒湿", "肠，能", "人", "阴分"))
+
+    def test_adjudicate_page_rejects_misplaced_crop(self):
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice
+        reg = Region(id="r6", kind="본문", bbox=[434, 77, 468, 889], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="〔6/7〕.《本草分经》：苦辛，生温熟热")])])
+        rec = {"pdf_page": 130, "pass1": PageReading(pdf_page=130, regions=[reg]).model_dump(), "merged": PageReading(pdf_page=130, regions=[reg]).model_dump()}
+        class Fake:
+            def adjudicate(self, crop, candidates, pre, post, horizontal, pdf_page):
+                return GlyphChoice(choice="7", evidence="7의 형태", window="血，逐寒湿 7.《本草便读")
+        rec = adjudicate_page(rec, Image.new("L", (900, 1300), 255), Fake(), horizontal=True)
+        self.assertEqual(rec["adjudicate_stats"]["decided"], 0); self.assertEqual(rec["adjudicate_stats"].get("misplaced"), 1)
+        self.assertIn("〔6/7〕", region_text(PageReading.model_validate(rec["merged"]).regions[0]))
+        self.assertIn("조각 위치가 어긋남", rec["adjudications"][0]["evidence"])
+
+
+class StaleRecords(unittest.TestCase):
+    """이전 판 기록: 좌표가 크게 밀린 기록은 stale/ 로 옮겨 다시 판독하고, 조금 밀린 기록은 좌표만 고쳐 다시 비교한다."""
+    def test_refresh_moves_drifted_records(self):
+        from yeone_ocr import __version__
+        from yeone_ocr.cli import refresh_stale_records, apply_mode
+        im, p1, truth, layer = _drifted_page()
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+            layer["plain"] = "".join(l["text"] for l in layer["horizontal_lines"])
+            work.textlayer_path(130).write_text(json.dumps(layer), encoding="utf-8")
+            rec = {"pdf_page": 130, "version": "0.6.0", "mode": "horizontal_zh", "pass1": p1.model_dump(), "merged": p1.model_dump(),
+                   "pass2": {"r1": RegionReread(columns=[Column(col_from_right=1, text="x")]).model_dump()}}
+            work.save_record(130, rec)
+            im2, p1b, truth2, layer2 = _drifted_page()
+            for r in p1b.regions:                                            # 131쪽은 거의 안 밀린 기록
+                y0, y1 = truth2[r.id]; r.bbox = [int((y0 + 0.004) * 1000), 100, int((y1 + 0.004) * 1000), 900]
+            layer2["plain"] = layer["plain"]; work.textlayer_path(131).write_text(json.dumps(layer2), encoding="utf-8")
+            work.save_record(131, {**rec, "pdf_page": 131, "pass1": p1b.model_dump(), "merged": p1b.model_dump()})
+            apply_mode(Namespace(mode="horizontal_zh"))
+            try:
+                n = refresh_stale_records(work, None, [130, 131])
+            finally:
+                apply_mode(Namespace(mode="vertical"))
+            self.assertEqual(n, 1); self.assertIsNone(work.load_record(130)); self.assertTrue((work.readings_dir / "stale" / "p130.json").exists())
+            r131 = work.load_record(131); self.assertEqual(r131["version"], __version__); self.assertEqual(r131["bbox_fix"]["fixed"], 4)

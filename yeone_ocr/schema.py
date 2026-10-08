@@ -84,6 +84,7 @@ class GlyphChoice(_M):
     """3차 글자 판별의 답. choice 는 후보 가운데 하나(자형 근거가 보일 때만), 아니면 빈 글."""
     choice: str = Field("", alias="c")
     evidence: str = Field("", alias="e")       # 본 자형 한 줄(갈고리·점·획 길이 등)
+    window: str = Field("", alias="w")         # 조각에 보이는 글자 전부(앞뒤 글자 확인용 — 조각이 엉뚱한 자리면 가려낸다)
 
 
 class MultiRegionReread(_M):

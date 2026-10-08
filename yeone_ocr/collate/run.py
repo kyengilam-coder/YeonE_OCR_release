@@ -227,6 +227,9 @@ def adjudicate_items(items: list[Item], *, work, doc, reader, horizontal: bool, 
         except Exception as e:
             it.note += f" · 3차 판별 실패({str(e)[:40]})"; st["undecided"] += 1; continue
         choice = (res.choice or "").strip(); ev = (res.evidence or "")[:60]
+        from ..adjudicate import window_ok
+        if choice and not window_ok(getattr(res, "window", "") or "", site.pre, choice, site.post):
+            it.note += f" · 3차 판별: 조각 위치가 어긋나 보류(보인 글: {(res.window or '')[:10]})"; st["undecided"] += 1; continue
         if choice == hk and hk != it.ocr:
             it.kind, it.witness = "D", (it.witness + "+" if it.witness else "") + "glyph=hwpx"
             it.note = f"3차 판별: 인쇄 자형이 HWPX 글자 「{it.hwpx}」({ev}) — 차이에서 뺌"; st["hwpx"] += 1
@@ -268,16 +271,18 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     for n in range(pages[0], pages[1] + 1):
         rec = work.load_record(n)
         if rec:
+            layer_d: dict = {}
             try:
                 tlp = work.textlayer_path(n)
-                layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else text_layer(pdf_doc, n).plain()
+                layer_d = json.loads(tlp.read_text(encoding="utf-8")) if tlp.exists() else {"plain": text_layer(pdf_doc, n).plain()}
+                layer = layer_d.get("plain", "")
             except Exception:
                 layer = ""
             layers[n] = layer
             if rec.get("pass1") and rec.get("pass2"):
-                # 저장된 1차·2차로 비교 표시를 현재 모드 규칙(부호·간체 접기)으로 다시 계산한다. 모델 호출 없음
+                # 저장된 1차·2차로 비교 표시를 현재 모드 규칙(부호·간체 접기)으로 다시 계산한다(영역 좌표도 글자층에 맞춤). 모델 호출 없음
                 try:
-                    rec = remerge_record(rec, layer); work.save_record(n, rec)
+                    rec = remerge_record(rec, layer, layer_d); work.save_record(n, rec)
                 except Exception as e:
                     log(f"  {n}쪽 비교 다시 계산 실패(기존 기록 사용): {e}")
             oc_all.extend(reading_text(rec))

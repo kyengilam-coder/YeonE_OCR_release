@@ -475,7 +475,7 @@ class App(tk.Tk):
         ttk.Label(pf, text="비우면 PDF 전체(기본). 일부만 할 때 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=8)
         ttk.Label(ff, text="인쇄 쪽수 = PDF 쪽수 +", style="Panel.TLabel").grid(row=1, column=4, sticky="e", **pad)
         ttk.Entry(ff, textvariable=self.v_off, width=6).grid(row=1, column=5, sticky="w", **pad)
-        ttk.Label(ff, text="예: PDF 1쪽이 인쇄 30쪽이면 29. 어긋남만 표시", style="Hint.TLabel").grid(row=1, column=6, columnspan=2, sticky="w", **pad)
+        ttk.Label(ff, text="비우면 자동 판정. 예: PDF 1쪽이 인쇄 30쪽이면 29. 어긋남만 표시", style="Hint.TLabel").grid(row=1, column=6, columnspan=2, sticky="w", **pad)
 
         # ---- 판독 / 문서 ----
         mid = ttk.Frame(root); mid.pack(fill="x", pady=(8, 0)); mid.columnconfigure(0, weight=3); mid.columnconfigure(1, weight=2)
@@ -908,8 +908,9 @@ class App(tk.Tk):
             o += ["--model", self.v_model.get().strip()]
         if not self.v_second.get():
             o.append("--no-second-pass")
-        if print_offset and self.v_off.get().strip():
-            o += ["--print-offset", self.v_off.get().strip()]          # 책갈피 OCR 은 다른 책이라 인식 탭의 보정값을 쓰지 않는다
+        off = self.v_off.get().strip()
+        if print_offset and off and off.lstrip("+-").isdigit() and int(off) != 0:
+            o += ["--print-offset", off]          # 비우거나 0 이면 자동 판정. 책갈피 OCR 은 다른 책이라 인식 탭의 보정값을 쓰지 않는다
         if (self.v_force.get() if force is None else force):
             o.append("--force")
         o += ["--workers", (self.v_workers.get().strip() or "6")]

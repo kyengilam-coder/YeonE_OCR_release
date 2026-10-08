@@ -112,6 +112,29 @@ def apply_adjudications(merged: PageReading, adjudications: list[dict] | None) -
     return n
 
 
+def window_ok(window: str, pre: str, choice: str, post: str) -> bool:
+    """모델이 조각에서 본 글(window)이 기대한 앞뒤 글자와 이어지는지. 조각이 엉뚱한 자리(좌표 밀림)를 잘랐으면 False.
+    window 가 비었거나 앞뒤 글자가 없으면 검사할 수 없으므로 True."""
+    if not window or not choice:
+        return True
+    w = _PUNCT.sub("", window); pk = _PUNCT.sub("", pre or ""); nk = _PUNCT.sub("", post or "")
+    if not pk and not nk:
+        return True
+    try:
+        from .collate import zh
+        fold = zh.compare_key if zh.available() else (lambda s: s)
+    except Exception:
+        fold = lambda s: s
+    w, pk, nk, ch = fold(w), fold(pk), fold(nk), fold(choice)
+    if pk and (pk[-1] + ch) in w:
+        return True
+    if nk and (ch + nk[0]) in w:
+        return True
+    if pk and nk and pk[-1] in w and nk[0] in w:               # 가운데 글자를 다르게 읽었어도 앞뒤가 둘 다 보이면 자리는 맞다
+        return True
+    return False
+
+
 def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_sites: int = 0, zoom: int = 6) -> dict:
     """한 쪽의 〔a/b〕 자리를 판별한다. rec 을 고쳐 돌려준다(merged 글, adjudications, uncertain 메모)."""
     merged = PageReading.model_validate(rec["merged"])
@@ -132,7 +155,10 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
             done.append({**asdict(site), "box": [round(v, 4) for v in box], "choice": "", "evidence": f"판별 실패: {str(e)[:80]}"})
             continue
         choice = (res.choice or "").strip()
-        entry = {**asdict(site), "box": [round(v, 4) for v in box], "choice": choice if choice in (site.a, site.b) else "", "evidence": (res.evidence or "")[:200]}
+        entry = {**asdict(site), "box": [round(v, 4) for v in box], "choice": choice if choice in (site.a, site.b) else "", "evidence": (res.evidence or "")[:200],
+                 "window": (getattr(res, "window", "") or "")[:40]}
+        if entry["choice"] and not window_ok(entry["window"], site.pre, entry["choice"], site.post):
+            entry["choice"] = ""; entry["evidence"] = f"조각 위치가 어긋남(보인 글: {entry['window'][:12]}) — " + entry["evidence"]; stats["misplaced"] = stats.get("misplaced", 0) + 1
         if entry["choice"]:
             apply_choice(merged, site, entry["choice"]); stats["decided"] += 1; stats["a" if entry["choice"] == site.a else "b"] += 1
             for u in merged.uncertain:

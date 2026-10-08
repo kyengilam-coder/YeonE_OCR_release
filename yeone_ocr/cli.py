@@ -28,6 +28,7 @@ from .merge import merge_passes, compare_textlayer
 from .verify import verify_page, check_hwpx_file
 from .blocks import assemble_blocks, Block
 from .report import make_report
+from .refit import refit_regions, describe as refit_describe
 
 
 CANCEL = threading.Event()   # 창 프로그램의 [중지] 단추가 켠다. 쪽 사이에서 확인한다.
@@ -141,14 +142,49 @@ def detect_print_offset(doc) -> int | None:
             tl = text_layer(doc, n)
         except Exception:
             continue
-        m = re.search(r"\d{1,4}", tl.page_label or "")
-        if m:
-            offs[int(m.group(0)) - n] += 1
+        cands = [tl.page_label] if tl.page_label else []
+        H = tl.page_height or 1
+        for l in tl.horizontal_lines:                                   # 머리글·꼬리글 자리의 '114' 같은 숫자만인 줄
+            t = (l["text"] or "").strip(); bb = l["bbox"]
+            if re.fullmatch(r"[-–—ー一·\s]*\d{1,4}[-–—ー一·\s]*", t) and (bb[3] < 0.15 * H or bb[1] > 0.85 * H):
+                cands.append(t)
+        if cands:
+            m = re.search(r"\d{1,4}", cands[0])
+            if m:
+                offs[int(m.group(0)) - n] += 1
     if offs:
         off, cnt = offs.most_common(1)[0]
-        if cnt >= 3:
+        if cnt >= 3 and cnt >= 0.6 * sum(offs.values()):
             return off
     return None
+
+
+def offset_from_records(records: list[dict]) -> int | None:
+    """판독한 쪽번호(merged.print_page)로 '인쇄 쪽수 = PDF 쪽수 + N' 을 판정한다. 2쪽 이상이 같은 값이고 과반이면 그 값."""
+    from collections import Counter
+    offs: Counter = Counter()
+    for rec in records:
+        pp = (rec.get("merged") or {}).get("print_page") or ""
+        if pp.isdigit():
+            offs[int(pp) - rec["pdf_page"]] += 1
+    if not offs:
+        return None
+    off, cnt = offs.most_common(1)[0]
+    return off if cnt >= 2 and cnt >= 0.6 * sum(offs.values()) else None
+
+
+def flag_print_mismatch(work: "Work", records: list[dict], off: int) -> int:
+    """판정한 차이와 어긋나는 쪽에 확인 항목을 붙인다(이미 있으면 그대로). 돌려주는 값은 새로 표시한 쪽 수."""
+    n = 0
+    for rec in records:
+        m = rec.get("merged") or {}; pp = m.get("print_page") or ""
+        if not pp.isdigit() or int(pp) == rec["pdf_page"] + off:
+            continue
+        if any((u.get("context") or "").startswith("인쇄 쪽수 판독값") for u in m.get("uncertain", [])):
+            continue
+        m.setdefault("uncertain", []).append(Uncertain(region_id="", context=f"인쇄 쪽수 판독값 {pp} 이 PDF 쪽수+{off}={rec['pdf_page'] + off} 과 다름 — 원본 확인").model_dump())
+        work.save_record(rec["pdf_page"], rec); work.set_status(rec["pdf_page"], "판독 확인 필요"); n += 1
+    return n
 
 
 def resolve_mode(args, doc, work: "Work | None" = None) -> str:
@@ -169,18 +205,35 @@ def resolve_mode(args, doc, work: "Work | None" = None) -> str:
     return mode
 
 
+STALE_MOVE = 0.02        # 이전 기록의 영역 좌표가 이보다 밀려 있으면 2차 조각이 이웃 글을 읽었을 수 있어 다시 판독한다
+
+
 def refresh_stale_records(work: "Work", doc, pages: list[int]) -> int:
-    """다른 판에서 만든 판독 기록을 지금 규칙으로 다시 비교·표시한다(모델 호출 없음). '프로그램을 바꾼 뒤 비교 다시 계산' 을 저절로."""
-    n = 0
+    """다른 판에서 만든 판독 기록을 지금 규칙으로 다시 비교·표시한다(모델 호출 없음). '프로그램을 바꾼 뒤 비교 다시 계산' 을 저절로.
+    영역 좌표를 글자층 줄 위치에 맞춰 보고(0.6.1 좌표 보정), 크게 밀려 있던 기록은 readings/stale/ 로 옮겨 다시 판독되게 한다."""
+    from . import prompts
+    n = 0; stale: list[tuple[int, float]] = []
     for rec in work.records(pages):
         if rec.get("version") == __version__ or not rec.get("pass1"):
             continue
-        tlp = work.textlayer_path(rec["pdf_page"])
-        layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else ""
-        rec = remerge_record(rec, layer); rec["version"] = __version__
-        work.save_record(rec["pdf_page"], rec); n += 1
+        pg = rec["pdf_page"]
+        tlp = work.textlayer_path(pg)
+        layer = json.loads(tlp.read_text(encoding="utf-8")) if tlp.exists() else {}
+        horizontal = (rec.get("mode") or prompts.MODE) == "horizontal_zh"
+        p1 = PageReading.model_validate(rec["pass1"])
+        fix = refit_regions(None, p1, horizontal, layer)
+        if fix["fixed"] and fix["max_shift"] > STALE_MOVE and rec.get("pass2"):
+            sd = work.readings_dir / "stale"; sd.mkdir(exist_ok=True)
+            work.record_path(pg).replace(sd / work.record_path(pg).name); stale.append((pg, fix["max_shift"]))
+            continue
+        rec["pass1"] = p1.model_dump(); rec["bbox_fix"] = fix
+        rec = remerge_record(rec, layer.get("plain", "")); rec["version"] = __version__
+        work.save_record(pg, rec); n += 1
     if n:
         log(f"이전 판의 판독 기록 {n}쪽을 지금 규칙으로 다시 비교했습니다(모델 호출 없음).")
+    if stale:
+        log(f"이전 기록 {len(stale)}쪽({', '.join(str(p) for p, _ in stale[:8])}{' …' if len(stale) > 8 else ''})은 영역 좌표가 최대 {max(m for _, m in stale):.1%} 밀려 있어"
+            f"(2차 조각이 이웃 글을 읽었을 수 있음) 다시 판독합니다 — 이전 기록은 readings/stale/ 에 두었습니다.")
     return n
 
 
@@ -223,9 +276,15 @@ def fill_page_marks(pr: PageReading) -> None:
             pr.running_header = t
 
 
-def remerge_record(rec: dict, layer_plain: str) -> dict:
-    """저장된 1차·2차 판독으로 비교·표시를 다시 계산한다(모델 호출 없음). merged 에 손으로 고친 내용은 사라진다."""
+def remerge_record(rec: dict, layer_plain: str, layer: dict | None = None) -> dict:
+    """저장된 1차·2차 판독으로 비교·표시를 다시 계산한다(모델 호출 없음). merged 에 손으로 고친 내용은 사라진다.
+    layer(글자층 사전)를 주면 아직 좌표 보정을 안 한 기록의 영역 좌표를 글자층 줄 위치에 맞춘다."""
     p1 = PageReading.model_validate(rec["pass1"])
+    if layer and not rec.get("bbox_fix"):
+        from . import prompts
+        fix = refit_regions(None, p1, (rec.get("mode") or prompts.MODE) == "horizontal_zh", layer)
+        if fix["fixed"]:
+            rec["pass1"] = p1.model_dump(); rec["bbox_fix"] = fix
     rereads = {k: RegionReread.model_validate(v) for k, v in (rec.get("pass2") or {}).items()}
     merged, mstats = merge_passes(p1, rereads)
     fill_page_marks(merged)
@@ -255,8 +314,8 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
             log(f"  {n}쪽: 1차 판독 원본이 없어 건너뜀"); continue
         before = len(rec["merged"].get("uncertain", []))
         tlp = work.textlayer_path(n)
-        layer = json.loads(tlp.read_text(encoding="utf-8")).get("plain", "") if tlp.exists() else ""
-        rec = remerge_record(rec, layer)
+        layer_d = json.loads(tlp.read_text(encoding="utf-8")) if tlp.exists() else {}
+        rec = remerge_record(rec, layer_d.get("plain", ""), layer_d)
         work.save_record(n, rec)
         m = rec["merged"]; ms = rec["merge_stats"]
         if m["uncertain"] or any(i["level"] == "error" for i in rec["verify"]):
@@ -267,37 +326,47 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
                 p["statuses"].remove("판독 확인 필요"); work.save_state(st)
         log(f"  {n}쪽: 확인 필요 {before} → {len(m['uncertain'])}건 · 열 비교 {ms.get('columns_compared')}열 중 {ms.get('columns_differ')}열 불일치"
             + (f" · 1차에만 {ms.get('columns_only_pass1')}열, 2차에만 {ms.get('columns_only_pass2')}열" if ms.get('columns_only_pass1') or ms.get('columns_only_pass2') else ""))
-    log("remerge: 끝. ④ 문서 만들기를 다시 실행하십시오.")
+    log("remerge: 끝. 문서에 넣으려면 ④ 문서 만들기 또는 [▶ 한 번에 인식] 을 실행하십시오.")
     return 0
 
 
-def orphan_message(b) -> str:
+def orphan_message(b, horizontal: bool = False) -> str:
     """영역 밖 글줄 흔적을 사람이 읽는 말로. 좌표는 검수 화면이 상자를 그릴 때 다시 읽는다(가로 a~b%, 세로 c~d%)."""
     hx, hy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
     hpos = "왼쪽" if hx < 0.33 else ("가운데" if hx < 0.67 else "오른쪽")
     vpos = "위" if hy < 0.33 else ("중간" if hy < 0.67 else "아래")
+    edge = " 쪽 가장자리라 머리글·꼬리글·쪽번호일 가능성이 큼." if horizontal and (b[3] < 0.13 or b[1] > 0.9) else ""
     return (f"영역 밖 글줄 흔적 — 쪽 {hpos} {vpos}(가로 {b[0] * 100:.0f}~{b[2] * 100:.0f}%, 세로 {b[1] * 100:.0f}~{b[3] * 100:.0f}%)에 "
-            f"모델이 어느 영역에도 넣지 않은 세로 글줄이 있음. 빠진 열·주석·쪽번호인지 원본 확인(검수 화면의 붉은 점선 상자)")
+            f"모델이 어느 영역에도 넣지 않은 {'가로' if horizontal else '세로'} 글줄이 있음.{edge} 빠진 {'줄' if horizontal else '열'}·주석·쪽번호인지 원본 확인(검수 화면의 붉은 점선 상자)")
 
 
-def cover_check(img: Image.Image, p1: PageReading) -> list[str]:
-    """영역 밖에 남은 글 기둥을 찾아 가까운 문자 영역의 좌표를 넓히거나(2차 조각에 포함되게), 붙일 곳이 없으면 확인 항목으로 남긴다."""
+def cover_check(img: Image.Image, p1: PageReading, horizontal: bool = False) -> list[str]:
+    """영역 밖에 남은 글 기둥(가로쓰기면 글줄)을 찾아 가까운 문자 영역의 좌표를 넓히거나(2차 조각에 포함되게), 붙일 곳이 없으면 확인 항목으로 남긴다.
+    가로쓰기는 줄 단위로 찾아야 머리글 한 줄이 글자 수만큼의 항목으로 쪼개지지 않는다(실측: 머리글 하나가 확인 항목 20건)."""
     from .schema import bbox_frac as _bf, frac_bbox as _fb
+    axis = "y" if horizontal else "x"
     all_fr = [_bf(r.bbox) for r in p1.regions]
-    boxes = uncovered_ink_boxes(img, all_fr)
+    boxes = uncovered_ink_boxes(img, all_fr, axis=axis)
     if not boxes:
         return []
     # 도판이 아닌 모든 영역(본문·제목·소주·쪽번호…)에 붙일 수 있다. 제목 글자가 크면 모델 좌표 밖으로 획이 삐져나오기 쉽다.
     targets = [(r.id, _bf(r.bbox)) for r in p1.regions if r.kind not in IMAGE_KINDS]
-    grown, orphans = attach_uncovered(boxes, targets)
+    if horizontal:
+        # 가로쓰기: 쪽 위·아래 가장자리의 줄(머리글·꼬리글·쪽번호)은 본문 영역에 붙이지 않는다 — 붙이면 2차 조각이 머리글을 본문 줄로 읽는다
+        edge = [b for b in boxes if b[3] < 0.12 or b[1] > 0.9]
+        grown, orphans = attach_uncovered([b for b in boxes if b not in edge], targets, max_gap=0.03, axis=axis)
+        orphans = edge + orphans
+    else:
+        grown, orphans = attach_uncovered(boxes, targets, axis=axis)
     notes = []
+    word = "글줄" if horizontal else "글 기둥"
     for r in p1.regions:
         if r.id in grown:
             r.bbox = _fb(grown[r.id])
-            notes.append(f"{r.id}: 영역 밖 글 기둥을 포함하도록 좌표를 넓힘 → {r.bbox}")
+            notes.append(f"{r.id}: 영역 밖 {word}을 포함하도록 좌표를 넓힘 → {r.bbox}")
     for b in orphans:
-        p1.uncertain.append(Uncertain(region_id="", context=orphan_message(b)))
-        notes.append(f"영역 밖 글 기둥 x {b[0]:.2f}~{b[2]:.2f} → 확인 항목으로 남김")
+        p1.uncertain.append(Uncertain(region_id="", context=orphan_message(b, horizontal)))
+        notes.append(f"영역 밖 {word} {'y' if horizontal else 'x'} {(b[1] if horizontal else b[0]):.2f}~{(b[3] if horizontal else b[2]):.2f} → 확인 항목으로 남김")
     return notes
 
 
@@ -322,6 +391,35 @@ def nfc_reading(pr: PageReading) -> PageReading:
 def _zoom(w: int, h: int, target_h: int = 1600, longest: int = 3000) -> float:
     """조각 확대 배율. 세로 target_h 안팎으로 키우되 긴 변이 longest 를 넘지 않게(모델은 3072px 안으로 줄이거나 토큰 예산이 고정이라 그 이상은 낭비)."""
     return max(1.0, min(4.0, target_h / max(1, h), longest / max(1, w, h)))
+
+
+def _contained(part: str, whole: str) -> float:
+    """part 의 글자 가운데 whole 에 순서대로 들어 있는 비율(0~1)."""
+    if not part or not whole:
+        return 0.0
+    from difflib import SequenceMatcher
+    sm = SequenceMatcher(None, part, whole, autojunk=False)
+    return sum(b.size for b in sm.get_matching_blocks() if b.size >= 2) / len(part)      # 한 글자짜리 우연한 일치(之·故·阳…)는 세지 않는다
+
+
+def _misassigned(rereads: dict[str, RegionReread], p1: PageReading) -> list[str]:
+    """묶음 2차 응답 가운데 제 영역의 1차 글과는 거의 안 맞고 다른 영역의 1차 글과는 잘 맞는 것(모델이 조각 번호를 섞음)을 찾는다."""
+    from .merge import _fold
+    from .schema import region_text
+    refs = {r.id: _fold(region_text(r)) for r in p1.regions if r.kind in TEXT_KINDS}
+    bad = []
+    for rid, rr in rereads.items():
+        base = rid.split("#")[0]
+        got = _fold("".join(c.text or "" for c in rr.columns))[:80]
+        if len(got) < 6 or base not in refs:
+            continue
+        own = _contained(got, refs[base])
+        if own >= 0.35:
+            continue
+        other = max((_contained(got, t) for k, t in refs.items() if k != base), default=0.0)
+        if other >= 0.6:
+            bad.append(rid)
+    return bad
 
 
 def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str, RegionReread], dict]:
@@ -365,14 +463,23 @@ def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str,
     if not items:
         return rereads, meta
     if args.second_mode == "batch" and len(items) > 1 and hasattr(reader2, "reread_regions"):
-        try:
-            rereads = reader2.reread_regions(items, n)
-        except Exception as e:
-            from .reader_gemini import ReaderError
-            if isinstance(e, ReaderError) and e.fatal:
-                raise
-            log(f"    {n}쪽: 묶음 2차 판독 실패({str(e)[:60]}) → 영역별로 다시")
-            rereads = {}
+        per = max(1, int(getattr(args, "batch_crops", 8) or 8))         # 한 호출에 조각 N장까지 — 많이 넣을수록 모델이 조각과 번호를 섞는다
+        for k in range(0, len(items), per):
+            batch = items[k:k + per]
+            if len(batch) == 1 and k:
+                break                                                     # 하나 남은 조각은 아래 낱개 호출로
+            try:
+                rereads.update(reader2.reread_regions(batch, n))
+            except Exception as e:
+                from .reader_gemini import ReaderError
+                if isinstance(e, ReaderError) and e.fatal:
+                    raise
+                log(f"    {n}쪽: 묶음 2차 판독 실패({str(e)[:60]}) → 영역별로 다시")
+        bad = _misassigned(rereads, p1)
+        for rid in bad:
+            rereads.pop(rid, None)
+        if bad:
+            log(f"    {n}쪽: 묶음 응답 {len(bad)}개({', '.join(bad[:5])})가 다른 영역의 글로 보여 낱개로 다시 읽음")
     for rid, kind, im in items:
         if rid in rereads and rereads[rid].columns:
             continue
@@ -408,7 +515,19 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     for r in {id(reader): reader, id(reader2): reader2}.values():
         if hasattr(r, "usage_begin"): r.usage_begin()
     p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total))
-    coverage_notes = cover_check(img, p1)
+    from . import prompts
+    horizontal = prompts.MODE == "horizontal_zh"
+    tlp = work.textlayer_path(n)
+    if tlp.exists():
+        layer = json.loads(tlp.read_text(encoding="utf-8"))
+    else:
+        from dataclasses import asdict as _asdict
+        with DOC_LOCK:
+            tl = text_layer(doc, n)
+        layer = {**_asdict(tl), "plain": tl.plain()}
+    # 모델의 영역 좌표가 아래로 갈수록 밀리는 일이 있어(실측 최대 7.8%) 글자층 줄·먹 띠에 맞춘 뒤에 조각을 자른다
+    bbox_fix = refit_regions(img, p1, horizontal, layer)
+    coverage_notes = ([refit_describe(bbox_fix)] if bbox_fix["fixed"] else []) + cover_check(img, p1, horizontal)
     rereads: dict[str, RegionReread] = {}
     meta: dict[str, dict] = {}
     if not args.no_second_pass:
@@ -425,12 +544,6 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     if args.print_offset is not None and merged.print_page.isdigit() and int(merged.print_page) != n + args.print_offset:
         merged.uncertain.append(Uncertain(region_id="", context=f"인쇄 쪽수 판독값 {merged.print_page} 이 PDF 쪽수+{args.print_offset}={n + args.print_offset} 과 다름 — 원본 확인"))
     # 기존 텍스트 레이어 대조
-    tlp = work.textlayer_path(n)
-    if tlp.exists():
-        layer = json.loads(tlp.read_text(encoding="utf-8"))
-    else:
-        with DOC_LOCK:
-            layer = {"plain": text_layer(doc, n).plain()}
     tdiff = compare_textlayer(merged, layer.get("plain", ""))
     issues = verify_page(merged)
     usage = {}; by_model = {}
@@ -449,7 +562,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": reader.name, "model": getattr(reader, "model", ""), "version": __version__, "mode": getattr(args, "mode", ""),
            "second_model": getattr(reader2, "model", "") if reader2 is not reader else "",
            "image_source": src, "upscale": args.upscale, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(time.time() - t0, 1),
-           "usage": usage, "coverage_notes": coverage_notes,
+           "usage": usage, "coverage_notes": coverage_notes, "bbox_fix": bbox_fix,
            "pass1": p1.model_dump(), "pass2": pass2,
            "merged": merged.model_dump(), "merge_stats": mstats, "textlayer_diff": tdiff, "verify": issues, "crops": {}}
     work.save_record(n, rec)
@@ -630,7 +743,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         chunks = [records]
     else:
         if not whole:
-            log(f"build: 판독 기록이 있는 {len(records)}쪽만 문서에 넣음 (PDF 전체 {len(doc)}쪽). 전체를 만들려면 쪽 범위를 비우고 ③ 판독을 마치십시오.")
+            log(f"build: 판독 기록이 있는 {len(records)}쪽만 문서에 넣음 (PDF 전체 {len(doc)}쪽). 전체를 만들려면 쪽 범위를 비우고 [▶ 한 번에 인식] 을 다시 누르십시오.")
         chunks = [records[i:i + args.split] for i in range(0, len(records), args.split)] if getattr(args, "split", 0) and args.split > 0 else [records]
     ok = True
     for ci, chunk in enumerate(chunks):
@@ -689,7 +802,7 @@ def cmd_build(args, work: Work | None = None, doc=None):
 
 
 # ---------- adjudicate / ledger ----------
-def cmd_adjudicate(args, work: Work | None = None, doc=None):
+def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = True):
     """3차 글자 판별. 〔a/b〕 자리마다 호출 한 번(flash 로도 충분). 확정한 글자는 merged 와 adjudications 에 남고, remerge 뒤에도 유지된다."""
     from . import prompts
     doc = doc or open_pdf(args.pdf)
@@ -714,7 +827,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None):
         log(f"오류: {e}"); return 1
     log(f"adjudicate: 판독기 {reader.model} · {len(records)}쪽 · 〔a/b〕 {total_sites}곳 · 조각 확대 {zoom}배" + (f" · 쪽당 최대 {max_sites}곳" if max_sites else ""))
     horizontal = prompts.MODE == "horizontal_zh"
-    agg = {"sites": 0, "decided": 0, "undecided": 0, "failed": 0}
+    agg = {"sites": 0, "decided": 0, "undecided": 0, "failed": 0, "misplaced": 0}
     for rec, n in todo:
         if not n or CANCEL.is_set():
             continue
@@ -739,7 +852,8 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None):
         shown = "; ".join(f"〔{a['a']}/{a['b']}〕→{a['choice'] or '미정'}" for a in (rec.get("adjudications") or [])[-n:])
         log(f"  {pg}쪽: {st.get('sites', 0)}곳 중 확정 {st.get('decided', 0)} · 미정 {st.get('undecided', 0)}" + (f" · 실패 {st['failed']}" if st.get("failed") else "") + f"  {shown[:160]}")
     log(f"adjudicate: 끝. {agg['sites']}곳 중 확정 {agg['decided']} · 미정 {agg['undecided']}" + (f" · 실패 {agg['failed']}" if agg["failed"] else "")
-        + " — 확정한 글자는 본문에 들어갔고 확인 목록에 '3차 판별' 메모가 남았습니다. ④ 문서 만들기를 다시 실행하십시오.")
+        + (f" · 조각 위치 어긋나 보류 {agg['misplaced']}" if agg.get("misplaced") else "")
+        + " — 확정한 글자는 본문에 들어갔고 확인 목록에 '3차 판별' 메모가 남았습니다." + (" ④ 문서 만들기를 다시 실행하십시오." if standalone else ""))
     return 0
 
 
@@ -811,12 +925,18 @@ def cmd_run(args):
     cmd_prepare(args, work, doc)
     pages = parse_pages(args.pages, len(doc))
     resolve_mode(args, doc, work)
-    if getattr(args, "print_offset", None) is None:
-        off = detect_print_offset(doc)
-        if off is not None:
-            args.print_offset = off; log(f"인쇄 쪽수 = PDF 쪽수 + {off} (글자층의 쪽번호 표기로 자동 판정)")
+    auto_offset = getattr(args, "print_offset", None) is None
+    if auto_offset:
+        st = work.load_state()
+        if isinstance(st.get("print_offset"), int):
+            args.print_offset = st["print_offset"]; log(f"인쇄 쪽수 = PDF 쪽수 + {args.print_offset} (결과 폴더에 적힌 값)")
         else:
-            log("인쇄 쪽수 차이는 자동으로 알 수 없어 검사하지 않습니다(설정에 적으면 어긋남을 표시).")
+            off = detect_print_offset(doc)
+            if off is not None:
+                args.print_offset = off; st["print_offset"] = off; work.save_state(st)
+                log(f"인쇄 쪽수 = PDF 쪽수 + {off} (글자층의 쪽번호 표기로 자동 판정)")
+            else:
+                log("인쇄 쪽수 차이는 글자층으로 알 수 없어, 판독한 쪽번호가 모이면 판정합니다.")
     refresh_stale_records(work, doc, pages)
 
     def checkpoint(reason: str):
@@ -829,9 +949,15 @@ def cmd_run(args):
         if work.records(pages):
             log("판독이 중간에 멈춰 '진행중' HWPX 를 남겼습니다. 다시 실행하면 남은 쪽부터 이어서 합니다.")
         return rc or 130
+    if auto_offset and getattr(args, "print_offset", None) is None:
+        recs = work.records(pages); off = offset_from_records(recs)
+        if off is not None:
+            args.print_offset = off; st = work.load_state(); st["print_offset"] = off; work.save_state(st)
+            flagged = flag_print_mismatch(work, recs, off)
+            log(f"인쇄 쪽수 = PDF 쪽수 + {off} (판독한 쪽번호로 판정)" + (f" · 어긋난 쪽 {flagged}개를 확인 항목으로" if flagged else ""))
     if args.reader == "gemini" and not getattr(args, "no_adjudicate", False):
         try:
-            cmd_adjudicate(args, work, doc)
+            cmd_adjudicate(args, work, doc, standalone=False)
         except Exception as e:
             log(f"3차 글자 판별을 건너뜀({e}). 〔a/b〕 표시는 그대로 남습니다.")
         if CANCEL.is_set(): return 130
@@ -880,6 +1006,7 @@ def build_parser():
                        help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. 모델이 거부하면 자동으로 기본값")
         p.add_argument("--checkpoint", type=int, default=20, help="N쪽 판독마다 '<이름>_진행중.hwpx' 를 중간 저장(0=안 함). run 에서만")
         p.add_argument("--no-adjudicate", action="store_true", help="run 에서 판독 뒤 3차 글자 판별(〔a/b〕 자리)을 하지 않음")
+        p.add_argument("--batch-crops", type=int, default=8, help="2차 묶음 호출 한 번에 넣을 조각 수(기본 8). 많으면 모델이 조각과 영역 번호를 섞는다")
         if not any(a.dest == "mode" for a in p._actions):
             p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto",
                            help="읽기 모드: auto(기본)=글자층으로 판정(결과 폴더에 적힌 값 우선), vertical=세로쓰기 한자·한글, horizontal_zh=가로쓰기 한문(간체)")
