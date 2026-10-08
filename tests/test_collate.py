@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from yeone_ocr.collate import zh
 from yeone_ocr.collate.sections import HwpxBook, Anchor, find_anchor, normalize_name, heading_styles
 from yeone_ocr.collate.pdf_outline import PdfAnchor, match_anchors, page_range
-from yeone_ocr.collate.collate import hwpx_cells, ocr_cells, collate, summary, strip_marks
+from yeone_ocr.collate.collate import hwpx_cells, ocr_cells, collate, summary, strip_marks, book_titles, witness_filter
 from yeone_ocr.collate.hwpx_edit import Editor, paragraph_text
 from yeone_ocr.collate.run import trim_to_section
 
@@ -330,3 +330,81 @@ class GanYu(unittest.TestCase):
         # 글자층이 없으면 그대로
         items = collate(hwpx_cells(["津液充滿無問"], 0), ocr_cells([(5, "津液充满无间")]), policy="all")
         st = witness_filter(items, {}); self.assertEqual(len(items), 1); self.assertEqual(st["checked"], 0)
+
+
+class StructuralRules(unittest.TestCase):
+    """0.6.0 — 번호·한글·각주·서명·자형 편향·반복 쌍 규칙(중의역대약론선 실측 근거)."""
+    def setUp(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+
+    def _items(self, hw, oc, **kw):
+        return collate(hwpx_cells(hw, 0), ocr_cells([(1, "\n".join(oc))]), policy="all", **kw)
+
+    def test_variants_added_are_not_differences(self):
+        # 澁·汚·沈·昻·濬·着 — 한국식 표기와 인쇄 글자(간체·이체자)는 표기 차이일 뿐
+        self.assertEqual(self._items(["味甘治前陰竅澁不利性沈重能泄氣"], ["味甘治前阴窍涩不利性沉重能泄气"]), [])
+        self.assertEqual(self._items(["凡著油汚卽屑滑石其上氣味昻"], ["凡着油污即屑滑石其上气味昂"]), [])
+        self.assertEqual(self._items(["水同源而異派浚其源"], ["水同源而异派濬其源"]), [])
+        self.assertEqual(self._items(["沈氏女科"], ["沈氏女科"]), [])                     # 성씨 沈 도 양쪽 같이 접혀 거짓 차이가 없다
+
+    def test_arabic_numbers_are_notation(self):
+        # 인용 번호 "1. 2." 가 HWPX 에는 자동 번호라 글자로 없다 → 표기 차이(D), 항목 없음
+        self.assertEqual(self._items(["本草發揮丹溪曰冬瓜"], ["1本草发挥丹溪曰冬瓜"]), [])
+        # 「本草」→「4」 처럼 숫자와 글자가 섞인 치환은 표시만
+        items = self._items(["液而渴反盛矣本草綱目滑石利竅"], ["液而渴反盛矣4纲目滑石利窍"])
+        self.assertTrue(items and all(it.kind == "C" and it.action == "mark" and not it.auto for it in items), [(i.kind, i.action, i.hwpx, i.ocr) for i in items])
+        # 한자 숫자끼리의 치환(분량)은 그대로 자동 교정 대상
+        items = self._items(["滑石六錢甘草一錢"], ["滑石六钱甘草三钱"])
+        self.assertEqual([(it.kind, it.hwpx, it.new, it.auto) for it in items], [("A", "一", "三", True)])
+
+    def test_hangul_gloss_is_never_auto(self):
+        hw = ["六一散으로天一生水地六成之의의미를취해서滑石六錢甘草一錢또는辰砂가한처방"]
+        oc = ["一名六一散取天一生水地六成之之义滑石六钱甘草一钱或加辰砂"]
+        items = self._items(hw, oc)
+        self.assertTrue(items)
+        self.assertFalse(any(it.auto for it in items), [(i.kind, i.action, i.hwpx, i.ocr) for i in items])
+        self.assertTrue(any("한글" in it.note for it in items))
+
+    def test_footnote_insert_is_mark_only(self):
+        items = self._items(["之品以退熱也"], ["之品以退热也注1益元散本草备要云益元散一名天水散一名六一散取天一生水地六成之之义滑石六钱甘草一钱或加辰砂"])
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("C", "mark", False)]); self.assertIn("각주", items[0].note)
+
+    def test_book_title_fragment_is_not_deleted(self):
+        titles = book_titles(["『本草綱目』에 이르기를", "《本草備要》"])
+        self.assertIn("本草綱目", titles)
+        items = self._items(["赤小豆本草綱目好古曰治水者"], ["赤小豆纲目好古曰治水者"], titles=titles)
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("C", "mark", False)]); self.assertIn("서명", items[0].note)
+        # 서명 집합이 없으면 지금처럼 두 글자 삭제는 자동
+        items = self._items(["赤小豆本草綱目好古曰治水者"], ["赤小豆纲目好古曰治水者"])
+        self.assertEqual([(it.kind, it.action) for it in items], [("A", "delete")])
+
+    def test_weak_pairs_are_marked_not_corrected(self):
+        # 入/人: HWPX 人, 판독 入 — 인쇄가 人(오자)인 자리도 있어 자동 교정하지 않고 글자 조각 확인으로
+        items = self._items(["行通乎小腸能人陰分治有形之病"], ["行通乎小肠能入阴分治有形之病"])
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)]); self.assertIn("자형 편향", items[0].note)
+        # 글자층이 판독 편이어도 승격하지 않는다
+        st = witness_filter(items, {1: "行通乎小肠能入阴分治有形之病"})
+        self.assertEqual([(it.kind, it.action) for it in items], [("B1", "mark")]); self.assertEqual(st["weak"], 1)
+        # 曰/日 도 같다
+        items = self._items(["唐容川曰物下極則反上"], ["唐容川日物下极则反上"])
+        self.assertEqual([(it.kind, it.action) for it in items], [("B1", "mark")])
+
+    def test_repeated_pair_is_promoted(self):
+        # 幹↔于 가 한 구획에서 5회 이상 되풀이되고 문맥으로도 못 가리면 → 책 전체 변환 오류로 보고 교정 후보(於)로
+        hw = ["甲幹乙", "丙幹丁", "戊幹己", "庚幹辛", "壬幹癸", "子幹丑"]
+        oc = ["甲于乙", "丙于丁", "戊于己", "庚于辛", "壬于癸", "子于丑"]
+        items = self._items(hw, oc)
+        self.assertEqual(len(items), 6)
+        self.assertTrue(all(it.kind == "B2" and it.action == "replace" and it.new == "於" and it.auto and "repeat" in it.witness for it in items),
+                        [(i.kind, i.action, i.new, i.witness) for i in items])
+        # 네 번이면 그대로 표시만
+        items = self._items(hw[:4], oc[:4])
+        self.assertTrue(all(it.kind == "B1" and it.action == "mark" for it in items))
+
+
+class TrimDedupe(unittest.TestCase):
+    def test_repeated_title_lines_are_dropped(self):
+        paras = [(1, "车前子"), (1, "车前子"), (1, "1汤液本草东垣"), (2, "车前子"), (2, "2本草纲目"), (2, "小蓟")]
+        cut, note = trim_to_section(paras, "車前子", "小薊")
+        self.assertEqual([t for _, t in cut], ["车前子", "1汤液本草东垣", "2本草纲目"]); self.assertEqual(note, "")

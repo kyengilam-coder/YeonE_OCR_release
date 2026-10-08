@@ -18,7 +18,8 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False,
+            "chunk_lines": 8, "media_high": True}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
@@ -36,7 +37,9 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
  5. [⑤ 검수 화면 열기] 에서 원본과 대조하고, 글자를 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다.
     [비교 다시 계산] 은 저장된 1차·2차 판독으로 확인 표시만 다시 만듭니다(모델 호출 없음). "기록 있는 쪽도 다시 판독" 을 켜면 ③ 판독이 기존 기록을 덮어씁니다.
- 6. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 "원본 대조 완료(사람)" 을 남깁니다.
+ 6. [3차 글자 판별] 은 1차·2차가 갈린 〔a/b〕 자리마다 그 글자 하나를 크게 잘라 모델에 자형만으로 묻습니다(자리 하나에 호출 한 번).
+    획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. [혼동 장부] 는 어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(호출 없음).
+ 7. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 "원본 대조 완료(사람)" 을 남깁니다.
 
 결과는 PDF 와 같은 폴더의 「<PDF 이름>_YeonE_OCR」 안에 생깁니다.
  out/      HWPX (+DOCX)
@@ -47,7 +50,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 """
 
 
-SPEED_DEFAULTS_VERSION = 3  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음
+SPEED_DEFAULTS_VERSION = 4  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음 / 4: 0.6.0 조각 8줄 묶음·2차 조각 고해상
 
 
 def upgrade_config(cfg: dict) -> dict:
@@ -61,6 +64,8 @@ def upgrade_config(cfg: dict) -> dict:
         cfg.setdefault("use_cache", True); cfg.setdefault("second_thinking_low", True)
     if ver < 3 and cfg.get("check_list", "none") == "extra":
         cfg["check_list"] = "none"
+    if ver < 4:
+        cfg.setdefault("chunk_lines", DEFAULTS["chunk_lines"]); cfg.setdefault("media_high", DEFAULTS["media_high"])
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
     return cfg
 
@@ -357,55 +362,90 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- 화면 ----------
+    FONT_CANDIDATES = ("Pretendard", "Pretendard Variable", "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "나눔고딕")
+    MONO_CANDIDATES = ("D2Coding", "D2Coding ligature", "Cascadia Mono", "Consolas", "Noto Sans Mono CJK KR", "Menlo", "DejaVu Sans Mono")
+
+    def _pick_font(self, candidates: tuple[str, ...], fallback: str) -> str:
+        """설치된 글꼴 가운데 앞에서부터 처음 있는 것. Pretendard(또는 D2Coding)가 있으면 그것을, 없으면 시스템 한글 글꼴을 쓴다."""
+        try:
+            from tkinter import font as tkfont
+            have = {f.lower() for f in tkfont.families(self)}
+            for c in candidates:
+                if c.lower() in have:
+                    return c
+        except Exception:
+            pass
+        return fallback
+
     def _style(self):
-        """차분한 종이색 바탕에 옻칠색 머리띠. clam 테마 위에 색·여백·글꼴을 통일한다."""
+        """차분한 종이색 바탕에 옻칠색 머리띠. clam 테마 위에 색·여백·글꼴을 통일한다(0.6.0: 글꼴 자동 선택, 단추 위계, 간격 정돈)."""
         st = ttk.Style(self)
         try:
             st.theme_use("clam")
         except tk.TclError:
             pass
-        base = "맑은 고딕" if sys.platform.startswith("win") else ("Apple SD Gothic Neo" if sys.platform == "darwin" else "Noto Sans CJK KR")
+        sys_base = "맑은 고딕" if sys.platform.startswith("win") else ("Apple SD Gothic Neo" if sys.platform == "darwin" else "Noto Sans CJK KR")
+        base = self._pick_font(self.FONT_CANDIDATES, sys_base)
+        mono = self._pick_font(self.MONO_CANDIDATES, "Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono")
         self.font_base, self.font_small, self.font_h = (base, 10), (base, 9), (base, 10, "bold")
-        self.font_title, self.font_sub = (base, 17, "bold"), (base, 10)
-        self.font_mono = ("Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono", 10)
+        self.font_title, self.font_sub, self.font_big = (base, 18, "bold"), (base, 10), (base, 12, "bold")
+        self.font_mono = (mono, 10)
         self.option_add("*Font", self.font_base)
-        C = self.colors = dict(BG="#f3efe7", PANEL="#fbf9f4", LINE="#d9d2c3", INK="#2a2420", MUTED="#7a7066",
-                               ACC="#3b1b14", ACC_HI="#55281e", GOLD="#b99552", RED="#b3261e", FIELD="#ffffff")
+        self.option_add("*TCombobox*Listbox.font", self.font_base)
+        C = self.colors = dict(BG="#f4f1ea", PANEL="#fcfbf7", LINE="#ddd6c7", INK="#27211d", MUTED="#7d7368",
+                               ACC="#3a1c15", ACC_HI="#5a2a20", GOLD="#b8934e", RED="#b4271f", GREEN="#2f6f4a", FIELD="#ffffff",
+                               BTN="#efe9dd", BTN_HI="#e5ddcd", SEL="#efe4c8")
         self.configure(bg=C["BG"])
-        st.configure(".", background=C["BG"], foreground=C["INK"], font=self.font_base, bordercolor=C["LINE"])
+        st.configure(".", background=C["BG"], foreground=C["INK"], font=self.font_base, bordercolor=C["LINE"], troughcolor="#e9e3d6")
         st.configure("TFrame", background=C["BG"]); st.configure("Panel.TFrame", background=C["PANEL"])
         st.configure("TLabel", background=C["BG"]); st.configure("Panel.TLabel", background=C["PANEL"])
         st.configure("Hint.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=self.font_small)
         st.configure("Status.TLabel", background=C["BG"], foreground=C["ACC"], font=self.font_h)
-        st.configure("TLabelframe", background=C["PANEL"], bordercolor=C["LINE"], relief="solid", borderwidth=1, padding=10)
-        st.configure("TLabelframe.Label", background=C["PANEL"], foreground=C["ACC"], font=self.font_h)
-        st.configure("TButton", padding=(10, 5), background="#efeae0", lightcolor="#f6f3ec", darkcolor="#e2dccd", focuscolor=C["PANEL"])
-        st.map("TButton", background=[("active", "#e6dfd2"), ("disabled", "#f0ece4")], foreground=[("disabled", "#a39a90")])
-        st.configure("Accent.TButton", background=C["ACC"], foreground="#fff7ea", font=self.font_h, padding=(18, 9),
-                     lightcolor=C["ACC"], darkcolor=C["ACC"], focuscolor=C["ACC"])
-        st.map("Accent.TButton", background=[("active", C["ACC_HI"]), ("disabled", "#b8a79d")], foreground=[("disabled", "#f3eee6")])
-        st.configure("Stop.TButton", foreground=C["RED"], padding=(12, 9))
-        st.configure("TCheckbutton", background=C["PANEL"]); st.configure("TRadiobutton", background=C["PANEL"])
-        st.configure("TEntry", fieldbackground=C["FIELD"], padding=3); st.configure("TSpinbox", fieldbackground=C["FIELD"], padding=3)
-        st.configure("TNotebook", background=C["BG"], tabmargins=(2, 4, 2, 0))
-        st.configure("TNotebook.Tab", padding=(14, 6), background="#e9e3d6")
-        st.map("TNotebook.Tab", background=[("selected", C["PANEL"])], foreground=[("selected", C["ACC"])])
-        st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], rowheight=24)
-        st.configure("Treeview.Heading", background="#efeae0", font=self.font_h, relief="flat")
-        st.configure("Top.TNotebook", background=C["BG"], borderwidth=0)
-        st.configure("Top.TNotebook.Tab", font=self.font_h, padding=(14, 7))
+        st.configure("Section.TLabel", background=C["PANEL"], foreground=C["ACC"], font=self.font_h)
+        st.configure("TLabelframe", background=C["PANEL"], bordercolor=C["LINE"], relief="solid", borderwidth=1, padding=(12, 8, 12, 10))
+        st.configure("TLabelframe.Label", background=C["PANEL"], foreground=C["ACC"], font=self.font_h, padding=(4, 0))
+        # 단추 위계: 기본(도구) < 강조(실행) · 중지는 붉은 글자
+        st.configure("TButton", padding=(12, 6), background=C["BTN"], lightcolor=C["BTN"], darkcolor=C["BTN"], bordercolor=C["LINE"], focuscolor=C["PANEL"], relief="flat")
+        st.map("TButton", background=[("pressed", C["BTN_HI"]), ("active", C["BTN_HI"]), ("disabled", "#f1ede5")], foreground=[("disabled", "#aaa196")],
+               bordercolor=[("active", C["GOLD"])])
+        st.configure("Accent.TButton", background=C["ACC"], foreground="#fff7ea", font=self.font_h, padding=(20, 10),
+                     lightcolor=C["ACC"], darkcolor=C["ACC"], bordercolor=C["ACC"], focuscolor=C["ACC"])
+        st.map("Accent.TButton", background=[("pressed", C["ACC_HI"]), ("active", C["ACC_HI"]), ("disabled", "#b8a79d")], foreground=[("disabled", "#f3eee6")])
+        st.configure("Stop.TButton", foreground=C["RED"], padding=(14, 10), font=self.font_h)
+        st.configure("Small.TButton", padding=(8, 3), font=self.font_small)
+        st.configure("TCheckbutton", background=C["PANEL"], padding=(2, 2)); st.configure("TRadiobutton", background=C["PANEL"], padding=(2, 2))
+        st.map("TCheckbutton", background=[("active", C["PANEL"])]); st.map("TRadiobutton", background=[("active", C["PANEL"])])
+        st.configure("TEntry", fieldbackground=C["FIELD"], padding=4, bordercolor=C["LINE"], lightcolor=C["LINE"], darkcolor=C["LINE"])
+        st.map("TEntry", bordercolor=[("focus", C["GOLD"])], lightcolor=[("focus", C["GOLD"])], darkcolor=[("focus", C["GOLD"])])
+        st.configure("TSpinbox", fieldbackground=C["FIELD"], padding=3, arrowsize=12)
+        st.configure("TCombobox", fieldbackground=C["FIELD"], padding=3, arrowsize=14)
+        st.map("TCombobox", fieldbackground=[("readonly", C["FIELD"])], selectbackground=[("readonly", C["FIELD"])], selectforeground=[("readonly", C["INK"])])
+        st.configure("TNotebook", background=C["BG"], tabmargins=(2, 4, 2, 0), borderwidth=0)
+        st.configure("TNotebook.Tab", padding=(16, 7), background="#e9e3d6", font=self.font_base)
+        st.map("TNotebook.Tab", background=[("selected", C["PANEL"])], foreground=[("selected", C["ACC"])], padding=[("selected", (16, 7))])
+        st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], rowheight=26, bordercolor=C["LINE"], lightcolor=C["LINE"], darkcolor=C["LINE"])
+        st.map("Treeview", background=[("selected", C["SEL"])], foreground=[("selected", C["INK"])])
+        st.configure("Treeview.Heading", background="#efe9dd", foreground=C["ACC"], font=self.font_h, relief="flat", padding=(6, 5))
+        st.map("Treeview.Heading", background=[("active", C["BTN_HI"])])
+        st.configure("Top.TNotebook", background=C["BG"], borderwidth=0, tabmargins=(0, 6, 0, 0))
+        st.configure("Top.TNotebook.Tab", font=self.font_h, padding=(18, 9))
         st.map("Top.TNotebook.Tab", background=[("selected", C["PANEL"]), ("!selected", "#e6dfd0")], foreground=[("selected", C["ACC"]), ("!selected", C["MUTED"])])
-        st.configure("Horizontal.TProgressbar", troughcolor="#e8e2d6", background=C["GOLD"], lightcolor=C["GOLD"], darkcolor=C["GOLD"])
+        st.configure("Horizontal.TProgressbar", troughcolor="#e8e2d6", background=C["GOLD"], lightcolor=C["GOLD"], darkcolor=C["GOLD"], bordercolor="#e8e2d6", thickness=8)
+        st.configure("TScrollbar", background=C["BTN"], troughcolor=C["BG"], bordercolor=C["BG"], arrowcolor=C["MUTED"], relief="flat")
+        st.map("TScrollbar", background=[("active", C["BTN_HI"])])
+        st.configure("TSeparator", background=C["LINE"])
 
     def _build(self):
         C = self.colors
         # ---- 머리띠 ----
-        hd = tk.Frame(self, bg=C["ACC"], padx=18, pady=10); hd.pack(fill="x")
-        tk.Label(hd, text=APP_NAME, font=self.font_title, bg=C["ACC"], fg="#f1e7cf").pack(side="left")
-        tk.Label(hd, text="  연어OCR · 세로쓰기 한자·한글 문헌을 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#d9c9a8").pack(side="left", pady=(6, 0))
+        hd = tk.Frame(self, bg=C["ACC"], padx=20, pady=12); hd.pack(fill="x")
+        tk.Frame(self, bg=C["GOLD"], height=3).pack(fill="x")                  # 머리띠 아래 금빛 선
+        tk.Label(hd, text=APP_NAME, font=self.font_title, bg=C["ACC"], fg="#f3e9d2").pack(side="left")
+        tk.Label(hd, text="연어OCR", font=self.font_big, bg=C["ACC"], fg="#d9c9a8").pack(side="left", padx=(12, 0), pady=(5, 0))
+        tk.Label(hd, text="세로쓰기 한자·한글 문헌을 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#bfae8e").pack(side="left", padx=(14, 0), pady=(7, 0))
         self.v_pkg = tk.StringVar(value="패키지 점검 중…")
-        tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", pady=(6, 0))
-        tk.Label(hd, text=f"v{__version__}   ", font=self.font_small, bg=C["ACC"], fg="#bfae8e").pack(side="right", pady=(6, 0))
+        tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", pady=(7, 0))
+        tk.Label(hd, text=f"v{__version__}", font=(self.font_small[0], 9, "bold"), bg="#5a2a20", fg="#f3e9d2", padx=8, pady=2).pack(side="right", padx=(0, 14), pady=(5, 0))
 
         self.tabs = ttk.Notebook(self, style="Top.TNotebook"); self.tabs.pack(fill="x", padx=14, pady=(10, 0))
         root = ttk.Frame(self.tabs, padding=(10, 8, 10, 10)); self.tabs.add(root, text="   세로쓰기 인식   ")
@@ -443,6 +483,7 @@ class App(tk.Tk):
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
         self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
+        self.v_chunk = tk.StringVar(value=str(self.cfg.get("chunk_lines", 8))); self.v_mres = tk.BooleanVar(value=self.cfg.get("media_high", True))
         rf.columnconfigure(1, weight=1)
         r = 0
         ttk.Label(rf, text="판독기", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
@@ -472,7 +513,15 @@ class App(tk.Tk):
         ttk.Entry(sp, textvariable=self.v_ckpt, width=4).pack(side="left")
         ttk.Label(sp, text="쪽마다", style="Panel.TLabel").pack(side="left", padx=(2, 0))
         r += 1
-        ck = ttk.Frame(rf, style="Panel.TFrame"); ck.grid(row=r, column=0, columnspan=4, sticky="w")
+        ttk.Label(rf, text="2차 조각", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
+        cp = ttk.Frame(rf, style="Panel.TFrame"); cp.grid(row=r, column=1, columnspan=3, sticky="w")
+        ttk.Label(cp, text="한 장에", style="Panel.TLabel").pack(side="left", padx=(4, 2))
+        ttk.Spinbox(cp, from_=0, to=30, width=3, textvariable=self.v_chunk).pack(side="left")
+        ttk.Label(cp, text="줄(열)까지 · 넘으면 나눠 보냄 (0=안 나눔)", style="Panel.TLabel").pack(side="left", padx=(4, 10))
+        ttk.Checkbutton(cp, text="조각 고해상(media_resolution high)", variable=self.v_mres).pack(side="left")
+        ttk.Label(cp, text="글자당 픽셀을 늘려 入/人·曰/日 같은 획 하나 차이를 가립니다", style="Hint.TLabel").pack(side="left", padx=(10, 0))
+        r += 1
+        ck = ttk.Frame(rf, style="Panel.TFrame"); ck.grid(row=r, column=0, columnspan=4, sticky="w", pady=(2, 0))
         ttk.Checkbutton(ck, text="영역 확대 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=(4, 10))
         ttk.Checkbutton(ck, text="지침 캐시", variable=self.v_cache).pack(side="left", padx=(0, 10))
         ttk.Checkbutton(ck, text="2차 생각 줄이기", variable=self.v_think2).pack(side="left", padx=(0, 10))
@@ -501,22 +550,24 @@ class App(tk.Tk):
                  ("④ 문서 만들기", self.do_build), ("⑤ 검수 화면", self.do_review), ("⑥ 보고", self.do_report)]
         for i, (t, c) in enumerate(steps):
             self._btn(sf, t, c, width=12).grid(row=0, column=i, padx=3, pady=2)
-        for i, (t, c) in enumerate([("검수 결과 기록…", self.do_mark), ("비교 다시 계산", self.do_remerge), ("패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
+        for i, (t, c) in enumerate([("3차 글자 판별", self.do_adjudicate), ("혼동 장부", self.do_ledger), ("비교 다시 계산", self.do_remerge),
+                                    ("검수 결과 기록…", self.do_mark), ("패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
             self._btn(sf, t, c, width=12).grid(row=1, column=i, padx=3, pady=(6, 2))
-        ttk.Label(sf, text="검수 뒤 사람이 확인한 쪽은 [검수 결과 기록…] · 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산](모델 호출 없음)",
-                  style="Hint.TLabel", wraplength=900).grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(4, 0))
+        ttk.Label(sf, text="[3차 글자 판별]은 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(자리마다 호출 한 번) · [혼동 장부]는 어느 글자가 어느 글자로 읽혔는지 모읍니다(호출 없음) · "
+                           "프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산] · 사람이 확인한 쪽은 [검수 결과 기록…]",
+                  style="Hint.TLabel", wraplength=1000, justify="left").grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(4, 0))
 
         self._build_collate_tab(tab2)
 
         # ---- 진행(공통) ----
         pf2 = ttk.Frame(bottom); pf2.pack(fill="x", pady=(10, 0))
-        self.progress = ttk.Progressbar(pf2, mode="indeterminate", length=260); self.progress.pack(side="left")
-        self.v_status = tk.StringVar(value="준비됨"); ttk.Label(pf2, textvariable=self.v_status, style="Status.TLabel").pack(side="left", padx=12)
+        self.progress = ttk.Progressbar(pf2, mode="indeterminate", length=240); self.progress.pack(side="left", pady=4)
+        self.v_status = tk.StringVar(value="준비됨"); ttk.Label(pf2, textvariable=self.v_status, style="Status.TLabel").pack(side="left", padx=14)
 
         # ---- 기록 / 쪽별 상태(공통) ----
         nb = ttk.Notebook(bottom); nb.pack(fill="both", expand=True, pady=(8, 0))
         self.log = ScrolledText(nb, height=14, wrap="word", state="disabled", font=self.font_mono, bg="#fffdf8", fg=C["INK"],
-                                relief="flat", padx=10, pady=8, insertbackground=C["INK"])
+                                relief="flat", padx=14, pady=10, insertbackground=C["INK"], spacing1=1, spacing3=1, selectbackground=C["SEL"])
         nb.add(self.log, text="진행 기록")
         tf = ttk.Frame(nb); nb.add(tf, text="쪽별 상태")
         self.table = ttk.Treeview(tf, columns=("pdf", "print", "status", "unc", "figs"), show="headings")
@@ -797,6 +848,7 @@ class App(tk.Tk):
         o += ["--workers", (self.v_workers.get().strip() or "6")]
         o += ["--second-model", self.v_model2.get().strip()]          # 빈 값이면 1차와 같은 모델, auto 면 자동
         o += ["--second-thinking", "low" if self.v_think2.get() else "full"]
+        o += ["--chunk-lines", (self.v_chunk.get().strip() or "0"), "--media-resolution", "auto" if self.v_mres.get() else "default"]
         if not self.v_cache.get():
             o.append("--no-cache")
         o += ["--checkpoint", (self.v_ckpt.get().strip() or "0")]
@@ -959,7 +1011,8 @@ class App(tk.Tk):
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
                          "workers": int(self.v_workers.get() or 6), "second_model": self.v_model2.get().strip(),
-                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "last_pdf": self.pdf()})
+                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "last_pdf": self.pdf(),
+                         "chunk_lines": int(self.v_chunk.get() or 0), "media_high": self.v_mres.get()})
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
@@ -1071,6 +1124,37 @@ class App(tk.Tk):
             return
         self.nb.select(0)
         self.start(["remerge", self.pdf(), "--work", str(self.work())] + self._pages(), "비교 다시 계산")
+
+    def do_adjudicate(self):
+        """3차 글자 판별: 〔a/b〕 자리마다 글자 조각을 모델에 묻는다. 자리 수를 먼저 세어 보여 주고 묻는다."""
+        if not self._need_pdf() or not self._prepare_env():
+            return
+        if self.v_reader.get() != "gemini":
+            messagebox.showinfo(APP_NAME, "3차 판별은 자형을 보는 모델이 필요합니다. 판독기를 Gemini 로 바꾸십시오."); return
+        try:
+            from .state import Work
+            from .adjudicate import find_sites
+            from .schema import PageReading
+            from .pdfio import parse_pages, open_pdf
+            w = Work(self.pdf(), str(self.work())); doc = open_pdf(self.pdf())
+            recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)))
+            n_sites = sum(len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs)
+        except Exception as e:
+            messagebox.showerror(APP_NAME, f"판독 기록을 읽지 못했습니다: {e}"); return
+        if not n_sites:
+            messagebox.showinfo(APP_NAME, "판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."); return
+        if not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(호출 {n_sites}회, 글자 조각이라 토큰은 적음).\n"
+                                             f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. 계속할까요?"):
+            return
+        self.nb.select(0)
+        argv = ["adjudicate", self.pdf(), "--work", str(self.work())] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
+        if not self.v_cache.get(): argv.append("--no-cache")
+        self.start(argv, "3차 글자 판별")
+
+    def do_ledger(self):
+        if not self._need_pdf(): return
+        self.nb.select(0)
+        self.start(["ledger", self.pdf(), "--work", str(self.work())], "혼동 장부")
 
     def open_work(self):
         if not self._need_pdf(): return

@@ -11,7 +11,7 @@ from pathlib import Path
 from . import zh
 from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name
 from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages
-from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter
+from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter, book_titles
 from .hwpx_edit import Editor
 
 POLICIES = {"memo": "메모만(글자 안 바꿈)", "sure": "확실한 것만(A) 자동", "all": "전부 자동(A·B2·누락 삽입), B1·C 는 표시"}
@@ -102,12 +102,23 @@ def trim_to_section(paras: list[tuple[int, str]], title: str, next_title: str | 
                 end = i; break
         else:
             note.append("다음 구획 제목을 판독 글에서 찾지 못해 마지막 쪽 끝까지 넣음")
-    return paras[start:end], " · ".join(note)
+    cut = paras[start:end]
+    # 구획 제목이 되풀이된 줄(쪽마다 다시 찍힌 머리 제목, 제목 영역과 첫 문단의 중복)은 첫 번째만 남긴다 — 「车前子车前子」 중복 삽입 방지
+    if k:
+        seen = False; out = []
+        for pg, t in cut:
+            if _key(t) == k:
+                if seen:
+                    continue
+                seen = True
+            out.append((pg, t))
+        cut = out
+    return cut, " · ".join(note)
 
 
 # ---------- 보고 ----------
 def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int, int], hw_paras: list[str], oc_paras: list[tuple[int, str]],
-                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "") -> str:
+                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "") -> str:
     sm = summary(items)
     def esc(s): return html.escape(s or "")
     rows = []
@@ -130,7 +141,8 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     td.ctx{font-size:15px;letter-spacing:.02em}td.ctx b{color:#b3261e}"""
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>교정 · {esc(section.anchor.name)}</title><style>{css}</style></head><body>"
            f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start}~{section.end - 1} · PDF {pages[0]}~{pages[1]}쪽"
-           + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}</small></header><main>"
+           + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}"
+           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + "</small></header><main>"
            f"<p class=sum><span>자동 교정 {sm['auto']}</span><span>표시만 {sm['mark']}</span><span>A {sm['A']}</span><span>B1 {sm['B1']}</span><span>B2 {sm['B2']}</span><span>C {sm['C']}</span></p>"
            + (f"<p><b>참고:</b> {esc(note)}</p>" if note else "") + appl +
            f"<table><tr><th>갈래</th><th>처리</th><th>문단</th><th>HWPX (「」 안이 해당 자리)</th><th>판독(간체)</th><th>반영</th><th>다른 후보</th><th>PDF 쪽</th><th>설명</th></tr>{''.join(rows) or '<tr><td colspan=9>차이 없음</td></tr>'}</table>"
@@ -198,10 +210,12 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             oc_all.extend(reading_text(rec))
     oc_paras, note = trim_to_section(oc_all, a.name, sec.next_anchor.name if sec.next_anchor else (m.pdf and None))
     policy = getattr(args, "policy", "all") or "all"
-    items = collate(hwpx_cells(hw_paras, sec.start), ocr_cells(oc_paras), policy=policy)
+    log(f"기준 HWPX: {Path(book.path).name} (문단 {len(book.paragraphs):,}개)")
+    items = collate(hwpx_cells(hw_paras, sec.start), ocr_cells(oc_paras), policy=policy, titles=book_titles(book.texts()))
     wst = witness_filter(items, layers, policy)
-    if wst["checked"]:
-        log(f"PDF 글자층 대조: 한 글자 차이 {wst['checked']}건 중 글자층이 HWPX 편 {wst['hwpx']}건(차이에서 뺌) · 판독 편 {wst['ocr']}건 · 못 찾음 {wst['none']}건")
+    if wst["checked"] or wst.get("weak"):
+        log(f"PDF 글자층 대조: 한 글자 차이 {wst['checked']}건 중 글자층이 HWPX 편 {wst['hwpx']}건(차이에서 뺌) · 판독 편 {wst['ocr']}건 · 못 찾음 {wst['none']}건"
+            + (f" · 자형 편향 쌍이라 증인으로 안 씀 {wst['weak']}건" if wst.get("weak") else ""))
     sm = summary(items)
     log(f"대조: 자동 교정 {sm['auto']}건 · 표시만 {sm['mark']}건 (A {sm['A']} · B1 {sm['B1']} · B2 {sm['B2']} · C {sm['C']})" + (f" · {note}" if note else ""))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
@@ -219,8 +233,9 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             log(f"반영 {ok}건" + (f", 실패 {len(bad)}건" if bad else "") + f" → 저장: {saved}")
             for x in bad[:5]:
                 log(f"  실패: {x.item.kind} 문단 {x.item.para} [{x.item.start}:{x.item.end}] — {x.note}")
-    rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note)
+    rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path))
     (out_dir / f"{stem}.json").write_text(json.dumps({"section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
+                                                      "hwpx_file": str(book.path), "hwpx_paragraphs": len(book.paragraphs), "witness_stats": wst,
                                                       "summary": sm, "items": [asdict(i) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"보고: {rep}")

@@ -67,14 +67,18 @@ def fit_figure_bbox(im: Image.Image, fr: Frac, pad: float = 0.01, thr: float = 0
     return {"bbox": tuple(round(v, 4) for v in bb), "touching": bad, "steps": len(history), "history": history}
 
 
+ALL_SIDES = ("left", "right", "top", "bottom")
+
+
 def expand_until_clean(im: Image.Image, fr: Frac, pad: float = 0.0, thr: float = 0.0005,
-                       step: float = 0.004, max_steps: int = 10) -> dict:
+                       step: float = 0.004, max_steps: int = 10, sides: tuple[str, ...] = ALL_SIDES) -> dict:
     """문자 영역 좌표를 바깥으로만 넓혀 네 변에 먹이 닿지 않게 한다(2차 판독 조각이 열의 마지막 글자나 가장자리 열을
-    잘라 먹지 않도록). 모델이 준 좌표는 글자 반 개쯤 안쪽으로 들어오는 일이 잦다."""
+    잘라 먹지 않도록). 모델이 준 좌표는 글자 반 개쯤 안쪽으로 들어오는 일이 잦다.
+    sides 로 넓힐 변을 제한한다 — 가로쓰기 책은 줄 간격이 좁아 위·아래로 넓히면 이웃 줄을 끌어들이므로 좌우만 넓힌다."""
     bb = list(fr)
     def touching(b):
         e = edge_ink(crop_frac(im, tuple(b), pad))
-        return [k for k, v in e.items() if v > thr]
+        return [k for k, v in e.items() if v > thr and k in sides]
     bad = touching(bb); steps = 0
     while bad and steps < max_steps:
         for k in bad:
@@ -84,6 +88,93 @@ def expand_until_clean(im: Image.Image, fr: Frac, pad: float = 0.0, thr: float =
             if k == "bottom": bb[3] = min(1.0, bb[3] + step)
         steps += 1; bad = touching(bb)
     return {"bbox": tuple(round(v, 4) for v in bb), "touching": bad, "steps": steps}
+
+
+def _profile(im: Image.Image, fr: Frac, axis: str, thr: int = 110) -> np.ndarray:
+    """fr 안의 먹 비율 프로파일. axis='y' 면 줄마다(가로 글줄 찾기), 'x' 면 세로줄마다(세로 글 열 찾기)."""
+    a = np.asarray(im.convert("L")) < thr
+    H, W = a.shape
+    x0, y0, x1, y1 = fr
+    xs, xe = max(0, int(x0 * W)), min(W, max(int(x0 * W) + 1, int(x1 * W)))
+    ys, ye = max(0, int(y0 * H)), min(H, max(int(y0 * H) + 1, int(y1 * H)))
+    if axis == "y":
+        return a[:, xs:xe].mean(axis=1) if xe > xs else np.zeros(H)
+    return a[ys:ye, :].mean(axis=0) if ye > ys else np.zeros(W)
+
+
+def snap_to_gaps(im: Image.Image, fr: Frac, axis: str = "y", density: float = 0.002, inset_px: int = 2, max_move: float = 0.03) -> Frac:
+    """영역의 두 변(axis='y' 면 위·아래, 'x' 면 왼·오른쪽)을 글줄 사이 공백에 맞춘다.
+    각 변에서 안쪽으로 먹이 나올 때까지 간 뒤(첫 글줄), 다시 바깥으로 먹이 없는 줄까지 되돌아간다(그 글줄 바로 밖 공백).
+    가로쓰기 책에서 2차 조각이 이웃 줄을 끌어들여 1차 36자 대 2차 252자가 되던 과확장을 막는다. 움직임은 max_move(비율) 안으로 제한."""
+    prof = _profile(im, fr, axis)
+    n = len(prof)
+    x0, y0, x1, y1 = fr
+    lo, hi = (y0, y1) if axis == "y" else (x0, x1)
+    def edge(pos: float, inward: int) -> float:
+        c = i = min(n - 1, max(0, int(pos * n)))
+        lim = max(1, int(max_move * n))
+        if prof[i] > density:
+            # 변이 먹 띠(글줄) 한가운데를 지난다. 그 띠가 주로 영역 바깥에 있으면 이웃 줄이니 건너뛰고, 주로 안쪽이면 영역의 첫 줄이다.
+            s0 = e0 = i
+            while s0 - 1 >= 0 and prof[s0 - 1] > density: s0 -= 1
+            while e0 + 1 < n and prof[e0 + 1] > density: e0 += 1
+            inside = (e0 - c + 1) if inward > 0 else (c - s0 + 1)
+            if inside < (e0 - s0 + 1) / 2:
+                i = e0 + 1 if inward > 0 else s0 - 1
+        while 0 <= i < n and prof[i] <= density and abs(i - c) < lim:      # 안쪽으로: 먹이 나올 때까지(영역의 첫 글줄)
+            i += inward
+        while 0 <= i < n and prof[i] > density and abs(i - c) < lim:       # 바깥으로: 그 글줄 바로 밖 공백까지
+            i -= inward
+        i = min(n - 1, max(0, i - inward * inset_px))                        # 공백 안쪽으로 몇 px 여유
+        if abs(i - c) >= lim:
+            return pos
+        return i / n
+    lo2, hi2 = edge(lo, +1), edge(hi, -1)
+    if hi2 - lo2 < 0.002:
+        return fr
+    return (x0, round(lo2, 4), x1, round(hi2, 4)) if axis == "y" else (round(lo2, 4), y0, round(hi2, 4), y1)
+
+
+def split_bands(im: Image.Image, axis: str = "y", max_bands: int = 8, density: float = 0.002, min_band_px: int = 4,
+                reverse: bool = False) -> list[tuple[int, int]]:
+    """잘라낸 조각 안의 글줄(axis='y') 또는 글 열(axis='x')을 투영으로 찾아 max_bands 개씩 묶은 구간(픽셀, 시작·끝)을 돌려준다.
+    구간 경계는 글줄 사이 공백의 가운데다. 글줄이 max_bands 이하면 조각 전체 하나. reverse=True 면 끝에서부터 묶는다(세로쓰기: 오른쪽 열부터)."""
+    prof = _profile(im, (0.0, 0.0, 1.0, 1.0), axis)
+    n = len(prof)
+    on = prof > density
+    bands: list[list[int]] = []
+    i = 0
+    while i < n:
+        if not on[i]:
+            i += 1; continue
+        j = i
+        while j < n and on[j]:
+            j += 1
+        if j - i >= min_band_px:
+            bands.append([i, j])
+        i = j
+    if len(bands) <= max_bands:
+        return [(0, n)]
+    if reverse:
+        bands = bands[::-1]
+    groups = [bands[k:k + max_bands] for k in range(0, len(bands), max_bands)]
+    if len(groups) > 1 and len(groups[-1]) == 1:            # 끝에 한 줄만 남으면 앞 묶음에 붙인다
+        groups[-2].extend(groups.pop())
+    if reverse:
+        groups = [g[::-1] for g in groups][::-1]
+    out: list[tuple[int, int]] = []
+    for gi, g in enumerate(groups):
+        first, last = min(b[0] for b in g), max(b[1] for b in g)
+        if gi == 0:
+            start = 0
+        else:
+            prev_last = max(b[1] for b in groups[gi - 1]); start = (prev_last + first) // 2
+        if gi == len(groups) - 1:
+            end = n
+        else:
+            next_first = min(b[0] for b in groups[gi + 1]); end = (last + next_first) // 2
+        out.append((start, end))
+    return out
 
 
 def uncovered_ink_boxes(im: Image.Image, regions: list[Frac], thr: int = 110, margin: float = 0.008,

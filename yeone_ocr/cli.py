@@ -6,6 +6,8 @@
   read     모델(기본 gemini)로 영역 분류·판독 → 확대 재판독 비교 → 텍스트 레이어 대조 → 구조 검사
   build    도판 잘라내기(외곽 검사) → HWPX(+DOCX) 조립 → 파일 구조 검사
   remerge  저장된 1차·2차 판독으로 비교·표시만 다시 계산 (모델 호출 없음)
+  adjudicate  3차 글자 판별: 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 모델에 자형만으로 묻는다
+  ledger   혼동 장부: 어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모아 confusion.json 과 표로 (모델 호출 없음)
   review   검수용 review.html
   report   작업 상태 보고 report.md
   mark     사람이 확인한 상태 기록 (예: --status "원본 대조 완료(사람)")
@@ -21,7 +23,7 @@ from . import __version__
 from .state import Work, HUMAN_ONLY, STATUSES
 from .pdfio import open_pdf, parse_pages, page_image, text_layer
 from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac
-from .layout import upscale, crop_frac, fit_figure_bbox, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered
+from .layout import upscale, crop_frac, fit_figure_bbox, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered, snap_to_gaps, split_bands
 from .merge import merge_passes, compare_textlayer
 from .verify import verify_page, check_hwpx_file
 from .blocks import assemble_blocks, Block
@@ -141,6 +143,9 @@ def remerge_record(rec: dict, layer_plain: str) -> dict:
     keep = [u for u in PageReading.model_validate(rec["merged"]).uncertain
             if u.context.startswith(("자동 감지한 큰 도형", "인쇄 쪽수 판독값"))]      # 도판·쪽수 교차 확인 항목은 유지
     merged.uncertain.extend(u for u in keep if u not in merged.uncertain)
+    if rec.get("adjudications"):
+        from .adjudicate import apply_adjudications
+        mstats["adjudicated"] = apply_adjudications(merged, rec["adjudications"])     # 3차 판별로 확정한 글자는 다시 계산해도 남긴다
     rec["merged"] = merged.model_dump(); rec["merge_stats"] = mstats
     rec["textlayer_diff"] = compare_textlayer(merged, layer_plain)
     rec["verify"] = verify_page(merged)
@@ -225,19 +230,48 @@ def nfc_reading(pr: PageReading) -> PageReading:
     return pr
 
 
+def _zoom(w: int, h: int, target_h: int = 1600, longest: int = 3000) -> float:
+    """조각 확대 배율. 세로 target_h 안팎으로 키우되 긴 변이 longest 를 넘지 않게(모델은 3072px 안으로 줄이거나 토큰 예산이 고정이라 그 이상은 낭비)."""
+    return max(1.0, min(4.0, target_h / max(1, h), longest / max(1, w, h)))
+
+
 def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str, RegionReread], dict]:
-    """문자 영역마다 확대 조각을 만들어 2차 독립 판독. 기본은 조각들을 한 호출에 묶어 보내고(빠르고 쌈), 빠진 영역은 낱개로 다시 묻는다."""
+    """문자 영역마다 확대 조각을 만들어 2차 독립 판독. 기본은 조각들을 한 호출에 묶어 보내고(빠르고 쌈), 빠진 영역은 낱개로 다시 묻는다.
+
+    0.6.0: 조각당 글자 수를 줄여 글자당 픽셀을 늘린다.
+    - 가로쓰기 모드: 좌우로만 넓히고 위·아래는 글줄 사이 공백에 맞춘다(이웃 줄을 끌어들여 '2차에만 있음' 잡음이 생기던 과확장 방지).
+    - 글줄(세로쓰기면 열)이 --chunk-lines 보다 많으면 그만큼씩 나눠 보내고, 돌아온 열을 이어 붙여 영역 하나로 되돌린다."""
     import unicodedata as _ud
+    from . import prompts
+    horizontal = prompts.MODE == "horizontal_zh"
+    max_bands = max(0, int(getattr(args, "chunk_lines", 8) or 0))
     items: list[tuple[str, str, Image.Image]] = []
     meta: dict[str, dict] = {}
+    chunks_of: dict[str, list[str]] = {}
     for reg in p1.regions:
         if reg.kind not in TEXT_KINDS:
             continue
-        fit = expand_until_clean(img, bbox_frac(reg.bbox), pad=0.012)   # 가장자리 글자가 잘리지 않게 넓힌 뒤 자른다
-        crop = crop_frac(img, fit["bbox"], pad=0.012)
-        f = max(1.0, min(4.0, 1600 / max(1, crop.height)))              # 열 글자가 또렷하도록 세로 1600px 안팎으로 확대
-        items.append((reg.id, reg.kind, upscale(crop, f)))
-        meta[reg.id] = {"crop_bbox": list(fit["bbox"]), "crop_steps": fit["steps"], "crop_touching": fit["touching"]}
+        if horizontal:
+            fit = expand_until_clean(img, bbox_frac(reg.bbox), pad=0.0, sides=("left", "right"))
+            fr = snap_to_gaps(img, fit["bbox"], axis="y")
+            crop = crop_frac(img, fr, pad=0.002); axis = "y"; reverse = False
+        else:
+            fit = expand_until_clean(img, bbox_frac(reg.bbox), pad=0.012)   # 가장자리 글자가 잘리지 않게 넓힌 뒤 자른다
+            fr = fit["bbox"]
+            crop = crop_frac(img, fr, pad=0.012); axis = "x"; reverse = True   # 세로쓰기: 오른쪽 열부터 묶는다
+        bands = split_bands(crop, axis=axis, max_bands=max_bands, reverse=reverse) if max_bands else [(0, crop.height if axis == "y" else crop.width)]
+        meta[reg.id] = {"crop_bbox": list(fr), "crop_steps": fit["steps"], "crop_touching": fit["touching"], "chunks": len(bands)}
+        if len(bands) == 1:
+            items.append((reg.id, reg.kind, upscale(crop, _zoom(crop.width, crop.height))))
+            continue
+        if reverse:
+            bands = bands[::-1]                                       # 세로쓰기는 오른쪽 구간부터 읽기 순서
+        ids = []
+        for k, (a, b) in enumerate(bands, 1):
+            sub = crop.crop((0, a, crop.width, b)) if axis == "y" else crop.crop((a, 0, b, crop.height))
+            cid = f"{reg.id}#{k}"; ids.append(cid)
+            items.append((cid, reg.kind, upscale(sub, _zoom(sub.width, sub.height))))
+        chunks_of[reg.id] = ids
     rereads: dict[str, RegionReread] = {}
     if not items:
         return rereads, meta
@@ -256,6 +290,21 @@ def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str,
         rr = reader2.reread_region(im, kind, rid, n)
         if rr.columns:
             rereads[rid] = rr
+    # 조각으로 나눠 읽은 영역은 열을 순서대로 이어 붙여 영역 하나로 되돌린다(열 번호는 1부터 다시)
+    for base, ids in chunks_of.items():
+        cols: list = []; unc: list = []; got = 0
+        for cid in ids:
+            rr = rereads.pop(cid, None)
+            if not rr or not rr.columns:
+                continue
+            got += 1
+            for c in sorted(rr.columns, key=lambda c: c.col_from_right):
+                c.col_from_right = len(cols) + 1; cols.append(c)
+            for u in rr.uncertain:
+                u.region_id = base; unc.append(u)
+        if cols:
+            rereads[base] = RegionReread(columns=cols, uncertain=unc)
+        meta[base]["chunks_read"] = got
     for rr in rereads.values():
         for c in rr.columns:
             c.text = _ud.normalize("NFC", c.text or "")
@@ -342,8 +391,10 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                 except Exception as e:
                     want = ""; log(f"  2차 모델 자동 선택 실패({str(e)[:60]}) → 1차와 같은 모델")
             think2 = "low" if args.second_thinking == "low" else None
-            if (want and want != reader.model) or think2:
-                reader2 = GeminiReader(model=want or reader.model, thinking_budget=args.thinking_budget, use_cache=not args.no_cache, thinking=think2)
+            mres = getattr(args, "media_resolution", "auto") or "auto"
+            mres = "high" if mres == "auto" else (None if mres == "default" else mres)      # auto = 2차 조각은 high(글자당 토큰을 늘린다)
+            if (want and want != reader.model) or think2 or mres:
+                reader2 = GeminiReader(model=want or reader.model, thinking_budget=args.thinking_budget, use_cache=not args.no_cache, thinking=think2, media_resolution=mres)
     except Exception as e:
         log(f"오류: {e}"); return 1
     todo = [n for n in pages if args.force or not work.load_record(n)]
@@ -351,7 +402,8 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     ceiling = max(1, int(args.workers or 1))
     cur = max(1, min(ceiling, int(args.workers_start or ceiling)))     # 동시 쪽 수: 여기서 시작해 한도(429)가 나면 줄이고, 안정되면 늘린다
     log(f"read: 판독기 {reader.name} {getattr(reader, 'model', '')}"
-        + (f" · 2차 {reader2.model}{' (생각 줄임)' if getattr(reader2, 'thinking', None) == 'low' else ''}" if reader2 is not reader else "")
+        + (f" · 2차 {reader2.model}{' (생각 줄임)' if getattr(reader2, 'thinking', None) == 'low' else ''}{' · 조각 해상도 ' + reader2.media_resolution if getattr(reader2, 'media_resolution', None) else ''}" if reader2 is not reader else "")
+        + (f" · 조각 {args.chunk_lines}줄 묶음" if getattr(args, "chunk_lines", 0) else "")
         + f" · {len(pages)}쪽 중 읽을 쪽 {len(todo)}개 · 동시 {cur}쪽(최대 {ceiling}, 자동 조절) · 2차 판독 {'묶음 호출' if args.second_mode == 'batch' else '영역별 호출'}"
         + (f" · {reader.cache_note}" if getattr(reader, "cache_note", "") else ""))
     if skipped:
@@ -547,6 +599,72 @@ def cmd_build(args, work: Work | None = None, doc=None):
     return 0 if ok else 1
 
 
+# ---------- adjudicate / ledger ----------
+def cmd_adjudicate(args, work: Work | None = None, doc=None):
+    """3차 글자 판별. 〔a/b〕 자리마다 호출 한 번(flash 로도 충분). 확정한 글자는 merged 와 adjudications 에 남고, remerge 뒤에도 유지된다."""
+    apply_mode(args)
+    from . import prompts
+    doc = doc or open_pdf(args.pdf)
+    work = work or Work(args.pdf, args.work)
+    records = work.records(parse_pages(args.pages, len(doc)))
+    if not records:
+        log("오류: 판독 기록이 없습니다."); return 2
+    from .adjudicate import find_sites, adjudicate_page
+    todo = [(rec, len(find_sites(PageReading.model_validate(rec["merged"])))) for rec in records]
+    total_sites = sum(n for _, n in todo)
+    if not total_sites:
+        log("판별할 〔a/b〕 자리가 없습니다."); return 0
+    if args.reader == "mock":
+        log(f"mock 판독기는 자형을 보지 못합니다. 〔a/b〕 자리 {total_sites}곳만 셌습니다."); return 0
+    from .reader_gemini import GeminiReader, ReaderError
+    try:
+        reader = GeminiReader(model=args.model, thinking_budget=args.thinking_budget, use_cache=not getattr(args, "no_cache", False),
+                              media_resolution="high")
+    except Exception as e:
+        log(f"오류: {e}"); return 1
+    log(f"adjudicate: 판독기 {reader.model} · {len(records)}쪽 · 〔a/b〕 {total_sites}곳 · 조각 확대 {args.zoom}배" + (f" · 쪽당 최대 {args.max_sites}곳" if args.max_sites else ""))
+    horizontal = prompts.MODE == "horizontal_zh"
+    agg = {"sites": 0, "decided": 0, "undecided": 0, "failed": 0}
+    for rec, n in todo:
+        if not n or CANCEL.is_set():
+            continue
+        pg = rec["pdf_page"]
+        img, _ = _load_page_image(work, doc, pg, args.dpi)
+        if hasattr(reader, "usage_begin"): reader.usage_begin()
+        try:
+            rec = adjudicate_page(rec, img, reader, horizontal, max_sites=args.max_sites, zoom=args.zoom)
+        except ReaderError as e:
+            log(f"오류: {pg}쪽 판별 실패 — {e}")
+            if e.fatal: return 1
+            continue
+        u = reader.usage_end() if hasattr(reader, "usage_end") else {}
+        if u.get("calls"):
+            usage = rec.get("usage") or {}
+            for k, v in u.items():
+                usage[k] = usage.get(k, 0) + v
+            usage.setdefault("by_model", {}); usage["by_model"][reader.model + " (3차)"] = u; rec["usage"] = usage
+        work.save_record(pg, rec)
+        st = rec.get("adjudicate_stats") or {}
+        for k in agg: agg[k] += st.get(k, 0)
+        shown = "; ".join(f"〔{a['a']}/{a['b']}〕→{a['choice'] or '미정'}" for a in (rec.get("adjudications") or [])[-n:])
+        log(f"  {pg}쪽: {st.get('sites', 0)}곳 중 확정 {st.get('decided', 0)} · 미정 {st.get('undecided', 0)}" + (f" · 실패 {st['failed']}" if st.get("failed") else "") + f"  {shown[:160]}")
+    log(f"adjudicate: 끝. {agg['sites']}곳 중 확정 {agg['decided']} · 미정 {agg['undecided']}" + (f" · 실패 {agg['failed']}" if agg["failed"] else "")
+        + " — 확정한 글자는 본문에 들어갔고 확인 목록에 '3차 판별' 메모가 남았습니다. ④ 문서 만들기를 다시 실행하십시오.")
+    return 0
+
+
+def cmd_ledger(args, work: Work | None = None, doc=None):
+    work = work or Work(args.pdf, args.work)
+    from .ledger import write_ledger, ledger_text, confusable_candidates
+    out, led = write_ledger(work.dir)
+    log("\n".join(["# 혼동 장부 — " + work.pdf_path.name] + ledger_text(led, top=args.top)))
+    cands = confusable_candidates(led, min_count=2)
+    if cands:
+        log("혼동 묶음 후보(두 번 이상): " + ", ".join(f"{a}{b}({n})" for a, b, n in cands[:30]))
+    log(f"ledger: {out}")
+    return 0
+
+
 # ---------- review / report / mark ----------
 def cmd_review(args, work: Work | None = None, doc=None):
     work = work or Work(args.pdf, args.work)
@@ -644,6 +762,9 @@ def build_parser():
         p.add_argument("--second-model", default="auto", help="2차 판독 모델. auto(기본)=1차와 같은 세대의 flash 자동 선택, 비우면 1차와 같음")
         p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
+        p.add_argument("--chunk-lines", type=int, default=8, help="2차 조각 한 장에 넣을 글줄(세로쓰기는 열) 수. 넘으면 나눠 보낸다(0=안 나눔). 글자당 픽셀을 늘려 획 하나 차이를 가린다")
+        p.add_argument("--media-resolution", choices=["auto", "default", "low", "medium", "high"], default="auto",
+                       help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. 모델이 거부하면 자동으로 기본값")
         p.add_argument("--checkpoint", type=int, default=20, help="N쪽 판독마다 '<이름>_진행중.hwpx' 를 중간 저장(0=안 함). run 에서만")
         if not any(a.dest == "mode" for a in p._actions):
             p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical", help="읽기 모드: vertical=세로쓰기 한자·한글(기본), horizontal_zh=가로쓰기 한문(간체)")
@@ -672,6 +793,17 @@ def build_parser():
     p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p)
     p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical", help="읽기 모드(가로쓰기 한문이면 horizontal_zh — 간체·부호 차이를 접어 비교)")
     p.set_defaults(fn=cmd_remerge)
+    p = sub.add_parser("adjudicate", help="3차 글자 판별: 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 모델에 자형만으로 묻는다"); common(p)
+    p.add_argument("--reader", choices=["gemini", "mock"], default="gemini")
+    p.add_argument("--model", help="판별에 쓸 모델(기본 GEMINI_MODEL 또는 gemini-2.5-pro). 1차와 같은 pro 계열을 권함")
+    p.add_argument("--thinking-budget", type=int, default=None)
+    p.add_argument("--no-cache", action="store_true")
+    p.add_argument("--max-sites", type=int, default=0, help="쪽당 판별할 자리 수 상한(0=전부)")
+    p.add_argument("--zoom", type=int, default=6, help="글자 조각 확대 배율(기본 6)")
+    p.add_argument("--mode", choices=["vertical", "horizontal_zh"], default="vertical")
+    p.set_defaults(fn=cmd_adjudicate)
+    p = sub.add_parser("ledger", help="혼동 장부: 결과 폴더의 판독·대조 기록에서 글자 쌍 빈도를 모아 confusion.json 과 표로"); common(p, pages=False)
+    p.add_argument("--top", type=int, default=30); p.set_defaults(fn=cmd_ledger)
     p = sub.add_parser("review"); common(p); p.set_defaults(fn=cmd_review)
     p = sub.add_parser("report"); common(p); p.set_defaults(fn=cmd_report)
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")

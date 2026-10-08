@@ -80,6 +80,12 @@ class RegionRereadItem(_M):
     uncertain: list[Uncertain] = Field(default_factory=list, alias="unc")
 
 
+class GlyphChoice(_M):
+    """3차 글자 판별의 답. choice 는 후보 가운데 하나(자형 근거가 보일 때만), 아니면 빈 글."""
+    choice: str = Field("", alias="c")
+    evidence: str = Field("", alias="e")       # 본 자형 한 줄(갈고리·점·획 길이 등)
+
+
 class MultiRegionReread(_M):
     """한 쪽의 문자 영역 조각 여러 장을 한 호출로 다시 판독한 결과."""
     regions: list[RegionRereadItem] = Field(default_factory=list)

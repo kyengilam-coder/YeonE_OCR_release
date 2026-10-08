@@ -20,8 +20,22 @@ CTX = 6                        # 보고에 보여 줄 앞뒤 글자 수
 # 자형이 비슷해 판독기가 서로 헷갈리기 쉬운 글자 묶음(간체 기준). 번체 후보까지 여럿(B2)이면 자동 반영하지 않고 표시만 한다
 CONFUSABLES = [set(g) for g in ("干于千", "日曰", "己已巳", "土士", "未末", "天夭", "人入", "刀力", "木本", "戊戌戍", "冶治", "乌鸟", "纲网", "问间闻",
                                  "王玉", "大太犬", "子于", "几凡", "血皿", "目日月", "白自", "戈弋", "丸九", "旦且", "田由甲申", "史吏", "宫官",
-                                 "侯候", "兔免", "祟崇", "荼茶", "午牛", "币市", "师帅", "凤风", "析折", "斤斥", "卯卵", "微徽")]
+                                 "侯候", "兔免", "祟崇", "荼茶", "午牛", "币市", "师帅", "凤风", "析折", "斤斥", "卯卵", "微徽",
+                                 # 0.6.0 — 중의역대약론선 실측(1차·2차 갈림, 글자층·HWPX 대조)에서 실제로 섞인 묶음
+                                 "府腐", "山由", "失尖", "信倍", "届属", "镇慎", "宜宣", "囊裹", "胀脓", "恶悉", "摄慑", "源原", "常尝", "僻澼", "浥挹",
+                                 "障癃", "授援", "元无", "火灭", "今令", "予子", "性桂", "混温", "革草", "元元",
+                                 "瘕疲痼痕瘦", "疠疣", "痛痈", "瘌癞", "癃痉", "哕啰", "芩苓", "菜茱", "葛菖", "芪黄", "英萸",
+                                 "校枝棱", "植楂", "拘枸", "脘院皖", "腠媵膜")]
+# OCR 엔진들이 같은 방향으로 틀리기 쉬운 자형 쌍. 글자층(다른 OCR)이 판독과 같아도 증거가 약하고, 인쇄 자체가 오자인 일도 있어
+# (430쪽 「能人陰分」) 한 글자 차이는 자동 반영하지 않고 글자 조각 확인(3차 판별)으로 넘긴다.
+WEAK_WITNESS = [set(g) for g in ("人入", "日曰", "土士", "未末", "己已巳", "大太犬", "白自")]
+REPEAT_MIN = 5                 # 같은 (HWPX, 판독) 한 글자 쌍이 한 구획에서 이만큼 반복되면 책 전체의 변환 오류로 보고 교정 후보로 올린다
 MAX_DELETE_AUTO = 2            # HWPX 에만 있는 글자를 자동으로 지우는 최대 길이(그 이상은 C 로 표시만)
+ARABIC_RE = re.compile(r"^[0-9０-９.．]+$")
+CJK_NUM_RE = re.compile(r"^[一二三四五六七八九十〇零百千兩两]+$")
+HANGUL_RE = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
+FOOTNOTE_RE = re.compile(r"^[注註]\s*[0-9０-９一二三四五六七八九十]+")
+TITLE_RE = re.compile(r"[『《〈「]([^』》〉」]{2,14})[』》〉」]")
 MARK_RE = re.compile(r"〔[^〔〕]*〕")
 PUNCT_RE = re.compile(r"[\s　·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥]+")
 
@@ -116,6 +130,93 @@ def _confusable(a: str, b: str) -> bool:
     return a != b and any(a in g and b in g for g in CONFUSABLES)
 
 
+def _weak_pair(a: str, b: str) -> bool:
+    return a != b and any(a in g and b in g for g in WEAK_WITNESS)
+
+
+def book_titles(texts: list[str]) -> set[str]:
+    """HWPX 본문의 『』《》 안 글(서명)을 모은다. 「本草」綱目 처럼 책이 줄여 적은 서명을 HWPX 가 풀어 쓴 자리를 자동으로 지우지 않기 위해."""
+    out: set[str] = set()
+    for t in texts:
+        for m in TITLE_RE.finditer(t or ""):
+            name = "".join(ch for ch in m.group(1) if zh.is_cjk(ch))
+            if len(name) >= 2:
+                out.add(name)
+    return out
+
+
+def _s2t_from_ctx(oc_ctx: str, ch: str) -> str:
+    """판독 앞뒤 글자(oc_ctx)를 붙여 어구 사전이 문맥을 보게 한 뒤 가운데 글자의 번체만 꺼낸다(于→於, 晒干→曬乾)."""
+    pre, post = _split_ctx(oc_ctx)
+    src = pre + ch + post
+    t = zh.to_traditional(src)
+    if len(t) == len(src):
+        return t[len(pre)]
+    return zh.to_traditional(ch)
+
+
+def _mark(it: "Item", kind: str, note: str) -> None:
+    it.kind, it.action, it.new, it.auto = kind, "mark", "", False
+    it.note = note
+
+
+def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) -> None:
+    """글자 오탈이 아닌 차이를 걸러 낸다(0.6.0, 중의역대약론선 실측 근거).
+    - 아라비아 숫자만인 삽입·삭제·치환(인용 번호 1. 2. 3.·쪽수): HWPX 가 자동 번호를 쓰면 글자로 없다 → 표기 차이(D).
+    - 숫자와 글자가 섞인 치환(「本草」→「4」): 표시만(C).
+    - 한자 숫자만인 삽입·삭제: 분량·순서일 수 있어 표시만(C). 한자 숫자끼리의 치환(三錢↔二錢)은 그대로 둔다(지침 14).
+    - HWPX 글자에 한글이 있거나 삽입 자리 바로 옆이 한글(편집자의 풀이): 어떤 정책에서도 자동 반영하지 않는다(B1).
+    - 각주(注1 …)로 보이는 삽입: 본문에 끼워 넣지 않고 표시만(C).
+    - 서명(『』) 일부로 보이는 짧은 삭제(「本草」綱目): 책이 줄여 적은 것일 수 있어 표시만(C)."""
+    for it in items:
+        hw, oc = it.hwpx, it.ocr
+        pre, post = _split_ctx(it.hw_ctx)
+        # HWPX 쪽에만 한글이 있으면(또는 삽입 자리 앞뒤가 한글 풀이 속이면) 편집자의 풀이를 판독 한문으로 덮어쓰는 셈 — 표시만.
+        # 양쪽 다 한글이면(한글·한자 혼용 문헌의 한글 대 한글) 보통 흐름대로 둔다.
+        hw_h, oc_h, ctx_h = bool(HANGUL_RE.search(hw)), bool(HANGUL_RE.search(oc)), bool(HANGUL_RE.search(pre + post))
+        if (hw_h and not oc_h) or (not hw and ctx_h and not oc_h):
+            _mark(it, "B1", "한글 풀이·주석 자리로 보임 — 자동 반영하지 않음(원본 확인)"); continue
+        hw_ar, oc_ar = bool(hw) and bool(ARABIC_RE.match(hw)), bool(oc) and bool(ARABIC_RE.match(oc))
+        hw_cn, oc_cn = bool(hw) and bool(CJK_NUM_RE.match(hw)), bool(oc) and bool(CJK_NUM_RE.match(oc))
+        if it.action in ("insert", "delete") and (hw_ar or oc_ar):
+            it.kind = "D"; it.note = "아라비아 숫자(인용 번호·쪽수)만 다름 — 표기 차이"; continue
+        if it.action == "replace" and hw_ar and oc_ar:
+            it.kind = "D"; it.note = "아라비아 숫자끼리 다름 — 표기 차이"; continue
+        if it.action == "replace" and (hw_ar != oc_ar) and (hw and oc):
+            _mark(it, "C", f"숫자와 글자가 섞인 치환(「{hw}」↔「{oc}」) — 번호 체계 차이로 보여 자동 반영하지 않음"); continue
+        if it.action in ("insert", "delete") and (hw_cn or oc_cn):
+            _mark(it, "C", "한자 숫자만 한쪽에 있음 — 분량·순서일 수 있어 표시만"); continue
+        if it.action == "insert" and FOOTNOTE_RE.match(oc.strip()):
+            _mark(it, "C", f"각주로 보이는 구간({len(oc)}자) — 본문에 넣지 않고 표시만"); continue
+        if it.action == "delete" and titles and 1 <= len(hw) <= 4:
+            cand = {hw + post[:k] for k in (1, 2, 3)} | {pre[-k:] + hw for k in (1, 2, 3) if pre[-k:]}
+            if any(c in t for c in cand for t in titles):
+                _mark(it, "C", f"서명(『』) 일부로 보임 — 책이 줄여 적은 자리일 수 있어 자동 삭제하지 않음"); continue
+
+
+def promote_repeated(items: list["Item"], min_count: int = REPEAT_MIN) -> int:
+    """같은 (HWPX, 판독) 한 글자 쌍이 구획 안에서 min_count 회 이상 반복되고 그 자리가 '혼동 가능성' 표시(B1)로 남아 있으면,
+    개별 자형 혼동이 아니라 책 전체에 걸친 변환 오류(간체 于→幹 일괄 변환 등)로 보고 교정 후보(B2/A)로 올린다. 올린 수를 돌려준다."""
+    from collections import Counter
+    cnt = Counter((zh.compare_key(it.hwpx), it.ocr) for it in items
+                  if len(it.hwpx) == 1 and len(it.ocr) == 1 and it.action in ("replace", "mark") and it.kind in ("A", "B1", "B2"))
+    n = 0
+    for it in items:
+        if not (it.kind == "B1" and it.action == "mark" and len(it.hwpx) == 1 and len(it.ocr) == 1):
+            continue
+        if not ("혼동" in it.note or "헷갈리기" in it.note):
+            continue
+        key = (zh.compare_key(it.hwpx), it.ocr)
+        if cnt[key] < min_count or _weak_pair(key[0], key[1]):
+            continue
+        new = _s2t_from_ctx(it.oc_ctx, it.ocr); cands = zh.candidates(it.ocr)
+        it.kind = "B2" if len(cands) > 1 else "A"; it.action = "replace"; it.new = new; it.candidates = cands if len(cands) > 1 else []
+        it.witness = (it.witness + "+" if it.witness else "") + "repeat"
+        it.note += f" · 같은 쌍 「{it.hwpx}」↔「{it.ocr}」 이 이 구획에서 {cnt[key]}회 반복 — 책 전체의 변환 오류로 보여 교정 후보로 올림"
+        n += 1
+    return n
+
+
 # ---------- 于·干·於·幹·乾 묶음: 판독기가 자주 섞는 자리라 문맥으로 가린다 ----------
 GAN_YU = set("于干於幹乾")
 YU_PREV = set("生至属由对关在甚大等见出始过归利合宜从行施用发成得走入居处位寓寄流注达通倍胜优劣异同基鉴源起终止限介存安死忠败毁立传闻问系乃莫及急缓近远轻重强弱多少高低先后易难善恶美丑长短久速溢伤益损助趋散聚托")   # 于 앞에 흔한 글자(간체)
@@ -168,8 +269,9 @@ def _ctx(cells: list[Char], lo: int, hi: int) -> str:
     return f"{pre}「{mid}」{post}"
 
 
-def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item]:
-    """정렬해 차이 항목을 만든다. policy: memo(아무것도 자동 반영 안 함) | sure(A만) | all(A+B2+누락 삽입)."""
+def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[str] | None = None) -> list[Item]:
+    """정렬해 차이 항목을 만든다. policy: memo(아무것도 자동 반영 안 함) | sure(A만) | all(A+B2+누락 삽입).
+    titles: HWPX 의 서명 집합(book_titles) — 서명 일부로 보이는 짧은 삭제를 자동으로 하지 않기 위해."""
     a = "".join(c.key for c in hw); b = "".join(c.key for c in oc)
     sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
     items: list[Item] = []
@@ -242,6 +344,8 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item
                     items.append(Item("B2", "replace", para, start, end, g_text, seg_text, new, cands, page, "간체 한 글자가 여러 번체로 갈라짐", hw_ctx=hctx, oc_ctx=octx))
                 else:
                     items.append(Item("A", "replace", para, start, end, g_text, seg_text, new, [], page, "판독과 다름", hw_ctx=hctx, oc_ctx=octx))
+    # 번호·한글·각주·서명 — 글자 오탈이 아닌 차이를 먼저 걸러 낸다
+    apply_structural_rules(items, titles)
     # 于·干·於·幹·乾 묶음은 문맥으로 먼저 가린다
     resolve_gan_yu(items)
     # 혼동하기 쉬운 글자 + 번체 후보 여럿(B2) → 판독 오류일 수 있으니 표시만(문맥 규칙이 판독 편을 든 자리는 예외)
@@ -249,6 +353,12 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all") -> list[Item
         if it.kind == "B2" and it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and it.witness != "ocr" and _confusable(zh.compare_key(it.hwpx), it.ocr):
             it.kind, it.action, it.new = "B1", "mark", ""
             it.note = f"판독 글자 「{it.ocr}」 는 「{zh.compare_key(it.hwpx)}」 와 자형이 비슷해 헷갈리기 쉽고 번체 후보도 여럿({'/'.join(it.candidates)}) — 원본 확인"
+    # 入/人·曰/日 같은 자형 쌍은 OCR 엔진들이 같은 방향으로 틀리고 인쇄 자체가 오자인 일도 있어 한 글자 차이를 자동 반영하지 않는다
+    for it in items:
+        if it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and it.kind in ("A", "B2") and _weak_pair(zh.compare_key(it.hwpx), it.ocr):
+            _mark(it, "B1", f"「{it.hwpx}」↔「{it.ocr}」 는 OCR 이 같은 방향으로 틀리기 쉬운 자형 편향 쌍 — 글자 조각으로 원본 확인(3차 판별)")
+    # 같은 쌍이 구획 안에서 되풀이되면 변환 오류로 보고 교정 후보로 올린다
+    promote_repeated(items)
     # 정책에 따라 자동 반영 여부
     for it in items:
         if it.kind == "A" and it.action in ("replace", "insert", "delete"):
@@ -284,10 +394,12 @@ def witness_filter(items: list[Item], layers: dict[int, str], policy: str = "all
     돌려주는 값은 통계 {"checked", "hwpx", "ocr", "none"}."""
     import re
     keys = {pg: _layer_key(t) for pg, t in (layers or {}).items() if t}
-    st = {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0}
+    st = {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0, "weak": 0}
     for it in items:
         if it.action not in ("replace", "mark") or len(it.hwpx) != 1 or len(it.ocr) != 1 or it.kind == "D":
             continue
+        if "자형 편향" in it.note or _weak_pair(zh.compare_key(it.hwpx), it.ocr):
+            st["weak"] += 1; continue                   # 글자층도 같은 식으로 틀릴 수 있는 쌍 — 증인으로 쓰지 않는다
         lk = keys.get(it.pdf_page)
         if not lk:
             continue

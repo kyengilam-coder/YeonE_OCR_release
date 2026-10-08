@@ -237,13 +237,27 @@ def _apply_edits(text: str, edits: list[tuple[int, int, str]], table: dict[str, 
     return _detok("".join(tok), table)
 
 
+def strip_marks_for_compare(s: str) -> str:
+    """〔a/b〕 → a(1차), 〔疑: x〕 → x, 그 밖의 표시(〔판독불명〕·작업 표시) → 빈 글. 글자층과 비교할 때 표시 글자가 차이로 잡히지 않게."""
+    def rep(m):
+        inner = m.group(0)[1:-1]
+        if inner.startswith("疑:"):
+            return inner[2:].strip()
+        if "/" in inner and not inner.startswith(("→", "소주", "작업", "판독 메모", "도판", "이어짐", "원본")):
+            return inner.split("/")[0]
+        return ""
+    return MARK_RE.sub(rep, s)
+
+
 def compare_textlayer(reading: PageReading, layer_plain: str, max_items: int = 60) -> dict:
-    """판독문과 기존 텍스트 레이어를 공백 없이 이어 붙여 대조한다. 다른 곳은 검수 참고용이며 자동 반영하지 않는다."""
+    """판독문과 기존 텍스트 레이어를 공백 없이 이어 붙여 대조한다. 다른 곳은 검수 참고용이며 자동 반영하지 않는다.
+    전각·반각 부호(，↔,)와 (간체 모드) 자형 차이는 접고 비교한다 — 중의역대약론선 실측에서 글자층 차이의 60%가 부호 표기였다."""
     body = "".join(region_text(r) for r in reading.regions if r.kind in TEXT_KINDS).replace("\n", "")
-    a = WS.sub("", body); b = WS.sub("", layer_plain)
+    a = WS.sub("", strip_marks_for_compare(body)); b = WS.sub("", layer_plain or "")
     if not a and not b:
         return {"ratio": 1.0, "items": [], "reading_chars": 0, "layer_chars": 0}
-    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    fa, fb = _fold(a), _fold(b)                     # 위치는 a·b 와 1:1 (접기는 글자 수를 바꾸지 않는다)
+    sm = difflib.SequenceMatcher(None, fa, fb, autojunk=False)
     items = []
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == "equal": continue
