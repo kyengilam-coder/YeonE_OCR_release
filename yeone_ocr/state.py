@@ -8,12 +8,33 @@ STATUSES = ["미처리", "영역 분류 완료", "1차 OCR 완료", "2차 독립
 HUMAN_ONLY = {"원본 대조 완료(사람)"}   # 프로그램이 스스로 붙이지 않는 상태
 
 
+def default_work_dir(pdf_path: str) -> Path:
+    """--work 가 없을 때의 결과 폴더. 창의 work_dir_for 와 같은 규칙: PDF 는 work/<이름>, 이미지는 work/<이름>_<확장자>,
+    이미지 폴더는 work/<폴더>_이미지(같은 이름끼리 판독 기록이 섞이지 않게)."""
+    p = Path(pdf_path)
+    name = p.absolute().name + "_이미지" if p.is_dir() else (f"{p.stem}_{p.suffix.lower().lstrip('.')}" if p.suffix.lower() not in ("", ".pdf") else p.stem)
+    return Path("work") / name
+
+
+def legacy_work_dir(pdf_path: str) -> Path | None:
+    """0.6.4 전 판이 이미지·이미지 폴더에 쓰던 결과 폴더 work/<이름>(확장자·'_이미지' 없이). 새 기본 폴더는 아직 없는데 그 옛 폴더에
+    이 입력의 기록(state.json 의 file 이름이 같음)이 있을 때만 돌려준다. 저절로 옮겨 쓰지는 않는다(사용자가 --work 로 고르게)."""
+    p = Path(pdf_path); new = default_work_dir(pdf_path); old = Path("work") / p.stem
+    if not (p.stem and old != new and not new.exists() and (old / "state.json").is_file()):
+        return None
+    try:
+        f = json.loads((old / "state.json").read_text(encoding="utf-8")).get("file")
+    except (OSError, ValueError, AttributeError):
+        f = None
+    return old if f in (None, p.name) else None                       # 같은 이름의 PDF 결과(work/<이름>)는 가리키지 않는다
+
+
 class Work:
     _lock = threading.RLock()      # 여러 쪽을 동시에 판독할 때 state.json 읽기-고치기-쓰기가 겹치지 않게
 
     def __init__(self, pdf_path: str, work_dir: str | None = None):
         self.pdf_path = Path(pdf_path)
-        self.dir = Path(work_dir) if work_dir else Path("work") / self.pdf_path.stem
+        self.dir = Path(work_dir) if work_dir else default_work_dir(pdf_path)
         self.pages_dir = self.dir / "pages"
         self.textlayer_dir = self.dir / "textlayer"
         self.readings_dir = self.dir / "readings"

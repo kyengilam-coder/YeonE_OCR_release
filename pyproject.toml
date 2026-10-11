@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yeone-ocr"
-version = "0.6.1"
+version = "0.6.5"
 description = "YeonE_OCR · 연어OCR · 세로쓰기 한자·한글 혼용 문헌 OCR·교정 처리기 (Gemini 판독, HWPX 출력)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ dependencies = [
   "python-hwpx>=6.0",
   "opencc-python-reimplemented>=0.1.7",
   "hanja>=0.15",
-  "python-docx>=1.1",
+  "python-docx>=1.2",
 ]
 
 [project.scripts]

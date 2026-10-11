@@ -1,6 +1,7 @@
 """HWPX 구획 글과 PDF 판독 글을 맞춰 보고 차이를 분류한다.
 
 비교 공간: 양쪽을 compare_key(NFC → 이체자 접기 → 간체)로 바꾸고, 부호·공백은 빼고(부호 차이는 D) 글자만 정렬한다.
+  HWPX 글 속 연어OCR 작업 표시(일반 OCR 의 〔고지: …〕, 교정의 〔확인: …〕·〔제안: …〕 …)도 본문이 아니므로 뺀다(note_spans).
 정렬: difflib.SequenceMatcher 로 구획 전체를 한 줄로 이어 글자 단위 정렬. 문단 경계는 HWPX 쪽 글자 지도로 되찾는다.
 
 분류
@@ -38,6 +39,8 @@ FOOTNOTE_RE = re.compile(r"^[注註]\s*[0-9０-９一二三四五六七八九十
 TITLE_RE = re.compile(r"[『《〈「]([^』》〉」]{2,14})[』》〉」]")
 MARK_RE = re.compile(r"〔[^〔〕]*〕")
 PUNCT_RE = re.compile(r"[\s　·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥]+")
+# 교정이 글 속에 남기는 짧은 표기(hwpx_edit._short_note, inline·0.6.3 까지의 메모 없음). 두 글자 후보 표시(〔확인/학인〕)와 겹치지 않게 쌍점·닫는 괄호까지
+INLINE_NOTE_PREFIXES = ("〔확인〕", "〔확인: ", "〔제안: ", "〔삽입〕", "〔삽입·확인〕", "〔삽입 제안: ", "〔삭제: ", "〔삭제 제안: ", "〔원: ", "〔자동 교정")
 
 
 @dataclass
@@ -66,6 +69,7 @@ class Item:
     hw_ctx: str = ""           # HWPX 앞뒤 글자(「」 안이 해당 자리)
     oc_ctx: str = ""           # 판독 앞뒤 글자
     witness: str = ""          # 문맥 규칙·글자층이 어느 쪽 편인지(hwpx | ocr | "")
+    notice: bool = False       # 구조 규칙이 붙인 고지(문서에 메모로 알릴 것 — grades.needs_memo)
 
 
 def strip_marks(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -87,12 +91,33 @@ def strip_marks(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(pieces), spans
 
 
-def _cells(text: str, para: int, *, strip: bool = False) -> list[Char]:
-    """글 → 비교 글자 목록. 부호·공백은 뺀다. 위치(pos)는 원래 글의 글자 번호 그대로라 편집에 바로 쓴다."""
+def note_spans(text: str) -> list[tuple[int, int]]:
+    """HWPX 글 속 연어OCR 작업 표시의 자리 [(시작, 끝)]: 일반 OCR 의 〔고지: …〕 같은 작업 표시(grades.NOTE_PREFIXES)와 교정의 글 속 표기
+    (〔확인: …〕·〔제안: …〕 …). 본문이 아니므로 대조하지 않는다 — 그 안의 한글이 한글 풀이(B1)로 잡혀 표기 안에 또 표기가 붙지 않게.
+    괄호가 겹쳐 있으면(예전 표기 안의 표기) 바깥 괄호까지. 〔판독 메모〕·〔작업 메모〕 는 메모 글이 〕 뒤에 오는 메모 문단(blocks.py)이라
+    문단 끝까지. 〔a/b〕 후보·〔판독불명〕 같은 지침 표시는 지금처럼 대조한다."""
+    from ..grades import NOTE_PREFIXES
+    pre = NOTE_PREFIXES + INLINE_NOTE_PREFIXES; out = []; i = text.find("〔")
+    while i >= 0:
+        end = None
+        if text.startswith(("〔판독 메모〕", "〔작업 메모〕"), i):
+            out.append((i, len(text))); break
+        if text.startswith(pre, i):
+            d = 0
+            for j in range(i, len(text)):
+                d += (text[j] == "〔") - (text[j] == "〕")
+                if d == 0:
+                    end = j + 1; out.append((i, end)); break
+        i = text.find("〔", end or i + 1)
+    return out
+
+
+def _cells(text: str, para: int, *, strip: bool = False, skip: list[tuple[int, int]] = ()) -> list[Char]:
+    """글 → 비교 글자 목록. 부호·공백은 뺀다. 위치(pos)는 원래 글의 글자 번호 그대로라 편집에 바로 쓴다. skip 구간(작업 표시)의 글자도 뺀다."""
     s, unc_spans = (strip_marks(text) if strip else (text, []))
     out: list[Char] = []
     for i, ch in enumerate(s):
-        if PUNCT_RE.match(ch) or unicodedata.category(ch)[0] in "ZCPS":
+        if PUNCT_RE.match(ch) or unicodedata.category(ch)[0] in "ZCPS" or any(a <= i < b for a, b in skip):
             continue
         key = zh.compare_key(ch)
         if not key:
@@ -104,7 +129,7 @@ def _cells(text: str, para: int, *, strip: bool = False) -> list[Char]:
 def hwpx_cells(paras: list[str], first_para: int) -> list[Char]:
     out = []
     for k, t in enumerate(paras):
-        out.extend(_cells(t, first_para + k))
+        out.extend(_cells(t, first_para + k, skip=note_spans(t)))
     return out
 
 
@@ -155,9 +180,11 @@ def _s2t_from_ctx(oc_ctx: str, ch: str) -> str:
     return zh.to_traditional(ch)
 
 
-def _mark(it: "Item", kind: str, note: str) -> None:
+def _mark(it: "Item", kind: str, note: str, notice: bool = False) -> None:
     it.kind, it.action, it.new, it.auto = kind, "mark", "", False
     it.note = note
+    if notice:
+        it.notice = True
 
 
 def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) -> None:
@@ -175,7 +202,7 @@ def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) 
         # 양쪽 다 한글이면(한글·한자 혼용 문헌의 한글 대 한글) 보통 흐름대로 둔다.
         hw_h, oc_h, ctx_h = bool(HANGUL_RE.search(hw)), bool(HANGUL_RE.search(oc)), bool(HANGUL_RE.search(pre + post))
         if (hw_h and not oc_h) or (not hw and ctx_h and not oc_h):
-            _mark(it, "B1", "한글 풀이·주석 자리로 보임 — 자동 반영하지 않음(원본 확인)"); continue
+            _mark(it, "B1", "한글 풀이·주석 자리로 보임 — 자동 반영하지 않음(원본 확인)", notice=True); continue
         hw_ar, oc_ar = bool(hw) and bool(ARABIC_RE.match(hw)), bool(oc) and bool(ARABIC_RE.match(oc))
         hw_cn, oc_cn = bool(hw) and bool(CJK_NUM_RE.match(hw)), bool(oc) and bool(CJK_NUM_RE.match(oc))
         if it.action in ("insert", "delete") and (hw_ar or oc_ar):
@@ -183,15 +210,15 @@ def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) 
         if it.action == "replace" and hw_ar and oc_ar:
             it.kind = "D"; it.note = "아라비아 숫자끼리 다름 — 표기 차이"; continue
         if it.action == "replace" and (hw_ar != oc_ar) and (hw and oc):
-            _mark(it, "C", f"숫자와 글자가 섞인 치환(「{hw}」↔「{oc}」) — 번호 체계 차이로 보여 자동 반영하지 않음"); continue
+            _mark(it, "C", f"숫자와 글자가 섞인 치환(「{hw}」↔「{oc}」) — 번호 체계 차이로 보여 자동 반영하지 않음", notice=True); continue
         if it.action in ("insert", "delete") and (hw_cn or oc_cn):
-            _mark(it, "C", "한자 숫자만 한쪽에 있음 — 분량·순서일 수 있어 표시만"); continue
+            _mark(it, "C", "한자 숫자만 한쪽에 있음 — 분량·순서일 수 있어 표시만", notice=True); continue
         if it.action == "insert" and FOOTNOTE_RE.match(oc.strip()):
-            _mark(it, "C", f"각주로 보이는 구간({len(oc)}자) — 본문에 넣지 않고 표시만"); continue
+            _mark(it, "C", f"각주로 보이는 구간({len(oc)}자) — 본문에 넣지 않고 표시만", notice=True); continue
         if it.action == "delete" and titles and 1 <= len(hw) <= 4:
             cand = {hw + post[:k] for k in (1, 2, 3)} | {pre[-k:] + hw for k in (1, 2, 3) if pre[-k:]}
             if any(c in t for c in cand for t in titles):
-                _mark(it, "C", f"서명(『』) 일부로 보임 — 책이 줄여 적은 자리일 수 있어 자동 삭제하지 않음"); continue
+                _mark(it, "C", f"서명(『』) 일부로 보임 — 책이 줄여 적은 자리일 수 있어 자동 삭제하지 않음", notice=True); continue
 
 
 def promote_repeated(items: list["Item"], min_count: int = REPEAT_MIN) -> int:

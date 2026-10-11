@@ -18,6 +18,8 @@ class Block:
     rows: list[list[str]] = field(default_factory=list)
     items: list[str] = field(default_factory=list)
     page: int = 0
+    spans: list[tuple[int, int, str]] = field(default_factory=list)   # 글자 모양 덮어쓰기: (시작, 끝, 등급) — grades.GRADE_STYLE
+    memos: list[tuple[int, str]] = field(default_factory=list)        # (글자 위치, 메모 글) — 고지 사항만
 
 
 def meta_line(rec: dict, whole_offset: int | None) -> str:
@@ -48,14 +50,41 @@ def page_text_of(pr: PageReading) -> str:
 
 
 def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: int | None = None,
-                    check_list: str = "none") -> list[Block]:
+                    check_list: str = "none", grades: bool = True, context: dict | None = None,
+                    memo_mode: str = "notice", legend: bool = True, stats: dict | None = None) -> list[Block]:
+    """grades=True 면 글자마다 확인 등급(초록·파랑·빨강 안 문맥 밑줄)과 고지 메모를 블록에 단다(grades.page_grades).
+    context 는 {쪽: 문맥 추정 기록}(context.analyze). 글 자체는 바꾸지 않는다."""
     if check_list not in CHECK_LIST_MODES:
         raise ValueError(f"check_list 는 {CHECK_LIST_MODES} 중 하나: {check_list!r}")
+    from .grades import page_grades, LEGEND, classify_uncertain, page_body, decided_keys, page_ranges
     blocks: list[Block] = []
+    legend_block: Block | None = None
+    no_pass2_pages: list[int] = []
     for rec in records:
         pr = PageReading.model_validate(rec["merged"])
         n = pr.pdf_page
-        blocks.append(Block(type="meta", text=meta_line(rec, whole_offset), page=n))
+        pg = page_grades(rec, (context or {}).get(n), memo_mode) if grades else None
+        meta = Block(type="meta", text=meta_line(rec, whole_offset), page=n)
+        if grades and legend and legend_block is None:
+            legend_block = meta
+        if pg is not None:
+            if pg.page_notices:
+                meta.memos.append((max(0, len(meta.text) - 1), " / ".join(pg.page_notices)))   # 쪽 고지는 쪽 기록 줄 끝 글자에 하나로
+            if pg.no_pass2:
+                no_pass2_pages.append(n)
+            if stats is not None:
+                for k, v in pg.stats.items():
+                    stats[k] = stats.get(k, 0) + v
+        blocks.append(meta)
+
+        def grade_of(reg_id: str, pi: int, raw: str, t: str, shift: int):
+            """문단 글(raw) 기준 등급·메모를 잘라 낸 글(t) 기준으로 옮긴다(앞 공백 lead 를 빼고 shift 를 더함)."""
+            if pg is None:
+                return [], []
+            lead = len(raw) - len(raw.lstrip())
+            sp = [(a - lead + shift, b - lead + shift, k) for a, b, k in pg.spans.get((reg_id, pi), []) if lead <= a and b <= lead + len(t)]
+            me = [(o - lead + shift, m) for o, m in pg.memos.get((reg_id, pi), []) if lead <= o < lead + len(t)]
+            return sp, me
         if rec.get("reader") == "mock":
             blocks.append(Block(type="note", text="〔작업 메모〕 아래 본문은 기존 PDF 텍스트 레이어를 옮긴 것으로 원본 대조 전 상태입니다.", page=n))
         first_text_done = False
@@ -67,19 +96,24 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 blocks.append(Block(type="heading", text=reg.title_text.strip(), level=lvl, kind=reg.kind, page=n))
             elif reg.kind in TEXT_KINDS:
                 for i, p in enumerate(reg.paragraphs):
-                    t = paragraph_text(p).strip()
+                    raw = paragraph_text(p)
+                    t = raw.strip()
                     if not t:
                         continue
-                    if reg.kind == "소주":
-                        t = "〔소주〕 " + t
+                    prefix = "〔소주〕 " if reg.kind == "소주" else ""
+                    sp, me = grade_of(reg.id, i, raw, t, len(prefix))
+                    t = prefix + t
                     if join_pages and i == 0 and not first_text_done and p.continues_from_previous:
                         prev = next((b for b in reversed(blocks) if b.type == "para"), None)
                         if prev is not None:
                             boundary = f"〔→PDF {n}쪽" + (f"/인쇄 {pr.print_page}쪽" if pr.print_page else "") + "〕"
+                            base = len(prev.text) + len(boundary)
                             prev.text = prev.text + boundary + t
+                            prev.spans.extend((a + base, b + base, k) for a, b, k in sp)
+                            prev.memos.extend((o + base, m) for o, m in me)
                             first_text_done = True
                             continue
-                    blocks.append(Block(type="para", text=t, kind=reg.kind, page=n))
+                    blocks.append(Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me))
                     first_text_done = True
             elif reg.kind in IMAGE_KINDS:
                 info = (rec.get("crops") or {}).get(reg.id)
@@ -102,12 +136,10 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     if t:
                         blocks.append(Block(type="para", text=t, kind="기타", page=n))
         items = []
-        shown = page_text_of(pr) if check_list == "extra" else ""
+        body, dec = (page_body(pr), decided_keys(rec)) if check_list == "extra" else ("", set())
         for u in pr.uncertain:
-            if check_list == "extra":
-                marks = MARK_RE.findall(u.context)
-                if marks and all(m in shown for m in marks):
-                    continue                       # 본문에 〔a/b〕·〔疑: ○〕 로 이미 표시된 자리 — 목록에 되풀이하지 않음
+            if check_list == "extra" and classify_uncertain(u, body, dec) != "notice":
+                continue                           # 본문에 〔a/b〕 로 보이거나 3차가 정한 자리 — 목록에 되풀이하지 않음
             where = []
             if u.region_id: where.append(u.region_id)
             if u.col_from_right: where.append(f"오른쪽에서 {u.col_from_right}번째 열")
@@ -118,4 +150,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 items.append(f"구조 검사: {iss['rule']} ({iss['where']}) — {iss['msg']}")
         if check_list != "none" and items:
             blocks.append(Block(type="uncertain", items=items, page=n, text=CHECK_HEADER[check_list]))
+    if legend_block is not None:                    # 범례: 이 파일 첫 쪽 기록 줄의 첫 글자에 메모 하나
+        extra = f" · 2차 판독 없이 1차만 들어간 쪽: {page_ranges(no_pass2_pages)}" if no_pass2_pages else ""
+        legend_block.memos.insert(0, (0, LEGEND + extra))
     return blocks

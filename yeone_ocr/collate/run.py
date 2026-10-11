@@ -13,8 +13,8 @@ from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name
 from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages
 from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter, book_titles
 from .hwpx_edit import Editor
-
-POLICIES = {"memo": "메모만(글자 안 바꿈)", "sure": "확실한 것만(A) 자동", "all": "전부 자동(A·B2·누락 삽입), B1·C 는 표시"}
+from .labels import POLICIES, ANCHOR_SOURCES
+from ..grades import COLLATE_LEGEND
 
 
 def log(msg: str) -> None:
@@ -23,8 +23,6 @@ def log(msg: str) -> None:
 
 
 # ---------- 색인 ----------
-ANCHOR_SOURCES = {"auto": "자동(HWPX 책갈피·제목 → 없으면 PDF 책갈피로 본문 검색)", "hwpx": "HWPX 책갈피·제목 스타일", "pdf": "PDF 책갈피 이름으로 HWPX 본문 검색"}
-
 
 def index_both(pdf_doc, book: HwpxBook, source: str = "auto", styles: list[str] | None = None):
     """구획 기준과 PDF 책갈피를 뽑고 짝짓는다. source: auto | hwpx | pdf.
@@ -117,14 +115,32 @@ def trim_to_section(paras: list[tuple[int, str]], title: str, next_title: str | 
 
 
 # ---------- 보고 ----------
+def memo_mode(args) -> str:
+    """책갈피 교정의 메모 방식: --memo 가 있으면 그것, --no-memo 면 inline, 아니면 notice(고지 사항만)."""
+    return getattr(args, "memo", None) or ("inline" if getattr(args, "no_memo", False) else "notice")
+
+
+def _item_json(it: Item, mode: str) -> dict:
+    from ..grades import collate_grade, needs_memo
+    d = asdict(it); d["grade"] = collate_grade(it); d["memo"] = needs_memo(it, mode) if it.kind != "D" else False
+    return d
+
+
 def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int, int], hw_paras: list[str], oc_paras: list[tuple[int, str]],
-                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "") -> str:
+                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "", mode: str = "notice") -> str:
+    """mode: 실제 메모 방식(memo_mode) — 항목마다 '메모를 다는지' 를 그 방식으로 보인다(json 의 memo 와 같게)."""
     sm = summary(items)
     def esc(s): return html.escape(s or "")
+    from ..grades import collate_grade, needs_memo
+    gname = {"green": "<span style='color:#0B7A3B;text-decoration:underline dotted'>초록</span>", "blue": "<span style='color:#1F4FBF;background:#E1EBFF;text-decoration:underline dashed'>파랑</span>",
+             "red": "<span style='color:#C00000;background:#FFFF00'><b>빨강</b></span>"}
+    mlabel = {"notice": "고지 메모", "all": "메모", "inline": "글 속 〔〕 표기"}.get(mode, "메모")
     rows = []
     for it in items:
         cls = {"A": "a", "B1": "b1", "B2": "b2", "C": "c"}.get(it.kind, "")
-        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}</td><td>{it.para}</td>"
+        g = collate_grade(it)
+        grade = "—" if g is None else gname[g] + (f" · {mlabel}" if needs_memo(it, mode) else "")
+        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}<br><small>{grade}</small></td><td>{it.para}</td>"
                     f"<td class=ctx>{esc(it.hw_ctx) or esc(it.hwpx) or '—'}</td><td class=ctx>{esc(it.oc_ctx) or esc(it.ocr) or '—'}</td>"
                     f"<td><b>{esc(it.new) or '—'}</b></td><td>{esc('/'.join(it.candidates))}</td><td>{it.pdf_page}</td><td>{esc(it.note)}</td></tr>")
     appl = ""
@@ -142,7 +158,7 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>교정 · {esc(section.anchor.name)}</title><style>{css}</style></head><body>"
            f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start}~{section.end - 1} · PDF {pages[0]}~{pages[1]}쪽"
            + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}"
-           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + "</small></header><main>"
+           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + f"<br>{esc(COLLATE_LEGEND)}</small></header><main>"
            f"<p class=sum><span>자동 교정 {sm['auto']}</span><span>표시만 {sm['mark']}</span><span>A {sm['A']}</span><span>B1 {sm['B1']}</span><span>B2 {sm['B2']}</span><span>C {sm['C']}</span></p>"
            + (f"<p><b>참고:</b> {esc(note)}</p>" if note else "") + appl +
            f"<table><tr><th>갈래</th><th>처리</th><th>문단</th><th>HWPX (「」 안이 해당 자리)</th><th>판독(간체)</th><th>반영</th><th>다른 후보</th><th>PDF 쪽</th><th>설명</th></tr>{''.join(rows) or '<tr><td colspan=9>차이 없음</td></tr>'}</table>"
@@ -152,6 +168,14 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
 
 
 # ---------- 한 구획 처리 ----------
+class Cancelled(Exception):
+    """[중지]로 쪽 판독이 멈춤 — 오류가 아니라 사용자가 멈춘 것(창에 '중지됨'으로 보이게 따로 다룬다)."""
+
+
+class ReadFailed(RuntimeError):
+    """쪽 판독이 오류로 끝남(키·한도·모델 이름 등). 다음 구획도 같은 오류가 날 것이므로 전체 교정을 멈춘다."""
+
+
 def ensure_pages_read(args, work, doc, pages: tuple[int, int]) -> None:
     """범위 쪽 중 기록이 없는 쪽만 준비·판독한다(기존 ②·③ 그대로)."""
     from ..cli import cmd_prepare, cmd_read
@@ -163,8 +187,10 @@ def ensure_pages_read(args, work, doc, pages: tuple[int, int]) -> None:
     log(f"쪽 {sub.pages} 준비·판독 …")
     cmd_prepare(sub, work, doc)
     rc = cmd_read(sub, work, doc)
+    if rc == 130:
+        raise Cancelled()
     if rc not in (0, None):
-        raise RuntimeError(f"판독이 끝나지 않음(rc={rc})")
+        raise ReadFailed(f"판독이 끝나지 않음(rc={rc})")
 
 
 _READER_CACHE: dict = {}
@@ -174,12 +200,14 @@ def glyph_reader(args):
     """항목 3차 판별용 Gemini 판독기(한 번만 만들어 재사용). 키가 없거나 만들지 못하면 None."""
     if getattr(args, "no_glyph_check", False) or getattr(args, "reader", "gemini") != "gemini":
         return None
-    key = (getattr(args, "model", None) or "", bool(getattr(args, "no_cache", False)))
+    key = (getattr(args, "model", None) or "", getattr(args, "adjudicate_thinking", "low"))
     if key in _READER_CACHE:
         return _READER_CACHE[key]
     try:
         from ..reader_gemini import GeminiReader
-        r = GeminiReader(model=getattr(args, "model", None), use_cache=not getattr(args, "no_cache", False), media_resolution="high")
+        from ..prompts import glyph_system_prompt
+        think = None if getattr(args, "adjudicate_thinking", "low") == "full" else "low"
+        r = GeminiReader(model=getattr(args, "model", None), use_cache=False, media_resolution="high", thinking=think, system=glyph_system_prompt())
     except Exception as e:
         log(f"자형 3차 판별은 건너뜁니다({str(e)[:80]}).")
         r = None
@@ -187,15 +215,20 @@ def glyph_reader(args):
     return r
 
 
-def adjudicate_items(items: list[Item], *, work, doc, reader, horizontal: bool, dpi: int = 300, policy: str = "all") -> dict:
+def adjudicate_items(items: list[Item], *, work, doc, reader, horizontal: bool, dpi: int = 300, policy: str = "all",
+                     min_px: float | None = None, blind: bool = False) -> dict:
     """자형 편향·혼동으로 표시만 한 한 글자 항목(入/人·曰/日·于/干 …)을 글자 조각으로 모델에 묻는다.
-    인쇄가 HWPX 글자면 차이에서 빼고(D), 판독 글자면 교정 후보(A/B2)로 올리며, 못 가리면 표시 그대로 둔다."""
-    from ..schema import PageReading
-    from ..adjudicate import locate_in_reading, glyph_box, glyph_crop
-    from ..cli import _load_page_image
+    인쇄가 HWPX 글자면 차이에서 빼고(D), 판독 글자면 교정 후보(A/B2)로 올리며, 못 가리면 표시 그대로 둔다.
+    묻는 방식은 일반 OCR 의 3차 판별과 같다(눈가림: 앞뒤 글자 없이 조각 안 순번으로 가리키고 후보를 섞는다, 저해상 자리는 묻지 않는다,
+    blind 면 후보 없이 한 번 더 읽어 같을 때만 따른다)."""
+    from ..schema import PageReading, GlyphAsk
+    from ..adjudicate import locate_in_reading, locate_glyph, glyph_crop, column_plain, page_ink, make_ask, blind_agrees, MIN_GLYPH_PX
+    min_px = MIN_GLYPH_PX if min_px is None else min_px
+    from ..cli import _load_page_image, DOC_LOCK
+    from ..pdfio import layer_chars, page_frame
     from . import zh
     from .collate import _s2t_from_ctx, _split_ctx
-    st = {"asked": 0, "hwpx": 0, "ocr": 0, "undecided": 0, "unlocated": 0}
+    st = {"asked": 0, "hwpx": 0, "ocr": 0, "undecided": 0, "unlocated": 0, "lowres": 0, "blind_rejected": 0}
     cache: dict[int, tuple] = {}
     for it in items:
         if not (it.kind == "B1" and it.action == "mark" and len(it.hwpx) == 1 and len(it.ocr) == 1):
@@ -210,26 +243,45 @@ def adjudicate_items(items: list[Item], *, work, doc, reader, horizontal: bool, 
             else:
                 merged = PageReading.model_validate(rec["merged"]); p1 = PageReading.model_validate(rec["pass1"]) if rec.get("pass1") else merged
                 img, _ = _load_page_image(work, doc, pg, dpi)
-                cache[pg] = (merged, {r.id: r.bbox for r in p1.regions}, img)
+                lines, frame = [], None
+                if doc is not None:
+                    with DOC_LOCK:
+                        try:
+                            lines = layer_chars(doc, pg); frame = page_frame(doc, pg)
+                        except Exception:
+                            lines, frame = [], None
+                cache[pg] = (merged, {r.id: r.bbox for r in p1.regions}, img, lines, frame, page_ink(img))
         if not cache[pg]:
             st["unlocated"] += 1; continue
-        merged, bboxes, img = cache[pg]
+        merged, bboxes, img, lines, frame, ink = cache[pg]
         pre, post = _split_ctx(it.oc_ctx)
         site = locate_in_reading(merged, pre, it.ocr, post)
         if site is None:
             st["unlocated"] += 1; continue
         hk = zh.compare_key(it.hwpx)
         cands = [hk, it.ocr] if hk != it.ocr else [it.ocr]
-        crop = glyph_crop(img, glyph_box(bboxes.get(site.region_id, [0, 0, 1000, 1000]), site, horizontal))
+        win = locate_glyph(ink, bboxes.get(site.region_id, [0, 0, 1000, 1000]), site, horizontal, column_plain(merged, site), lines, frame)
+        if min_px and win.em_px and win.em_px < min_px:
+            it.note += f" · 3차 판별: 저해상(원본 글자 약 {win.em_px:.0f}px)이라 묻지 않음"; st["lowres"] += 1; st["undecided"] += 1; continue
+        ask = make_ask(site, win, cands, pg, tick=bool(win.measured and win.target))
+        crop = glyph_crop(img, win.box, target=win.target if ask.tick else None, horizontal=horizontal)
         st["asked"] += 1
         try:
-            res = reader.adjudicate(crop, cands, site.pre, site.post, horizontal, pg)
+            res = reader.adjudicate(crop, ask, horizontal, pg)
         except Exception as e:
             it.note += f" · 3차 판별 실패({str(e)[:40]})"; st["undecided"] += 1; continue
         choice = (res.choice or "").strip(); ev = (res.evidence or "")[:60]
         from ..adjudicate import window_ok
         if choice and not window_ok(getattr(res, "window", "") or "", site.pre, choice, site.post):
             it.note += f" · 3차 판별: 조각 위치가 어긋나 보류(보인 글: {(res.window or '')[:10]})"; st["undecided"] += 1; continue
+        if blind and choice in cands and hasattr(reader, "identify"):
+            try:
+                rb = reader.identify(crop, GlyphAsk(candidates=(), pos=ask.pos, k=ask.k or max(1, len(choice)), count=ask.count, measured=ask.measured, tick=ask.tick), horizontal, pg)
+                got = (rb.choice or "").strip()
+            except Exception as e:
+                it.note += f" · 3차 판별: 눈가림 재확인 실패({str(e)[:30]})라 보류"; st["undecided"] += 1; continue
+            if not blind_agrees(got, choice, cands):
+                it.note += f" · 3차 판별: 눈가림 답 「{got or '?'}」 ≠ 객관식 「{choice}」라 보류"; st["undecided"] += 1; st["blind_rejected"] += 1; continue
         if choice == hk and hk != it.ocr:
             it.kind, it.witness = "D", (it.witness + "+" if it.witness else "") + "glyph=hwpx"
             it.note = f"3차 판별: 인쇄 자형이 HWPX 글자 「{it.hwpx}」({ev}) — 차이에서 뺌"; st["hwpx"] += 1
@@ -299,8 +351,11 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
         reader = glyph_reader(args)
         if reader is not None:
             from .. import prompts
-            gst = adjudicate_items(items, work=work, doc=pdf_doc, reader=reader, horizontal=(prompts.MODE == "horizontal_zh"), dpi=getattr(args, "dpi", 300), policy=policy)
-            log(f"자형 3차 판별: {gst['asked']}곳 물음 → 인쇄가 HWPX 글자 {gst['hwpx']}(차이에서 뺌) · 판독 글자 {gst['ocr']}(교정 후보로) · 못 가림 {gst['undecided']}" + (f" · 자리 못 찾음 {gst['unlocated']}" if gst.get("unlocated") else ""))
+            gst = adjudicate_items(items, work=work, doc=pdf_doc, reader=reader, horizontal=(prompts.MODE == "horizontal_zh"), dpi=getattr(args, "dpi", 300), policy=policy,
+                                   min_px=getattr(args, "adjudicate_min_px", None), blind=bool(getattr(args, "adjudicate_blind", False)))
+            log(f"자형 3차 판별: {gst['asked']}곳 물음 → 인쇄가 HWPX 글자 {gst['hwpx']}(차이에서 뺌) · 판독 글자 {gst['ocr']}(교정 후보로) · 못 가림 {gst['undecided']}"
+                + (f" · 자리 못 찾음 {gst['unlocated']}" if gst.get("unlocated") else "") + (f" · 저해상이라 묻지 않음 {gst['lowres']}" if gst.get("lowres") else "")
+                + (f" · 눈가림 재확인 불일치 {gst['blind_rejected']}" if gst.get("blind_rejected") else ""))
     sm = summary(items)
     log(f"대조: 자동 교정 {sm['auto']}건 · 표시만 {sm['mark']}건 (A {sm['A']} · B1 {sm['B1']} · B2 {sm['B2']} · C {sm['C']})" + (f" · {note}" if note else ""))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
@@ -310,18 +365,32 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
         if not items:
             log("차이가 없어 고칠 것이 없습니다.")
         else:
-            ed = Editor(book, memo=not getattr(args, "no_memo", False))
+            mode = memo_mode(args)
+            ed = Editor(book, memo=mode, heads={x.para for x in anchors})   # 이번 실행의 구획 기준(구획 시작 포함, PDF 책갈피 제목·고른 스타일)
             applied = ed.apply(items)
+            if mode != "inline":
+                ed.add_legend_memo()                                   # 범례 메모 하나(이미 있으면 그대로)
             out = getattr(args, "out", None) or corrected_path(book.path)
             saved = ed.save_copy(out)
             ok = sum(1 for x in applied if x.ok); bad = [x for x in applied if not x.ok]
+            from ..grades import collate_grade
+            gc = {"green": 0, "blue": 0, "red": 0}
+            for x in applied:
+                g = collate_grade(x.item) if x.ok else None
+                if g: gc[g] += 1
+            n_memo = sum(1 for x in applied if x.ok and x.memo)   # 실제로 단 메모·글 속 표기만('이미 표시된 자리'·제목 문단·표기 자리 없음은 세지 않음)
             log(f"반영 {ok}건" + (f", 실패 {len(bad)}건" if bad else "") + f" → 저장: {saved}")
+            log(f"표시: 초록 {gc['green']} · 파랑 {gc['blue']} · 빨강 {gc['red']} · 메모 {n_memo}건({ {'notice': '고지 사항', 'all': '모든 표시', 'inline': '글 속 〔〕'}[mode] })"
+                + (" — 원래 글자·근거는 보고 화면(html·json)에" if mode != "all" else ""))
+            n_hidden = sum(1 for x in applied if x.ok and x.hidden)
+            if n_hidden:
+                log(f"제목 문단의 표시 {n_hidden}건(지운 글자·폭 없는 표시)은 문서에 보이지 않고 보고(html)에만 있습니다 — 구획 이름이 바뀌지 않게 글 속 표기를 넣지 않음")
             for x in bad[:5]:
                 log(f"  실패: {x.item.kind} 문단 {x.item.para} [{x.item.start}:{x.item.end}] — {x.note}")
-    rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path))
+    rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path), mode=memo_mode(args))
     (out_dir / f"{stem}.json").write_text(json.dumps({"section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
                                                       "hwpx_file": str(book.path), "hwpx_paragraphs": len(book.paragraphs), "witness_stats": wst, "glyph_stats": gst,
-                                                      "summary": sm, "items": [asdict(i) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                                      "summary": sm, "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"보고: {rep}")
     return {"section": a.name, "pages": pages, "summary": sm, "report": rep, "saved": saved, "items": items}
@@ -330,13 +399,14 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
 def run_all(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matches) -> dict:
     """구획 전체를 차례로 대조(--apply 면 교정본 하나에 쌓는다). 구획은 급과 무관하게 바로 다음 기준 직전까지(겹침·빠짐 없음).
     PDF 쪽을 못 찾는 구획은 건너뛰고, 끝에 요약(collate/_전체_요약.html·json)을 남긴다."""
-    from ..cli import CANCEL
-    results = []; skipped = []; t0 = time.time()
+    from ..cli import CANCEL, progress
+    results = []; skipped = []; t0 = time.time(); stopped = False; failed = ""
     total = {"A": 0, "B1": 0, "B2": 0, "C": 0, "auto": 0, "mark": 0}
     log(f"▶ 전체 교정: 구획 {len(anchors)}개 · 정책 {POLICIES.get(getattr(args, 'policy', 'all'), '')} · {'교정본에 반영' if getattr(args, 'apply', False) else '대조만'}")
     for i, a in enumerate(anchors):
+        progress("collate", i, len(anchors))
         if CANCEL.is_set():
-            log("중지 요청으로 멈춤."); break
+            stopped = True; log("중지 요청으로 멈춤."); break
         sec = book.section(anchors, i, flat=True)
         if sec.n_paras <= 0 or not any(t.strip() for t in book.section_texts(sec)[1:]):
             continue                                            # 제목뿐인 구획(장 제목 등)
@@ -349,23 +419,36 @@ def run_all(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matche
             for k in total:
                 total[k] += r["summary"].get(k, 0)
             log(f"  [{i + 1}/{len(anchors)}] {a.name[:24]}: 자동 {r['summary']['auto']} · 표시 {r['summary']['mark']} · 누적 자동 {total['auto']} 표시 {total['mark']} · {time.time() - t0:.0f}초")
+        except Cancelled:
+            stopped = True; log(f"중지 요청으로 멈춤 — 「{a.name[:24]}」 구획은 판독 도중이라 대조하지 않았습니다(끝난 쪽 판독은 남음)."); break
+        except ReadFailed as e:
+            failed = str(e); skipped.append(f"{a.name} (판독 오류)")
+            log(f"오류: 「{a.name[:24]}」 구획의 쪽 판독이 오류로 끝나 전체 교정을 멈춥니다 — 위 오류(키·한도·모델 이름)를 고친 뒤 다시 누르면 이어서 합니다."); break
         except Exception as e:
             skipped.append(f"{a.name} (오류: {str(e)[:60]})"); log(f"  {a.name}: 건너뜀 — {str(e)[:100]}")
+    if not stopped and not failed:
+        progress("collate", len(anchors), len(anchors))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
     esc = html.escape
+    from ..grades import collate_grade
+    gsum = {"green": 0, "blue": 0, "red": 0}
+    for r in results:
+        for it in r.get("items") or []:
+            g = collate_grade(it)
+            if g: gsum[g] += 1
     rows = "".join(f"<tr><td>{esc(r['section'])}</td><td>{r['pages'][0]}~{r['pages'][1]}</td><td>{r['summary']['auto']}</td><td>{r['summary']['mark']}</td>"
                    f"<td>{r['summary']['A']}</td><td>{r['summary']['B1']}</td><td>{r['summary']['B2']}</td><td>{r['summary']['C']}</td><td><a href='{esc(Path(r['report']).name)}'>보고</a></td></tr>" for r in results)
     doc_html = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>전체 교정 요약</title><style>body{{font-family:'Noto Serif KR',serif;background:#f4efe4;color:#231c18;margin:0}}"
                 f"header{{padding:12px 20px;background:#3b1b14;color:#f1e7cf}}main{{padding:16px 20px}}table{{border-collapse:collapse;background:#fff;font-size:13px}}td,th{{border:1px solid #d9d2c3;padding:4px 8px}}</style></head><body>"
-                f"<header><h1 style='font-size:18px;margin:0'>전체 교정 요약 — {esc(Path(book.path).name)}</h1><small>구획 {len(results)}개 대조 · 건너뜀 {len(skipped)}개 · 자동 교정 {total['auto']} · 표시만 {total['mark']}"
+                f"<header><h1 style='font-size:18px;margin:0'>전체 교정 요약 — {esc(Path(book.path).name)}</h1><small>{'중지로 멈춤 · ' if stopped else ('판독 오류로 멈춤 · ' if failed else '')}표시 초록 {gsum['green']} · 파랑 {gsum['blue']} · 빨강 {gsum['red']} · 구획 {len(results)}개 대조 · 건너뜀 {len(skipped)}개 · 자동 교정 {total['auto']} · 표시만 {total['mark']}"
                 f" · {time.strftime('%Y-%m-%d %H:%M')}</small></header><main><table><tr><th>구획</th><th>PDF 쪽</th><th>자동</th><th>표시</th><th>A</th><th>B1</th><th>B2</th><th>C</th><th></th></tr>{rows}</table>"
                 + (f"<h3>건너뛴 구획(PDF 쪽을 못 찾음·오류)</h3><p>{esc(' · '.join(skipped))}</p>" if skipped else "") + "</main></body></html>")
     (out_dir / "_전체_요약.html").write_text(doc_html, encoding="utf-8")
     (out_dir / "_전체_요약.json").write_text(json.dumps({"sections": [{"section": r["section"], "pages": r["pages"], "summary": r["summary"], "saved": r["saved"]} for r in results],
-                                                        "skipped": skipped, "total": total, "at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=1), encoding="utf-8")
-    log(f"전체 교정 끝: 구획 {len(results)}개 · 자동 교정 {total['auto']}건 · 표시만 {total['mark']}건 · 건너뜀 {len(skipped)}개 · {time.time() - t0:.0f}초"
+                                                        "skipped": skipped, "total": total, "grades": gsum, "stopped": stopped, "failed": failed, "at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=1), encoding="utf-8")
+    log(f"전체 교정 {'중지' if stopped else ('오류로 멈춤' if failed else '끝')}: 구획 {len(results)}개 · 자동 교정 {total['auto']}건 · 표시만 {total['mark']}건 · 건너뜀 {len(skipped)}개 · {time.time() - t0:.0f}초"
         + (f" · 교정본 {results[-1]['saved']}" if results and results[-1].get("saved") else "") + f" · 요약 {out_dir / '_전체_요약.html'}")
-    return {"results": results, "skipped": skipped, "total": total}
+    return {"results": results, "skipped": skipped, "total": total, "stopped": stopped, "failed": failed}
 
 
 def corrected_path(hwpx_path: str) -> str:
@@ -401,15 +484,23 @@ def cmd_collate(args):
     if not anchors:
         log("구획 기준을 찾지 못했습니다. HWPX 에 책갈피·제목 스타일이 없고 PDF 책갈피 이름도 본문에서 찾지 못했습니다. "
             "--anchor-source pdf 로 다시 하거나, 한컴에서 제목에 '제목' 스타일 또는 책갈피를 넣어 주십시오."); return 2
+    from ..cli import progress
     if getattr(args, "all", False):
-        run_all(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches)
-        return 0
+        r = run_all(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches) or {}
+        return 130 if r.get("stopped") else (1 if r.get("failed") else 0)   # 중지·판독 오류로 멈추면 '완료'로 보이지 않게
     ai = getattr(args, "anchor_index", None)
     if ai:
         if not 1 <= ai <= len(anchors):
             log(f"구획 번호 {ai} 가 범위(1~{len(anchors)}) 밖입니다."); return 2
-        run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=ai - 1)
-        return 0
+        progress("collate", 0, 1)
+        try:
+            run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=ai - 1)
+        except Cancelled:
+            log("중지 요청으로 멈춤 — 쪽 판독 도중이라 이 구획은 대조하지 않았습니다(끝난 쪽 판독은 남음)."); return 130
+        except ReadFailed as e:
+            log(f"오류: 쪽 판독이 끝나지 않아 이 구획을 대조하지 못했습니다 — {e}"); return 1
+        progress("collate", 1, 1)
+        return 0                                                 # 판독이 끝난 뒤 눌린 [중지]는 이 구획을 마저 끝내고 저장했으므로 완료
     if getattr(args, "list", False) or not getattr(args, "section", None):
         log(list_text(anchors, pdf_anchors, matches, limit=getattr(args, "limit", 0) or 0)); return 0
     hits = find_anchor(anchors, args.section)
@@ -421,5 +512,10 @@ def cmd_collate(args):
             log(f"  {i}. {h.name} (문단 {h.para}, 급 {h.level})")
         return 2
     a = hits[(getattr(args, "nth", 1) or 1) - 1]
-    run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=anchors.index(a))
+    try:
+        run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=anchors.index(a))
+    except Cancelled:
+        log("중지 요청으로 멈춤 — 쪽 판독 도중이라 이 구획은 대조하지 않았습니다(끝난 쪽 판독은 남음)."); return 130
+    except ReadFailed as e:
+        log(f"오류: 쪽 판독이 끝나지 않아 이 구획을 대조하지 못했습니다 — {e}"); return 1
     return 0

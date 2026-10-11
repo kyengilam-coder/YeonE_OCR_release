@@ -135,6 +135,8 @@ def align_columns(c1: list[Column], c2: list[Column], min_sim: float = 0.55) -> 
 
 
 LONG_SEGMENT = 12   # 이 길이 이상의 구간이 한쪽에만 있으면 본문 안에 표시하지 않고 확인 항목으로만 남긴다
+LONG_SEG_NO_P2 = "2차 확대 판독이 이 구간을 읽지 못해 1차 판독만으로 들어감"   # 긴 구간 확인 항목 글 머리: 표시 없이 1차만 본문에 들어감
+LONG_SEG_DIFFER = "1차·2차 판독이 크게 달라 1차를 따름"                          # (context.settled_segments 가 이 두 머리로 바탕에서 뺀다)
 
 
 def _strip_map(cols: list[Column]) -> tuple[str, list[tuple[int, int]], dict[str, str]]:
@@ -190,8 +192,7 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
             ctx_col = cols[ci].text
             if (len(sa_t) >= LONG_SEGMENT and not sb_t) or (len(sb_t) >= LONG_SEGMENT and not sa_t) or (len(sa_t) >= LONG_SEGMENT and len(sb_t) >= LONG_SEGMENT):
                 stats["long_segments"] += 1
-                who = ("2차 확대 판독이 이 구간을 읽지 못해 1차 판독만으로 들어감" if not sb_t
-                       else ("1차 판독에 없고 2차에만 있어 본문에 넣지 않음" if not sa_t else "1차·2차 판독이 크게 달라 1차를 따름"))
+                who = (LONG_SEG_NO_P2 if not sb_t else ("1차 판독에 없고 2차에만 있어 본문에 넣지 않음" if not sa_t else LONG_SEG_DIFFER))
                 shown = sa_t if sa_t else sb_t
                 merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=ci + 1, position=_pos(k, len(ctx_col)),
                     context=f"{who}({len(shown)}자): 「{shown[:40]}{'…' if len(shown) > 40 else ''}」" + (f" ↔ 2차 「{sb_t[:40]}」" if sa_t and sb_t else "") + " — 열이 빠졌거나 열 경계가 어긋났는지 원본 확인"))

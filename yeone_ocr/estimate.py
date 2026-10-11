@@ -156,11 +156,14 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
                     b["prompt_tokens"] += uu.get("prompt_tokens", 0); b["cached_tokens"] += uu.get("cached_tokens", 0); b["calls"] += uu.get("calls", 0)
                     b["out"] += uu.get("output_tokens", 0) + uu.get("thinking_tokens", 0)
             for name, b in buckets.items():
-                pr = resolve_price(name, prices) or p1
+                base_name = name.split(" (")[0]                                   # "gemini-2.5-pro (3차)" → 단가는 모델 이름으로
+                pr = resolve_price(base_name, prices) or p1
                 scale = len(todo) / k
                 c = _cost((b["prompt_tokens"] - b["cached_tokens"]) * scale, b["cached_tokens"] * scale, b["out"] * scale, pr)
                 usd_low += c * 0.8; usd_high += c * 1.25
-                out["rows"].append({"label": "1차 · 쪽 전체 판독" if _norm_model(name) == _norm_model(model) or len(buckets) == 1 else "2차 · 확대 조각 확인",
+                label = ("3차 · 글자 판별" if "(3차" in name else
+                         ("1차 · 쪽 전체 판독" if _norm_model(base_name) == _norm_model(model) or len(buckets) == 1 else "2차 · 확대 조각 확인"))
+                out["rows"].append({"label": label,
                                     "model": name, "calls": round(b.get("calls", 0) * scale),
                                     "in_low": round(b["prompt_tokens"] * scale * 0.85), "in_high": round(b["prompt_tokens"] * scale * 1.15),
                                     "out_low": round(b["out"] * scale * 0.7), "out_high": round(b["out"] * scale * 1.3),

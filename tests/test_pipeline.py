@@ -364,6 +364,83 @@ if __name__ == "__main__":
 
 
 class GuiConfig(unittest.TestCase):
+    def test_work_dir_names_do_not_collide(self):
+        """같은 이름의 PDF·이미지·이미지 폴더가 한곳에 있어도 결과 폴더(판독 기록)가 섞이지 않는다."""
+        import tempfile
+        from yeone_ocr.gui import work_dir_for, IMAGE_EXTS
+        from yeone_ocr.pdfio import IMAGE_EXTS as PDFIO_EXTS
+        self.assertEqual(IMAGE_EXTS, PDFIO_EXTS)
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "book"))
+            names = {work_dir_for(os.path.join(td, n)).name for n in ("book.pdf", "book.png", "book.jpg", "book")}
+            self.assertEqual(names, {"book_YeonE_OCR", "book_png_YeonE_OCR", "book_jpg_YeonE_OCR", "book_이미지_YeonE_OCR"})
+
+    def test_cli_default_work_dir_follows_gui_rule(self):
+        """명령줄 기본 결과 폴더(--work 없이)도 창과 같은 규칙: book.pdf·book.png·book/ 이 work/book 하나에 섞이지 않는다."""
+        import tempfile
+        from yeone_ocr.state import Work
+        from yeone_ocr.gui import work_dir_for
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as td:
+            os.chdir(td)
+            try:
+                os.makedirs("book")
+                dirs = {n: Work(n).dir for n in ("book.pdf", "book.png", "book.JPG", "book")}
+                self.assertEqual({n: str(d) for n, d in dirs.items()}, {"book.pdf": os.path.join("work", "book"), "book.png": os.path.join("work", "book_png"),
+                                                                       "book.JPG": os.path.join("work", "book_jpg"), "book": os.path.join("work", "book_이미지")})
+                for n, d in dirs.items():
+                    self.assertEqual(work_dir_for(n).name, d.name + "_YeonE_OCR")
+                self.assertEqual(Work("book.pdf", "elsewhere").dir, Path("elsewhere"))      # --work 를 주면 그대로
+            finally:
+                os.chdir(cwd)
+
+    def test_cli_hints_legacy_work_dir(self):
+        """예전 판은 이미지·이미지 폴더의 결과를 work/<이름> 에 썼다. 새 기본 폴더가 아직 없고 그 옛 폴더에 이 입력의 기록이 있으면
+        --work 로 이어 쓰라고 한 줄 알린다(저절로 옮겨 쓰지 않는다). 같은 이름의 PDF 결과는 가리키지 않는다."""
+        import contextlib, tempfile
+        from yeone_ocr import cli
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as td:
+            os.chdir(td)
+            try:
+                os.makedirs("book")
+                for n in ("scan.png", "doc.png", os.path.join("book", "p1.png")):
+                    Image.new("L", (60, 80), 255).save(n)
+                for d, f in (("scan", "scan.png"), ("book", "book"), ("doc", "doc.pdf")):        # 예전 판의 결과 폴더(doc 은 같은 이름의 PDF 것)
+                    os.makedirs(os.path.join("work", d, "readings"))
+                    Path("work", d, "state.json").write_text(json.dumps({"file": f, "pages": {}}), encoding="utf-8")
+                def run(*a):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        self.assertEqual(cli.main(["report", *a]), 0)
+                    return buf.getvalue()
+                self.assertNotIn("예전 판", run("scan.png", "--work", "elsewhere"))           # --work 를 주면 알리지 않는다
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.main(["inspect", "scan.png"]), 0)
+                hint = [l for l in buf.getvalue().splitlines() if "예전 판" in l]                  # 결과 폴더를 만들지 않는 명령에도 맞는 말로, 이름의 받침과 상관없는 조사로
+                self.assertEqual(hint, ["참고: 예전 판의 결과 폴더가 있습니다: " + os.path.join("work", "scan") + ' — 그 판독 기록을 이어 쓰려면 --work "'
+                                        + os.path.join("work", "scan") + '" 을(를) 붙이십시오.'])
+                out = run("scan.png")
+                self.assertEqual(out.count("예전 판"), 1); self.assertIn('--work "' + os.path.join("work", "scan") + '"', out)
+                self.assertTrue(os.path.isdir(os.path.join("work", "scan_png")))              # 새 기본 폴더로 간다(저절로 옮기지 않음)
+                self.assertFalse(os.path.exists(os.path.join("work", "scan", "report.md")))
+                self.assertNotIn("예전 판", run("scan.png"))                                   # 새 폴더가 생긴 뒤에는 알리지 않는다
+                self.assertIn('--work "' + os.path.join("work", "book") + '"', run("book"))
+                self.assertNotIn("예전 판", run("doc.png"))                                    # work/doc 은 doc.pdf 의 결과
+            finally:
+                os.chdir(cwd)
+
+    def test_memo_tips_name_real_options(self):
+        """도움말·힌트가 '모든 표시에 …' 로 가리키는 선택지가 실제 메모 콤보 선택지에 있다."""
+        import re
+        from yeone_ocr import gui
+        from yeone_ocr.collate.labels import MEMO_MODES
+        quoted = re.findall(r"'(모든 표시에[^']*)'", Path(gui.__file__).read_text(encoding="utf-8"))
+        self.assertTrue(quoted)
+        for q in quoted:
+            self.assertTrue(any(v.startswith(q) for v in MEMO_MODES.values()), q)
+
     def test_upgrade_old_config_adopts_speed_defaults(self):
         from yeone_ocr.gui import upgrade_config, DEFAULTS, SPEED_DEFAULTS_VERSION
         old = dict(DEFAULTS); old.update({"workers": 3, "second_model": "", "checkpoint": 20}); old.pop("speed_defaults", None)
@@ -378,6 +455,13 @@ class GuiConfig(unittest.TestCase):
         new = {"speed_defaults": SPEED_DEFAULTS_VERSION, "workers": 2, "second_model": ""}
         up3 = upgrade_config(new)
         self.assertEqual(up3["workers"], 2); self.assertEqual(up3["second_model"], "")
+        # 0.6.2: 조각 고해상 켬/끔 → 3단. load_config 처럼 DEFAULTS(media_res=high) 를 먼저 섞어도 '끔' 이 '기본' 으로 간다
+        off = dict(DEFAULTS); off.update({"media_high": False, "speed_defaults": 4}); on = dict(DEFAULTS); on.update({"media_high": True, "speed_defaults": 4})
+        self.assertEqual((upgrade_config(off)["media_res"], upgrade_config(on)["media_res"]), ("default", "high"))
+        self.assertNotIn("media_high", upgrade_config(off))
+        keep = dict(DEFAULTS); keep.update({"media_res": "ultra_high", "speed_defaults": SPEED_DEFAULTS_VERSION})
+        self.assertEqual(upgrade_config(keep)["media_res"], "ultra_high")
+        self.assertEqual(upgrade_config({"media_res": "weird", "speed_defaults": SPEED_DEFAULTS_VERSION})["media_res"], "high")
 
 
 class CheckList(unittest.TestCase):
@@ -567,20 +651,29 @@ class Adjudicate(unittest.TestCase):
         rec = self._rec(); img = Image.new("L", (900, 1300), 255)
 
         class Fake:
+            """판독기는 앞뒤 글자를 받지 못한다(눈가림) — 자리 차례로 답한다: 1번 人, 2번 入, 3번(曰/日) 못 가림."""
             def __init__(self): self.calls = []
-            def adjudicate(self, crop, candidates, pre, post, horizontal, pdf_page):
-                self.calls.append((candidates, pre, post, crop.size))
-                if candidates == ["入", "人"] and pre.endswith("能"):
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                self.calls.append((ask, crop.size))
+                n = len(self.calls)
+                if n == 1:
                     return GlyphChoice(choice="人", evidence="왼쪽 삐침이 위에서 시작")       # 인쇄가 人인 자리
-                if candidates == ["入", "人"]:
+                if n == 2:
                     return GlyphChoice(choice="入", evidence="오른쪽 삐침이 위로 솟음")
                 return GlyphChoice(choice="", evidence="획이 뭉개짐")                           # 曰/日 은 못 가림
         fake = Fake()
         rec = adjudicate_page(rec, img, fake, horizontal=True)
-        self.assertEqual(len(fake.calls), 3); self.assertTrue(all(sz[0] > 4 and sz[1] > 4 for *_, sz in fake.calls))
+        self.assertEqual(len(fake.calls), 3); self.assertTrue(all(sz[0] > 4 and sz[1] > 4 for _, sz in fake.calls))
+        asks = [a for a, _ in fake.calls]
+        self.assertEqual([set(a.candidates) for a in asks], [{"入", "人"}, {"入", "人"}, {"曰", "日"}])
+        self.assertTrue(all(a.pos == 3 and not a.measured and not a.tick for a in asks))                 # 균등 분할: 어림 순번(앞 두 글자 뒤), 눈금 없음
+        self.assertFalse(any(hasattr(a, "pre") or hasattr(a, "post") for a in asks))                  # 질문에 앞뒤 글자 칸이 없다
         m = PageReading.model_validate(rec["merged"]); body = region_text(m.regions[0])
         self.assertIn("能人阴分", body); self.assertIn("色赤入心", body); self.assertIn("〔曰/日〕", body)
-        self.assertEqual(rec["adjudicate_stats"], {"sites": 3, "decided": 2, "undecided": 1, "a": 1, "b": 1, "failed": 0})
+        st = rec["adjudicate_stats"]
+        self.assertEqual({k: st[k] for k in ("sites", "decided", "undecided", "a", "b", "failed")}, {"sites": 3, "decided": 2, "undecided": 1, "a": 1, "b": 1, "failed": 0})
+        self.assertEqual(st["loc"], {"uniform": 3})                                                   # 빈 쪽 이미지·글자층 없음 → 균등 분할
+        self.assertTrue(all(a["loc"] == "uniform" for a in rec["adjudications"]))
         self.assertTrue(any("3차 판별: 「人」 확정" in u.context for u in m.uncertain))
         # 비교 다시 계산(원본 pass1 에서 다시 병합) 뒤에도 판별 결과를 다시 적용할 수 있다
         fresh = PageReading.model_validate(rec["pass1"])
@@ -589,5 +682,670 @@ class Adjudicate(unittest.TestCase):
 
     def test_prompt_has_glyph_hint(self):
         from yeone_ocr.prompts import adjudicate_prompt
-        t = adjudicate_prompt(["入", "人"], "肠，能", "阴分", True, 430)
-        self.assertIn("入", t); self.assertIn("자형 단서", t); self.assertIn("문맥", t)
+        from yeone_ocr.schema import GlyphAsk
+        t = adjudicate_prompt(GlyphAsk(candidates=("入", "人"), pos=3, count=5, measured=True, tick=True), True, 430)
+        self.assertIn("入", t); self.assertIn("자형 단서", t); self.assertIn("왼쪽에서 3번째", t); self.assertIn("눈금", t)
+
+
+def _site_ctx(rec):
+    """자리 번호(1부터) → (앞 글자, 뒤 글자). 판독기는 앞뒤 글자를 받지 못하니(눈가림) 가짜 판독기가 창(w)을 꾸밀 때 테스트가 직접 꺼낸다."""
+    from yeone_ocr.adjudicate import find_sites
+    from yeone_ocr.schema import PageReading
+    return {str(i): (s.pre, s.post) for i, s in enumerate(find_sites(PageReading.model_validate(rec["merged"])), 1)}
+
+
+class AdjudicateBatch(unittest.TestCase):
+    """0.6.2 — 3차 판별 묶음 호출·낱개 재질문·보완 판독기·글자 자리 실측."""
+    def _rec(self):
+        return Adjudicate._rec(self)
+
+    def test_batch_then_singles_and_fallback(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import PageReading, GlyphChoice, region_text
+        rec = self._rec(); img = Image.new("L", (900, 1300), 255)
+
+        class Batch:
+            """묶음 호출: 1번 자리는 답하고, 2번은 창(w)이 엉뚱하게(조각 번호 섞임), 3번은 빠뜨린다. 낱개 호출은 2번(入/人)만 가린다."""
+            model = "flash"
+            def __init__(self): self.many = []; self.single = []
+            def adjudicate_many(self, crops, horizontal, pdf_page):
+                self.many.append([sid for sid, *_ in crops])
+                return {"1": GlyphChoice(choice="人", evidence="삐침", window="能人阴"), "2": GlyphChoice(choice="入", evidence="x", window="唐容川曰")}
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                self.single.append(set(ask.candidates))
+                if "入" in ask.candidates:
+                    return GlyphChoice(choice="入", evidence="솟음", window="色赤入心")
+                return GlyphChoice(choice="", evidence="뭉개짐", window="")
+
+        class Pro:
+            model = "pro"
+            def __init__(self): self.calls = []
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                self.calls.append(set(ask.candidates))
+                return GlyphChoice(choice="曰", evidence="가로획이 닿지 않음", window="唐容川曰：")
+
+        b, p = Batch(), Pro()
+        rec = adjudicate_page(rec, img, b, horizontal=True, batch=8, fallback_reader=p)
+        self.assertEqual(b.many, [["1", "2", "3"]])                                   # 한 호출에 세 자리
+        self.assertEqual(b.single, [{"入", "人"}, {"曰", "日"}])                         # 2번(창 불일치)·3번(빠짐)만 낱개
+        self.assertEqual(p.calls, [{"曰", "日"}])                                      # 첫 판독기가 못 가린 3번만 보완 판독기로
+        m = PageReading.model_validate(rec["merged"]); body = region_text(m.regions[0])
+        self.assertIn("能人阴分", body); self.assertIn("色赤入心", body); self.assertIn("唐容川曰：", body)
+        st = rec["adjudicate_stats"]
+        self.assertEqual((st["sites"], st["decided"], st["undecided"], st["batched"], st["fallback_decided"]), (3, 3, 0, 1, 1))
+        models = [a["model"] for a in rec["adjudications"]]
+        self.assertEqual(models, ["flash", "flash", "pro"])
+
+    def test_batch_size_one_means_singles_and_fatal_propagates(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice
+        from yeone_ocr.reader_gemini import ReaderError
+
+        class Single:
+            model = "m"
+            def __init__(self): self.n = 0
+            def adjudicate_many(self, *a, **k): raise AssertionError("batch=1 이면 묶음을 부르지 않는다")
+            def adjudicate(self, *a, **k):
+                self.n += 1; return GlyphChoice(choice="", evidence="")
+        s = Single(); rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), s, True, batch=1)
+        self.assertEqual(s.n, 3); self.assertEqual(rec["adjudicate_stats"]["undecided"], 3)
+
+        class Fatal:
+            model = "m"
+            def adjudicate_many(self, *a, **k): raise ReaderError("키가 틀림", fatal=True)
+            def adjudicate(self, *a, **k): raise ReaderError("키가 틀림", fatal=True)
+        with self.assertRaises(ReaderError):
+            adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), Fatal(), True)
+
+        class Flaky:
+            model = "m"
+            def adjudicate(self, *a, **k): raise ReaderError("5회 시도 뒤에도 실패", fatal=False)
+        rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), Flaky(), True, batch=1)
+        self.assertEqual(rec["adjudicate_stats"]["failed"], 3)
+        self.assertTrue(all(a["evidence"].startswith("판별 실패") for a in rec["adjudications"]))
+
+    def test_apply_choice_targets_the_right_duplicate_mark(self):
+        """같은 열에 같은 표시가 둘일 때 앞 자리가 미정이고 뒤 자리만 확정되면 뒤 자리를 바꾼다(이전엔 첫 표시를 바꿨다)."""
+        from yeone_ocr.adjudicate import find_sites, apply_choice, apply_adjudications
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, region_text
+        reg = Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="甲〔入/人〕乙丙〔入/人〕丁")])])
+        pr = PageReading(pdf_page=1, regions=[reg]); sites = find_sites(pr)
+        self.assertEqual([s.char_index for s in sites], [1, 4])
+        self.assertTrue(apply_choice(pr, sites[1], "人")); self.assertEqual(region_text(pr.regions[0]), "甲〔入/人〕乙丙人丁")
+        self.assertTrue(apply_choice(pr, sites[0], "入")); self.assertEqual(region_text(pr.regions[0]), "甲入乙丙人丁")
+        fresh = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="甲〔入/人〕乙丙〔入/人〕丁")])])])
+        from dataclasses import asdict
+        self.assertEqual(apply_adjudications(fresh, [{**asdict(sites[1]), "choice": "人"}]), 1)
+        self.assertEqual(region_text(fresh.regions[0]), "甲〔入/人〕乙丙人丁")
+
+    def test_same_marks_after_length_change_keep_their_choices(self):
+        """한 차례에서 길이가 바뀐 선택(〔效效/先〕→先) 뒤의 같은 표시 둘(〔再/後〕〔再/後〕)이 뒤바뀌지 않는다 — 판별 때도, 다시 적용할 때도.
+        기록마다 3차 차례 번호(run)를 적고, 다시 돌리면 다음 번호를 적는다(run 이 없는 예전 기록은 어림한 차례 다음)."""
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page, apply_adjudications
+        from yeone_ocr.grades import decided_positions
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, GlyphChoice
+        pr = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[
+            Column(col_from_right=1, text="〔效效/先〕〔再/後〕〔再/後〕速此虛其")])])])
+        img = Image.new("L", (900, 1300), 255); text = lambda p: p.regions[0].paragraphs[0].columns[0].text
+
+        class R:
+            """눈가림 판독기: 자리 차례대로 정해 둔 답을 낸다(빈 답 = 못 가림)."""
+            model = "m"
+            def __init__(self, answers): self.answers = list(answers)
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                return GlyphChoice(choice=self.answers.pop(0), evidence="획")
+        rec = adjudicate_page({"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}, img, R(["先", "再", "後"]), True)
+        m = PageReading.model_validate(rec["merged"]); self.assertEqual(text(m), "先再後速此虛其")
+        self.assertEqual([a["run"] for a in rec["adjudications"]], [1, 1, 1])
+        found, missing = decided_positions(m, rec["adjudications"])
+        self.assertEqual(([(f.start, f.entry["choice"]) for f in found], missing), ([(0, "先"), (1, "再"), (2, "後")], []))
+        fresh = PageReading.model_validate(rec["pass1"])                                          # 비교 다시 계산 뒤 다시 적용해도 같은 글
+        self.assertEqual(apply_adjudications(fresh, rec["adjudications"]), 3); self.assertEqual(text(fresh), "先再後速此虛其")
+        # 다시 돌린 쪽: 앞 차례(run 없는 예전 기록)는 先 만, 다음 차례는 둘째 〔再/後〕 만 정함 → 앞 차례의 길이 차를 다음 차례에 다시 더하지 않는다
+        rec = adjudicate_page({"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}, img, R(["先", "", ""]), True)
+        for a in rec["adjudications"]:
+            a.pop("run")
+        rec = adjudicate_page(rec, img, R(["", "後"]), True)
+        self.assertEqual([a.get("run") for a in rec["adjudications"]], [None, None, None, 2, 2])
+        m = PageReading.model_validate(rec["merged"]); self.assertEqual(text(m), "先〔再/後〕後速此虛其")
+        fresh = PageReading.model_validate(rec["pass1"])
+        self.assertEqual(apply_adjudications(fresh, rec["adjudications"]), 2); self.assertEqual(text(fresh), "先〔再/後〕後速此虛其")
+        found, missing = decided_positions(m, rec["adjudications"])
+        self.assertEqual(([(f.start, f.entry["choice"]) for f in found], missing), ([(0, "先"), (6, "後")], []))
+
+    def test_batch_failure_does_not_fan_out_and_missing_site_id_is_dropped(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import MultiGlyphChoice
+        from yeone_ocr.reader_gemini import ReaderError
+
+        class Quota:
+            model = "m"
+            def __init__(self): self.single = 0
+            def adjudicate_many(self, *a, **k): raise ReaderError("5회 시도 뒤에도 실패: 한도", fatal=False)
+            def adjudicate(self, *a, **k): self.single += 1; raise AssertionError("묶음이 실패하면 낱개로 번지지 않는다")
+        q = Quota(); rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), q, True, batch=8)
+        self.assertEqual(q.single, 0); self.assertEqual(rec["adjudicate_stats"]["failed"], 3)
+        self.assertTrue(all(a["evidence"].startswith("판별 실패: 묶음 호출 실패") for a in rec["adjudications"]))
+        r = MultiGlyphChoice.model_validate_json('{"items":[{"s":"1","c":"入"},{"c":"人"}]}')         # 자리 번호가 빠진 항목은 응답을 깨지 않고 버려진다
+        self.assertEqual([i.site_id for i in r.items], ["1", ""])
+
+    def test_batch_undecided_with_foreign_window_is_reasked(self):
+        """묶음 응답이 c="" 이어도 보인 글(w)이 앞뒤 글자와 전혀 안 맞으면 조각 번호가 섞인 것이라 낱개로 다시 묻는다."""
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice
+        class R:
+            model = "m"
+            def __init__(self): self.single = []
+            def adjudicate_many(self, crops, h, p):
+                return {"1": GlyphChoice(choice="", evidence="", window="全然다른글"), "2": GlyphChoice(choice="", evidence="뭉개짐", window="色赤?心"), "3": GlyphChoice(choice="", evidence="", window="")}
+            def adjudicate(self, crop, ask, h, p):
+                self.single.append(set(ask.candidates)); return GlyphChoice(choice="人", evidence="획", window="能人阴")
+        r = R(); rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), r, True, batch=8)
+        self.assertEqual(r.single, [{"入", "人"}])                                                  # 1번만 다시(2번은 창이 맞는 진짜 미정, 3번은 창이 비어 검사 불가)
+        st = rec["adjudicate_stats"]; self.assertEqual((st["decided"], st["undecided"], st["batched"], st["batch_rechecked"]), (1, 2, 2, 1))
+
+    def test_out_of_candidate_answer_is_undecided_and_goes_to_fallback(self):
+        """후보 밖 글자(八)를 답하면 미정으로 다뤄 보완 판독기에 넘긴다. 보완 호출이 실패하면 첫 판독기의 답(근거)을 남긴다."""
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice
+        from yeone_ocr.reader_gemini import ReaderError
+        ctx = _site_ctx(self._rec())
+        class Flash:
+            model = "flash"
+            def adjudicate_many(self, crops, h, p): return {sid: GlyphChoice(choice="八", evidence="엉뚱", window=ctx[sid][0][-1:] + "八" + ctx[sid][1][:1]) for sid, _, _ in crops}
+            def adjudicate(self, *a, **k): raise AssertionError("창이 맞으니 낱개 재질문은 없다")
+        class Pro:
+            model = "pro"
+            def __init__(self): self.n = 0
+            def adjudicate_many(self, crops, h, p):
+                self.n += 1; return {sid: GlyphChoice(choice=a.candidates[0], evidence="획", window=ctx[sid][0][-1:] + a.candidates[0] + ctx[sid][1][:1]) for sid, _, a in crops}
+        pro = Pro(); rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), Flash(), True, batch=8, fallback_reader=pro)
+        st = rec["adjudicate_stats"]; self.assertEqual((pro.n, st["decided"], st["fallback_decided"], st["undecided"]), (1, 3, 3, 0))
+        self.assertEqual({a["model"] for a in rec["adjudications"]}, {"pro"})
+        class ProDown:
+            model = "pro"
+            def adjudicate_many(self, *a, **k): raise ReaderError("한도", fatal=False)
+        rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), Flash(), True, batch=8, fallback_reader=ProDown())
+        st = rec["adjudicate_stats"]; self.assertEqual((st["decided"], st["undecided"], st["failed"]), (0, 3, 0))
+        self.assertTrue(all(a["model"] == "flash" and "후보 밖 답(八)" in a["evidence"] and "보완 실패" in a["evidence"] for a in rec["adjudications"]))
+
+    def test_layer_mapping_refuses_index_beyond_line(self):
+        """글자층 줄이 열의 끝 글자를 빠뜨렸으면 대응을 포기한다(끝에서 잘린 창으로 엉뚱한 글자를 보지 않게)."""
+        from yeone_ocr.adjudicate import _map_index
+        self.assertIsNone(_map_index("abcdeX", "abcde", 5)); self.assertIsNone(_map_index("Xabcde", "abcde", 0))
+        self.assertEqual(_map_index("abcde", "abcde", 4), 4); self.assertEqual(_map_index("abXde", "abYde", 2), 2)
+
+    def test_stop_skips_remaining_batches(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice
+        calls = []
+        class R:
+            model = "m"
+            def adjudicate_many(self, crops, h, p): calls.append(len(crops)); return {sid: GlyphChoice(choice="", evidence="") for sid, *_ in crops}
+            def adjudicate(self, *a, **k): calls.append(1); return GlyphChoice(choice="", evidence="")
+        rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), R(), True, batch=2, should_stop=lambda: len(calls) >= 1)
+        self.assertEqual(calls, [2])                                                             # 첫 묶음 뒤 중지 → 남은 자리는 묻지 않고 기록도 남기지 않는다
+        st = rec["adjudicate_stats"]; self.assertEqual((st["failed"], st["undecided"], st["skipped"], st["batched"]), (0, 2, 1, 2))
+        self.assertEqual(len(rec["adjudications"]), 2)
+
+    def test_many_prompt_and_schema(self):
+        from yeone_ocr.prompts import adjudicate_many_prompt
+        from yeone_ocr.schema import MultiGlyphChoice, GlyphAsk
+        t = adjudicate_many_prompt([("1", GlyphAsk(("入", "人"), pos=3, count=5)), ("2", GlyphAsk(("曰", "日"), pos=2, count=4, measured=True))], True, 430)
+        self.assertIn("【1】", t); self.assertIn("【2】", t); self.assertIn("자형 단서", t); self.assertIn("어림", t); self.assertIn("2번째", t)
+        r = MultiGlyphChoice.model_validate_json('{"items":[{"s":"1","c":"人","e":"x","w":"能人阴"},{"s":"2","c":"","e":"","w":""}]}')
+        self.assertEqual([(i.site_id, i.choice) for i in r.items], [("1", "人"), ("2", "")])
+
+
+class GlyphLocate(unittest.TestCase):
+    """0.6.2 — 글자 자리 실측: 글자층 글자 상자 → 먹 띠·먹 구간 → 균등 분할. PyMuPDF 내장 CJK 글꼴로 실제 한자를 렌더해 잰다."""
+    TEXTS = ["入人曰日三川于干未末二八小州心火山水", "己已巳大太犬白自土士", "一二三四五六七八九十百千萬億", "生于水而長于土能入肝"]
+
+    def _page(self, vertical: bool, size: float = 22):
+        import pymupdf
+        from PIL import Image
+        doc = pymupdf.open(); page = doc.new_page(width=600, height=800)
+        for i, t in enumerate(self.TEXTS):
+            if vertical: page.insert_text((560 - i * 2 * size, 40), t, fontsize=size, fontname="china-ss", rotate=270)
+            else: page.insert_text((30, 60 + i * 2 * size), t, fontsize=size, fontname="china-ss")
+        pix = page.get_pixmap(dpi=300)
+        return doc, page, Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+
+    def _check(self, vertical: bool, size: float = 22):
+        from yeone_ocr.adjudicate import Site, locate_by_layer, locate_by_ink, glyph_box, glyph_window
+        from yeone_ocr.pdfio import layer_chars
+        from yeone_ocr.schema import frac_bbox
+        doc, page, im = self._page(vertical, size); Wp, Hp = page.rect.width, page.rect.height
+        lines = [l for l in layer_chars(doc, 1) if l["dir"] == ("v" if vertical else "h")]
+        self.assertEqual(["".join(c[0] for c in l["chars"]) for l in lines], self.TEXTS)      # 세로는 오른쪽 열부터, 가로는 위 줄부터
+        allb = [c[1] for l in lines for c in l["chars"]]
+        fr = (min(b[0] for b in allb) / Wp - 0.05, min(b[1] for b in allb) / Hp - 0.03, max(b[2] for b in allb) / Wp + 0.06, max(b[3] for b in allb) / Hp + 0.07)
+        bbox = frac_bbox(fr)                                                                 # 모델 좌표처럼 느슨한 영역 상자
+        hit = {"layer": 0, "ink": 0, "uniform": 0}; n = 0
+        for ci, ln in enumerate(lines):
+            txt = "".join(c[0] for c in ln["chars"]); L = len(txt)
+            for k, (ch, bb) in enumerate(ln["chars"]):
+                site = Site("r1", ci, len(lines), k, L, ch, "x", txt[max(0, k - 4):k], txt[k + 1:k + 5], ""); n += 1
+                cx, cy = (bb[0] + bb[2]) / 2 / Wp, (bb[1] + bb[3]) / 2 / Hp
+                for how, box in (("layer", locate_by_layer(site, bbox, txt, lines, (Wp, Hp), not vertical)),
+                                 ("ink", locate_by_ink(im, bbox, site, not vertical)), ("uniform", glyph_box(bbox, site, not vertical))):
+                    if box and box[0] <= cx <= box[2] and box[1] <= cy <= box[3]:
+                        hit[how] += 1
+        self.assertGreaterEqual(hit["layer"], 0.95 * n, hit); self.assertGreaterEqual(hit["ink"], 0.9 * n, hit)
+        self.assertGreater(hit["layer"], hit["uniform"], hit); self.assertGreater(hit["ink"], hit["uniform"], hit)
+        # glyph_window 는 글자층이 있으면 layer, 없으면 ink, 빈 이미지면 uniform
+        site = Site("r1", 1, len(lines), 3, len(self.TEXTS[1]), "大", "太", "己已巳", "太犬白自", "")
+        self.assertEqual(glyph_window(im, bbox, site, not vertical, self.TEXTS[1], lines, (Wp, Hp))[1], "layer")
+        self.assertEqual(glyph_window(im, bbox, site, not vertical, self.TEXTS[1], [], None)[1], "ink")
+        from PIL import Image
+        self.assertEqual(glyph_window(Image.new("L", (300, 300), 255), bbox, site, not vertical)[1], "uniform")
+
+    def test_vertical(self): self._check(True)
+    def test_horizontal(self): self._check(False)
+    def test_small_font_vertical(self): self._check(True, size=10.5)      # 실제 본문 크기(10.5pt·300dpi)에서도 二·三 획 틈이 글자를 가르지 않는다
+    def test_small_font_horizontal(self): self._check(False, size=10.5)
+
+    def test_frame_offset_of_embedded_scan(self):
+        """내장 스캔이 쪽보다 작은 사각형에 놓인 PDF: 글자층 pt 좌표는 쪽 기준, 쪽 이미지는 그 사각형 기준이라 틀(frame)로 바꿔야 맞는다."""
+        import pymupdf
+        from yeone_ocr.pdfio import page_frame, page_image
+        doc = pymupdf.open(); page = doc.new_page(width=400, height=600)
+        pix = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.IRect(0, 0, 370, 560), False); pix.clear_with(255)
+        page.insert_image(pymupdf.Rect(20, 30, 390, 590), pixmap=pix)                       # 쪽의 92%를 덮는 스캔(왼쪽 위 20,30 부터, 비율 같음)
+        fr = page_frame(doc, 1)
+        self.assertEqual([round(v) for v in fr], [20, 30, 370, 560])
+        self.assertEqual([round(v) for v in page_frame(pymupdf.open().new_page(width=400, height=600).parent, 1)], [0, 0, 400, 600])   # 내장 스캔이 없으면 쪽 전체
+        img, src = page_image(doc, 1); self.assertTrue(src.startswith("내장 스캔"), src)
+        # 글자 상자 (210,330)~(230,350)pt 는 틀 기준으로 가로 (210-20)/370 ≈ 0.51 — 쪽 기준(0.525)으로 나누면 1.4% 밀린다
+        from yeone_ocr.adjudicate import Site, locate_by_layer
+        lines = [{"dir": "h", "bbox": [30, 330, 390, 350], "chars": [[c, [30 + i * 20, 330, 50 + i * 20, 350]] for i, c in enumerate("一二三四五六七八九十")]}]
+        site = Site("r1", 0, 1, 9, 10, "十", "千", "七八九", "", "")
+        box = locate_by_layer(site, [500, 0, 600, 1000], "一二三四五六七八九十", lines, fr, True, span=1)
+        self.assertIsNotNone(box)
+        self.assertAlmostEqual((box[0] + box[2]) / 2, ((30 + 8.5 * 20 + 10) - 20) / 370, delta=0.02)   # 九·十 창의 가운데(틀 기준)
+
+    def test_layer_mapping_tolerates_misread_target(self):
+        """글자층이 목표 글자를 다르게 읽었어도(그래서 〔a/b〕 가 됐어도) 앞뒤 글자 대응으로 자리를 찾는다. 닮지 않은 줄은 고르지 않는다."""
+        from yeone_ocr.adjudicate import Site, locate_by_layer
+        lines = [{"dir": "h", "bbox": [10, 10, 190, 30], "chars": [[c, [10 + i * 18, 10, 28 + i * 18, 30]] for i, c in enumerate("行通乎小肠能人阴分治")]},
+                 {"dir": "h", "bbox": [10, 40, 190, 60], "chars": [[c, [10 + i * 18, 40, 28 + i * 18, 60]] for i, c in enumerate("色赤入心性下行而通也")]}]
+        site = Site("r1", 0, 2, 6, 10, "入", "人", "小肠能", "阴分治", "〔入/人〕")
+        box = locate_by_layer(site, [0, 0, 400, 1000], "行通乎小肠能入阴分治", lines, (200.0, 200.0), True, span=1)
+        self.assertIsNotNone(box); cx = (box[0] + box[2]) / 2 * 200
+        self.assertTrue(10 + 6 * 18 <= cx <= 28 + 6 * 18, cx)                                     # 7번째 글자(人) 자리
+        self.assertIsNone(locate_by_layer(site, [0, 0, 400, 1000], "全然다른글자들입니다", lines, (200.0, 200.0), True))
+
+
+class BlindAdjudicate(unittest.TestCase):
+    """0.6.5 — 3차 눈가림: 앞뒤 글자를 숨기고 순번·눈금으로 가리키며, 후보를 섞고, 저해상 자리는 묻지 않고, 원하면 후보 없이 재확인한다."""
+    def _rec(self):
+        return Adjudicate._rec(self)
+
+    def _ctx(self):
+        return _site_ctx(self._rec())
+
+    def test_prompts_carry_no_context(self):
+        """판독기가 받는 질문(GlyphAsk)으로 만든 프롬프트에 앞뒤 글자가 하나도 없다. 자형 전용 시스템 지시에는 문맥 단서가 없다."""
+        from PIL import Image
+        from yeone_ocr import prompts
+        from yeone_ocr.adjudicate import adjudicate_page, find_sites
+        from yeone_ocr.schema import GlyphChoice, PageReading
+        sent = []
+        class R:
+            model = "m"
+            def adjudicate_many(self, crops, h, p):
+                sent.append(prompts.adjudicate_many_prompt([(sid, a) for sid, _, a in crops], h, p)); return {}
+            def adjudicate(self, crop, ask, h, p):
+                sent.append(prompts.adjudicate_prompt(ask, h, p)); return GlyphChoice()
+        adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), R(), True, batch=8)
+        self.assertEqual(len(sent), 4)                                                            # 묶음 1 + 빠진 자리 낱개 3
+        allowed = set("".join(prompts.GLYPH_HINTS.values())) | {c for k in prompts.GLYPH_HINTS for c in k}
+        ctx_chars = {ch for s in find_sites(PageReading.model_validate(self._rec()["merged"])) for ch in s.pre + s.post
+                     if "\u4e00" <= ch <= "\u9fff" and ch not in allowed}
+        self.assertTrue(ctx_chars)
+        for t in sent:
+            self.assertFalse(ctx_chars & set(t), (ctx_chars & set(t), t[:200]))
+            self.assertIn("3번째", t)
+        sysp = prompts.glyph_system_prompt()
+        self.assertNotIn("장부 앞은", sysp); self.assertNotIn("生于", sysp); self.assertNotIn("출력 형식 규칙", sysp)
+        self.assertIn("지침 24", sysp); self.assertIn("入", sysp)
+        self.assertLess(len(sysp), 6000)                                                          # 캐시 문턱보다 짧다 → 캐시를 만들지 않는다
+        from yeone_ocr.schema import GlyphAsk
+        t = prompts.identify_prompt(GlyphAsk(pos=2, count=4), False, 3)
+        self.assertIn("후보는 주지 않는다", t); self.assertNotIn("후보:", t)
+
+    def test_candidate_order_is_seeded_and_mixed(self):
+        from yeone_ocr.adjudicate import candidate_order
+        orders = [candidate_order(["入", "人"], 12, "r1", 0, i) for i in range(40)]
+        self.assertEqual(orders, [candidate_order(["入", "人"], 12, "r1", 0, i) for i in range(40)])     # 같은 자리는 늘 같은 차례
+        self.assertEqual({o for o in orders}, {("入", "人"), ("人", "入")})                              # 자리에 따라 섞인다
+        self.assertEqual(candidate_order(["入", "入", ""], 1), ("入",))
+
+    def test_answer_field_order_is_window_evidence_choice(self):
+        from yeone_ocr.schema import GlyphChoice, MultiGlyphChoice
+        self.assertEqual(list(GlyphChoice.model_json_schema(by_alias=True)["properties"]), ["w", "e", "c"])
+        try:
+            from google.genai import client, _transformers
+        except Exception:
+            self.skipTest("google-genai 없음")
+        sc = _transformers.t_schema(client.Client(api_key="x")._api_client, MultiGlyphChoice)
+        self.assertEqual(sc.properties["items"].items.property_ordering, ["s", "w", "e", "c"])          # 모델에 그 차례로 쓰라고 전달된다
+
+    def test_measured_position_target_and_tick(self):
+        """실제 렌더한 한자 쪽: 글자층·먹 셈이 맞으면 순번과 대상 상자가 실측이고, 눈금은 조각 바깥 흰 띠에만 그려진다."""
+        import numpy as np
+        from yeone_ocr.adjudicate import Site, locate_glyph, glyph_crop
+        from yeone_ocr.pdfio import layer_chars
+        from yeone_ocr.schema import frac_bbox
+        g = GlyphLocate(); g.TEXTS = GlyphLocate.TEXTS
+        for vertical in (True, False):
+            doc, page, im = g._page(vertical, 10.5); Wp, Hp = page.rect.width, page.rect.height
+            lines = [l for l in layer_chars(doc, 1) if l["dir"] == ("v" if vertical else "h")]
+            allb = [c[1] for l in lines for c in l["chars"]]
+            bbox = frac_bbox((min(b[0] for b in allb) / Wp - 0.05, min(b[1] for b in allb) / Hp - 0.03, max(b[2] for b in allb) / Wp + 0.06, max(b[3] for b in allb) / Hp + 0.07))
+            n = ok_layer = ink_measured = ok_ink = 0
+            for ci, ln in enumerate(lines):
+                txt = "".join(c[0] for c in ln["chars"]); L = len(txt)
+                for k, (ch, bb) in enumerate(ln["chars"]):
+                    site = Site("r1", ci, len(lines), k, L, ch, "x", txt[max(0, k - 4):k], txt[k + 1:k + 5], ""); n += 1
+                    cx, cy = (bb[0] + bb[2]) / 2 / Wp, (bb[1] + bb[3]) / 2 / Hp
+                    w = locate_glyph(im, bbox, site, not vertical, txt, lines, (Wp, Hp))
+                    self.assertEqual(w.how, "layer")
+                    if w.measured and w.pos == min(k, 2) + 1 and w.target and w.target[0] <= cx <= w.target[2] and w.target[1] <= cy <= w.target[3]:
+                        ok_layer += 1
+                    self.assertTrue(35 < w.em_px < 55, w.em_px)                                       # 10.5pt·300dpi ≈ 44px
+                    wi = locate_glyph(im, bbox, site, not vertical, txt, [], None)
+                    self.assertEqual(wi.how, "ink")
+                    if wi.measured:
+                        ink_measured += 1
+                        if wi.pos == min(k, 2) + 1 and wi.target[0] <= cx <= wi.target[2] and wi.target[1] <= cy <= wi.target[3]:
+                            ok_ink += 1
+            self.assertEqual(ok_layer, n)
+            self.assertGreaterEqual(ink_measured, 0.3 * n, (ink_measured, n))                         # 먹 셈은 획이 갈라지는 글자(二·三·川·八)가 든 줄에서 안 맞는다 → 어림
+            self.assertEqual(ok_ink, ink_measured)                                                    # 실측이라고 한 자리는 모두 맞다(눈금을 그려도 된다)
+            # 눈금: 조각 바깥 띠에만 빨간 픽셀, 대상 글자 길이만큼
+            site = Site("r1", 0, len(lines), 5, len(GlyphLocate.TEXTS[0]), GlyphLocate.TEXTS[0][5], "x", "", "", "")
+            w = locate_glyph(im, bbox, site, not vertical, GlyphLocate.TEXTS[0], lines, (Wp, Hp))
+            plain_c = glyph_crop(im, w.box); marked = glyph_crop(im, w.box, target=w.target, horizontal=not vertical)
+            a = np.asarray(marked.convert("RGB")).astype(int); red = (a[..., 0] > 180) & (a[..., 1] < 60) & (a[..., 2] < 60)
+            self.assertTrue(red.any())
+            if vertical:
+                self.assertEqual(marked.height, plain_c.height); self.assertGreater(marked.width, plain_c.width)
+                self.assertFalse(red[:, :plain_c.width].any())                                       # 글자 쪽에는 그리지 않는다
+                rows = np.where(red.any(axis=1))[0]; span = (rows.min(), rows.max())
+                self.assertTrue(0.25 * plain_c.height < (span[0] + span[1]) / 2 < 0.75 * plain_c.height, span)   # 가운데(3번째) 글자 옆
+            else:
+                self.assertEqual(marked.width, plain_c.width); self.assertGreater(marked.height, plain_c.height)
+                self.assertFalse(red[marked.height - plain_c.height:, :].any())
+                cols = np.where(red.any(axis=0))[0]
+                self.assertTrue(0.25 * plain_c.width < (cols.min() + cols.max()) / 2 < 0.75 * plain_c.width)
+
+    def test_low_resolution_sites_are_not_asked(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page, locate_glyph, Site
+        from yeone_ocr.schema import PageReading, region_text
+        class R:
+            model = "m"
+            def adjudicate_many(self, *a, **k): raise AssertionError("저해상 자리는 묻지 않는다")
+            def adjudicate(self, *a, **k): raise AssertionError("저해상 자리는 묻지 않는다")
+        rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), R(), True, min_px=10_000)
+        st = rec["adjudicate_stats"]; self.assertEqual((st["lowres"], st["undecided"], st["decided"]), (3, 3, 0))
+        self.assertTrue(all(a["evidence"].startswith("저해상") and a["em_px"] > 0 for a in rec["adjudications"]))
+        body = region_text(PageReading.model_validate(rec["merged"]).regions[0]); self.assertIn("〔入/人〕", body); self.assertIn("〔曰/日〕", body)
+        # 실제 저해상 스캔: 10.5pt 를 75dpi 로 그리면 글자가 약 11px — 기본 문턱(16px)에 걸린다
+        import pymupdf
+        from yeone_ocr.adjudicate import MIN_GLYPH_PX
+        doc = pymupdf.open(); page = doc.new_page(width=600, height=800)
+        page.insert_text((30, 60), "生于水而長于土能入肝", fontsize=10.5, fontname="china-ss")
+        pix = page.get_pixmap(dpi=75); im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples).convert("L")
+        site = Site("r1", 0, 1, 8, 10, "入", "人", "", "", "")
+        w = locate_glyph(im, [50, 30, 120, 300], site, True, "生于水而長于土能入肝")
+        self.assertLess(w.em_px, MIN_GLYPH_PX, w)
+
+    def test_blind_recheck_confirms_only_matching_answers(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice, PageReading, region_text
+        from yeone_ocr.reader_gemini import ReaderError
+        ctx = self._ctx(); want = {"1": "人", "2": "入", "3": "曰"}
+        class R:
+            model = "m"
+            def __init__(self): self.open_asks = []; self.single = []
+            def adjudicate_many(self, crops, h, p):
+                return {sid: GlyphChoice(window=ctx[sid][0][-1:] + want[sid] + ctx[sid][1][:1], evidence="획", choice=want[sid]) for sid, _, _ in crops}
+            def identify_many(self, crops, h, p):
+                self.open_asks += [a for _, _, a in crops]
+                return {"1": GlyphChoice(choice="人"), "2": GlyphChoice(choice="人")}                # 2번은 객관식(入)과 다르고, 3번은 빠뜨림
+            def identify(self, crop, ask, h, p):
+                self.single.append(ask); return GlyphChoice(choice="曰")
+        r = R(); rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), r, True, batch=8, blind=True)
+        st = rec["adjudicate_stats"]
+        self.assertEqual((st["decided"], st["undecided"], st["blind_checked"], st.get("blind_rejected")), (2, 1, 3, 1))
+        self.assertTrue(all(a.candidates == () for a in r.open_asks + r.single)); self.assertEqual(len(r.single), 1)
+        body = region_text(PageReading.model_validate(rec["merged"]).regions[0])
+        self.assertIn("能人阴分", body); self.assertIn("〔入/人〕", body); self.assertIn("唐容川曰", body)
+        e2 = rec["adjudications"][1]; self.assertEqual((e2["choice"], e2["blind"]), ("", "人")); self.assertIn("눈가림 답 「人」 ≠ 객관식 「入」", e2["evidence"])
+        class Down(R):
+            def identify_many(self, *a, **k): raise ReaderError("한도", fatal=False)
+        rec = adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), Down(), True, batch=8, blind=True)
+        st = rec["adjudicate_stats"]; self.assertEqual((st["decided"], st.get("blind_failed")), (0, 3))      # 재확인을 못 했으면 확정하지 않는다
+        # 끄면(기본) 재확인 호출이 없다
+        class NoOpen(R):
+            def identify_many(self, *a, **k): raise AssertionError("blind 가 꺼져 있으면 부르지 않는다")
+        self.assertEqual(adjudicate_page(self._rec(), Image.new("L", (900, 1300), 255), NoOpen(), True, batch=8)["adjudicate_stats"]["decided"], 3)
+
+    def test_blind_answer_folds_script_variants(self):
+        from yeone_ocr.adjudicate import fold_glyph
+        from yeone_ocr.collate import zh
+        if not zh.available():
+            self.skipTest("opencc 없음")
+        self.assertEqual(fold_glyph("黄"), fold_glyph("黃")); self.assertNotEqual(fold_glyph("入"), fold_glyph("人"))
+
+    def test_reader_takes_glyph_system_and_skips_cache_when_short(self):
+        try:
+            from yeone_ocr.reader_gemini import GeminiReader
+            from yeone_ocr.prompts import glyph_system_prompt
+            import contextlib, io
+            with contextlib.redirect_stdout(io.StringIO()):
+                r = GeminiReader(api_key="AIza" + "x" * 35, model="gemini-2.5-flash", use_cache=True, system=glyph_system_prompt())
+        except Exception as e:
+            self.skipTest(f"판독기를 만들 수 없음: {e}")
+        self.assertEqual(r._system, glyph_system_prompt()); self.assertIsNone(r.cache_name); self.assertIn("캐시 안 씀", r.cache_note)
+        self.assertTrue(r._config(None).system_instruction)
+
+
+class BlindReviewFixes(unittest.TestCase):
+    """0.6.5 검토 반영 — 눈금·실측 순번은 확실할 때만, 눈가림 재확인은 엄격하게, 재확인은 답을 낸 판독기에."""
+    def test_unequal_candidate_lengths_do_not_claim_a_span(self):
+        from yeone_ocr.adjudicate import Site, GlyphWindow, make_ask
+        from yeone_ocr import prompts
+        site = Site("r1", 0, 1, 4, 9, "日一", "旦", "水而", "土能", "〔日一/旦〕")
+        win = GlyphWindow((0, 0, 1, 1), "layer", pos=3, count=6, measured=True, target=(0.1, 0.1, 0.2, 0.2))
+        a = make_ask(site, win, [site.a, site.b], 1, tick=True)
+        self.assertEqual((a.k, a.measured, a.tick), (0, False, False))
+        t = prompts.adjudicate_prompt(a, True, 1); self.assertIn("1~2자", t); self.assertNotIn("눈금", t)
+        same = make_ask(Site("r1", 0, 1, 4, 9, "入", "人", "", "", ""), win, ["入", "人"], 1, tick=True)
+        self.assertEqual((same.k, same.measured, same.tick), (1, True, True))
+        # 실제 흐름: 글자층이 있는 쪽에서도 길이가 다른 표시에는 눈금을 그리지 않는다
+        import pymupdf
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.pdfio import layer_chars, page_frame
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, GlyphChoice, frac_bbox
+        doc = pymupdf.open(); page = doc.new_page(width=600, height=800)
+        page.insert_text((30, 60), "生于水而旦土能入肝", fontsize=22, fontname="china-ss")
+        pix = page.get_pixmap(dpi=300); im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        lines = layer_chars(doc, 1); allb = [c[1] for l in lines for c in l["chars"]]
+        bbox = frac_bbox((min(b[0] for b in allb) / 600 - 0.02, min(b[1] for b in allb) / 800 - 0.02, max(b[2] for b in allb) / 600 + 0.02, max(b[3] for b in allb) / 800 + 0.02))
+        reg = Region(id="r1", kind="본문", bbox=bbox, paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="生于水而〔日一/旦〕土能入肝")])])
+        pr = PageReading(pdf_page=1, regions=[reg]); rec = {"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}
+        seen = []
+        class R:
+            model = "m"
+            def adjudicate(self, crop, ask, h, p): seen.append(ask); return GlyphChoice()
+        adjudicate_page(rec, im, R(), True, batch=1, layer_lines=lines, frame=page_frame(doc, 1))
+        self.assertEqual((seen[0].k, seen[0].tick, seen[0].measured), (0, False, False))
+
+    def test_blind_agreement_is_strict_where_folding_cannot_tell(self):
+        from yeone_ocr.adjudicate import blind_agrees
+        from yeone_ocr.collate import zh
+        self.assertTrue(blind_agrees("入", "入", ("入", "人"))); self.assertFalse(blind_agrees("人", "入", ("入", "人")))
+        self.assertFalse(blind_agrees("", "入", ("入", "人"))); self.assertFalse(blind_agrees("  ", "7", ("6", "7")))   # 빈 답은 같지 않다
+        self.assertTrue(blind_agrees("7", "7", ("6", "7"))); self.assertFalse(blind_agrees("6", "7", ("6", "7")))      # 숫자는 접으면 빈 글 → 그대로
+        self.assertFalse(blind_agrees("。", "，", ("，", "。")))
+        if zh.available():
+            self.assertFalse(blind_agrees("黄", "黃", ("黃", "黄")))               # 이체자 쌍: 접으면 같아지므로 글자 그대로
+            self.assertFalse(blind_agrees("苢", "苡", ("苡", "苢")))
+            self.assertTrue(blind_agrees("黄", "黃", ("黃", "寅")))                # 후보가 접어도 다르면 간체·번체는 같게 본다
+
+    def test_ink_exact_count_ignores_spaces(self):
+        """띄어쓰기가 있는 줄: 먹 구간에는 빈칸이 없으므로 공백을 뺀 글자 수로 맞춰 본다(전에는 공백까지 세어 쪼개진 글자와 우연히 맞으면 엉뚱한 글자에 눈금)."""
+        import pymupdf
+        from PIL import Image
+        from yeone_ocr.adjudicate import find_sites, locate_glyph, column_plain
+        from yeone_ocr.pdfio import layer_chars
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, frac_bbox
+        doc = pymupdf.open(); page = doc.new_page(width=600, height=800)
+        page.insert_text((30, 60), "水而儿能 入肝", fontsize=22, fontname="china-ss")
+        pix = page.get_pixmap(dpi=300); im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        chars = layer_chars(doc, 1)[0]["chars"]; allb = [bb for _, bb in chars]
+        bbox = frac_bbox((min(b[0] for b in allb) / 600 - 0.02, min(b[1] for b in allb) / 800 - 0.02, max(b[2] for b in allb) / 600 + 0.02, max(b[3] for b in allb) / 800 + 0.02))
+        reg = Region(id="r1", kind="본문", bbox=bbox, paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="水而儿能 〔入/人〕肝")])])
+        m = PageReading(pdf_page=1, regions=[reg]); site = find_sites(m)[0]
+        w = locate_glyph(im, bbox, site, True, column_plain(m, site), [], None)
+        self.assertEqual(w.how, "ink")
+        if w.measured:                                                                       # 실측이라고 하면 대상 상자에 入 이 있어야 한다
+            bb = next(bb for c, bb in chars if c == "入"); cx = (bb[0] + bb[2]) / 2 / 600
+            self.assertTrue(w.target[0] <= cx <= w.target[2], (w, bb))
+
+    def test_layer_interpolation_is_not_measured(self):
+        from yeone_ocr.adjudicate import _map_index_ex, _map_index
+        self.assertEqual(_map_index_ex("abXde", "abYde", 2), (2, True))                       # 한 글자를 달리 읽음 → 틈 길이 같음 → 실측
+        j, exact = _map_index_ex("abcXde", "abcde", 3); self.assertFalse(exact)              # 글자층이 대상 글자를 빠뜨림 → 어림
+        j, exact = _map_index_ex("abXde", "abYZde", 2); self.assertFalse(exact)              # 글자층이 쪼갬 → 어림
+        self.assertEqual(_map_index("abXde", "abYde", 2), 2)
+
+    def test_blind_recheck_goes_to_the_reader_that_answered(self):
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page
+        from yeone_ocr.schema import GlyphChoice
+        ctx = _site_ctx(Adjudicate._rec(self)); want = {"1": "人", "2": "入", "3": "曰"}
+        class Flash:
+            model = "flash"
+            def adjudicate_many(self, crops, h, p): return {sid: GlyphChoice(window=ctx[sid][0][-1:] + "?" + ctx[sid][1][:1]) for sid, _, _ in crops}
+            def identify_many(self, *a, **k): raise AssertionError("못 가린 판독기에 재확인을 묻지 않는다")
+            def identify(self, *a, **k): raise AssertionError("못 가린 판독기에 재확인을 묻지 않는다")
+        class Pro:
+            model = "pro"
+            def __init__(self): self.open = 0
+            def adjudicate_many(self, crops, h, p):
+                return {sid: GlyphChoice(window=ctx[sid][0][-1:] + want[sid] + ctx[sid][1][:1], choice=want[sid]) for sid, _, _ in crops}
+            def identify_many(self, crops, h, p):
+                self.open += 1; return {sid: GlyphChoice(choice=("入" if sid == "1" else want[sid])) for sid, _, _ in crops}   # 1번은 재확인에서 갈림
+        pro = Pro(); rec = adjudicate_page(Adjudicate._rec(self), Image.new("L", (900, 1300), 255), Flash(), True, batch=8, fallback_reader=pro, blind=True)
+        st = rec["adjudicate_stats"]
+        self.assertEqual((pro.open, st["decided"], st["fallback_decided"], st["blind_rejected"]), (1, 2, 2, 1))        # 보완 확정은 재확인 뒤 남은 자리만
+
+
+class UltraHigh(unittest.TestCase):
+    """0.6.2 — 조각별 최고 해상도(ultra_high): 조각(Part)에 붙이고, 거부되면 high → 기본값 순으로 내린다."""
+    def _reader(self, model="gemini-3-pro"):
+        import threading
+        from yeone_ocr.reader_gemini import GeminiReader
+        from google.genai import types
+        r = GeminiReader.__new__(GeminiReader); r.types = types; r.cache_name = None; r._system = "s"; r.thinking = None; r.thinking_budget = None; r.model = model
+        r._lock = threading.Lock(); r.media_resolution = "ultra_high"
+        return r
+
+    def test_part_level_and_fallback_order(self):
+        from PIL import Image
+        from yeone_ocr.reader_gemini import GeminiReader
+        from google.genai import types
+        r = self._reader()
+        p = r.image_part(Image.new("L", (8, 8), 255))
+        self.assertEqual(p.media_resolution.level, types.PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH)
+        self.assertIsNone(r._config(types.Schema).media_resolution)                      # 전역 설정에는 넣지 않는다(SDK 열거형에 없음)
+        GeminiReader._strip_part_resolution([p, "글"]); self.assertIsNone(p.media_resolution)
+        r.media_resolution = "high"; self.assertEqual(r._config(types.Schema).media_resolution, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
+        self.assertIsNone(r.image_part(Image.new("L", (8, 8), 255)).media_resolution)
+        from yeone_ocr.cli import build_parser
+        self.assertEqual(build_parser().parse_args(["read", "x.pdf", "--media-resolution", "ultra_high"]).media_resolution, "ultra_high")
+
+    def test_ultra_high_only_for_gemini_3(self):
+        """2.5 계열은 조각별 설정을 받지 않으므로 ultra_high 를 고르면 high(전역)로 내려 쓴다 — 서버가 조각 설정을 무시해 기본 해상도로 떨어지지 않게."""
+        import contextlib, io
+        from PIL import Image
+        from google.genai import types
+        r = self._reader("gemini-2.5-flash")
+        with contextlib.redirect_stdout(io.StringIO()):
+            p = r.image_part(Image.new("L", (8, 8), 255))
+        self.assertIsNone(p.media_resolution); self.assertEqual(r.media_resolution, "high")
+        self.assertEqual(r._config(types.Schema).media_resolution, types.MediaResolution.MEDIA_RESOLUTION_HIGH)
+
+    def test_shared_cache_registry(self):
+        """같은 모델·지침의 판독기는 캐시를 하나만 만들고, 만료된 이름은 버리고 새로 만든다."""
+        import threading
+        from yeone_ocr import reader_gemini as rg
+        made = []
+        class C:
+            def create(self, model, config): made.append(model); o = type("O", (), {})(); o.name = f"cachedContents/{len(made)}"; return o
+        class Client: caches = C()
+        from google.genai import types
+        def mk(model):
+            r = rg.GeminiReader.__new__(rg.GeminiReader); r.types = types; r.client = Client(); r.model = model; r.vertexai = False; r._system = "지침"; r._lock = threading.Lock(); r.cache_name = None; r.cache_note = ""
+            return r
+        rg._CACHE_REGISTRY.clear()
+        a, b, c = mk("m1"), mk("m1"), mk("m2")
+        a._make_cache(); b._make_cache(); c._make_cache()
+        self.assertEqual(made, ["m1", "m2"]); self.assertEqual(a.cache_name, b.cache_name); self.assertNotEqual(a.cache_name, c.cache_name)
+        self.assertIn("공유", b.cache_note)
+        b._make_cache(stale=b.cache_name)                                                     # 만료 → 새로
+        self.assertEqual(made, ["m1", "m2", "m1"]); self.assertNotEqual(a.cache_name, b.cache_name)
+        rg._CACHE_REGISTRY.clear()
+
+
+class GlyphReadersAndEstimate(unittest.TestCase):
+    """0.6.2 — 3차 판별 판독기 고르기(''/이름/auto)와 비용 어림의 3차 줄."""
+    def test_make_glyph_readers_branches(self):
+        from argparse import Namespace
+        from yeone_ocr import reader_gemini as rg, cli
+        made = []
+        class FakeReader:
+            def __init__(self, model=None, thinking_budget=None, use_cache=True, media_resolution=None, thinking=None, **k):
+                self.model = model; self.thinking = thinking; self.thinking_budget = thinking_budget; self.media_resolution = media_resolution
+                self.key = "k"; self.vertexai = False; made.append(model)
+        old = (rg.GeminiReader, rg.list_models)
+        rg.GeminiReader = FakeReader; rg.list_models = lambda key, vx: ["gemini-3-pro", "gemini-3-flash", "gemini-3-flash-lite"]
+        try:
+            base = dict(model="gemini-3-pro", thinking_budget=777, no_cache=False, adjudicate_thinking="low")
+            r, f = cli.make_glyph_readers(Namespace(**base, adjudicate_model=""))
+            self.assertEqual((r.model, f, r.thinking, r.thinking_budget, r.media_resolution), ("gemini-3-pro", None, "low", None, "high"))   # --thinking-budget 은 low 면 넘기지 않는다
+            made.clear(); r, f = cli.make_glyph_readers(Namespace(**base, adjudicate_model="auto"))
+            self.assertEqual((r.model, f.model, made), ("gemini-3-flash", "gemini-3-pro", ["gemini-3-pro", "gemini-3-flash"]))
+            made.clear(); r, f = cli.make_glyph_readers(Namespace(**base, adjudicate_model="gemini-3-flash-lite"))
+            self.assertEqual((r.model, f, made), ("gemini-3-flash-lite", None, ["gemini-3-flash-lite"]))                  # 쓰지 않을 판독기는 만들지 않는다
+            r, f = cli.make_glyph_readers(Namespace(**dict(base, adjudicate_thinking="full"), adjudicate_model=""))
+            self.assertEqual((r.thinking, r.thinking_budget), (None, 777))
+            rg.list_models = lambda key, vx: ["gemini-3-pro"]
+            r, f = cli.make_glyph_readers(Namespace(**base, adjudicate_model="auto"))
+            self.assertEqual((r.model, f), ("gemini-3-pro", None))                                                       # 같은 세대 flash 가 없으면 보완 없음
+        finally:
+            rg.GeminiReader, rg.list_models = old
+
+    def test_estimate_prices_third_pass_rows_by_model_name(self):
+        from yeone_ocr.estimate import estimate
+        u = {"calls": 3, "prompt_tokens": 3000, "output_tokens": 300, "thinking_tokens": 0, "cached_tokens": 2000,
+             "by_model": {"gemini-2.5-pro": {"calls": 1, "prompt_tokens": 1000, "output_tokens": 100, "thinking_tokens": 0, "cached_tokens": 800},
+                          "gemini-2.5-pro (3차)": {"calls": 1, "prompt_tokens": 1000, "output_tokens": 100, "thinking_tokens": 0, "cached_tokens": 600},
+                          "gemini-2.5-flash (3차 보완)": {"calls": 1, "prompt_tokens": 1000, "output_tokens": 100, "thinking_tokens": 0, "cached_tokens": 600}}}
+        e = estimate("x.pdf", [1, 2, 3], model="gemini-2.5-pro", second_model="", records=[{"pdf_page": 1, "pass1": {}, "usage": u}], fx_krw=1000.0)
+        labels = {r["model"]: r["label"] for r in e["rows"]}
+        self.assertEqual(labels["gemini-2.5-pro (3차)"], "3차 · 글자 판별"); self.assertEqual(labels["gemini-2.5-flash (3차 보완)"], "3차 · 글자 판별")
+        self.assertEqual(labels["gemini-2.5-pro"], "1차 · 쪽 전체 판독"); self.assertIsNotNone(e["usd_low"]); self.assertEqual(e["calls"], 6)

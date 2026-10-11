@@ -5,7 +5,7 @@
 from __future__ import annotations
 import os, re, time, json, logging, threading
 from PIL import Image
-from .schema import PageReading, RegionReread, MultiRegionReread, GlyphChoice
+from .schema import PageReading, RegionReread, MultiRegionReread, GlyphChoice, MultiGlyphChoice, GlyphAsk
 from .layout import to_png_bytes
 from . import prompts
 
@@ -214,11 +214,16 @@ def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int 
     return out
 
 
+_CACHE_REGISTRY: dict[tuple, str] = {}        # (모델, 접속 경로, 지침 해시) → 캐시 이름. 한 실행의 1차·2차 판독기가 같은 캐시를 쓴다
+CACHE_MIN_CHARS = 6000                         # 이보다 짧은 시스템 지시(3차 판별용)는 캐시 최소 토큰(모델별 1~4천)에 못 미쳐 캐시를 만들지 않는다
+_CACHE_LOCK = threading.Lock()
+
+
 class GeminiReader:
     name = "gemini"
 
     def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto",
-                 use_cache: bool = True, thinking: str | None = None, media_resolution: str | None = None):
+                 use_cache: bool = True, thinking: str | None = None, media_resolution: str | None = None, system: str | None = None):
         from google.genai import types     # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
         key = normalize_key(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
         if not key:
@@ -235,29 +240,47 @@ class GeminiReader:
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
         self.thinking_budget = thinking_budget
         self.thinking = thinking          # None=모델 기본, "low"=생각 줄임(2차 전사용). 거부되면 자동 해제
-        self.media_resolution = (media_resolution or "").lower() if media_resolution in ("low", "medium", "high") else None   # 이미지 토큰 예산(2차 조각용 high). 거부되면 자동 해제
+        # 이미지 토큰 예산. low/medium/high 는 호출 설정으로, ultra_high(Gemini 3: 2,240 토큰)는 이미지 조각(Part)마다 붙인다(SDK 전역 열거형에 없음).
+        # 모델이 거부하면 ultra_high → high → 기본값 순으로 자동으로 내린다.
+        self.media_resolution = (media_resolution or "").lower() if (media_resolution or "").lower() in ("low", "medium", "high", "ultra_high") else None
         self.n_429 = 0                    # 한도 초과 횟수(동시 쪽 수 조절에 씀)
         self.retries = retries
-        self._system = prompts.system_prompt()
+        self._system = system or prompts.system_prompt()      # 3차 판별기는 자형 전용 지시(prompts.glyph_system_prompt)를 받는다
         self.usage = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cached_tokens": 0}
         self._lock = threading.Lock()
         self._tls = threading.local()
         self.cache_name: str | None = None
         self.cache_note = ""
-        if use_cache:
+        if use_cache and len(self._system) >= CACHE_MIN_CHARS:
             self._make_cache()
+        elif use_cache:
+            self.cache_note = "지시가 짧아 캐시 안 씀"        # 캐시 최소 토큰에 못 미친다(만들기 호출이 매번 거절되기만 한다)
 
-    def _make_cache(self) -> None:
-        """지침 전문을 컨텍스트 캐시에 올린다. 호출마다 지침을 다시 보내지 않아 빠르고 싸다. 모델이 지원하지 않으면 그냥 넘어간다."""
+    def _cache_key(self) -> tuple:
+        import hashlib
+        return (self.model, self.vertexai, hashlib.sha1(self._system.encode("utf-8")).hexdigest())
+
+    def _make_cache(self, stale: str | None = None) -> None:
+        """지침 전문을 컨텍스트 캐시에 올린다. 호출마다 지침을 다시 보내지 않아 빠르고 싸다. 모델이 지원하지 않으면 그냥 넘어간다.
+        같은 모델·지침으로 이미 만든 캐시가 이 프로세스에 있으면 그것을 쓴다(한 실행에서 1차·2차 판독기가 각각 만들지 않게).
+        stale 을 주면 그 이름은 만료된 것이라 보고 새로 만든다."""
         t = self.types
-        try:
-            c = self.client.caches.create(model=self.model, config=t.CreateCachedContentConfig(
-                system_instruction=self._system, ttl="7200s", display_name="yeone-ocr-guide"))
-            self.cache_name = getattr(c, "name", None)
-            self.cache_note = f"지침 캐시 사용({self.cache_name})" if self.cache_name else ""
-        except Exception as e:
-            self.cache_name = None
-            self.cache_note = f"지침 캐시 미사용({friendly_error(e, self.model)[0][:80]})"
+        key = self._cache_key()
+        with _CACHE_LOCK:
+            have = _CACHE_REGISTRY.get(key)
+            if have and have != stale:
+                self.cache_name = have; self.cache_note = f"지침 캐시 사용({have}, 공유)"; return
+            try:
+                c = self.client.caches.create(model=self.model, config=t.CreateCachedContentConfig(
+                    system_instruction=self._system, ttl="7200s", display_name="yeone-ocr-guide"))
+                self.cache_name = getattr(c, "name", None)
+                self.cache_note = f"지침 캐시 사용({self.cache_name})" if self.cache_name else ""
+                if self.cache_name:
+                    _CACHE_REGISTRY[key] = self.cache_name
+            except Exception as e:
+                self.cache_name = None
+                self.cache_note = f"지침 캐시 미사용({friendly_error(e, self.model)[0][:80]})"
+                _CACHE_REGISTRY.pop(key, None)
 
     def _config(self, schema):
         t = self.types
@@ -267,7 +290,7 @@ class GeminiReader:
             kw["cached_content"] = self.cache_name          # 캐시를 쓰면 system_instruction 을 따로 보내지 않는다
         else:
             kw["system_instruction"] = self._system
-        if self.media_resolution:
+        if self.media_resolution and self.media_resolution != "ultra_high":
             try:
                 kw["media_resolution"] = getattr(t.MediaResolution, f"MEDIA_RESOLUTION_{self.media_resolution.upper()}")
             except AttributeError:                       # 옛 SDK — 설정 없이 간다
@@ -279,13 +302,50 @@ class GeminiReader:
             kw["thinking_config"] = t.ThinkingConfig(thinking_level="LOW") if re.search(r"gemini-[3-9]", self.model) else t.ThinkingConfig(thinking_budget=512)
         return t.GenerateContentConfig(**kw)
 
+    def image_part(self, img: Image.Image):
+        """이미지 조각(Part). ultra_high 면 조각마다 해상도 수준을 붙인다(조각별 media_resolution 은 Gemini 3 계열만 받는다).
+        3 계열이 아니거나 옛 SDK 면 high(전역 설정)로 내려 쓴다 — 서버가 조각 설정을 무시해 기본 해상도로 떨어지는 일을 막는다."""
+        t = self.types
+        p = t.Part.from_bytes(data=to_png_bytes(img), mime_type="image/png")
+        if self.media_resolution == "ultra_high":
+            if not re.search(r"gemini-[3-9]", self.model):
+                self._step_down("high", f"주의: {self.model} 은 조각별 최고 해상도(ultra_high)를 받지 않는 세대라 high 로 계속합니다.")
+                return p
+            try:
+                p.media_resolution = t.PartMediaResolution(level=t.PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH)
+            except Exception:                            # 옛 SDK — 조각별 설정이 없으면 high 로
+                self._step_down("high", "주의: 설치된 SDK 가 조각별 해상도를 지원하지 않아 high 로 계속합니다.")
+        return p
+
+    def _step_down(self, level: str | None, note: str) -> None:
+        """해상도 설정을 내린다(여러 스레드가 같은 거부를 봐도 한 번만 알린다)."""
+        with self._lock:
+            if self.media_resolution == level or (level == "high" and self.media_resolution != "ultra_high"):
+                return
+            self.media_resolution = level
+        print(note, flush=True)
+
+    @staticmethod
+    def _has_part_resolution(contents: list) -> bool:
+        return any(getattr(p, "media_resolution", None) is not None for p in (contents or []))
+
+    @staticmethod
+    def _strip_part_resolution(contents: list) -> None:
+        for p in contents:
+            if getattr(p, "media_resolution", None) is not None:
+                try:
+                    p.media_resolution = None
+                except Exception:
+                    pass
+
     def _call(self, img: Image.Image, prompt: str, schema, extra_parts: list | None = None):
         """이미지 한 장(또는 extra_parts 로 여러 장)과 지시문을 보내 schema 대로 받는다."""
         t = self.types
-        contents = extra_parts if extra_parts is not None else [t.Part.from_bytes(data=to_png_bytes(img), mime_type="image/png"), prompt]
+        contents = extra_parts if extra_parts is not None else [self.image_part(img), prompt]
         last_msg = ""; tried_msgs: list[str] = []
         attempts = max(self.retries, 5)
         for i in range(attempts):
+            used_cache = self.cache_name                                  # 이 호출이 쓰는 캐시(실패하면 이 이름이 만료된 것)
             try:
                 resp = self.client.models.generate_content(model=self.model, contents=contents, config=self._config(schema))
                 um = getattr(resp, "usage_metadata", None)
@@ -321,14 +381,19 @@ class GeminiReader:
                     print(f"주의: {self.model} 이 생각 설정을 받지 않아 모델 기본값으로 계속합니다.", flush=True)
                     self.thinking = None; self.thinking_budget = None
                     continue
-                if self.media_resolution and code == 400 and "resolution" in str(e).lower():
-                    print(f"주의: {self.model} 이 이미지 해상도 설정(media_resolution)을 받지 않아 기본값으로 계속합니다.", flush=True)
-                    self.media_resolution = None
-                    continue
-                if self.cache_name and ("cachedContent" in str(e) or "cached content" in str(e).lower() or (code == 403 and "cache" in str(e).lower())):
-                    self._make_cache()                       # 캐시가 만료·소실되면 다시 만들고 재시도
+                if used_cache and ("cachedContent" in str(e) or "cached content" in str(e).lower() or (code == 403 and "cache" in str(e).lower())):
+                    if self.cache_name == used_cache:        # 다른 스레드가 먼저 새로 만들었으면 그 이름으로 다시 시도. 만드는 일은 _make_cache 의 등록부 잠금이 하나로 묶는다
+                        self._make_cache(stale=used_cache)   # 캐시가 만료·소실되면 다시 만들고 재시도
                     if not self.cache_name:
                         print("주의: 지침 캐시를 다시 만들지 못해 일반 호출로 계속합니다.", flush=True)
+                    continue
+                if code == 400 and self._has_part_resolution(contents) and not re.search(r"payload|size|too large|cache|token", str(e).lower()):
+                    # 이 호출의 조각에 ultra_high 가 붙어 있었다(다른 스레드가 이미 내렸어도). 다른 원인이 분명한 400(크기·캐시·토큰)이 아니면 조각 설정을 떼고 high 로
+                    self._strip_part_resolution(contents)
+                    self._step_down("high", f"주의: {self.model} 이 조각별 최고 해상도(ultra_high)를 받지 않아 high 로 계속합니다.")
+                    continue
+                if code == 400 and "resolution" in str(e).lower() and self.media_resolution:
+                    self._step_down(None, f"주의: {self.model} 이 이미지 해상도 설정(media_resolution)을 받지 않아 기본값으로 계속합니다.")
                     continue
                 if code in (403, 404) and self.api == "auto" and not self._switched and self.key.startswith("AQ."):
                     tried_msgs.append(("AI Studio 경로: " if not self.vertexai else "Vertex 경로: ") + last_msg)
@@ -372,15 +437,40 @@ class GeminiReader:
     def reread_region(self, crop: Image.Image, kind: str, region_id: str, pdf_page: int) -> RegionReread:
         return self._call(crop, prompts.region_prompt(kind, region_id, pdf_page), RegionReread)
 
-    def adjudicate(self, crop: Image.Image, candidates: list[str], pre: str, post: str, horizontal: bool, pdf_page: int) -> GlyphChoice:
-        """3차 글자 판별: 글자 하나를 크게 잘라 보내 후보 가운데 어느 것인지 자형만으로 묻는다."""
-        return self._call(crop, prompts.adjudicate_prompt(candidates, pre, post, horizontal, pdf_page), GlyphChoice)
+    def adjudicate(self, crop: Image.Image, ask: GlyphAsk, horizontal: bool, pdf_page: int) -> GlyphChoice:
+        """3차 글자 판별: 글자 몇 개를 크게 잘라 보내, 조각 안 순번으로 가리킨 글자가 후보 가운데 어느 것인지 자형만으로 묻는다.
+        앞뒤 글자는 받지 않는다(눈가림 — GlyphAsk 참고)."""
+        return self._call(crop, prompts.adjudicate_prompt(ask, horizontal, pdf_page), GlyphChoice)
+
+    def identify(self, crop: Image.Image, ask: GlyphAsk, horizontal: bool, pdf_page: int) -> GlyphChoice:
+        """눈가림 확인: 후보 없이 가리킨 글자를 읽게 한다(객관식 답과 맞춰 본다)."""
+        return self._call(crop, prompts.identify_prompt(ask, horizontal, pdf_page), GlyphChoice)
 
     def reread_regions(self, crops: list[tuple[str, str, Image.Image]], pdf_page: int) -> dict[str, RegionReread]:
         """여러 문자 영역 조각을 한 호출로 다시 판독한다. 돌려주는 사전에 빠진 영역은 호출자가 낱개로 다시 묻는다."""
         t = self.types
         parts = [prompts.regions_prompt([(rid, kind) for rid, kind, _ in crops], pdf_page)]
         for rid, kind, im in crops:
-            parts.append(f"【{rid}】"); parts.append(t.Part.from_bytes(data=to_png_bytes(im), mime_type="image/png"))
+            parts.append(f"【{rid}】"); parts.append(self.image_part(im))
         res = self._call(None, "", MultiRegionReread, extra_parts=parts)
         return {it.region_id: RegionReread(columns=it.columns, uncertain=it.uncertain) for it in res.regions if it.columns}
+
+    def adjudicate_many(self, crops: list[tuple[str, Image.Image, GlyphAsk]], horizontal: bool, pdf_page: int) -> dict[str, GlyphChoice]:
+        """3차 글자 판별을 조각 여러 장(자리 번호, 조각, 질문)으로 한 호출에 묻는다. 빠진 자리는 호출자가 낱개로 다시 묻는다."""
+        return self._glyph_many(prompts.adjudicate_many_prompt([(sid, ask) for sid, _, ask in crops], horizontal, pdf_page), crops)
+
+    def identify_many(self, crops: list[tuple[str, Image.Image, GlyphAsk]], horizontal: bool, pdf_page: int) -> dict[str, GlyphChoice]:
+        """눈가림 확인을 조각 여러 장으로 한 호출에 묻는다."""
+        return self._glyph_many(prompts.identify_many_prompt([(sid, ask) for sid, _, ask in crops], horizontal, pdf_page), crops)
+
+    def _glyph_many(self, prompt: str, crops) -> dict[str, GlyphChoice]:
+        parts = [prompt]
+        for sid, im, _ in crops:
+            parts.append(f"【{sid}】"); parts.append(self.image_part(im))
+        res = self._call(None, "", MultiGlyphChoice, extra_parts=parts)
+        out: dict[str, GlyphChoice] = {}
+        for it in res.items:
+            sid = (it.site_id or "").strip().strip("【】")
+            if sid and sid not in out:
+                out[sid] = GlyphChoice(window=it.window, evidence=it.evidence, choice=it.choice)
+        return out

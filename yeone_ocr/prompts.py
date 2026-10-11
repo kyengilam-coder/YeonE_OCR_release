@@ -140,16 +140,109 @@ GLYPH_HINTS = {
 }
 
 
-def adjudicate_prompt(candidates: list[str], pre: str, post: str, horizontal: bool, pdf_page: int) -> str:
-    cands = " / ".join(candidates)
-    hint = ""
+def glyph_hint(candidates: list[str]) -> str:
+    """후보 묶음에 맞는 자형 단서(없으면 빈 글)."""
     for k, v in GLYPH_HINTS.items():
         if all(any(c in k for c in cand) for cand in candidates if cand):
-            hint = f"\n자형 단서: {v}."; break
-    direction = "가로쓰기 한 줄의 일부" if horizontal else "세로쓰기 한 열의 일부"
-    return (f"첨부 이미지는 PDF {pdf_page}쪽 본문에서 글자 하나와 그 앞뒤 두 글자를 크게 자른 것({direction})이다.\n"
-            f"가운데 글자는 두 판독에서 「{cands}」 로 갈렸다. 앞뒤 글자: 「{pre}」 _ 「{post}」.\n"
-            f"자형만 보고 답하라. 문맥이나 흔한 낱말로 고르지 않는다.{hint}\n"
-            f"후보 가운데 어느 것인지 획이 보이면 c 에 그 글자 하나를, e 에 본 자형을 한 줄로 적는다. "
-            f"획이 뭉개져 가릴 수 없거나 두 후보 모두 아니면 c 는 빈 글(\"\")로 둔다. "
-            f"w 에는 조각에 보이는 글자를 {'왼쪽→오른쪽' if horizontal else '위→아래'} 차례로 모두 적는다(부호 포함, 조각이 엉뚱한 자리인지 확인용). JSON 으로만 답한다.")
+            return v
+    return ""
+
+
+# 3차 글자 판별 전용 시스템 지시(0.6.5 눈가림). 1·2차의 지침 전문·출력 규칙·혼동 카드는 넣지 않는다:
+# 혼동 카드의 문맥 단서("장부 앞은 入이 흔하다")나 가로 모드의 于 용법 목록은 자형 질문에서 문맥으로 고르게 만든다.
+GLYPH_SYSTEM = """# 3차 글자 판별 — 확대 조각의 자형만 본다
+
+너는 옛 한자·한글 문헌의 인쇄 글자를 획 단위로 가리는 판독자다. 받는 이미지는 본문의 한 줄(세로쓰기면 한 열)에서 글자 몇 개만 크게 자른 조각이고, 그 가운데 한 글자를 순번으로 가리켜 묻는다.
+
+## 원칙
+- 판정의 기준은 조각에 실제로 보이는 획과 부수다. 앞뒤 문맥·흔한 낱말·전문용어로 고르지 않는다. 문장이 자연스럽다는 것은 근거가 아니다(지침 2).
+- 이미지에서 그 자형을 확인할 수 없으면 확정하지 않는다(지침 7). 그때는 빈 답("")을 낸다. 빈 답은 실패가 아니라 원본 확인으로 넘기는 정상 결과다(지침 19).
+- 인쇄된 꼴 그대로 답한다. 이체자·약자·간체를 상용자·번체로, 어려운 글자를 쉬운 글자로 바꾸지 않는다(지침 21).
+- 확대는 보는 것을 돕는 수단일 뿐이다. 뭉개지거나 번진 획을 상상으로 채우지 않는다(지침 24).
+- 가리킨 글자만 판정한다. 이웃 글자의 획을 섞지 않고, 조각 가장자리에 조금 걸친 이웃 글자 조각은 글자로 세지 않는다.
+- 조각 바깥 흰 여백에 빨간 눈금이 있으면 그 눈금 옆 글자가 묻는 글자다. 눈금은 표시일 뿐 글자의 획이 아니다.
+
+## 답하는 차례
+1) w: 조각에 보이는 글자를 읽기 방향 차례로 모두 적는다(부호 포함, 가장자리에 반쯤 잘린 글자는 빼도 된다).
+2) e: 묻는 글자에서 본 자형을 한 줄로 적는다(갈고리·점·삐침의 시작점·가로획 길이·닫힘 여부 등).
+3) c: 판정한 글자. 후보가 주어지면 후보 가운데 하나만 적는다. 가릴 수 없거나 후보 모두 아니면 "".
+
+## 혼동하기 쉬운 묶음의 자형 단서
+"""
+
+
+def glyph_system_prompt() -> str:
+    """3차 판별 판독기의 시스템 지시(지침 2·7·19·21·24장 요지 + 묶음별 자형 단서). 짧아서 컨텍스트 캐시는 쓰지 않는다."""
+    hints = "\n".join(f"- {'/'.join(sorted(k))}: {v}" for k, v in GLYPH_HINTS.items())
+    return GLYPH_SYSTEM + hints + "\n"
+
+
+def _pointer(ask, horizontal: bool) -> str:
+    """질문 글자를 가리키는 말. 앞뒤 글자 대신 조각 안 순번(과 눈금)으로 가리킨다."""
+    side = "왼쪽에서" if horizontal else "위에서"
+    if not ask.pos:
+        t = "조각 가운데 글자"
+    elif ask.k == 0:
+        t = f"조각 안 {side} {ask.pos}번째 글자부터 1~2자(후보마다 글자 수가 다르다)"
+    elif ask.k > 1:
+        t = f"조각 안 {side} {ask.pos}~{ask.pos + ask.k - 1}번째 {ask.k}글자(한 묶음으로 읽는다)"
+    else:
+        t = f"조각 안 {side} {ask.pos}번째 글자"
+    if ask.count:
+        t += f"(조각의 글자 {ask.count}자" + ("" if ask.measured else " 안팎") + ")"
+    if ask.pos and not ask.measured:
+        t += " — 순번은 어림이라 한 자쯤 어긋날 수 있다"
+    if ask.tick:
+        t += f" · {'위' if horizontal else '오른쪽'} 여백의 빨간 눈금 옆"
+    return t
+
+
+def _piece(horizontal: bool) -> str:
+    return "가로쓰기 한 줄" if horizontal else "세로쓰기 한 열"
+
+
+def _order(horizontal: bool) -> str:
+    return "왼쪽→오른쪽" if horizontal else "위→아래"
+
+
+def adjudicate_prompt(ask, horizontal: bool, pdf_page: int) -> str:
+    """3차 판별 질문(눈가림): 앞뒤 글자를 주지 않고 조각 안 순번으로 가리킨다. 후보는 ask.candidates 차례(섞인 것) 그대로."""
+    h = glyph_hint(list(ask.candidates))
+    return (f"첨부 이미지는 PDF {pdf_page}쪽 본문의 {_piece(horizontal)}에서 글자 몇 개를 크게 자른 조각이다.\n"
+            f"묻는 글자: {_pointer(ask, horizontal)}.\n"
+            f"후보: 「{' / '.join(ask.candidates)}」. 자형만 보고 어느 것인지 가려라." + (f"\n자형 단서: {h}." if h else "") + "\n"
+            f"w 에 조각의 글자를 {_order(horizontal)} 차례로 모두, e 에 묻는 글자에서 본 자형 한 줄, "
+            "c 에 후보 가운데 그 글자 하나(가릴 수 없거나 후보 모두 아니면 \"\")를 적는다. JSON 으로만 답한다.")
+
+
+def adjudicate_many_prompt(items: list, horizontal: bool, pdf_page: int) -> str:
+    """묶음 3차 판별(눈가림). items = [(자리 번호, GlyphAsk), …] 순서대로 이미지가 붙고, 각 이미지 바로 앞에 【자리 번호】 표시가 있다."""
+    lines = []
+    for sid, ask in items:
+        h = glyph_hint(list(ask.candidates))
+        lines.append(f"- 【{sid}】 {_pointer(ask, horizontal)} · 후보 「{' / '.join(ask.candidates)}」" + (f" · 자형 단서: {h}" if h else ""))
+    return (f"첨부한 이미지 {len(items)}장은 PDF {pdf_page}쪽 본문의 {_piece(horizontal)}에서 글자 몇 개씩 크게 자른 조각이다. "
+            "각 이미지 바로 앞에 【자리 번호】 표시가 있다. 조각마다 묻는 글자와 후보:\n" + "\n".join(lines) + "\n"
+            "조각마다 독립적으로, 자형만 보고 답하라. 다른 조각의 답을 참고하지 않는다.\n"
+            f"items 에 조각마다 하나씩 넣는다: s 에 자리 번호를 그대로, w 에 그 조각의 글자를 {_order(horizontal)} 차례로 모두, "
+            "e 에 묻는 글자에서 본 자형 한 줄, c 에 후보 가운데 그 글자 하나(가릴 수 없거나 후보 모두 아니면 \"\"). "
+            "조각 수와 items 수가 같아야 한다. JSON 으로만 답한다.")
+
+
+def identify_prompt(ask, horizontal: bool, pdf_page: int) -> str:
+    """눈가림 확인 질문: 후보도 앞뒤 글자도 주지 않고 가리킨 글자를 그냥 읽게 한다(객관식 답과 맞춰 볼 독립 판독)."""
+    return (f"첨부 이미지는 PDF {pdf_page}쪽 본문의 {_piece(horizontal)}에서 글자 몇 개를 크게 자른 조각이다.\n"
+            f"묻는 글자: {_pointer(ask, horizontal)}.\n"
+            "후보는 주지 않는다. 이 글자를 인쇄된 꼴 그대로 읽어라(이체자·간체를 바꾸지 않는다).\n"
+            f"w 에 조각의 글자를 {_order(horizontal)} 차례로 모두, e 에 묻는 글자에서 본 자형 한 줄, "
+            "c 에 그 글자(획이 뭉개져 읽을 수 없으면 \"\")를 적는다. JSON 으로만 답한다.")
+
+
+def identify_many_prompt(items: list, horizontal: bool, pdf_page: int) -> str:
+    """묶음 눈가림 확인. items = [(자리 번호, GlyphAsk), …] — 후보 없이 읽게 한다."""
+    lines = [f"- 【{sid}】 {_pointer(ask, horizontal)}" for sid, ask in items]
+    return (f"첨부한 이미지 {len(items)}장은 PDF {pdf_page}쪽 본문의 {_piece(horizontal)}에서 글자 몇 개씩 크게 자른 조각이다. "
+            "각 이미지 바로 앞에 【자리 번호】 표시가 있다. 조각마다 묻는 글자:\n" + "\n".join(lines) + "\n"
+            "후보는 주지 않는다. 조각마다 독립적으로, 그 글자를 인쇄된 꼴 그대로 읽어라(이체자·간체를 바꾸지 않는다).\n"
+            f"items 에 조각마다 하나씩 넣는다: s 에 자리 번호를 그대로, w 에 그 조각의 글자를 {_order(horizontal)} 차례로 모두, "
+            "e 에 묻는 글자에서 본 자형 한 줄, c 에 그 글자(읽을 수 없으면 \"\"). 조각 수와 items 수가 같아야 한다. JSON 으로만 답한다.")

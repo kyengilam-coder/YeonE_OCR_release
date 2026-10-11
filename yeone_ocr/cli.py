@@ -20,7 +20,7 @@ from pathlib import Path
 from PIL import Image
 
 from . import __version__
-from .state import Work, HUMAN_ONLY, STATUSES
+from .state import Work, HUMAN_ONLY, STATUSES, legacy_work_dir
 from .pdfio import open_pdf, parse_pages, page_image, text_layer
 from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac
 from .layout import upscale, crop_frac, fit_figure_bbox, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered, snap_to_gaps, split_bands
@@ -29,9 +29,11 @@ from .verify import verify_page, check_hwpx_file
 from .blocks import assemble_blocks, Block
 from .report import make_report
 from .refit import refit_regions, describe as refit_describe
+from .adjudicate import MIN_GLYPH_PX
 
 
 CANCEL = threading.Event()   # 창 프로그램의 [중지] 단추가 켠다. 쪽 사이에서 확인한다.
+PROGRESS = None              # 창 프로그램이 넣는 진행 알림 함수 f(단계, 끝난 수, 전체 수). 명령줄에서는 None.
 DOC_LOCK = threading.Lock()  # PyMuPDF 문서 객체는 스레드 안전하지 않다. 여러 쪽을 동시에 읽을 때 문서 접근을 직렬화한다.
 LOG_LOCK = threading.Lock()
 
@@ -39,6 +41,16 @@ LOG_LOCK = threading.Lock()
 def log(*a):
     with LOG_LOCK:
         print(*a, flush=True)
+
+
+def progress(stage: str, done: int, total: int) -> None:
+    """진행 막대에 알린다(창 프로그램에서만). 알림이 실패해도 작업은 계속한다."""
+    cb = PROGRESS
+    if cb is not None:
+        try:
+            cb(stage, int(done), int(total))
+        except Exception:
+            pass
 
 
 # ---------- inspect ----------
@@ -68,7 +80,8 @@ def cmd_prepare(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     pages = parse_pages(args.pages, len(doc))
-    for n in pages:
+    progress("prepare", 0, len(pages))
+    for i, n in enumerate(pages, 1):
         ip = work.page_image_path(n)
         if not ip.exists() or args.force:
             img, src = page_image(doc, n, dpi=args.dpi)
@@ -84,6 +97,7 @@ def cmd_prepare(args, work: Work | None = None, doc=None):
         st["pages"].setdefault(str(n), {"statuses": ["미처리"], "notes": []})
         st["total_pages"] = len(doc)
         work.save_state(st)
+        progress("prepare", i, len(pages))
     log(f"prepare: {len(pages)}쪽 → {work.dir}")
     return 0
 
@@ -308,8 +322,9 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
         log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
-    for rec in records:
+    for k, rec in enumerate(records, 1):
         n = rec["pdf_page"]
+        progress("remerge", k - 1, len(records))
         if not rec.get("pass1"):
             log(f"  {n}쪽: 1차 판독 원본이 없어 건너뜀"); continue
         before = len(rec["merged"].get("uncertain", []))
@@ -326,6 +341,7 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
                 p["statuses"].remove("판독 확인 필요"); work.save_state(st)
         log(f"  {n}쪽: 확인 필요 {before} → {len(m['uncertain'])}건 · 열 비교 {ms.get('columns_compared')}열 중 {ms.get('columns_differ')}열 불일치"
             + (f" · 1차에만 {ms.get('columns_only_pass1')}열, 2차에만 {ms.get('columns_only_pass2')}열" if ms.get('columns_only_pass1') or ms.get('columns_only_pass2') else ""))
+    progress("remerge", len(records), len(records))
     log("remerge: 끝. 문서에 넣으려면 ④ 문서 만들기 또는 [▶ 한 번에 인식] 을 실행하십시오.")
     return 0
 
@@ -648,6 +664,7 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
         + (f" · {reader.cache_note}" if getattr(reader, "cache_note", "") else ""))
     if skipped:
         log(f"  기록이 있어 건너뛴 쪽 {skipped}개 (다시 읽으려면 '기록 있는 쪽도 다시 판독' 또는 --force)")
+    progress("read", 0, len(todo))
     from .reader_gemini import ReaderError
     failed: list[int] = []; fatal: Exception | None = None
     done_now = 0; since_ckpt = 0; t_start = time.time()
@@ -690,6 +707,7 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                 try:
                     rec = fut.result()
                     done_now += 1; since_ckpt += 1
+                    progress("read", done_now + len(failed), len(todo))
                     m = rec["merged"]; u = rec.get("usage") or {}
                     log(f"  {n}쪽: 영역 {len(m['regions'])} · 확인 필요 {len(m['uncertain'])} · 구조 검사 {len(rec['verify'])} · 레이어 일치율 {rec['textlayer_diff'].get('ratio')} · {rec['seconds']}s"
                         + (f" · 호출 {u.get('calls')}회 · 토큰 입력 {u.get('prompt_tokens', 0):,} 출력 {u.get('output_tokens', 0) + u.get('thinking_tokens', 0):,}" if u.get("calls") else ""))
@@ -701,9 +719,11 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                     else:
                         failed.append(n); work.set_status(n, "판독 확인 필요", note=f"판독 실패(다시 시도 가능): {e}")
                         log(f"  {n}쪽: 판독 실패 — {str(e)[:120]} → 건너뛰고 계속")
+                        progress("read", done_now + len(failed), len(todo))
                 except Exception as e:
                     failed.append(n); work.set_status(n, "판독 확인 필요", note=f"판독 중 예외: {type(e).__name__}: {e}")
                     log(f"  {n}쪽: 판독 중 예외 {type(e).__name__}: {str(e)[:120]} → 건너뛰고 계속")
+                    progress("read", done_now + len(failed), len(todo))
                 clean_since += 1
             # 동시 쪽 수 자동 조절: 한도 초과가 새로 보이면 하나 줄이고 20초 쉼, 10쪽 연속 깨끗하면 하나 늘림
             now429 = n429()
@@ -734,7 +754,7 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
             + (f" · 캐시 적중 {u['cached_tokens']:,}" if u["cached_tokens"] else "") + f" · {time.time() - t_start:.0f}초  — 쪽별 누적은 ⑥ 보고에 있음")
     if fatal is not None:
         return 1
-    if CANCEL.is_set():
+    if CANCEL.is_set() and done_now + len(failed) < len(todo):        # 남은 쪽이 있을 때만 '중지'(마지막 쪽들이 도는 중에 눌렸으면 다 끝난 것)
         log(f"중지 요청으로 판독을 멈춤. 지금까지의 쪽은 기록에 남아 있음. (이번에 {done_now}쪽 판독)"); return 130
     return 0
 
@@ -761,11 +781,36 @@ def make_crops(work: Work, rec: dict, img: Image.Image) -> dict:
     return out
 
 
+def context_snapshots(work: Work, records: list[dict], write: bool = True) -> dict[int, dict]:
+    """문맥 추정(context.analyze): 결과 폴더의 모든 판독 기록을 바탕으로 이번에 문서에 넣을 쪽들의 추정을 낸다.
+    글도 판독 기록도 바꾸지 않고, write 면 <결과 폴더>/context.json 에만 남긴다. 실패해도 문서 만들기는 계속한다(밑줄만 빠짐)."""
+    try:
+        from .context import analyze, fold_zh_for, load_ledger_pairs, write_snapshot
+        allrec = []
+        for f in sorted(work.readings_dir.glob("p*.json")):
+            try:
+                allrec.append(json.loads(f.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+        res = analyze(allrec or records, records, fold_zh=fold_zh_for(records), ledger_pairs=load_ledger_pairs(work.dir))
+        if write:
+            write_snapshot(work.dir, res)
+        return res
+    except Exception as e:
+        log(f"문맥 추정을 건너뜀: {e}")
+        return {}
+
+
 def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False) -> bool:
     """판독 기록들로 HWPX(+DOCX)를 만든다. interim=True 면 '<이름>_진행중.hwpx' 한 파일만 조용히 만든다(중간 저장)."""
     from .hwpx_builder import build_hwpx
-    for rec in records:
+    steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
+    if not interim:
+        progress("build", 0, steps)
+    for k, rec in enumerate(records, 1):
         n = rec["pdf_page"]
+        if not interim:
+            progress("build", k - 1, steps)
         img, _ = _load_page_image(work, doc, n, args.dpi)
         new_crops = make_crops(work, rec, img)
         if new_crops != (rec.get("crops") or {}):
@@ -776,7 +821,13 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 work.set_status(n, "판독 확인 필요", note=f"도판 외곽에 글자·선이 닿음: {touching}")
             else:
                 work.set_status(n, "이미지 보존 확인 완료")
+    if not interim:
+        progress("build", len(records), steps)                  # 쪽 다 함 → 이제 문서 조립
     whole = len(records) == len(doc)
+    ctx = None
+    gstats: dict = {}
+    if not interim and not getattr(args, "no_context", False):
+        ctx = context_snapshots(work, records)
     if interim:
         chunks = [records]
     else:
@@ -786,7 +837,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     ok = True
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
-                                 check_list=getattr(args, "check_list", "none") or "none")
+                                 check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
+                                 context=ctx, memo_mode=getattr(args, "memo", "notice") or "notice",
+                                 legend=not args.no_highlight, stats=gstats)
         if not interim and args.append_report and ci == len(chunks) - 1:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
@@ -800,7 +853,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         out_h = work.out_dir / f"{stem}.hwpx"
         t0 = time.time()
         st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                        highlight=not args.no_highlight, page_breaks=not args.no_page_breaks)
+                        highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
         fissues = check_hwpx_file(str(out_h))
         want_imgs = sum(1 for b in blocks if b.type == "image")
         this_ok = not fissues and st.get("images_in_file") == want_imgs
@@ -814,13 +867,21 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             from .docx_builder import build_docx
             out_d = work.out_dir / f"{stem}.docx"
             sd = build_docx(blocks, str(out_d), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks)
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
             log(f"build: DOCX {out_d} · {sd}")
+    if not interim and gstats:
+        anyc = next(iter((ctx or {}).values()), {})
+        log(f"등급: 초록 {gstats.get('green', 0)} · 파랑 {gstats.get('blue', 0)} · 문맥 밑줄 {gstats.get('red_ctx', 0)} · 쪽 고지 {gstats.get('notices', 0)}"
+            + (f" · 3차 확정 위치 못 찾음 {gstats['unmapped']}" if gstats.get("unmapped") else "")
+            + (f" · 3차와 다른 대목 어긋남 {gstats['conflict']}" if gstats.get("conflict") else "")
+            + (f" · 문맥 바탕 {anyc.get('corpus_chars', 0):,}자/{anyc.get('corpus_pages', 0)}쪽(1차·2차 일치 글)" if ctx else " · 문맥 추정 끔")
+            + " — 글은 바꾸지 않음(색·밑줄·메모만)")
     if not interim:
         for rec in records:
             work.set_status(rec["pdf_page"], "문서 반영 완료")
             if ok:
                 work.set_status(rec["pdf_page"], "파일 구조 검사 완료")
+        progress("build", steps, steps)
     return ok
 
 
@@ -840,58 +901,178 @@ def cmd_build(args, work: Work | None = None, doc=None):
 
 
 # ---------- adjudicate / ledger ----------
+def run_adaptive(items: list, fn, readers: list, ceiling: int, start: int, on_result, on_error, pause: float = 20.0) -> bool:
+    """items 를 동시 start→ceiling 스레드로 fn(item) 실행(판독·판별 공통). 한도 초과(429)가 새로 보이면 하나 줄이고 20초 쉬며,
+    10개 연속 깨끗하면 하나 늘린다. CANCEL 이 켜지거나 on_error 가 True(치명)를 돌려주면 새 작업을 내지 않는다. 돌려주는 값은 멈췄는지."""
+    cur = max(1, min(ceiling, start)); it = iter(items); futures: dict = {}
+    def n429() -> int:
+        return sum(getattr(r, "n_429", 0) for r in readers if r is not None)
+    seen = n429(); clean = 0; pause_until = 0.0; exhausted = False; stop = False
+    with ThreadPoolExecutor(max_workers=max(1, ceiling)) as ex:
+        def submit_next() -> bool:
+            nonlocal exhausted
+            if stop or CANCEL.is_set() or exhausted:
+                return False
+            for item in it:
+                futures[ex.submit(fn, item)] = item
+                return True
+            exhausted = True
+            return False
+        while True:
+            while len(futures) < cur and time.time() >= pause_until and submit_next():
+                pass
+            if not futures:
+                if not exhausted and not stop and not CANCEL.is_set() and time.time() < pause_until:
+                    time.sleep(1); continue
+                break
+            done_set, _ = wait(list(futures), return_when=FIRST_COMPLETED, timeout=5)
+            for fut in done_set:
+                item = futures.pop(fut)
+                try:
+                    on_result(item, fut.result())
+                except Exception as e:
+                    if on_error(item, e):
+                        stop = True
+                clean += 1
+            now = n429()
+            if now > seen:
+                seen = now; clean = 0
+                if cur > 1:
+                    cur -= 1; log(f"  — 한도 초과(429) 감지 → 동시 {cur}쪽으로 줄이고 {pause:.0f}초 쉼")
+                else:
+                    log(f"  — 한도 초과(429) 감지 → {pause:.0f}초 쉼")
+                pause_until = time.time() + pause
+            elif clean >= 10 and cur < ceiling:
+                cur += 1; clean = 0; log(f"  — 안정적 → 동시 {cur}쪽으로 늘림")
+    return stop or CANCEL.is_set()
+
+
+def make_glyph_readers(args) -> tuple:
+    """3차 글자 판별 판독기 (주 판독기, 보완 판독기 또는 None).
+    --adjudicate-model: 비우면 1차 모델, 이름을 주면 그 모델, auto 면 같은 세대 flash 로 먼저 묻고 못 가린 자리만 1차 모델로.
+    생각 수준은 기본 LOW(객관식 자형 질문이라 깊은 생각이 필요 없음), 조각 해상도 high."""
+    from .reader_gemini import GeminiReader, list_models, pick_second_model
+    from .prompts import glyph_system_prompt
+    think = None if getattr(args, "adjudicate_thinking", "low") == "full" else "low"
+    system = glyph_system_prompt()                      # 눈가림: 지침 전문(문맥 단서 포함) 대신 자형 전용 지시. 짧아서 캐시는 쓰지 않는다
+    def make(model):
+        return GeminiReader(model=model, thinking_budget=(getattr(args, "thinking_budget", None) if think is None else None), use_cache=False,
+                            media_resolution="high", thinking=think, system=system)
+    want = (getattr(args, "adjudicate_model", "") or "").strip()
+    if not want:
+        return make(args.model), None
+    if want.lower() == "auto":
+        primary = make(args.model)
+        try:
+            flash = pick_second_model(list_models(primary.key, primary.vertexai), primary.model)
+        except Exception as e:
+            log(f"  3차 판별 모델 자동 선택 실패({str(e)[:60]}) → 1차 모델만"); return primary, None
+        if flash == primary.model:
+            return primary, None
+        return make(flash), primary
+    return make(want), None
+
+
 def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = True):
-    """3차 글자 판별. 〔a/b〕 자리마다 호출 한 번(flash 로도 충분). 확정한 글자는 merged 와 adjudications 에 남고, remerge 뒤에도 유지된다."""
+    """3차 글자 판별. 〔a/b〕 자리를 조각 묶음(--batch-sites)으로 묻고, 쪽은 동시(--workers)에 돌린다. 확정한 글자는 merged 와
+    adjudications 에 남고, remerge 뒤에도 유지된다. 자리 창은 글자층 글자 상자 → 먹 실측 → 균등 분할 순으로 잡는다."""
     from . import prompts
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     resolve_mode(args, doc, work)
     max_sites = int(getattr(args, "max_sites", 0) or 0); zoom = int(getattr(args, "zoom", 6) or 6)
+    batch = int(getattr(args, "batch_sites", 8) or 0)
+    min_px = float(getattr(args, "adjudicate_min_px", MIN_GLYPH_PX) or 0); blind = bool(getattr(args, "adjudicate_blind", False))
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
         log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
     from .adjudicate import find_sites, adjudicate_page
     todo = [(rec, len(find_sites(PageReading.model_validate(rec["merged"])))) for rec in records]
+    todo = [(rec, n) for rec, n in todo if n]
     total_sites = sum(n for _, n in todo)
     if not total_sites:
         log("판별할 〔a/b〕 자리가 없습니다."); return 0
     if args.reader == "mock":
         log(f"mock 판독기는 자형을 보지 못합니다. 〔a/b〕 자리 {total_sites}곳만 셌습니다."); return 0
-    from .reader_gemini import GeminiReader, ReaderError
+    from .reader_gemini import ReaderError
+    from .pdfio import layer_chars, page_frame
     try:
-        reader = GeminiReader(model=args.model, thinking_budget=args.thinking_budget, use_cache=not getattr(args, "no_cache", False),
-                              media_resolution="high")
+        reader, fallback = make_glyph_readers(args)
     except Exception as e:
         log(f"오류: {e}"); return 1
-    log(f"adjudicate: 판독기 {reader.model} · {len(records)}쪽 · 〔a/b〕 {total_sites}곳 · 조각 확대 {zoom}배" + (f" · 쪽당 최대 {max_sites}곳" if max_sites else ""))
+    readers = [r for r in (reader, fallback) if r is not None]
+    ceiling = max(1, int(getattr(args, "workers", 6) or 1)); start = max(1, min(ceiling, int(getattr(args, "workers_start", 4) or ceiling)))
+    log(f"adjudicate: 판독기 {reader.model}" + (f" → 못 가리면 {fallback.model}" if fallback else "") + (" (생각 줄임)" if getattr(reader, "thinking", None) == "low" else "")
+        + f" · {len(todo)}쪽 · 〔a/b〕 {total_sites}곳 · 조각 확대 {zoom}배 · 한 호출에 {batch}자리" + (f" · 쪽당 최대 {max_sites}곳" if max_sites else "")
+        + f" · 동시 {start}쪽(최대 {ceiling}, 자동 조절)" + " · 눈가림(앞뒤 글자를 글로 주지 않음·후보 섞음)" + (" + 후보 없이 재확인" if blind else "")
+        + (f" · 글자 {min_px:g}px 미만은 묻지 않음" if min_px else ""))
     horizontal = prompts.MODE == "horizontal_zh"
-    agg = {"sites": 0, "decided": 0, "undecided": 0, "failed": 0, "misplaced": 0}
-    for rec, n in todo:
-        if not n or CANCEL.is_set():
-            continue
-        pg = rec["pdf_page"]
+    progress("adjudicate", 0, len(todo))
+    pages_done = [0]
+    agg = {"sites": 0, "decided": 0, "undecided": 0, "failed": 0, "misplaced": 0, "batched": 0, "fallback_decided": 0, "batch_rechecked": 0, "skipped": 0,
+           "lowres": 0, "blind_checked": 0, "blind_rejected": 0, "blind_failed": 0}
+    loc_agg: dict[str, int] = {}
+    fatal: list = []; t0 = time.time()
+
+    def one(item):
+        rec, n = item; pg = rec["pdf_page"]
         img, _ = _load_page_image(work, doc, pg, args.dpi)
-        if hasattr(reader, "usage_begin"): reader.usage_begin()
+        with DOC_LOCK:                                   # PyMuPDF 문서는 스레드 안전하지 않다
+            try:
+                lines = layer_chars(doc, pg); frame = page_frame(doc, pg)
+            except Exception:
+                lines, frame = [], None
+        for r in readers:
+            if hasattr(r, "usage_begin"): r.usage_begin()
         try:
-            rec = adjudicate_page(rec, img, reader, horizontal, max_sites=max_sites, zoom=zoom)
-        except ReaderError as e:
-            log(f"오류: {pg}쪽 판별 실패 — {e}")
-            if e.fatal: return 1
-            continue
-        u = reader.usage_end() if hasattr(reader, "usage_end") else {}
-        if u.get("calls"):
-            usage = rec.get("usage") or {}
-            for k, v in u.items():
-                usage[k] = usage.get(k, 0) + v
-            usage.setdefault("by_model", {}); usage["by_model"][reader.model + " (3차)"] = u; rec["usage"] = usage
+            rec = adjudicate_page(rec, img, reader, horizontal, max_sites=max_sites, zoom=zoom, batch=batch, fallback_reader=fallback,
+                                  layer_lines=lines, frame=frame, should_stop=CANCEL.is_set, min_px=min_px, blind=blind)
+        finally:
+            usage = rec.get("usage") or {}; used = False
+            for i, r in enumerate(readers):
+                u = r.usage_end() if hasattr(r, "usage_end") else {}
+                if u.get("calls"):
+                    used = True
+                    for k, v in u.items():
+                        usage[k] = usage.get(k, 0) + v
+                    key = r.model + (" (3차)" if i == 0 else " (3차 보완)")
+                    bm = usage.setdefault("by_model", {}); old = bm.get(key) or {}
+                    bm[key] = {k: old.get(k, 0) + u.get(k, 0) for k in set(old) | set(u)}      # 다시 실행해도 누적(합계와 같은 셈법)
+            if used:
+                rec["usage"] = usage
         work.save_record(pg, rec)
+        return rec
+
+    def on_result(item, rec):
+        rec0, n = item; pg = rec["pdf_page"]
+        pages_done[0] += 1; progress("adjudicate", pages_done[0], len(todo))
         st = rec.get("adjudicate_stats") or {}
         for k in agg: agg[k] += st.get(k, 0)
+        for k, v in (st.get("loc") or {}).items(): loc_agg[k] = loc_agg.get(k, 0) + v
         shown = "; ".join(f"〔{a['a']}/{a['b']}〕→{a['choice'] or '미정'}" for a in (rec.get("adjudications") or [])[-n:])
-        log(f"  {pg}쪽: {st.get('sites', 0)}곳 중 확정 {st.get('decided', 0)} · 미정 {st.get('undecided', 0)}" + (f" · 실패 {st['failed']}" if st.get("failed") else "") + f"  {shown[:160]}")
-    log(f"adjudicate: 끝. {agg['sites']}곳 중 확정 {agg['decided']} · 미정 {agg['undecided']}" + (f" · 실패 {agg['failed']}" if agg["failed"] else "")
-        + (f" · 조각 위치 어긋나 보류 {agg['misplaced']}" if agg.get("misplaced") else "")
-        + " — 확정한 글자는 본문에 들어갔고 확인 목록에 '3차 판별' 메모가 남았습니다." + (" ④ 문서 만들기를 다시 실행하십시오." if standalone else ""))
+        log(f"  {pg}쪽: {st.get('sites', 0)}곳 중 확정 {st.get('decided', 0)} · 미정 {st.get('undecided', 0)}" + (f" · 실패 {st['failed']}" if st.get("failed") else "") + (f" · 중지로 못 물은 {st['skipped']}" if st.get("skipped") else "")
+            + (f" · 보완 확정 {st['fallback_decided']}" if st.get("fallback_decided") else "") + f"  {shown[:160]}")
+
+    def on_error(item, e) -> bool:
+        rec, n = item; pg = rec["pdf_page"]
+        pages_done[0] += 1; progress("adjudicate", pages_done[0], len(todo))
+        if isinstance(e, ReaderError) and e.fatal:
+            fatal.append(e); log(f"오류: {pg}쪽 판별 실패 — {e}"); return True
+        log(f"  {pg}쪽: 판별 중 예외 {type(e).__name__}: {str(e)[:120]} → 건너뜀"); return False
+
+    run_adaptive(todo, one, readers, ceiling, start, on_result, on_error)
+    if fatal:
+        return 1
+    names = {"layer": "글자층", "ink": "먹 실측", "uniform": "균등 분할"}
+    log(f"adjudicate: 끝. {agg['sites']}곳 중 확정 {agg['decided']} · 미정 {agg['undecided']}" + (f" · 실패 {agg['failed']}" if agg["failed"] else "") + (f" · 중지로 못 물은 {agg['skipped']}" if agg.get("skipped") else "")
+        + (f" · 조각 위치 어긋나 보류 {agg['misplaced']}" if agg.get("misplaced") else "") + (f" · 묶음으로 답한 자리 {agg['batched']}" if agg.get("batched") else "")
+        + (f" · 보완 확정 {agg['fallback_decided']}" if agg.get("fallback_decided") else "") + (f" · 묶음 창 불일치로 낱개 재질문 {agg['batch_rechecked']}" if agg.get("batch_rechecked") else "")
+        + (f" · 저해상이라 묻지 않음 {agg['lowres']}" if agg.get("lowres") else "")
+        + (f" · 눈가림 재확인 {agg['blind_checked']}곳 중 불일치 보류 {agg['blind_rejected']}" if agg.get("blind_checked") else "") + (f" · 재확인 실패 보류 {agg['blind_failed']}" if agg.get("blind_failed") else "")
+        + (" · 자리: " + ", ".join(f"{names.get(k, k)} {v}" for k, v in sorted(loc_agg.items(), key=lambda kv: -kv[1])) if loc_agg else "")
+        + f" · {time.time() - t0:.0f}초 — 확정한 글자는 본문에 들어갔고 확인 목록에 '3차 판별' 메모가 남았습니다." + (" ④ 문서 만들기를 다시 실행하십시오." if standalone else ""))
+    if CANCEL.is_set() and (pages_done[0] < len(todo) or agg.get("skipped")):
+        log("중지 요청으로 판별을 멈춤. 끝난 쪽은 기록에 남아 있음."); return 130
     return 0
 
 
@@ -915,7 +1096,10 @@ def cmd_review(args, work: Work | None = None, doc=None):
     recs = work.records(parse_pages(args.pages, len(doc)))
     if not recs:
         log("오류: 판독 기록이 없어 검수 화면을 만들지 않았습니다. 먼저 ③ 판독(read)을 실행하십시오."); return 2
-    out = make_review(work, recs)
+    progress("review", 0, 1)
+    ctx = None if getattr(args, "no_context", False) else context_snapshots(work, recs, write=False)
+    out = make_review(work, recs, context=ctx)
+    progress("review", 1, 1)
     log(f"review: {out} ({len(recs)}쪽)")
     return 0
 
@@ -923,8 +1107,10 @@ def cmd_review(args, work: Work | None = None, doc=None):
 def cmd_report(args, work: Work | None = None, doc=None):
     work = work or Work(args.pdf, args.work)
     doc = doc or open_pdf(args.pdf)
+    progress("report", 0, 1)
     txt = make_report(work, len(doc))
     (work.dir / "report.md").write_text(txt, encoding="utf-8")
+    progress("report", 1, 1)
     log(txt)
     return 0
 
@@ -995,7 +1181,9 @@ def cmd_run(args):
             log(f"인쇄 쪽수 = PDF 쪽수 + {off} (판독한 쪽번호로 판정)" + (f" · 어긋난 쪽 {flagged}개를 확인 항목으로" if flagged else ""))
     if args.reader == "gemini" and not getattr(args, "no_adjudicate", False):
         try:
-            cmd_adjudicate(args, work, doc, standalone=False)
+            rc_a = cmd_adjudicate(args, work, doc, standalone=False)
+            if rc_a not in (0, None, 130):
+                log("3차 글자 판별이 중단되었습니다(위 오류). 가리지 못한 〔a/b〕 표시는 그대로 남고, 문서는 계속 만듭니다.")
         except Exception as e:
             log(f"3차 글자 판별을 건너뜀({e}). 〔a/b〕 표시는 그대로 남습니다.")
         if CANCEL.is_set(): return 130
@@ -1018,8 +1206,8 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p, pages=True):
-        p.add_argument("pdf")
-        p.add_argument("--work", help="작업 폴더(기본 work/<PDF 이름>)")
+        p.add_argument("pdf", help="스캔 PDF, 또는 이미지 파일(PNG·JPG·TIFF…, 여러 쪽 TIFF 는 쪽마다)·이미지 폴더(이름의 숫자 순서로 한 권)")
+        p.add_argument("--work", help="작업 폴더(기본 work/<PDF 이름>, 이미지는 work/<이름>_<확장자>, 이미지 폴더는 work/<폴더>_이미지)")
         if pages:
             p.add_argument("--pages", help="예 1-5,8 (기본 전체)")
         p.add_argument("--dpi", type=int, default=300, help="내장 스캔이 없을 때 렌더 해상도")
@@ -1040,14 +1228,26 @@ def build_parser():
         p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
         p.add_argument("--chunk-lines", type=int, default=8, help="2차 조각 한 장에 넣을 글줄(세로쓰기는 열) 수. 넘으면 나눠 보낸다(0=안 나눔). 글자당 픽셀을 늘려 획 하나 차이를 가린다")
-        p.add_argument("--media-resolution", choices=["auto", "default", "low", "medium", "high"], default="auto",
-                       help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. 모델이 거부하면 자동으로 기본값")
+        p.add_argument("--media-resolution", choices=["auto", "default", "low", "medium", "high", "ultra_high"], default="auto",
+                       help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. ultra_high 는 Gemini 3 에서 조각마다 2,240 토큰(두 배). 모델이 거부하면 자동으로 한 단계 아래로")
         p.add_argument("--checkpoint", type=int, default=20, help="N쪽 판독마다 '<이름>_진행중.hwpx' 를 중간 저장(0=안 함). run 에서만")
         p.add_argument("--no-adjudicate", action="store_true", help="run 에서 판독 뒤 3차 글자 판별(〔a/b〕 자리)을 하지 않음")
         p.add_argument("--batch-crops", type=int, default=8, help="2차 묶음 호출 한 번에 넣을 조각 수(기본 8). 많으면 모델이 조각과 영역 번호를 섞는다")
         if not any(a.dest == "mode" for a in p._actions):
             p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto",
                            help="읽기 모드: auto(기본)=글자층으로 판정(결과 폴더에 적힌 값 우선), vertical=세로쓰기 한자·한글, horizontal_zh=가로쓰기 한문(간체)")
+
+    def thinking_opt(p):
+        p.add_argument("--adjudicate-thinking", choices=["low", "full"], default="low", help="3차(자형) 판별의 생각 수준. low(기본)=줄여서 빠르게(객관식 자형 질문)")
+        p.add_argument("--adjudicate-blind", action="store_true",
+                       help="3차 판별에서 고른 자리를 후보 없이 한 번 더 읽게 해 같을 때만 확정. 호출이 더 든다: adjudicate·run 은 쪽마다 ⌈확정 자리/--batch-sites⌉회, 책갈피 교정(collate)은 확정 항목마다 1회")
+        p.add_argument("--adjudicate-min-px", type=float, default=MIN_GLYPH_PX,
+                       help=f"원본 글자 크기가 이 픽셀보다 작은 자리는 3차로 묻지 않고 미정으로 둠(기본 {MIN_GLYPH_PX:g}, 0=끔. 지침 24)")
+
+    def adjudicate_opts(p):
+        p.add_argument("--adjudicate-model", default="", help="3차 글자 판별 모델. 비우면 1차 모델(--model), auto=같은 세대 flash 로 먼저 묻고 못 가린 자리만 1차 모델로")
+        thinking_opt(p)
+        p.add_argument("--batch-sites", type=int, default=8, help="3차 판별 한 호출에 넣을 글자 조각 수(기본 8, 1=낱개 호출)")
 
     def build_opts(p):
         p.add_argument("--docx", action="store_true", help="DOCX 도 함께 생성")
@@ -1057,7 +1257,10 @@ def build_parser():
         p.add_argument("--no-join-pages", action="store_true", help="앞 쪽에서 이어지는 문단을 잇지 않음")
         p.add_argument("--whole-offset", type=int, default=None, help="분할 전 전체 PDF 쪽수 = PDF 쪽수 + N 을 기록에 함께 적음")
         p.add_argument("--append-report", action="store_true", help="문서 끝에 〔작업 기록〕 덧붙임")
-        p.add_argument("--no-highlight", action="store_true", help="의심 자리를 붉은 글자·노란 형광펜으로 칠하지 않음")
+        p.add_argument("--no-highlight", action="store_true", help="확인 등급 색·밑줄·범례를 넣지 않음(〔〕 표기와 고지 메모는 그대로)")
+        p.add_argument("--memo", choices=["notice", "all", "inline"], default="notice",
+                       help="한컴 메모: notice=고지 사항만(기본) / all=등급 근거까지 / inline=메모 없이 고지를 글 속 회색 〔고지: …〕 로")
+        p.add_argument("--no-context", action="store_true", help="문맥 추정(이 판독의 다른 대목이 가리키는 후보에 밑줄)을 하지 않음")
         p.add_argument("--no-page-breaks", action="store_true", help="원본 쪽마다 쪽 나누기를 넣지 않음")
         p.add_argument("--check-list", choices=["none", "extra", "all"], default="none",
                        help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
@@ -1080,6 +1283,9 @@ def build_parser():
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--max-sites", type=int, default=0, help="쪽당 판별할 자리 수 상한(0=전부)")
     p.add_argument("--zoom", type=int, default=6, help="글자 조각 확대 배율(기본 6)")
+    p.add_argument("--workers", type=int, default=6, help="동시에 판별할 쪽 수의 최대(기본 6). 한도(429)가 나면 자동으로 줄인다")
+    p.add_argument("--workers-start", type=int, default=4, help="시작 동시 쪽 수(기본 4)")
+    adjudicate_opts(p)
     p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto")
     p.set_defaults(fn=cmd_adjudicate)
     p = sub.add_parser("ledger", help="혼동 장부: 결과 폴더의 판독·대조 기록에서 글자 쌍 빈도를 모아 confusion.json 과 표로"); common(p, pages=False)
@@ -1088,8 +1294,8 @@ def build_parser():
     p = sub.add_parser("report"); common(p); p.set_defaults(fn=cmd_report)
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")
     p.add_argument("--clear-check", action="store_true", help="'판독 확인 필요' 표시를 지움(사람이 확인한 뒤)"); p.set_defaults(fn=cmd_mark)
-    p = sub.add_parser("run"); common(p); read_opts(p); build_opts(p); p.set_defaults(fn=cmd_run)
-    p = sub.add_parser("collate", help="책갈피 교정: HWPX 구획을 PDF 판독과 대조해 고친 사본을 저장"); common(p, pages=False); read_opts(p)
+    p = sub.add_parser("run"); common(p); read_opts(p); adjudicate_opts(p); build_opts(p); p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("collate", help="책갈피 교정: HWPX 구획을 PDF 판독과 대조해 고친 사본을 저장"); common(p, pages=False); read_opts(p); thinking_opt(p)
     p.add_argument("--hwpx", required=True, help="교정할 HWPX")
     p.add_argument("--list", action="store_true", help="HWPX 책갈피·제목과 PDF 책갈피의 짝 목록만 보여 줌")
     p.add_argument("--limit", type=int, default=0, help="--list 에서 보여 줄 줄 수(0=전부)")
@@ -1103,7 +1309,9 @@ def build_parser():
     p.add_argument("--policy", choices=["all", "sure", "memo"], default="all", help="all=전부 자동(A·B2·누락 삽입, B1·C 는 표시) / sure=확실한 것(A)만 / memo=메모만")
     p.add_argument("--apply", action="store_true", help="대조 결과를 HWPX 에 반영해 사본(<이름>_교정.hwpx)으로 저장. 없으면 보고만")
     p.add_argument("--out", help="저장할 HWPX 경로(기본 <이름>_교정.hwpx)")
-    p.add_argument("--no-memo", action="store_true", help="한컴 메모 대신 글 뒤에 〔…〕 로 적음")
+    p.add_argument("--memo", choices=["notice", "all", "inline"], default=None,
+                   help="한컴 메모: notice=고지 사항만(지운 글자·구조 차이·반영하지 않은 제안 등, 기본) / all=모든 항목에 근거(0.6.3 방식) / inline=메모 없이 고지만 글 뒤 〔…〕")
+    p.add_argument("--no-memo", action="store_true", help="(예전 이름) --memo inline 과 같음")
     p.add_argument("--all", action="store_true", help="구획 전체를 차례로 대조(--apply 면 교정본 하나에 쌓음). PDF 쪽을 못 찾는 구획은 건너뛰고 요약에 적음")
     p.add_argument("--no-glyph-check", action="store_true", help="대조 뒤 자형 편향·혼동 자리(入/人 등)를 글자 조각으로 모델에 묻는 3차 판별을 하지 않음")
     p.set_defaults(mode="auto")
@@ -1116,4 +1324,6 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if not Path(args.pdf).exists():
         log(f"파일이 없습니다: {args.pdf}"); return 2
+    if not getattr(args, "work", None) and (old := legacy_work_dir(args.pdf)):     # 예전 판의 이미지 결과 폴더(work/<이름>)는 저절로 옮겨 쓰지 않고 알린다
+        log(f"참고: 예전 판의 결과 폴더가 있습니다: {old} — 그 판독 기록을 이어 쓰려면 --work \"{old}\" 을(를) 붙이십시오.")
     return args.fn(args)

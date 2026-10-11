@@ -1,16 +1,18 @@
 """YeonE_OCR 창 프로그램. 모든 기능을 단추로 조작한다.
 
 표준 라이브러리 tkinter 만 쓰므로 Python 만 있으면 뜬다. 무거운 패키지(pymupdf, hwpx, google-genai…)는
-단추를 눌렀을 때 비로소 불러오며, 없으면 [필요한 패키지 설치·점검] 단추로 설치한다.
+단추를 눌렀을 때 비로소 불러오며, 없으면 [▸ 고급 → 패키지 설치·점검] 단추로 설치한다.
 """
 from __future__ import annotations
-import contextlib, io, json, os, queue, subprocess, sys, threading, traceback, webbrowser
+import contextlib, io, json, os, queue, re, subprocess, sys, threading, time, traceback, webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from tkinter.scrolledtext import ScrolledText
 
 from . import __version__
+from .progress import Tracker, fmt_duration, fmt_elapsed
+
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".jp2", ".j2k", ".jpx")   # pdfio.IMAGE_EXTS 와 같게(창은 pymupdf 없이도 떠야 하므로 따로 둠)
 
 APP_NAME = "YeonE_OCR"
 CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
@@ -18,34 +20,40 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": True, "collate_vertical": False,
-            "chunk_lines": 8, "media_high": True, "mode": "auto", "advanced_open": False}
+            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
+            "chunk_lines": 8, "media_res": "high", "mode": "auto", "advanced_open": False, "details_open": False}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
+from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
+MRES_LABELS = {"default": "기본", "high": "높음(high)", "ultra_high": "최고(ultra_high · Gemini 3)"}   # 2차 조각 이미지 토큰 예산
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
-세로쓰기 한자·한글 혼용 문헌(스캔 PDF)을 지침에 따라 OCR·교정해 HWPX 로 만듭니다.
+한자·한글 혼용 문헌(세로쓰기 스캔 PDF, 가로쓰기 한문 책)을 지침에 따라 OCR·교정해 HWPX 로 만듭니다.
 글자는 Gemini 가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다.
+맨 위의 [일반 OCR] 은 PDF → HWPX, [책갈피 OCR] 은 이미 입력된 HWPX 를 PDF 와 대조해 고친 사본을 만듭니다.
 
-쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② [PDF 고르기…] → ③ [▶ 한 번에 인식].
+쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② [PDF·이미지 고르기…] → ③ [▶ 한 번에 인식].
 읽기 방향·인쇄 쪽수 차이·이전 판 기록 갱신·2차 비교·3차 글자 판별·문서·검수 화면·보고·혼동 장부를 프로그램이 알아서 이어서 합니다.
-아래 단계별 단추는 "고급"을 펼쳤을 때만 보이며, 일부만 다시 하고 싶을 때 씁니다.
+진행 막대는 처음부터 끝까지 한 방향으로 차며, 오른쪽에 단계·쪽 수·남은 시간이 나옵니다.
+2차 판독 모델·속도·조각 같은 설정은 판독 칸의 [세부 설정 ▾] 에, 단계별 단추는 [▸ 고급] 에 접혀 있습니다. 단추에 마우스를 올리면 하는 일이 나옵니다.
 
 차례
- 1. [필요한 패키지 설치·점검] — 처음 한 번(빠진 패키지가 있으면 켤 때 설치할지 묻습니다).
+ 1. [패키지 설치·점검](고급 안) — 처음 한 번(빠진 패키지가 있으면 켤 때 설치할지 묻습니다).
  2. API 키를 넣고 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다. (https://aistudio.google.com/apikey)
- 3. [PDF 고르기…] 로 파일을 고릅니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
-    인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 틀리게 판정했을 때만 직접 고르십시오.
+ 3. [PDF·이미지 고르기…] 로 파일을 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)도 됩니다 — 여러 장을 함께 고르면 이름의 숫자 순서로
+    한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
+    인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 이미지는 글자층이 없어 세로쓰기로 보므로
+    가로쓰기 책이면 읽기 방향을 직접 고르십시오.
  4. [▶ 한 번에 인식 (PDF → HWPX)] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
     준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 만들기 → 검수 화면 → 보고·혼동 장부 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
     이전 판으로 만든 판독 기록이 있으면 지금 규칙으로 저절로 다시 비교합니다(모델 호출 없음).
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
- 5. 끝나면 [HWPX 열기] 로 결과를 보고 [검수 화면 열기] 에서 원본과 대조합니다. 〔 〕 로 남은 자리만 사람이 보면 됩니다.
+ 5. 끝나면 검수 화면을 열지 묻습니다. [HWPX 열기] 로 결과를 보고 검수 화면에서 원본과 대조합니다. 〔 〕 로 남은 자리만 사람이 보면 됩니다.
  6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
     사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
- 7. "고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
+ 7. "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
     글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
 
 결과는 PDF 와 같은 폴더의 「<PDF 이름>_YeonE_OCR」 안에 생깁니다.
@@ -57,7 +65,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 """
 
 
-SPEED_DEFAULTS_VERSION = 4  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음 / 4: 0.6.0 조각 8줄 묶음·2차 조각 고해상
+SPEED_DEFAULTS_VERSION = 5  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음 / 4: 0.6.0 조각 8줄 묶음·2차 조각 고해상 / 5: 0.6.2 조각 해상도 3단(media_res)
 
 
 def upgrade_config(cfg: dict) -> dict:
@@ -72,7 +80,16 @@ def upgrade_config(cfg: dict) -> dict:
     if ver < 3 and cfg.get("check_list", "none") == "extra":
         cfg["check_list"] = "none"
     if ver < 4:
-        cfg.setdefault("chunk_lines", DEFAULTS["chunk_lines"]); cfg.setdefault("media_high", DEFAULTS["media_high"])
+        cfg.setdefault("chunk_lines", DEFAULTS["chunk_lines"])
+    if "media_high" in cfg:                                   # 0.6.0~0.6.1 의 켬/끔 → 3단 선택 (load_config 가 DEFAULTS 를 먼저 섞으므로 setdefault 가 아니라 대입)
+        cfg["media_res"] = "high" if cfg.pop("media_high") else "default"
+    cfg.setdefault("media_res", DEFAULTS["media_res"])
+    cm = cfg.get("collate_memo", "notice")                       # 0.6.3 까지의 켬/끔 → 고지 사항만 / 글 속
+    cfg["collate_memo"] = ("notice" if cm else "inline") if isinstance(cm, bool) else (cm if cm in MEMO_LABELS else "notice")
+    if cfg.get("memo_mode") not in MEMO_LABELS:
+        cfg["memo_mode"] = "notice"
+    if cfg.get("media_res") not in MRES_LABELS:
+        cfg["media_res"] = DEFAULTS["media_res"]
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
     return cfg
 
@@ -103,7 +120,13 @@ def missing_packages() -> list[str]:
 
 
 def work_dir_for(pdf: str) -> Path:
+    """결과 폴더: PDF 옆 '<이름>_YeonE_OCR'. 이미지는 '<이름>_<확장자>_YeonE_OCR', 이미지 폴더는 '<폴더>_이미지_YeonE_OCR'
+    (같은 이름의 PDF·이미지·폴더가 한곳에 있어도 판독 기록이 섞이지 않게)."""
     p = Path(pdf)
+    if p.is_dir():
+        return p.with_name(p.name + "_이미지_YeonE_OCR")
+    if p.suffix.lower() not in ("", ".pdf"):
+        return p.with_name(f"{p.stem}_{p.suffix.lower().lstrip('.')}_YeonE_OCR")
     return p.with_name(p.stem + "_YeonE_OCR")
 
 
@@ -140,18 +163,19 @@ class MarkDialog(tk.Toplevel):
         self.app = app
         self.title("검수 결과 기록")
         self.resizable(False, False)
-        f = ttk.Frame(self, padding=12); f.grid()
-        ttk.Label(f, text="쪽 범위").grid(row=0, column=0, sticky="w")
-        self.pages = ttk.Entry(f, width=16); self.pages.insert(0, app.v_pages.get()); self.pages.grid(row=0, column=1, sticky="w")
-        ttk.Label(f, text="상태").grid(row=1, column=0, sticky="w")
-        self.status = ttk.Combobox(f, values=STATUSES, state="readonly", width=24); self.status.current(0); self.status.grid(row=1, column=1, sticky="w")
-        ttk.Label(f, text="메모").grid(row=2, column=0, sticky="w")
-        self.note = ttk.Entry(f, width=40); self.note.grid(row=2, column=1, sticky="w")
+        self.configure(bg=app.colors["PANEL"]); f = ttk.Frame(self, style="Dialog.TFrame", padding=app.px(18)); f.grid()
+        P = app.px; lp = dict(sticky="w", padx=(0, P(10)), pady=P(4))
+        ttk.Label(f, style="Panel.TLabel", text="쪽 범위").grid(row=0, column=0, **lp)
+        self.pages = ttk.Entry(f, width=16); self.pages.insert(0, app.v_pages.get()); self.pages.grid(row=0, column=1, sticky="w", pady=P(4))
+        ttk.Label(f, style="Panel.TLabel", text="상태").grid(row=1, column=0, **lp)
+        self.status = ttk.Combobox(f, values=STATUSES, state="readonly", width=24); self.status.current(0); self.status.grid(row=1, column=1, sticky="w", pady=P(4))
+        ttk.Label(f, style="Panel.TLabel", text="메모").grid(row=2, column=0, **lp)
+        self.note = ttk.Entry(f, width=40); self.note.grid(row=2, column=1, sticky="w", pady=P(4))
         self.clear = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f, text="'판독 확인 필요' 표시 지우기(사람이 확인한 뒤)", variable=self.clear).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        b = ttk.Frame(f); b.grid(row=4, column=0, columnspan=2, pady=(10, 0))
-        ttk.Button(b, text="기록", command=self.ok).pack(side="left", padx=4)
-        ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=4)
+        ttk.Checkbutton(f, text="'판독 확인 필요' 표시 지우기(사람이 확인한 뒤)", variable=self.clear).grid(row=3, column=0, columnspan=2, sticky="w", pady=(P(6), 0))
+        b = ttk.Frame(f, style="Dialog.TFrame"); b.grid(row=4, column=0, columnspan=2, pady=(P(12), 0))
+        ttk.Button(b, text="기록", command=self.ok, style="Accent.TButton").pack(side="left", padx=P(4))
+        ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=P(4))
         self.transient(app); self.grab_set()
 
     def ok(self):
@@ -169,24 +193,25 @@ class ModelDialog(tk.Toplevel):
     def __init__(self, app: "App", models: list[str], probe: dict | None = None, working: str = ""):
         super().__init__(app)
         self.app = app; self.title("쓸 수 있는 모델 고르기"); self.resizable(False, False)
-        f = ttk.Frame(self, padding=12); f.grid()
+        self.configure(bg=app.colors["PANEL"]); f = ttk.Frame(self, style="Dialog.TFrame", padding=app.px(18)); f.grid()
         cur = app.v_model.get().strip(); probe = probe or {}
         head = f"키 확인됨. 모델 {len(models)}개 중 고르십시오."
         if cur:
             head += f"\n지금 '{cur}': " + ("호출 확인됨" if probe.get(cur) == "호출 확인됨" else ("목록에 있지만 호출 거부됨 — " + probe.get(cur, "") if cur in models else "목록에 없음"))
         if working and working != cur:
             head += f"\n→ 호출 확인된 모델 '{working}' 을 미리 골라 두었습니다."
-        ttk.Label(f, text=head, justify="left", wraplength=560).grid(row=0, column=0, columnspan=2, sticky="w")
+        P = app.px
+        ttk.Label(f, style="Panel.TLabel", text=head, justify="left", wraplength=P(560)).grid(row=0, column=0, columnspan=2, sticky="w")
         ordered = [(m + ("   ✓ 호출 확인" if probe.get(m) == "호출 확인됨" else ("   ✗ 거부" if m in probe else ""))) for m in models]
         self._names = list(models)
         self.cb = ttk.Combobox(f, values=ordered, width=56, state="readonly")
         pick = working if working in models else (cur if cur in models else (models[0] if models else ""))
         if pick: self.cb.current(models.index(pick))
-        self.cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=8)
-        ttk.Label(f, text="위쪽이 최신입니다. 판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다. preview·exp 는 시험판입니다.").grid(row=2, column=0, columnspan=2, sticky="w")
-        b = ttk.Frame(f); b.grid(row=3, column=0, columnspan=2, pady=(10, 0))
-        ttk.Button(b, text="이 모델로", command=self.ok).pack(side="left", padx=4)
-        ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=4)
+        self.cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=P(8))
+        ttk.Label(f, style="Panel.TLabel", text="위쪽이 최신입니다. 판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다. preview·exp 는 시험판입니다.").grid(row=2, column=0, columnspan=2, sticky="w")
+        b = ttk.Frame(f, style="Dialog.TFrame"); b.grid(row=3, column=0, columnspan=2, pady=(P(12), 0))
+        ttk.Button(b, text="이 모델로", command=self.ok, style="Accent.TButton").pack(side="left", padx=P(4))
+        ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=P(4))
         self.transient(app); self.grab_set()
 
     def ok(self):
@@ -203,18 +228,19 @@ class StylePicker(tk.Toplevel):
     def __init__(self, app: "App", counts: list[tuple[str, int]]):
         super().__init__(app)
         self.app = app; self.title("책갈피로 쓸 스타일 고르기"); self.resizable(False, True)
-        f = ttk.Frame(self, padding=12); f.grid(sticky="nsew")
-        ttk.Label(f, text="문단에 쓰인 스타일입니다. 책갈피처럼 쓸 제목 스타일을 고르십시오(여러 개 가능, 고른 순서가 큰 단위 → 작은 단위).", wraplength=520, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
-        self.lb = tk.Listbox(f, selectmode="multiple", height=min(18, max(6, len(counts))), width=48, exportselection=False, font=app.font_base)
+        self.configure(bg=app.colors["PANEL"]); f = ttk.Frame(self, style="Dialog.TFrame", padding=app.px(18)); f.grid(sticky="nsew")
+        ttk.Label(f, style="Panel.TLabel", text="문단에 쓰인 스타일입니다. 책갈피처럼 쓸 제목 스타일을 고르십시오(여러 개 가능, 고른 순서가 큰 단위 → 작은 단위).", wraplength=app.px(520), justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.lb = tk.Listbox(f, selectmode="multiple", height=min(18, max(6, len(counts))), width=48, exportselection=False, font=app.font_base, relief="flat", highlightthickness=1, highlightbackground=app.colors["LINE"], selectbackground=app.colors["SEL"], selectforeground=app.colors["INK"])
         self.names = [n for n, _ in counts]
         chosen = app.heading_styles_list()
         for i, (n, c) in enumerate(counts):
             self.lb.insert("end", f"{n}   ({c:,}개 문단)")
             if (chosen and n in chosen) or (not chosen and "제목" in n):
                 self.lb.selection_set(i)
-        self.lb.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-        sb = ttk.Scrollbar(f, orient="vertical", command=self.lb.yview); self.lb.configure(yscrollcommand=sb.set); sb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
-        b = ttk.Frame(f); b.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        P = app.px
+        self.lb.grid(row=1, column=0, sticky="nsew", pady=(P(8), 0)); f.columnconfigure(0, weight=1); f.rowconfigure(1, weight=1)
+        sb = ttk.Scrollbar(f, orient="vertical", command=self.lb.yview); self.lb.configure(yscrollcommand=sb.set); sb.grid(row=1, column=1, sticky="ns", pady=(P(8), 0))
+        b = ttk.Frame(f, style="Dialog.TFrame"); b.grid(row=2, column=0, columnspan=2, pady=(P(12), 0))
         ttk.Button(b, text="이 스타일들을 책갈피로", command=self.ok, style="Accent.TButton").pack(side="left", padx=4)
         ttk.Button(b, text="취소", command=self.destroy).pack(side="left", padx=4)
         self.transient(app); self.grab_set()
@@ -235,7 +261,8 @@ class EstimateDialog(tk.Toplevel):
         C = app.colors
         self.title("비용 미리 보기"); self.resizable(False, False); self.configure(bg=C["PANEL"])
         base = app.font_base[0]
-        f = ttk.Frame(self, padding=(20, 16, 20, 14), style="Panel.TFrame"); f.grid(sticky="nsew")
+        P = app.px
+        f = ttk.Frame(self, padding=(P(20), P(16), P(20), P(14)), style="Panel.TFrame"); f.grid(sticky="nsew")
         # 머리: 금액
         self.v_cap, self.v_head, self.v_usd, self.v_sub = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
         tk.Label(f, textvariable=self.v_cap, font=app.font_small, fg=C["MUTED"], bg=C["PANEL"]).grid(row=0, column=0, columnspan=2, sticky="w")
@@ -247,21 +274,21 @@ class EstimateDialog(tk.Toplevel):
         self.tv = ttk.Treeview(f, columns=cols, show="headings", height=3, selectmode="none")
         for c, (t, w, a) in {"step": ("단계", 160, "w"), "model": ("모델", 230, "w"), "calls": ("호출", 60, "e"),
                              "tin": ("입력 토큰", 110, "e"), "tout": ("출력 토큰", 100, "e"), "cost": ("비용", 140, "e")}.items():
-            self.tv.heading(c, text=t, anchor=a); self.tv.column(c, width=w, anchor=a, stretch=(c == "model"))
+            self.tv.heading(c, text=t, anchor=a); self.tv.column(c, width=P(w), anchor=a, stretch=(c == "model"))
         self.tv.tag_configure("sum", font=app.font_h)
         self.tv.grid(row=3, column=0, columnspan=2, sticky="we")
         f.columnconfigure(0, weight=1)
         # 바탕 정보
         self.v_info = tk.StringVar(); self.v_note = tk.StringVar()
-        ttk.Label(f, textvariable=self.v_info, style="Hint.TLabel", wraplength=800, justify="left").grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(f, textvariable=self.v_note, style="Hint.TLabel", wraplength=800, justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(f, textvariable=self.v_info, style="Hint.TLabel", wraplength=P(800), justify="left").grid(row=4, column=0, columnspan=2, sticky="w", pady=(P(8), 0))
+        ttk.Label(f, textvariable=self.v_note, style="Hint.TLabel", wraplength=P(800), justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(P(2), 0))
         # 단가·환율 고치기(접힘)
         self.adj = ttk.Frame(f, style="Panel.TFrame", padding=(0, 10, 0, 0))
         self.e_in = ttk.Entry(self.adj, width=7); self.e_out = ttk.Entry(self.adj, width=7); self.e_fx = ttk.Entry(self.adj, width=7)
-        self.l_model = ttk.Label(self.adj, text=""); self.l_model.grid(row=0, column=0, sticky="w")
-        ttk.Label(self.adj, text="입력 $").grid(row=0, column=1, sticky="e", padx=(10, 2)); self.e_in.grid(row=0, column=2)
-        ttk.Label(self.adj, text="출력 $").grid(row=0, column=3, sticky="e", padx=(10, 2)); self.e_out.grid(row=0, column=4)
-        ttk.Label(self.adj, text="원/달러").grid(row=0, column=5, sticky="e", padx=(10, 2)); self.e_fx.grid(row=0, column=6)
+        self.l_model = ttk.Label(self.adj, style="Panel.TLabel", text=""); self.l_model.grid(row=0, column=0, sticky="w")
+        ttk.Label(self.adj, style="Panel.TLabel", text="입력 $").grid(row=0, column=1, sticky="e", padx=(10, 2)); self.e_in.grid(row=0, column=2)
+        ttk.Label(self.adj, style="Panel.TLabel", text="출력 $").grid(row=0, column=3, sticky="e", padx=(10, 2)); self.e_out.grid(row=0, column=4)
+        ttk.Label(self.adj, style="Panel.TLabel", text="원/달러").grid(row=0, column=5, sticky="e", padx=(10, 2)); self.e_fx.grid(row=0, column=6)
         ttk.Button(self.adj, text="이 값으로 다시 계산", command=self.save).grid(row=0, column=7, padx=(12, 4))
         ttk.Button(self.adj, text="자동값으로", command=self.reset).grid(row=0, column=8)
         ttk.Label(self.adj, text="100만 토큰당 미국 달러. 요금표 https://ai.google.dev/pricing 과 다를 때만 고치십시오. 고친 값은 이 모델에 저장됩니다.",
@@ -292,6 +319,7 @@ class EstimateDialog(tk.Toplevel):
             self.v_sub.set(f"{pages} · 1차 {e['model']}" + (f" · 2차 {e['second_model']}" if e.get("second_model") and e["second_model"] != e["model"] else "") + f" · {basis}")
         for i in self.tv.get_children():
             self.tv.delete(i)
+        self.tv.configure(height=max(1, len(e.get("rows") or [1]) + (1 if e.get("rows") else 0)))   # 단계 줄 + 합계 줄이 다 보이게
         tot = {"calls": 0, "in_low": 0, "in_high": 0, "out_low": 0, "out_high": 0, "usd_low": 0.0, "usd_high": 0.0}
         for r in e.get("rows") or []:
             self.tv.insert("", "end", values=(r["label"], r["model"], f"{r['calls']:,}", f"{fmt_tokens(r['in_low'])}~{fmt_tokens(r['in_high'])}",
@@ -304,6 +332,7 @@ class EstimateDialog(tk.Toplevel):
         else:
             self.tv.insert("", "end", values=("전체", e["model"], f"{e['calls']:,}", f"{fmt_tokens(e['in_low'])}~{fmt_tokens(e['in_high'])}",
                                               f"{fmt_tokens(e['out_low'])}~{fmt_tokens(e['out_high'])}", "-"))
+        self._fit_columns()
         info = []
         if e.get("fx"):
             info.append(f"환율 {e['fx']:,.0f}원/달러 ({e['fx_source']})")
@@ -319,6 +348,22 @@ class EstimateDialog(tk.Toplevel):
         self.l_model.configure(text=f"'{model}' 단가")
         for ent, v in ((self.e_in, f"{pr['in']:g}" if pr else ""), (self.e_out, f"{pr['out']:g}" if pr else ""), (self.e_fx, f"{fx:.0f}" if fx else "")):
             ent.delete(0, "end"); ent.insert(0, v)
+
+    def _fit_columns(self):
+        """칸 너비를 가장 긴 값(합계 줄은 굵은 글씨)에 맞춘다 — 화면 배율이 커도 '1,200만~1,800만' 이 잘리지 않게."""
+        try:
+            from tkinter import font as tkfont
+            reg, bold = tkfont.Font(self, font=self.app.font_base), tkfont.Font(self, font=self.app.font_h)
+            pad = self.app.px(22)
+            for k, c in enumerate(self.tv["columns"]):
+                need = bold.measure(self.tv.heading(c, "text"))
+                for it in self.tv.get_children():
+                    v = str(self.tv.item(it, "values")[k]); f = bold if "sum" in self.tv.item(it, "tags") else reg
+                    need = max(need, f.measure(v))
+                if need + pad > int(self.tv.column(c, "width")):
+                    self.tv.column(c, width=need + pad)
+        except (tk.TclError, IndexError):
+            pass
 
     def toggle_adj(self):
         self.adj_shown = not self.adj_shown
@@ -348,17 +393,62 @@ class EstimateDialog(tk.Toplevel):
         self.proceed = True; self.destroy()
 
 
+class Tip:
+    """마우스를 올리면 잠시 뒤 짧은 설명을 띄운다(화면에 늘 보이던 긴 안내문을 줄이기 위해)."""
+    def __init__(self, widget, text: str, app: "App"):
+        self.w, self.text, self.app = widget, text, app
+        self.win: tk.Toplevel | None = None; self.job = None
+        widget.bind("<Enter>", self._enter, add="+"); widget.bind("<Leave>", self._leave, add="+"); widget.bind("<ButtonPress>", self._leave, add="+")
+
+    def _enter(self, _e=None):
+        self._cancel(); self.job = self.w.after(550, self._show)
+
+    def _leave(self, _e=None):
+        self._cancel()
+        if self.win is not None:
+            try: self.win.destroy()
+            except tk.TclError: pass
+            self.win = None
+
+    def _cancel(self):
+        if self.job:
+            try: self.w.after_cancel(self.job)
+            except tk.TclError: pass
+            self.job = None
+
+    def _show(self):
+        self.job = None
+        if self.win is not None or not self.w.winfo_exists():
+            return
+        C, P = self.app.colors, self.app.px
+        self.win = tw = tk.Toplevel(self.w); tw.wm_overrideredirect(True)
+        try: tw.attributes("-topmost", True)
+        except tk.TclError: pass
+        tk.Label(tw, text=self.text, bg=C["INK"], fg="#f7f1e6", font=self.app.font_small, justify="left", wraplength=P(380), padx=P(10), pady=P(6)).pack()
+        tw.update_idletasks()
+        x = min(self.w.winfo_rootx() + P(6), self.w.winfo_screenwidth() - tw.winfo_reqwidth() - 8)
+        y = self.w.winfo_rooty() + self.w.winfo_height() + P(6)
+        tw.geometry(f"+{max(0, x)}+{y}")
+
+
+TAB_HINTS = ("스캔 PDF·이미지를 지침대로 판독해 HWPX 문서로 만듭니다", "이미 입력된 HWPX를 PDF 원본과 대조해 고친 사본을 만듭니다")
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} · 연어OCR {__version__}")
-        self.geometry("1180x1000"); self.minsize(980, 760)
         self.cfg = load_config()
         self._style()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(self.px(1180), sw - 40), min(self.px(980), sh - 80)
+        self.geometry(f"{w}x{h}"); self.minsize(min(self.px(960), w), min(self.px(640), h))
         self.q: queue.Queue = queue.Queue()
         self.running = False
         self.open_after: Path | None = None
         self.buttons: list[ttk.Button] = []
+        self.tracker = Tracker()
+        self._prog_shown = 0.0
         self._build()
         self.after(100, self._poll)
         self.after(400, self.check_packages)
@@ -367,6 +457,10 @@ class App(tk.Tk):
         if self.cfg.get("last_pdf") and Path(self.cfg["last_pdf"]).exists():
             self.v_pdf.set(self.cfg["last_pdf"]); self.refresh_table()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def px(self, v: float) -> int:
+        """화면 배율에 맞춘 픽셀 수(글꼴은 Tk 가 알아서 키우지만 여백·그림은 직접 곱해야 한다)."""
+        return max(1, int(round(v * getattr(self, "scale", 1.0))))
 
     # ---------- 화면 ----------
     FONT_CANDIDATES = ("Pretendard", "Pretendard Variable", "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "나눔고딕")
@@ -385,279 +479,686 @@ class App(tk.Tk):
         return fallback
 
     def _style(self):
-        """차분한 종이색 바탕에 옻칠색 머리띠. clam 테마 위에 색·여백·글꼴을 통일한다(0.6.0: 글꼴 자동 선택, 단추 위계, 간격 정돈)."""
+        """종이색 바탕에 옻칠색 강조. clam 테마 위에 둥근 단추·카드·입력칸, ✓ 체크 상자, 끝까지 차는 진행 막대를
+        그림(gui_art)으로 입힌다(0.6.3). 단추는 세 단계 위계 — 강조(실행) · 보통(테두리 단추) · 글자 단추(펼치기)."""
+        from . import gui_art as A
         st = ttk.Style(self)
         try:
             st.theme_use("clam")
         except tk.TclError:
             pass
+        try:
+            self.scale = max(1.0, round(self.winfo_fpixels("1i") / 96.0 * 4) / 4)
+        except Exception:
+            self.scale = 1.0
+        P = self.px
         sys_base = "맑은 고딕" if sys.platform.startswith("win") else ("Apple SD Gothic Neo" if sys.platform == "darwin" else "Noto Sans CJK KR")
         base = self._pick_font(self.FONT_CANDIDATES, sys_base)
         mono = self._pick_font(self.MONO_CANDIDATES, "Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono")
         self.font_base, self.font_small, self.font_h = (base, 10), (base, 9), (base, 10, "bold")
-        self.font_title, self.font_sub, self.font_big = (base, 18, "bold"), (base, 10), (base, 12, "bold")
+        self.font_title, self.font_sub, self.font_big = (base, 17, "bold"), (base, 10), (base, 12, "bold")
+        self.font_card, self.font_btn_h = (base, 11, "bold"), (base, 11, "bold")
         self.font_mono = (mono, 10)
-        self.option_add("*Font", self.font_base)
+        # 기본 글꼴을 한글 글꼴로 바꾼다. (option_add("*Font") 는 ttk 이름표의 스타일 글꼴까지 덮어써 카드 제목·안내 글의 굵기·크기가 사라졌다)
+        try:
+            from tkinter import font as tkfont
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont"):
+                tkfont.nametofont(name, root=self).configure(family=base)
+            tkfont.nametofont("TkDefaultFont", root=self).configure(size=10); tkfont.nametofont("TkTextFont", root=self).configure(size=10)
+        except Exception:
+            self.option_add("*Font", self.font_base)
         self.option_add("*TCombobox*Listbox.font", self.font_base)
-        C = self.colors = dict(BG="#f4f1ea", PANEL="#fcfbf7", LINE="#ddd6c7", INK="#27211d", MUTED="#7d7368",
-                               ACC="#3a1c15", ACC_HI="#5a2a20", GOLD="#b8934e", RED="#b4271f", GREEN="#2f6f4a", FIELD="#ffffff",
-                               BTN="#efe9dd", BTN_HI="#e5ddcd", SEL="#efe4c8")
+        C = self.colors = dict(BG="#f3efe7", PANEL="#fdfcf9", LINE="#e3dbcc", FLINE="#d0c6b4", EDGE="#9d917f", FOCUS="#9a7637", INK="#2a221d", MUTED="#6b6155",
+                               ACC="#3d1d16", ACC_HI="#5c2c21", ACC_DN="#2a130e", GOLD="#b8934e", RED="#b4271f", RED_SOFT="#fbeceb",
+                               GREEN="#2f6f4a", FIELD="#ffffff", BTN="#ffffff", BTN_HI="#f8f2e6", BTN_DN="#efe5d1",
+                               TRACK="#e7e0d1", TRACK_HI="#dcd2bf", SEL="#f1e5c9", STRIPE="#faf7f0", HEAD="#f4efe4",
+                               DIS="#f5f2ec", DIS_LINE="#e6e0d5", DIS_INK="#ada395")
         self.configure(bg=C["BG"])
-        st.configure(".", background=C["BG"], foreground=C["INK"], font=self.font_base, bordercolor=C["LINE"], troughcolor="#e9e3d6")
+        self.option_add("*TCombobox*Listbox.background", C["FIELD"])
+        self.option_add("*TCombobox*Listbox.selectBackground", C["SEL"])
+        self.option_add("*TCombobox*Listbox.selectForeground", C["INK"])
+        self._img: dict[str, tk.PhotoImage] = {}
+
+        def img(key: str, b64: str) -> tk.PhotoImage:
+            self._img[key] = tk.PhotoImage(master=self, data=b64)
+            return self._img[key]
+
+        bw = 1.0 * self.scale
+        # ---- 바탕·글자 ----
+        st.configure(".", background=C["BG"], foreground=C["INK"], font=self.font_base, bordercolor=C["LINE"], troughcolor=C["TRACK"],
+                     focuscolor=C["BG"], selectbackground=C["SEL"], selectforeground=C["INK"], insertcolor=C["INK"])
         st.configure("TFrame", background=C["BG"]); st.configure("Panel.TFrame", background=C["PANEL"])
-        st.configure("TLabel", background=C["BG"]); st.configure("Panel.TLabel", background=C["PANEL"])
+        st.configure("TLabel", background=C["BG"], foreground=C["INK"])
+        st.configure("Panel.TLabel", background=C["PANEL"])
+        st.configure("Field.TLabel", background=C["PANEL"], foreground=C["INK"])
         st.configure("Hint.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=self.font_small)
+        st.configure("PageHint.TLabel", background=C["BG"], foreground=C["MUTED"], font=self.font_small)
+        st.configure("CardTitle.TLabel", background=C["PANEL"], foreground=C["ACC"], font=self.font_card)
+        st.configure("Section.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=self.font_h)
         st.configure("Status.TLabel", background=C["BG"], foreground=C["ACC"], font=self.font_h)
-        st.configure("Section.TLabel", background=C["PANEL"], foreground=C["ACC"], font=self.font_h)
-        st.configure("TLabelframe", background=C["PANEL"], bordercolor=C["LINE"], relief="solid", borderwidth=1, padding=(12, 8, 12, 10))
-        st.configure("TLabelframe.Label", background=C["PANEL"], foreground=C["ACC"], font=self.font_h, padding=(4, 0))
-        # 단추 위계: 기본(도구) < 강조(실행) · 중지는 붉은 글자
-        st.configure("TButton", padding=(12, 6), background=C["BTN"], lightcolor=C["BTN"], darkcolor=C["BTN"], bordercolor=C["LINE"], focuscolor=C["PANEL"], relief="flat")
-        st.map("TButton", background=[("pressed", C["BTN_HI"]), ("active", C["BTN_HI"]), ("disabled", "#f1ede5")], foreground=[("disabled", "#aaa196")],
-               bordercolor=[("active", C["GOLD"])])
-        st.configure("Accent.TButton", background=C["ACC"], foreground="#fff7ea", font=self.font_h, padding=(20, 10),
-                     lightcolor=C["ACC"], darkcolor=C["ACC"], bordercolor=C["ACC"], focuscolor=C["ACC"])
-        st.map("Accent.TButton", background=[("pressed", C["ACC_HI"]), ("active", C["ACC_HI"]), ("disabled", "#b8a79d")], foreground=[("disabled", "#f3eee6")])
-        st.configure("Stop.TButton", foreground=C["RED"], padding=(14, 10), font=self.font_h)
-        st.configure("Small.TButton", padding=(8, 3), font=self.font_small)
-        st.configure("TCheckbutton", background=C["PANEL"], padding=(2, 2)); st.configure("TRadiobutton", background=C["PANEL"], padding=(2, 2))
-        st.map("TCheckbutton", background=[("active", C["PANEL"])]); st.map("TRadiobutton", background=[("active", C["PANEL"])])
-        st.configure("TEntry", fieldbackground=C["FIELD"], padding=4, bordercolor=C["LINE"], lightcolor=C["LINE"], darkcolor=C["LINE"])
-        st.map("TEntry", bordercolor=[("focus", C["GOLD"])], lightcolor=[("focus", C["GOLD"])], darkcolor=[("focus", C["GOLD"])])
-        st.configure("TSpinbox", fieldbackground=C["FIELD"], padding=3, arrowsize=12)
-        st.configure("TCombobox", fieldbackground=C["FIELD"], padding=3, arrowsize=14)
-        st.map("TCombobox", fieldbackground=[("readonly", C["FIELD"])], selectbackground=[("readonly", C["FIELD"])], selectforeground=[("readonly", C["INK"])])
-        st.configure("TNotebook", background=C["BG"], tabmargins=(2, 4, 2, 0), borderwidth=0)
-        st.configure("TNotebook.Tab", padding=(16, 7), background="#e9e3d6", font=self.font_base)
-        st.map("TNotebook.Tab", background=[("selected", C["PANEL"])], foreground=[("selected", C["ACC"])], padding=[("selected", (16, 7))])
-        st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], rowheight=26, bordercolor=C["LINE"], lightcolor=C["LINE"], darkcolor=C["LINE"])
+        st.configure("Prog.TLabel", background=C["BG"], foreground=C["MUTED"], font=self.font_base)
+        # 가는 선: clam 의 구분선은 홈 파인 두 줄(짙은 그림자)로 그려져 무거워 보이므로 한 줄짜리 그림으로 바꾼다
+        lh = max(1, P(1))
+        st.element_create("Rule.line", "image", img("rule", A.rounded_box(64, lh, 0, C["LINE"])), sticky="ew", height=lh)
+        st.layout("TSeparator", [("Rule.line", {"sticky": "ew"})]); st.layout("Horizontal.TSeparator", [("Rule.line", {"sticky": "ew"})])
+        # ---- 카드(둥근 모서리 판) ----
+        r = P(10); nw, bd_ = A.stretch_size(r, 192); nh, _ = A.stretch_size(r, 64)
+        st.element_create("Card.border", "image", img("card", A.rounded_box(nw, nh, r, C["PANEL"], C["LINE"], bw)), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_)
+        st.layout("Card.TFrame", [("Card.border", {"sticky": "nsew"})])
+        st.configure("Card.TFrame", background=C["BG"])
+
+        # ---- 단추: 강조(실행) · 보통(테두리) · 중지 ----
+        def button_style(name: str, look: dict, pad, font, fg: str, fg_dis: str, on: str):
+            r = P(7); nw, bd_ = A.stretch_size(r, 96); nh, _ = A.stretch_size(r, 24)
+            ims = {k: img(f"{name}_{k}", A.rounded_box(nw, nh, r, fill, line, bw)) for k, (fill, line) in look.items()}
+            el = f"{name}.border"
+            st.element_create(el, "image", ims["normal"], ("disabled", ims["disabled"]), ("pressed", ims["pressed"]),
+                              ("active", ims["active"]), ("focus", ims["focus"]), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(2))
+            sname = "TButton" if name == "Btn" else f"{name}.TButton"
+            st.layout(sname, [(el, {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
+            st.configure(sname, padding=pad, font=font, foreground=fg, background=on, anchor="center")
+            st.map(sname, foreground=[("disabled", fg_dis)], background=[("active", on), ("pressed", on), ("disabled", on)])
+
+        button_style("Btn", {"normal": (C["BTN"], C["FLINE"]), "active": (C["BTN_HI"], C["GOLD"]), "pressed": (C["BTN_DN"], C["GOLD"]),
+                             "disabled": (C["DIS"], C["DIS_LINE"]), "focus": (C["BTN"], C["FOCUS"])}, (P(14), P(6)), self.font_base, C["INK"], C["DIS_INK"], C["PANEL"])
+        button_style("Accent", {"normal": (C["ACC"], None), "active": (C["ACC_HI"], None), "pressed": (C["ACC_DN"], None),
+                                "disabled": ("#c2b4a9", None), "focus": (C["ACC"], C["FOCUS"])}, (P(24), P(9)), self.font_btn_h, "#fff8ec", "#f7f1e8", C["PANEL"])
+        button_style("Stop", {"normal": (C["BTN"], "#e5c0bb"), "active": (C["RED_SOFT"], C["RED"]), "pressed": ("#f6dcd8", C["RED"]),
+                              "disabled": (C["DIS"], C["DIS_LINE"]), "focus": (C["BTN"], C["RED"])}, (P(18), P(9)), self.font_btn_h, C["RED"], C["DIS_INK"], C["PANEL"])
+        st.configure("TButton", width=-6)                            # clam 기본 최소 11글자 → 짧은 단추([전체]·[보기])가 지나치게 넓지 않게
+        st.configure("Tool.TButton", padding=(P(10), P(6)))
+        st.configure("Page.TButton", background=C["BG"]); st.map("Page.TButton", background=[("active", C["BG"]), ("pressed", C["BG"]), ("disabled", C["BG"])])
+        # 글자 단추(펼치기·접기): 테두리 없이 강조색 글자
+        for sname, bg in (("Link.TButton", C["PANEL"]), ("PageLink.TButton", C["BG"])):
+            st.layout(sname, [("Button.padding", {"sticky": "nsew", "children": [("Button.focus", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
+            st.configure(sname, background=bg, foreground=C["ACC"], font=self.font_h, padding=(P(4), P(3)), width=0, focuscolor=C["FOCUS"], focusthickness=max(1, P(1)))
+            st.map(sname, foreground=[("disabled", C["DIS_INK"]), ("active", C["ACC_HI"])], background=[("active", bg)],
+                   font=[("active", (self.font_h[0], self.font_h[1], "bold", "underline"))])
+        # ---- 체크 상자(✓)·라디오 ----
+        cs, gap = P(16), P(8)
+        G = C["FOCUS"]                                               # 초점 고리(바탕 대비 3:1 이상)
+        ck = {k: img("chk_" + k, A.checkbox(cs, on, acc, edge, gap=gap, hover=hv, disabled=ds, ring=rg))
+              for k, on, acc, edge, hv, ds, rg in (("off", False, C["ACC"], C["EDGE"], False, False, None), ("off_h", False, C["ACC"], C["EDGE"], True, False, None),
+                                                   ("off_f", False, C["ACC"], C["EDGE"], False, False, G), ("on", True, C["ACC"], C["EDGE"], False, False, None),
+                                                   ("on_h", True, C["ACC_HI"], C["EDGE"], False, False, None), ("on_f", True, C["ACC"], C["EDGE"], False, False, G),
+                                                   ("dis_off", False, C["ACC"], C["EDGE"], False, True, None), ("dis_on", True, C["ACC"], C["EDGE"], False, True, None))}
+        st.element_create("Check.indicator", "image", ck["off"], ("disabled", "selected", ck["dis_on"]), ("disabled", ck["dis_off"]),
+                          ("selected", "active", ck["on_h"]), ("selected", "focus", ck["on_f"]), ("selected", ck["on"]), ("active", ck["off_h"]), ("focus", ck["off_f"]), sticky="")
+        rd = {k: img("rad_" + k, A.radio(cs, on, acc, edge, gap=gap, hover=hv, disabled=ds, ring=rg))
+              for k, on, acc, edge, hv, ds, rg in (("off", False, C["ACC"], C["EDGE"], False, False, None), ("off_h", False, C["ACC"], C["EDGE"], True, False, None),
+                                                   ("off_f", False, C["ACC"], C["EDGE"], False, False, G), ("on", True, C["ACC"], C["EDGE"], False, False, None),
+                                                   ("on_f", True, C["ACC"], C["EDGE"], False, False, G), ("dis_off", False, C["ACC"], C["EDGE"], False, True, None),
+                                                   ("dis_on", True, C["ACC"], C["EDGE"], False, True, None))}
+        st.element_create("Radio.indicator", "image", rd["off"], ("disabled", "selected", rd["dis_on"]), ("disabled", rd["dis_off"]),
+                          ("selected", "focus", rd["on_f"]), ("selected", rd["on"]), ("active", rd["off_h"]), ("focus", rd["off_f"]), sticky="")
+        for w, ind in (("Checkbutton", "Check.indicator"), ("Radiobutton", "Radio.indicator")):
+            st.layout(f"T{w}", [(f"{w}.padding", {"sticky": "nswe", "children": [(ind, {"side": "left", "sticky": ""}), (f"{w}.label", {"side": "left", "sticky": "nswe"})]})])
+            st.configure(f"T{w}", background=C["PANEL"], foreground=C["INK"], padding=(0, P(3), P(4), P(3)))
+            st.map(f"T{w}", background=[("active", C["PANEL"]), ("disabled", C["PANEL"])], foreground=[("disabled", C["DIS_INK"])])
+        # ---- 두 갈래 고르기(탭 대신): 붙어 있는 알약 모양 ----
+        r = P(9); nw, bd_ = A.stretch_size(r, 96); nh, _ = A.stretch_size(r, 16)
+        for side, corners in (("L", "l"), ("R", "r")):
+            on, off, hov, on_f, off_f = (img(f"seg{side}_{k}", A.rounded_box(nw, nh, r, fill, line, bw * 1.6, corners=corners))
+                                         for k, fill, line in (("on", C["ACC"], None), ("off", C["TRACK"], None), ("h", C["TRACK_HI"], None),
+                                                               ("on_f", C["ACC"], G), ("off_f", C["TRACK"], G)))
+            st.element_create(f"Seg{side}.border", "image", off, ("selected", "focus", on_f), ("selected", on), ("focus", off_f), ("active", hov),
+                              border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(2))
+            sname = f"Seg{side}.TRadiobutton"
+            st.layout(sname, [(f"Seg{side}.border", {"sticky": "nsew", "children": [("Radiobutton.padding", {"sticky": "nsew", "children": [("Radiobutton.label", {"sticky": "nsew"})]})]})])
+            st.configure(sname, background=C["BG"], foreground="#5f554a", font=self.font_h, padding=(P(24), P(8)), anchor="center")
+            st.map(sname, foreground=[("selected", "#fff8ec"), ("active", C["INK"]), ("focus", C["INK"])], background=[("active", C["BG"]), ("selected", C["BG"])])
+            st.configure(f"Small.{sname}", font=self.font_base, padding=(P(16), P(5)))
+        # ---- 진행 막대: 처음부터 끝까지 한 방향으로 찬다 ----
+        h = P(10); r = h // 2; nw, bd_ = A.stretch_size(r, 192)
+        st.element_create("Bar.trough", "image", img("bar_tr", A.rounded_box(nw, h, r, C["TRACK"])), border=(bd_, 0), sticky="nsew", width=2 * bd_, padding=0)
+        self._bar_cap = 2 * bd_                                       # 막대가 이보다 짧으면 둥근 끝이 겹쳐 그려진다
+        st.element_create("Bar.pbar", "image", img("bar_pb", A.rounded_box(nw, h, r, C["GOLD"])), border=(bd_, 0), sticky="nsew", width=2 * bd_)
+        st.layout("Bar.Horizontal.TProgressbar", [("Bar.trough", {"sticky": "nsew", "children": [("Bar.pbar", {"side": "left", "sticky": "ns"})]})])
+        st.configure("Bar.Horizontal.TProgressbar", background=C["BG"])
+        # ---- 입력칸·고르기 칸(둥근 테두리, 초점이면 금빛) ----
+        r = P(5); nw, bd_ = A.stretch_size(r, 128); nh, _ = A.stretch_size(r, 20)
+        fld = {k: img("fld_" + k, A.rounded_box(nw, nh, r, fill, line, w))
+               for k, fill, line, w in (("n", C["FIELD"], C["EDGE"], bw), ("f", C["FIELD"], C["FOCUS"], bw * 1.6), ("d", C["DIS"], C["DIS_LINE"], bw), ("ro", "#faf8f3", C["FLINE"], bw))}
+        st.element_create("Field.field", "image", fld["n"], ("disabled", fld["d"]), ("focus", fld["f"]), ("readonly", fld["ro"]), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(3))
+        st.element_create("Pick.field", "image", fld["n"], ("disabled", fld["d"]), ("focus", fld["f"]), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(3))
+        st.element_create("Pick.downarrow", "image", img("chev", A.chevron(P(12), P(8), C["MUTED"], 1.6 * self.scale)),
+                          ("disabled", img("chev_d", A.chevron(P(12), P(8), C["DIS_INK"], 1.6 * self.scale))), sticky="", padding=(P(4), 0, P(2), 0))
+        st.layout("TEntry", [("Field.field", {"sticky": "nswe", "children": [("Entry.padding", {"sticky": "nswe", "children": [("Entry.textarea", {"sticky": "nswe"})]})]})])
+        st.configure("TEntry", padding=(P(6), P(4)), background=C["PANEL"], fieldbackground=C["FIELD"], foreground=C["INK"])
+        st.map("TEntry", foreground=[("disabled", C["DIS_INK"])])
+        st.layout("TCombobox", [("Pick.field", {"sticky": "nswe", "children": [("Pick.downarrow", {"side": "right", "sticky": ""}),
+                                ("Combobox.padding", {"sticky": "nswe", "children": [("Combobox.textarea", {"sticky": "nswe"})]})]})])
+        st.configure("TCombobox", padding=(P(6), P(4)), background=C["PANEL"], fieldbackground=C["FIELD"], foreground=C["INK"])
+        st.map("TCombobox", fieldbackground=[("readonly", C["FIELD"])], selectbackground=[("readonly", C["FIELD"])], selectforeground=[("readonly", C["INK"])],
+               foreground=[("disabled", C["DIS_INK"])], background=[("readonly", C["PANEL"]), ("active", C["PANEL"])])
+        st.layout("TSpinbox", [("Field.field", {"side": "top", "sticky": "we", "children": [("null", {"side": "right", "sticky": "", "children": [
+            ("Spinbox.uparrow", {"side": "top", "sticky": "e"}), ("Spinbox.downarrow", {"side": "bottom", "sticky": "e"})]}),
+            ("Spinbox.padding", {"sticky": "nswe", "children": [("Spinbox.textarea", {"sticky": "nswe"})]})]})])
+        st.configure("TSpinbox", padding=(P(6), P(3)), arrowsize=P(9), arrowcolor=C["MUTED"], background=C["PANEL"], fieldbackground=C["FIELD"],
+                     bordercolor=C["FIELD"], lightcolor=C["FIELD"], darkcolor=C["FIELD"], foreground=C["INK"])
+        st.map("TSpinbox", background=[("active", C["BTN_HI"]), ("pressed", C["BTN_DN"])])
+        # ---- 표·글줄 ----
+        st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], foreground=C["INK"], rowheight=P(28), bordercolor=C["LINE"],
+                     lightcolor=C["FIELD"], darkcolor=C["FIELD"], borderwidth=0)
         st.map("Treeview", background=[("selected", C["SEL"])], foreground=[("selected", C["INK"])])
-        st.configure("Treeview.Heading", background="#efe9dd", foreground=C["ACC"], font=self.font_h, relief="flat", padding=(6, 5))
+        st.configure("Treeview.Heading", background=C["HEAD"], foreground=C["MUTED"], font=self.font_h, relief="flat", padding=(P(8), P(6)),
+                     bordercolor=C["LINE"], lightcolor=C["HEAD"], darkcolor=C["HEAD"])
         st.map("Treeview.Heading", background=[("active", C["BTN_HI"])])
-        st.configure("Top.TNotebook", background=C["BG"], borderwidth=0, tabmargins=(0, 6, 0, 0))
-        st.configure("Top.TNotebook.Tab", font=self.font_h, padding=(18, 9))
-        st.map("Top.TNotebook.Tab", background=[("selected", C["PANEL"]), ("!selected", "#e6dfd0")], foreground=[("selected", C["ACC"]), ("!selected", C["MUTED"])])
-        st.configure("Horizontal.TProgressbar", troughcolor="#e8e2d6", background=C["GOLD"], lightcolor=C["GOLD"], darkcolor=C["GOLD"], bordercolor="#e8e2d6", thickness=8)
-        st.configure("TScrollbar", background=C["BTN"], troughcolor=C["BG"], bordercolor=C["BG"], arrowcolor=C["MUTED"], relief="flat")
-        st.map("TScrollbar", background=[("active", C["BTN_HI"])])
-        st.configure("TSeparator", background=C["LINE"])
+        for o in ("Vertical", "Horizontal"):
+            st.configure(f"{o}.TScrollbar", background=C["TRACK"], troughcolor=C["PANEL"], bordercolor=C["PANEL"], lightcolor=C["TRACK"],
+                         darkcolor=C["TRACK"], arrowcolor=C["MUTED"], gripcount=0, arrowsize=P(12))
+            st.map(f"{o}.TScrollbar", background=[("active", C["TRACK_HI"]), ("pressed", C["TRACK_HI"])])
+        st.layout("Hidden.TNotebook.Tab", [])
+        st.configure("Hidden.TNotebook", background=C["BG"], borderwidth=0, padding=0, tabmargins=0, bordercolor=C["BG"], lightcolor=C["BG"], darkcolor=C["BG"])
+        # 대화 상자(별도 창)는 카드색 바탕
+        st.configure("Dialog.TFrame", background=C["PANEL"])
+        st.configure("TPanedwindow", background=C["BG"])
+        st.configure("Sash", sashthickness=P(10), gripcount=0, background=C["BG"], lightcolor=C["BG"], darkcolor=C["BG"], bordercolor=C["BG"])
+        # 위·아래 칸 경계: 가운데 작은 손잡이(끌어서 높이를 나눌 수 있다는 표시). 마우스를 올리면 커서가 ↕ 로 바뀐다.
+        gw, gh = P(44), max(3, P(4))
+        st.element_create("Grip.sash", "image", img("grip", A.rounded_box(gw, gh, gh / 2, C["FLINE"])), sticky="", width=gw, height=P(10))   # 그림은 얇게, 잡는 자리는 넉넉히
+        for o in ("Vertical", "Horizontal"):
+            st.layout(f"{o}.Sash", [("Grip.sash", {"sticky": ""})])
+
+    # ---------- 화면 부품 ----------
+    def _card(self, parent, title: str | None = None, pad=None) -> ttk.Frame:
+        """둥근 모서리 카드. 제목이 있으면 위에 굵게 적고, 내용은 card.body 에 넣는다."""
+        P = self.px
+        outer = ttk.Frame(parent, style="Card.TFrame", padding=pad or (P(18), P(12) if title else P(14), P(18), P(14)))
+        if title:
+            ttk.Label(outer, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, P(8)))
+        body = ttk.Frame(outer, style="Panel.TFrame"); body.pack(fill="both", expand=True)
+        outer.body = body                                   # type: ignore[attr-defined]
+        return outer
+
+    def _hint(self, parent, text: str = "", page: bool = False, **kw) -> ttk.Label:
+        """흐린 안내 글. 차지한 너비에 맞춰 줄을 바꾼다(창이 좁아도 잘리지 않게)."""
+        # width=1: 안내 글이 칸 너비를 정하지 않게 한다(줄바꿈 너비 ↔ 칸 너비가 서로를 바꾸며 끝없이 되먹임되는 것을 막음).
+        # 실제 너비는 칸이 주는 만큼이고, 그 너비에 맞춰 줄을 바꾼다.
+        lab = ttk.Label(parent, text=text, style="PageHint.TLabel" if page else "Hint.TLabel", justify="left", width=1, **kw)
+
+        def wrap(e):
+            w = max(self.px(40), e.width - 2)
+            if abs(int(str(lab.cget("wraplength") or 0)) - w) > 3:
+                lab.configure(wraplength=w)
+        lab.bind("<Configure>", wrap)
+        return lab
+
+    def _field_label(self, parent, text: str, row: int, top: int = 3):
+        ttk.Label(parent, text=text, style="Field.TLabel").grid(row=row, column=0, sticky="w", padx=(0, self.px(12)), pady=(self.px(top), self.px(3)))
+
+    def _segmented(self, parent, items: list[tuple[str, int]], var: tk.IntVar, command, small: bool = False) -> ttk.Frame:
+        """붙어 있는 두 갈래 고르기. 탭처럼 화면을 바꾸지만 단추처럼 또렷하게 보인다."""
+        f = ttk.Frame(parent)
+        for k, (text, val) in enumerate(items):
+            side = "L" if k == 0 else "R"
+            ttk.Radiobutton(f, text=text, value=val, variable=var, command=command, cursor="hand2",
+                            style=("Small." if small else "") + f"Seg{side}.TRadiobutton").pack(side="left")
+        return f
+
+    def _cw(self, values, extra: int = 3) -> int:
+        """고르기 칸 너비(글자 '0' 단위): 가장 긴 값이 다 보이게."""
+        try:
+            from tkinter import font as tkfont
+            f = tkfont.Font(self, font=self.font_base); zero = max(1, f.measure("0"))
+            return max(6, -(-max(f.measure(str(v)) for v in values) // zero) + extra)
+        except Exception:
+            return max(6, max(len(str(v)) for v in values) * 2)
+
+    def select_tab(self, i: int):
+        """일반 OCR(0) · 책갈피 OCR(1). 고른 쪽만 보여 높이가 내용에 맞는다."""
+        self.v_tab.set(i)
+        for k, f in enumerate(self.tab_frames):
+            if k == i:
+                f.pack(fill="x")
+            else:
+                f.pack_forget()
+        self.v_tabhint.set(TAB_HINTS[i])
+        if hasattr(self, "_canvas"):
+            self._canvas.yview_moveto(0)
+        for k, a in enumerate(getattr(self, "act_cards", [])):
+            if k == i:
+                a.pack(fill="x")
+            else:
+                a.pack_forget()
+        if hasattr(self, "pane"):
+            self.after_idle(self._fit_sash)
 
     def _build(self):
-        C = self.colors
+        C = self.colors; P = self.px
         # ---- 머리띠 ----
-        hd = tk.Frame(self, bg=C["ACC"], padx=20, pady=12); hd.pack(fill="x")
-        tk.Frame(self, bg=C["GOLD"], height=3).pack(fill="x")                  # 머리띠 아래 금빛 선
-        tk.Label(hd, text=APP_NAME, font=self.font_title, bg=C["ACC"], fg="#f3e9d2").pack(side="left")
-        tk.Label(hd, text="연어OCR", font=self.font_big, bg=C["ACC"], fg="#d9c9a8").pack(side="left", padx=(12, 0), pady=(5, 0))
-        tk.Label(hd, text="세로쓰기 한자·한글 문헌을 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#bfae8e").pack(side="left", padx=(14, 0), pady=(7, 0))
+        hd = tk.Frame(self, bg=C["ACC"], padx=P(20), pady=P(11)); hd.pack(fill="x")
+        tk.Frame(self, bg=C["GOLD"], height=max(2, P(2))).pack(fill="x")             # 머리띠 아래 금빛 선
         self.v_pkg = tk.StringVar(value="패키지 점검 중…")
-        tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", pady=(7, 0))
-        tk.Label(hd, text=f"v{__version__}", font=(self.font_small[0], 9, "bold"), bg="#5a2a20", fg="#f3e9d2", padx=8, pady=2).pack(side="right", padx=(0, 14), pady=(5, 0))
+        # 제목·판 번호를 먼저 배치한다(pack 은 먼저 넣은 것에 자리를 먼저 주므로, 긴 안내 글이 제목을 밀어내지 않게).
+        tk.Label(hd, text=APP_NAME, font=self.font_title, bg=C["ACC"], fg="#f3e9d2").pack(side="left")
+        tk.Label(hd, text="연어OCR", font=self.font_big, bg=C["ACC"], fg="#d9c9a8").pack(side="left", padx=(P(10), 0), pady=(P(4), 0))
+        tk.Label(hd, text=f"v{__version__}", font=(self.font_small[0], 9, "bold"), bg="#5a2a20", fg="#f3e9d2", padx=P(8), pady=P(2)).pack(side="right", pady=(P(5), 0))
+        tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", padx=(0, P(14)), pady=(P(6), 0))
+        tk.Label(hd, text="한자·한글 문헌 스캔 PDF·이미지를 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#bfae8e").pack(side="left", padx=(P(16), 0), pady=(P(6), 0))
 
-        self.tabs = ttk.Notebook(self, style="Top.TNotebook"); self.tabs.pack(fill="x", padx=14, pady=(10, 0))
-        root = ttk.Frame(self.tabs, padding=(10, 8, 10, 10)); self.tabs.add(root, text="   세로쓰기 인식   ")
-        tab2 = ttk.Frame(self.tabs, padding=(10, 8, 10, 10)); self.tabs.add(tab2, text="   책갈피 OCR   ")
-        bottom = ttk.Frame(self, padding=(14, 0, 14, 10)); bottom.pack(fill="both", expand=True)
-        pad = {"padx": 4, "pady": 3}
+        # ---- 일반 OCR / 책갈피 OCR 고르기 ----
+        bar = ttk.Frame(self, padding=(P(16), P(12), P(16), 0)); bar.pack(fill="x")
+        self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])
+        self._segmented(bar, [("일반 OCR", 0), ("책갈피 OCR", 1)], self.v_tab, lambda: self.select_tab(self.v_tab.get())).pack(side="left")
+        ttk.Label(bar, textvariable=self.v_tabhint, style="PageHint.TLabel").pack(side="left", padx=(P(14), 0))
+        # 위(설정·실행)는 스크롤되는 칸, 아래(진행·기록)는 늘 보이는 칸. 가운데 경계를 끌어 높이를 나눈다.
+        self.pane = ttk.PanedWindow(self, orient="vertical"); self.pane.pack(fill="both", expand=True)
+        upper = ttk.Frame(self.pane)
+        cv = self._canvas = tk.Canvas(upper, bg=C["BG"], highlightthickness=0, borderwidth=0, yscrollincrement=P(20))
+        cv.pack(fill="both", expand=True)
+        self._vsb = ttk.Scrollbar(upper, orient="vertical", command=cv.yview); cv.configure(yscrollcommand=self._vsb.set)
+        host = self._host = ttk.Frame(cv, padding=(P(16), P(10), P(16), P(8)))
+        win = cv.create_window(0, 0, window=host, anchor="nw")
+        host.bind("<Configure>", lambda e: (cv.configure(scrollregion=(0, 0, e.width, e.height)), self._update_scroll()))
+        cv.bind("<Configure>", lambda e: (cv.itemconfigure(win, width=e.width), self._update_scroll()))
+        self.bind_all("<MouseWheel>", self._wheel, add="+"); self.bind_all("<Button-4>", self._wheel, add="+"); self.bind_all("<Button-5>", self._wheel, add="+")
+        for cls in ("TCombobox", "TSpinbox"):                      # 휠로 위 칸을 굴리다 고르기 칸 위를 지나면 값이 몰래 바뀌던 문제
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<Shift-MouseWheel>"):
+                self.bind_class(cls, ev, "")
+        self.bind_all("<<TraverseIn>>", self._focus_into_view, add="+")   # Tab 으로 옮길 때만(마우스로 누를 때 위 칸이 튀어 클릭이 씹히지 않게)
+        self.pane.add(upper, weight=0)
+        root = ttk.Frame(host); tab2 = ttk.Frame(host)
+        self.tab_frames = [root, tab2]
 
-        # ---- 파일 ----
-        ff = ttk.LabelFrame(root, text="파일"); ff.pack(fill="x")
-        ff.columnconfigure(1, weight=1)
-        ttk.Label(ff, text="PDF", style="Panel.TLabel").grid(row=0, column=0, sticky="w", **pad)
+        # ---- 카드 1: PDF 파일 ----
+        c1 = self._card(root, "PDF · 이미지"); c1.pack(fill="x")
+        b = c1.body; b.columnconfigure(1, weight=1)
         self.v_pdf = tk.StringVar()
-        ttk.Entry(ff, textvariable=self.v_pdf, state="readonly").grid(row=0, column=1, columnspan=6, sticky="ew", **pad)
-        self._btn(ff, "PDF 고르기…", self.choose_pdf, width=12).grid(row=0, column=7, sticky="e", **pad)
+        self._field_label(b, "파일", 0)
+        ttk.Entry(b, textvariable=self.v_pdf, state="readonly").grid(row=0, column=1, sticky="ew", pady=P(3))
+        self._btn(b, "PDF·이미지 고르기…", self.choose_pdf, tip="판독할 스캔 PDF 나 이미지(PNG·JPG·TIFF 등)를 고릅니다. 이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다. 결과는 파일 옆 '<이름>_YeonE_OCR' 폴더에 생깁니다.").grid(row=0, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         self.v_pages = tk.StringVar(value=self.cfg["pages"]); self.v_off = tk.StringVar(value=self.cfg["print_offset"])
-        ttk.Label(ff, text="쪽 범위", style="Panel.TLabel").grid(row=1, column=0, sticky="w", **pad)
-        pf = ttk.Frame(ff, style="Panel.TFrame"); pf.grid(row=1, column=1, columnspan=3, sticky="w")
-        ttk.Entry(pf, textvariable=self.v_pages, width=12).pack(side="left", padx=(4, 2))
-        self._btn(pf, "전체", lambda: self.v_pages.set(""), width=5).pack(side="left")
-        ttk.Label(pf, text="비우면 PDF 전체(기본). 일부만 할 때 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=8)
-        ttk.Label(ff, text="인쇄 쪽수 = PDF 쪽수 +", style="Panel.TLabel").grid(row=1, column=4, sticky="e", **pad)
-        ttk.Entry(ff, textvariable=self.v_off, width=6).grid(row=1, column=5, sticky="w", **pad)
-        ttk.Label(ff, text="비우면 자동 판정. 예: PDF 1쪽이 인쇄 30쪽이면 29. 어긋남만 표시", style="Hint.TLabel").grid(row=1, column=6, columnspan=2, sticky="w", **pad)
+        self._field_label(b, "쪽 범위", 1, top=6)
+        row = ttk.Frame(b, style="Panel.TFrame"); row.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
+        ttk.Entry(row, textvariable=self.v_pages, width=12).pack(side="left")
+        self._btn(row, "전체", lambda: self.v_pages.set(""), tip="쪽 범위를 비워 PDF 전체를 합니다").pack(side="left", padx=(P(6), 0))
+        ttk.Label(row, text="비우면 전체 · 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        ttk.Label(row, text="빈칸이면 자동 판정", style="Hint.TLabel").pack(side="right", padx=(P(8), 0))
+        e_off = ttk.Entry(row, textvariable=self.v_off, width=6); e_off.pack(side="right")
+        ttk.Label(row, text="인쇄 쪽수 = PDF 쪽수 +", style="Field.TLabel").pack(side="right", padx=(0, P(6)))
+        Tip(e_off, "PDF 1쪽이 인쇄 30쪽이면 29. 비우거나 0 이면 글자층·판독한 쪽번호로 자동 판정하고, 어긋나는 쪽만 확인 항목으로 표시합니다.", self)
 
-        # ---- 판독 / 문서 ----
-        mid = ttk.Frame(root); mid.pack(fill="x", pady=(8, 0)); mid.columnconfigure(0, weight=3); mid.columnconfigure(1, weight=2)
-        rf = ttk.LabelFrame(mid, text="판독"); rf.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        df = ttk.LabelFrame(mid, text="문서"); df.grid(row=0, column=1, sticky="nsew")
+        # ---- 카드 2·3: 판독 / 문서 ----
+        mid = ttk.Frame(root); mid.pack(fill="x", pady=(P(10), 0))
+        mid.columnconfigure(0, weight=3); mid.columnconfigure(1, weight=2)
+        c2 = self._card(mid, "판독"); c2.grid(row=0, column=0, sticky="nsew", padx=(0, P(10)))
+        c3 = self._card(mid, "문서"); c3.grid(row=0, column=1, sticky="nsew")
         self.v_up = tk.StringVar(value=self.cfg["upscale"]); self.v_reader = tk.StringVar(value=self.cfg["reader"])
         self.v_model = tk.StringVar(value=self.cfg["model"]); self.v_key = tk.StringVar(value=self.cfg["api_key"])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
+        self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
+        self.v_memo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), MEMO_LABELS["notice"]))
         self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "none"), CHECK_LIST_LABELS["none"]))
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
         self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
-        self.v_chunk = tk.StringVar(value=str(self.cfg.get("chunk_lines", 8))); self.v_mres = tk.BooleanVar(value=self.cfg.get("media_high", True))
+        self.v_blind = tk.BooleanVar(value=bool(self.cfg.get("adjudicate_blind", False)))
+        self.v_chunk = tk.StringVar(value=str(self.cfg.get("chunk_lines", 8)))
+        self.v_mres = tk.StringVar(value=MRES_LABELS.get(self.cfg.get("media_res", "high"), MRES_LABELS["high"]))
         self.v_mode = tk.StringVar(value=MODE_LABELS.get(self.cfg.get("mode", "auto"), MODE_LABELS["auto"]))
-        rf.columnconfigure(1, weight=1)
-        r = 0
-        ttk.Label(rf, text="판독기", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
-        rr = ttk.Frame(rf, style="Panel.TFrame"); rr.grid(row=r, column=1, columnspan=3, sticky="w")
-        ttk.Radiobutton(rr, text="Gemini (원본 이미지 판독)", variable=self.v_reader, value="gemini", command=self._reader_changed).pack(side="left", padx=(4, 14))
+        b = c2.body; b.columnconfigure(1, weight=1)
+        self._field_label(b, "판독기", 0)
+        rr = ttk.Frame(b, style="Panel.TFrame"); rr.grid(row=0, column=1, columnspan=2, sticky="w", pady=P(3))
+        ttk.Radiobutton(rr, text="Gemini (원본 이미지 판독)", variable=self.v_reader, value="gemini", command=self._reader_changed).pack(side="left", padx=(0, P(16)))
         ttk.Radiobutton(rr, text="기존 텍스트 레이어만 (API 없이 시험)", variable=self.v_reader, value="mock", command=self._reader_changed).pack(side="left")
-        ttk.Label(rr, text="읽기 방향", style="Panel.TLabel").pack(side="left", padx=(18, 4))
-        ttk.Combobox(rr, textvariable=self.v_mode, values=list(MODE_LABELS.values()), state="readonly", width=18).pack(side="left")
-        r += 1
-        ttk.Label(rf, text="모델", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
-        self.e_model = ttk.Entry(rf, textvariable=self.v_model, width=26); self.e_model.grid(row=r, column=1, sticky="w", **pad)
-        self._btn(rf, "키 확인·모델 고르기", self.check_key, width=17).grid(row=r, column=2, sticky="w", **pad)
-        r += 1
-        ttk.Label(rf, text="2차 판독 모델", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
-        self.e_model2 = ttk.Entry(rf, textvariable=self.v_model2, width=26); self.e_model2.grid(row=r, column=1, sticky="w", **pad)
-        ttk.Label(rf, text="auto = 1차와 같은 세대의 flash 자동 선택. 비우면 1차와 같음", style="Hint.TLabel").grid(row=r, column=2, columnspan=2, sticky="w", **pad)
-        r += 1
-        ttk.Label(rf, text="Gemini API 키", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
-        self.e_key = ttk.Entry(rf, textvariable=self.v_key, width=40, show="•"); self.e_key.grid(row=r, column=1, columnspan=2, sticky="ew", **pad)
-        self._btn(rf, "보기", self.toggle_key, width=5).grid(row=r, column=3, sticky="w", **pad)
-        r += 1
-        ttk.Label(rf, text="속도", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
-        sp = ttk.Frame(rf, style="Panel.TFrame"); sp.grid(row=r, column=1, columnspan=3, sticky="w")
-        ttk.Label(sp, text="동시 최대", style="Panel.TLabel").pack(side="left", padx=(4, 2))
-        ttk.Spinbox(sp, from_=1, to=8, width=3, textvariable=self.v_workers).pack(side="left")
-        ttk.Label(sp, text="쪽(자동 조절) ·  확대", style="Panel.TLabel").pack(side="left", padx=(8, 2))
+        self._field_label(b, "읽기 방향", 1)
+        cb = ttk.Combobox(b, textvariable=self.v_mode, values=list(MODE_LABELS.values()), state="readonly", width=self._cw(MODE_LABELS.values()))
+        cb.grid(row=1, column=1, sticky="w", pady=P(3))
+        Tip(cb, "자동 판정이면 PDF 글자층의 세로 열·가로 줄 글자 수로 세로쓰기 한자·한글 / 가로쓰기 한문(간체)을 고르고 결과 폴더에 적어 둡니다.", self)
+        self._field_label(b, "모델", 2)
+        self.e_model = ttk.Entry(b, textvariable=self.v_model); self.e_model.grid(row=2, column=1, sticky="ew", pady=P(3))
+        self._btn(b, "키 확인·모델 고르기", self.check_key, tip="키가 맞는지 Gemini 에 확인하고, 실제로 호출되는 모델 목록에서 고릅니다.").grid(row=2, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
+        self._field_label(b, "API 키", 3)
+        self.e_key = ttk.Entry(b, textvariable=self.v_key, show="•"); self.e_key.grid(row=3, column=1, sticky="ew", pady=P(3))
+        self._btn(b, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC 의 설정 파일에만 저장됩니다.").grid(row=3, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
+        foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
+        ttk.Checkbutton(foot, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
+        self.v_details = tk.BooleanVar(value=bool(self.cfg.get("details_open", False)))
+        self.b_details = ttk.Button(foot, text="", command=self.toggle_details, style="Link.TButton", cursor="hand2")
+        self.b_details.pack(side="right")
+        d = self.details = ttk.Frame(b, style="Panel.TFrame"); d.columnconfigure(1, weight=1)
+        ttk.Separator(d).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(P(8), P(6)))
+        self._field_label(d, "2차 판독 모델", 1)
+        r2 = ttk.Frame(d, style="Panel.TFrame"); r2.grid(row=1, column=1, columnspan=2, sticky="ew", pady=P(3))
+        self.e_model2 = ttk.Entry(r2, textvariable=self.v_model2, width=24); self.e_model2.pack(side="left")
+        ttk.Label(r2, text="auto = 같은 세대 flash 자동 · 비우면 1차와 같음", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        self._field_label(d, "속도", 2)
+        sp = ttk.Frame(d, style="Panel.TFrame"); sp.grid(row=2, column=1, columnspan=2, sticky="w", pady=P(3))
+        ttk.Label(sp, text="동시 최대", style="Field.TLabel").pack(side="left", padx=(0, P(4)))
+        s1 = ttk.Spinbox(sp, from_=1, to=8, width=3, textvariable=self.v_workers); s1.pack(side="left")
+        ttk.Label(sp, text="쪽 · 확대", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
         ttk.Entry(sp, textvariable=self.v_up, width=4).pack(side="left")
-        ttk.Label(sp, text="배 ·  중간 저장", style="Panel.TLabel").pack(side="left", padx=(8, 2))
+        ttk.Label(sp, text="배 · 중간 저장", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
         ttk.Entry(sp, textvariable=self.v_ckpt, width=4).pack(side="left")
-        ttk.Label(sp, text="쪽마다", style="Panel.TLabel").pack(side="left", padx=(2, 0))
-        r += 1
-        ttk.Label(rf, text="2차 조각", style="Panel.TLabel").grid(row=r, column=0, sticky="w", **pad)
-        cp = ttk.Frame(rf, style="Panel.TFrame"); cp.grid(row=r, column=1, columnspan=3, sticky="w")
-        ttk.Label(cp, text="한 장에", style="Panel.TLabel").pack(side="left", padx=(4, 2))
-        ttk.Spinbox(cp, from_=0, to=30, width=3, textvariable=self.v_chunk).pack(side="left")
-        ttk.Label(cp, text="줄(열)까지 · 넘으면 나눠 보냄 (0=안 나눔)", style="Panel.TLabel").pack(side="left", padx=(4, 10))
-        ttk.Checkbutton(cp, text="조각 고해상(media_resolution high)", variable=self.v_mres).pack(side="left")
-        ttk.Label(cp, text="글자당 픽셀을 늘려 入/人·曰/日 같은 획 하나 차이를 가립니다", style="Hint.TLabel").pack(side="left", padx=(10, 0))
-        r += 1
-        ck = ttk.Frame(rf, style="Panel.TFrame"); ck.grid(row=r, column=0, columnspan=4, sticky="w", pady=(2, 0))
-        ttk.Checkbutton(ck, text="영역 확대 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=(4, 10))
-        ttk.Checkbutton(ck, text="지침 캐시", variable=self.v_cache).pack(side="left", padx=(0, 10))
-        ttk.Checkbutton(ck, text="2차 생각 줄이기", variable=self.v_think2).pack(side="left", padx=(0, 10))
-        ttk.Checkbutton(ck, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
+        ttk.Label(sp, text="쪽마다", style="Field.TLabel").pack(side="left", padx=(P(4), 0))
+        Tip(s1, "동시에 판독할 쪽 수의 최대. 4쪽에서 시작해 안정적이면 늘리고, 한도 초과(429)가 나면 저절로 줄입니다.", self)
+        self._field_label(d, "2차 조각", 3)
+        cp = ttk.Frame(d, style="Panel.TFrame"); cp.grid(row=3, column=1, columnspan=2, sticky="w", pady=P(3))
+        ttk.Label(cp, text="한 장에", style="Field.TLabel").pack(side="left", padx=(0, P(4)))
+        s2 = ttk.Spinbox(cp, from_=0, to=30, width=3, textvariable=self.v_chunk); s2.pack(side="left")
+        ttk.Label(cp, text="줄(열)까지 · 해상도", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
+        mr = ttk.Combobox(cp, textvariable=self.v_mres, values=list(MRES_LABELS.values()), state="readonly", width=self._cw(MRES_LABELS.values()))
+        mr.pack(side="left")
+        Tip(s2, "2차 확대 조각 한 장에 넣을 글줄(세로쓰기는 열) 수. 넘으면 나눠 보내 글자당 픽셀을 늘립니다(0 = 나누지 않음).", self)
+        Tip(mr, "2차 조각 이미지의 토큰 예산. 높을수록 入/人·曰/日 같은 획 하나 차이를 잘 가립니다. 최고는 Gemini 3 전용이며 거부되면 저절로 높음으로 내립니다.", self)
+        self._field_label(d, "판독 단계", 4)
+        ck = ttk.Frame(d, style="Panel.TFrame"); ck.grid(row=4, column=1, columnspan=2, sticky="w", pady=P(3))
+        ttk.Checkbutton(ck, text="영역 확대 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=(0, P(14)))
+        ttk.Checkbutton(ck, text="지침 캐시", variable=self.v_cache).pack(side="left", padx=(0, P(14)))
+        ttk.Checkbutton(ck, text="2차 생각 줄이기", variable=self.v_think2).pack(side="left")
+        self._field_label(d, "3차 판별", 5)
+        bl = ttk.Frame(d, style="Panel.TFrame"); bl.grid(row=5, column=1, columnspan=2, sticky="w", pady=P(3))
+        cb = ttk.Checkbutton(bl, text="후보 없이 한 번 더 읽어 같을 때만 확정", variable=self.v_blind); cb.pack(side="left")
+        ttk.Label(bl, text="호출 조금 더 · 더 엄격", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        Tip(cb, "3차 판별은 앞뒤 글자를 글로 알려 주지 않고(조각 그림에는 이웃 글자가 보입니다) 후보 차례를 섞어 자형만 묻습니다. "
+                "이것을 켜면 고른 자리를 후보도 주지 않고 한 번 더 읽게 해, 두 답이 같을 때만 확정합니다. 다르면 표시〔a/b〕를 그대로 남깁니다. "
+                "호출이 더 듭니다(일반 OCR: 쪽마다 확정 자리 8곳당 1회 · 책갈피 OCR 교정에도 적용: 확정 항목마다 1회).", self)
+        from tkinter import font as tkfont
+        lw = max(tkfont.Font(self, font=self.font_base).measure(t) for t in ("판독기", "읽기 방향", "모델", "API 키", "2차 판독 모델", "속도", "2차 조각", "판독 단계", "3차 판별")) + P(18)
+        b.columnconfigure(0, minsize=lw); d.columnconfigure(0, minsize=lw)   # 세부 설정을 펼쳐도 입력칸 왼쪽 끝이 한 줄로 맞게
+        self._apply_details()
         # 문서
-        ttk.Checkbutton(df, text="의심 자리 붉은 글자 · 노란 형광펜", variable=self.v_hl).grid(row=0, column=0, sticky="w", **pad)
-        ttk.Checkbutton(df, text="원본 쪽마다 쪽 나누기", variable=self.v_pb).grid(row=1, column=0, sticky="w", **pad)
-        ttk.Checkbutton(df, text="앞 쪽에서 이어지는 문단 잇기", variable=self.v_join).grid(row=2, column=0, sticky="w", **pad)
-        ttk.Checkbutton(df, text="DOCX 도 함께 만들기", variable=self.v_docx).grid(row=3, column=0, sticky="w", **pad)
-        cl = ttk.Frame(df, style="Panel.TFrame"); cl.grid(row=4, column=0, sticky="w", **pad)
-        ttk.Label(cl, text="쪽 끝 확인 목록").pack(side="left", padx=(0, 6))
-        ttk.Combobox(cl, textvariable=self.v_chk, values=list(CHECK_LIST_LABELS.values()), state="readonly", width=22).pack(side="left")
-        ttk.Label(df, text="가로쓰기 정리본 · 함초롬바탕 · 도판은 원본 이미지", style="Hint.TLabel").grid(row=5, column=0, sticky="w", **pad)
-        self._btn(df, "설정 저장", self.save_settings, width=10).grid(row=6, column=0, sticky="e", pady=(6, 0))
+        b = c3.body; b.columnconfigure(0, weight=1)
+        checks = (("확인 등급 색 (초록·파랑·빨강)", self.v_hl, "글자를 얼마나 믿어도 되는지 색과 밑줄로: 초록 = 1차·2차가 갈려 3차 자형 판별로 고름(훑어 확인) · "
+                                                            "파랑 = 골랐지만 근거가 약하거나 다른 대목과 어긋남(확인 권장) · 빨강 〔 〕 = 정하지 못함, 원본 확인 필수(지침 19). "
+                                                            "끄면 색 없이 〔 〕 표기만 남습니다."),
+                  ("문맥 추정 밑줄 (확정 아님)", self.v_ctx, "빨간 〔a/b〕 안에서, 이 판독의 다른 대목(1차·2차가 같게 읽은 글)이 더 많이 쓰는 후보에 실선 밑줄을 긋습니다. "
+                                                         "글자는 바꾸지 않고 두 후보도 그대로 둡니다(지침 2·7·19·21). 숫자·이체자·판독불명·자형이 다른 쌍에는 긋지 않습니다. "
+                                                         "이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
+                  ("원본 쪽마다 쪽 나누기", self.v_pb, None), ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None))
+        for i, (t, v, tip) in enumerate(checks):
+            cb_ = ttk.Checkbutton(b, text=t, variable=v); cb_.grid(row=i, column=0, sticky="w")
+            if tip: Tip(cb_, tip, self)
+        cl = ttk.Frame(b, style="Panel.TFrame"); cl.grid(row=5, column=0, sticky="ew", pady=(P(8), 0)); cl.columnconfigure(1, weight=1)
+        ttk.Label(cl, text="메모", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, P(8)), pady=(0, P(4)))
+        mc = ttk.Combobox(cl, textvariable=self.v_memo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(list(MEMO_LABELS.values()) + list(CHECK_LIST_LABELS.values())))
+        mc.grid(row=0, column=1, sticky="w", pady=(0, P(4)))
+        Tip(mc, "고지 사항만(기본): 색으로 전할 수 없는 것 — 본문에 표시되지 않은 확인 항목, 구조 검사 오류, 3차와 다른 대목의 어긋남 — 과 첫머리의 표시 범례에만 한컴 메모를 답니다. "
+                "모든 표시에 메모: 초록·파랑·문맥 밑줄 자리마다 근거 메모. 메모 없이: 고지를 회색 〔고지: …〕 로 글 속에.", self)
+        ttk.Label(cl, text="쪽 끝 확인 목록", style="Field.TLabel").grid(row=1, column=0, sticky="w", padx=(0, P(8)))
+        cc = ttk.Combobox(cl, textvariable=self.v_chk, values=list(CHECK_LIST_LABELS.values()), state="readonly", width=self._cw(list(MEMO_LABELS.values()) + list(CHECK_LIST_LABELS.values())))
+        cc.grid(row=1, column=1, sticky="w")
+        Tip(cc, "문서 끝에 확인 목록을 넣을지. 기본은 넣지 않으며(문서에는 OCR 본문만), 전체 목록은 검수 화면에 있습니다.", self)
+        self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
+        self._btn(b, "설정 저장", self.save_settings, tip="지금 설정을 저장합니다(실행할 때와 창을 닫을 때도 저절로 저장).").grid(row=7, column=0, sticky="e", pady=(P(8), 0))
 
-        # ---- 실행 ----
-        act = ttk.Frame(root, style="Panel.TFrame", padding=10); act.pack(fill="x", pady=(8, 0))
-        self._btn(act, "▶  한 번에 인식 (PDF → HWPX)", self.do_run, style="Accent.TButton").pack(side="left")
-        self.b_stop = ttk.Button(act, text="■ 중지", command=self.do_stop, state="disabled", style="Stop.TButton"); self.b_stop.pack(side="left", padx=(8, 0))
-        ttk.Label(act, text="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고·장부까지 알아서 이어서 합니다. 멈춰도 끝난 쪽은 남고 다시 누르면 이어서 합니다.",
-                  style="Hint.TLabel", wraplength=520, justify="left").pack(side="left", padx=(12, 0))
-        for t, c in (("HWPX 열기", self.open_hwpx), ("결과 폴더", self.open_work), ("비용 미리 보기", self.do_estimate)):
-            self._btn(act, t, c, width=13).pack(side="right", padx=(6, 0))
-
-        # ---- 단계별 / 도구 (고급 — 접힘) ----
+        # ---- 고급(접힘) ----
         self.v_adv = tk.BooleanVar(value=bool(self.cfg.get("advanced_open", False)))
-        advbar = ttk.Frame(root); advbar.pack(fill="x", pady=(8, 0))
-        self.b_adv = ttk.Button(advbar, text="고급 — 단계별 실행·도구 ▾", command=self.toggle_advanced, style="Small.TButton"); self.b_adv.pack(side="left")
-        ttk.Label(advbar, text="보통은 필요 없습니다. 일부 단계만 다시 하거나 기록을 손볼 때 펼치십시오.", style="Hint.TLabel").pack(side="left", padx=10)
-        sf = ttk.LabelFrame(root, text="단계별 · 도구"); self.adv_frame = sf
-        steps = [("① 구조 보기", self.do_inspect), ("② 준비", self.do_prepare), ("③ 판독", self.do_read),
-                 ("④ 문서 만들기", self.do_build), ("⑤ 검수 화면", self.do_review), ("⑥ 보고", self.do_report)]
-        for i, (t, c) in enumerate(steps):
-            self._btn(sf, t, c, width=12).grid(row=0, column=i, padx=3, pady=2)
-        for i, (t, c) in enumerate([("3차 글자 판별", self.do_adjudicate), ("혼동 장부", self.do_ledger), ("비교 다시 계산", self.do_remerge),
-                                    ("검수 결과 기록…", self.do_mark), ("패키지 설치·점검", self.install_packages), ("도움말", self.show_help)]):
-            self._btn(sf, t, c, width=12).grid(row=1, column=i, padx=3, pady=(6, 2))
-        ttk.Label(sf, text="[3차 글자 판별]은 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(자리마다 호출 한 번) · [혼동 장부]는 어느 글자가 어느 글자로 읽혔는지 모읍니다(호출 없음) · "
-                           "프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산] · 사람이 확인한 쪽은 [검수 결과 기록…]",
-                  style="Hint.TLabel", wraplength=1000, justify="left").grid(row=2, column=0, columnspan=6, sticky="w", padx=6, pady=(4, 0))
-
-        if self.v_adv.get():
-            sf.pack(fill="x", pady=(6, 0)); self.b_adv.configure(text="고급 — 단계별 실행·도구 ▴")
+        advbar = ttk.Frame(root); advbar.pack(fill="x", pady=(P(8), 0))
+        self.b_adv = ttk.Button(advbar, text="", command=self.toggle_advanced, style="PageLink.TButton", cursor="hand2"); self.b_adv.pack(side="left")
+        ttk.Label(advbar, text="보통은 필요 없습니다. 일부 단계만 다시 하거나 기록을 손볼 때 펼치십시오.", style="PageHint.TLabel").pack(side="left", padx=(P(10), 0))
+        sf = self.adv_frame = self._card(root)
+        g = sf.body
+        steps = [("① 구조 보기", self.do_inspect, "쪽수, 쪽마다 스캔 이미지인지, 텍스트 레이어 글자 수, 쪽번호 표기를 보여 줍니다"),
+                 ("② 준비", self.do_prepare, "쪽 이미지와 기존 텍스트 레이어를 결과 폴더에 꺼냅니다"),
+                 ("③ 판독", self.do_read, "1차·2차 판독만 합니다(기록이 있는 쪽은 건너뜀)"),
+                 ("④ 문서 만들기", self.do_build, "판독 기록으로 HWPX(+DOCX)를 만듭니다. readings 를 손으로 고친 뒤에 누릅니다"),
+                 ("⑤ 검수 화면", self.do_review, "원본 위에 영역 상자를 그린 검수 화면(review.html)을 만들어 엽니다"),
+                 ("⑥ 보고", self.do_report, "쪽별 상태와 다발 오인식 장부(report.md)를 진행 기록에 보여 줍니다")]
+        tools = [("3차 글자 판별", self.do_adjudicate, "1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(앞뒤 글자는 글로 주지 않고 후보 차례는 섞음 · 8자리씩 묶어 한 호출, 쪽은 동시에)"),
+                 ("혼동 장부", self.do_ledger, "어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(모델 호출 없음)"),
+                 ("비교 다시 계산", self.do_remerge, "저장된 1차·2차 판독으로 확인 표시만 다시 계산합니다(모델 호출 없음). 프로그램을 새 판으로 바꾼 뒤에"),
+                 ("검수 결과 기록…", self.do_mark, "사람이 원본 대조를 마친 쪽에 '원본 대조 완료(사람)' 를 남깁니다"),
+                 ("패키지 설치·점검", self.install_packages, "필요한 파이썬 패키지를 설치하거나 새 판으로 올립니다"),
+                 ("도움말", self.show_help, "쓰는 법을 간단히 보여 줍니다")]
+        for r_, (head, items) in enumerate((("단계", steps), ("도구", tools))):
+            ttk.Label(g, text=head, style="Section.TLabel").grid(row=r_, column=0, sticky="w", padx=(0, P(12)))
+            for i, (t, c, tip) in enumerate(items):
+                self._btn(g, t, c, style="Tool.TButton", tip=tip).grid(row=r_, column=i + 1, sticky="ew", padx=P(3), pady=P(3))
+        for i in range(1, 7):
+            g.columnconfigure(i, weight=1, uniform="tools")
+        self._hint(g, "단추에 마우스를 올리면 하는 일이 나옵니다. 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산], 사람이 확인한 쪽은 [검수 결과 기록…].").grid(
+            row=2, column=0, columnspan=7, sticky="ew", pady=(P(6), 0))
+        self._apply_advanced()
 
         self._build_collate_tab(tab2)
+        self.select_tab(0)
 
-        # ---- 진행(공통) ----
-        pf2 = ttk.Frame(bottom); pf2.pack(fill="x", pady=(10, 0))
-        self.progress = ttk.Progressbar(pf2, mode="indeterminate", length=240); self.progress.pack(side="left", pady=4)
-        self.v_status = tk.StringVar(value="준비됨"); ttk.Label(pf2, textvariable=self.v_status, style="Status.TLabel").pack(side="left", padx=14)
+        # ---- 진행(공통): 상태 글 · 진행 글 / 끝까지 차는 막대 ----
+        bottom = self._bottom = ttk.Frame(self.pane, padding=(P(16), P(8), P(16), P(14))); self.pane.add(bottom, weight=1)
+        self._build_actions(bottom)
+        # 한 줄에 [진행 기록|쪽별 상태] 고르기 · 상태 글 · 진행 글, 그 아래 막대(낮은 화면에서 기록 칸에 한 줄이라도 더 주려고)
+        pf = ttk.Frame(bottom); pf.pack(fill="x", pady=(P(10), 0))
+        self.v_status = tk.StringVar(value="준비됨"); self.v_prog = tk.StringVar(value="")
+        self.v_nb = tk.IntVar(value=0)
+        self._segmented(pf, [("진행 기록", 0), ("쪽별 상태", 1)], self.v_nb, lambda: self.nb.select(self.v_nb.get()), small=True).pack(side="left")
+        ttk.Label(pf, textvariable=self.v_prog, style="Prog.TLabel").pack(side="right", padx=(P(12), 0))
+        ttk.Label(pf, textvariable=self.v_status, style="Status.TLabel").pack(side="left", padx=(P(14), 0))
+        self.progress = ttk.Progressbar(bottom, style="Bar.Horizontal.TProgressbar", mode="determinate", maximum=1000, value=0)
+        self.progress.pack(fill="x", pady=(P(8), 0))
 
-        # ---- 기록 / 쪽별 상태(공통) ----
-        nb = ttk.Notebook(bottom); nb.pack(fill="both", expand=True, pady=(8, 0))
-        self.log = ScrolledText(nb, height=14, wrap="word", state="disabled", font=self.font_mono, bg="#fffdf8", fg=C["INK"],
-                                relief="flat", padx=14, pady=10, insertbackground=C["INK"], spacing1=1, spacing3=1, selectbackground=C["SEL"])
-        nb.add(self.log, text="진행 기록")
-        tf = ttk.Frame(nb); nb.add(tf, text="쪽별 상태")
-        self.table = ttk.Treeview(tf, columns=("pdf", "print", "status", "unc", "figs"), show="headings")
+        # ---- 진행 기록 / 쪽별 상태(공통) ----
+        nb = self.nb = ttk.Notebook(bottom, style="Hidden.TNotebook"); nb.pack(fill="both", expand=True, pady=(P(10), 0))
+        nb.bind("<<NotebookTabChanged>>", lambda _e: self.v_nb.set(nb.index("current")))
+        lc = self._card(nb, pad=(P(6), P(6), P(4), P(6)))
+        lb = lc.body
+        self.log = tk.Text(lb, height=6, wrap="word", state="disabled", font=self.font_mono, bg=C["PANEL"], fg=C["INK"], relief="flat",
+                           borderwidth=0, highlightthickness=0, padx=P(10), pady=P(6), insertbackground=C["INK"], spacing1=1, spacing3=1,
+                           selectbackground=C["SEL"], selectforeground=C["INK"])
+        sb = ttk.Scrollbar(lb, orient="vertical", command=self.log.yview); self.log.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self.log.pack(side="left", fill="both", expand=True)
+        nb.add(lc, text="진행 기록")
+        tc = self._card(nb, pad=(P(6), P(6), P(4), P(6)))
+        self.table = ttk.Treeview(tc.body, columns=("pdf", "print", "status", "unc", "figs"), show="headings")
         for c, t, w in (("pdf", "PDF 쪽", 70), ("print", "인쇄 쪽", 70), ("status", "상태", 560), ("unc", "확인 필요", 80), ("figs", "도판", 60)):
-            self.table.heading(c, text=t); self.table.column(c, width=w, anchor="center" if c != "status" else "w")
-        sb = ttk.Scrollbar(tf, orient="vertical", command=self.table.yview); self.table.configure(yscrollcommand=sb.set)
-        self.table.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
-        self.nb = nb
+            self.table.heading(c, text=t); self.table.column(c, width=P(w), anchor="center" if c != "status" else "w", stretch=(c == "status"))
+        self.table.tag_configure("odd", background=C["STRIPE"])
+        sb = ttk.Scrollbar(tc.body, orient="vertical", command=self.table.yview); self.table.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self.table.pack(side="left", fill="both", expand=True)
+        nb.add(tc, text="쪽별 상태")
         self._reader_changed()
+        self.select_tab(0)
+        self.update_idletasks()
+        mid.columnconfigure(1, minsize=c3.winfo_reqwidth())           # 문서 카드는 줄어도 글자가 잘리지 않게
+        self.after(60, self._fit_sash)
+        for ev in ("<Configure>", "<B1-Motion>", "<ButtonRelease-1>"):     # 창을 줄이거나 경계를 끌어 내려도 실행 줄·막대가 남게
+            self.pane.bind(ev, lambda _e: self.after_idle(lambda: self._fit_sash(force=False)), add="+")
+        # 마우스로 누른 체크·라디오·두 갈래·글자 단추는 초점을 창으로 돌린다 — 초점 고리는 키보드(Tab)로 옮겼을 때만 보이게
+        for cls in ("TCheckbutton", "TRadiobutton", "TButton"):
+            self.bind_class(cls, "<ButtonRelease-1>", lambda e: self.after_idle(self._drop_mouse_focus, e.widget), add="+")
+
+    def _build_actions(self, host) -> None:
+        """실행 줄 — 진행 막대 바로 위, 늘 보이는 자리. 탭마다 그 탭의 실행 단추를 보여 준다(실행 중에도 [중지]가 가려지지 않게)."""
+        P = self.px
+        self.actbars = ttk.Frame(host); self.actbars.pack(fill="x")
+        act = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
+        a = act.body
+        self._btn(a, "▶  한 번에 인식 (PDF → HWPX)", self.do_run, style="Accent.TButton",
+                  tip="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. 먼저 예상 비용을 보여 주고 묻습니다.").pack(side="left")
+        self.b_stop = ttk.Button(a, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop.pack(side="left", padx=(P(8), 0))
+        Tip(self.b_stop, "지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 이어서 합니다.", self)
+        for t, c, tip in (("HWPX 열기", self.open_hwpx, "가장 최근에 만든 HWPX 를 한컴오피스로 엽니다"),
+                          ("결과 폴더", self.open_work, "결과 폴더(쪽 이미지·판독 기록·문서·검수 화면)를 엽니다"),
+                          ("비용 미리 보기", self.do_estimate, "쪽 수와 모델로 호출·토큰·금액을 어림합니다(이미 판독한 쪽이 있으면 그 실측으로 보정)")):
+            self._btn(a, t, c, tip=tip).pack(side="right", padx=(P(6), 0))
+        self._hint(a, "멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.").pack(side="left", fill="x", expand=True, padx=(P(14), P(8)))
+        act2 = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
+        a = act2.body
+        self._btn(a, "▶  HWPX 전체 교정", self.do_collate_all, style="Accent.TButton",
+                  tip="구획을 차례로 전부 대조해 HWPX 사본(<이름>_교정.hwpx) 하나에 고쳐 넣고 요약(_전체_요약.html)을 남깁니다").pack(side="left")
+        self.b_stop2 = ttk.Button(a, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop2.pack(side="left", padx=(P(8), 0))
+        Tip(self.b_stop2, "지금 구획이 끝나면 멈춥니다. 고친 내용은 교정본에 남습니다.", self)
+        self._btn(a, "교정본 열기", self.open_collated, tip="고친 사본(<이름>_교정.hwpx)을 한컴오피스로 엽니다").pack(side="right", padx=(P(6), 0))
+        self._btn(a, "보고 열기", self.open_collate_report, tip="가장 최근 대조 보고(구획별 HTML)를 엽니다").pack(side="right", padx=(P(6), 0))
+        self._hint(a, "원본 HWPX 는 건드리지 않고, 고친 사본 하나에 구획을 차례로 쌓습니다.").pack(side="left", fill="x", expand=True, padx=(P(14), P(8)))
+        # 둘째 줄: 교정 방법과 표에서 고른 한 구획만 하는 단추(위 칸을 굴리지 않아도 늘 보이게)
+        from .collate.labels import POLICIES
+        ttk.Separator(act2).pack(fill="x", pady=(P(10), P(8)))
+        r4 = ttk.Frame(act2, style="Panel.TFrame"); r4.pack(fill="x")
+        ttk.Label(r4, text="교정 정책", style="Field.TLabel").pack(side="left", padx=(0, P(6)))
+        ttk.Combobox(r4, textvariable=self.v_policy, values=list(POLICIES.values()), state="readonly", width=self._cw(POLICIES.values())).pack(side="left", padx=(0, P(14)))
+        ttk.Label(r4, text="메모", style="Field.TLabel").pack(side="left", padx=(0, P(6)))
+        cm = ttk.Combobox(r4, textvariable=self.v_cmemo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(MEMO_LABELS.values())); cm.pack(side="left")
+        Tip(cm, "고지 사항만(기본): 지운 글자·폭 없는 표시·구조 차이·반영하지 않은 제안에만 메모를 답니다. 자동 교정은 초록·파랑, 확인 요청은 빨강으로 칠하고, "
+                "원래 글자와 근거 전체는 보고(collate 폴더의 html)에 남습니다. 0.6.3 처럼 모든 항목에 메모를 원하면 '모든 표시에 메모'.", self)
+        self._btn(r4, "이 구획 교정", lambda: self.do_collate(apply=True), tip="표에서 고른 구획만 대조해 교정본에 고쳐 넣습니다").pack(side="right")
+        self._btn(r4, "이 구획 대조만", lambda: self.do_collate(apply=False), tip="표에서 고른 구획만 대조해 보고를 만듭니다(문서는 고치지 않음). 표에서 두 번 눌러도 됩니다").pack(side="right", padx=(0, P(6)))
+        ttk.Label(r4, text="표에서 고른 구획:", style="Field.TLabel").pack(side="right", padx=(0, P(8)))
+        self.act_cards = [act, act2]
+
+    def _update_scroll(self):
+        """위 칸 내용이 넘칠 때만 스크롤 막대를 오른쪽 여백 위에 띄운다(카드 너비는 그대로)."""
+        cv = self._canvas
+        if self._host.winfo_reqheight() > cv.winfo_height() + 1:
+            self._vsb.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        else:
+            self._vsb.place_forget(); cv.yview_moveto(0)
+
+    def _wheel(self, e):
+        """마우스 휠: 포인터가 위 칸에 있고 내용이 넘칠 때만 위 칸을 굴린다(표·기록·목록은 제 휠을 쓴다)."""
+        cv = self._canvas
+        try:
+            w = self.winfo_containing(e.x_root, e.y_root)
+        except (KeyError, tk.TclError):
+            return
+        if w is None or not str(w).startswith(str(cv)) or self._host.winfo_reqheight() <= cv.winfo_height():
+            return
+        num = getattr(e, "num", 0)
+        if num in (4, 5):
+            n = -1 if num == 4 else 1                               # X11: 한 번에 한 칸
+        elif sys.platform == "darwin":
+            n = -int(e.delta) or (-1 if e.delta > 0 else 1)       # macOS: delta 가 작은 정수
+        else:                                                     # Windows: 120 단위. 정밀 터치패드의 작은 delta 는 모아서
+            self._wacc = getattr(self, "_wacc", 0) + int(e.delta)
+            n = -int(self._wacc / 120); self._wacc -= -n * 120
+            if not n:
+                return
+        if w.winfo_class() in ("Treeview", "Listbox", "Text"):
+            try:
+                top, bot = w.yview()
+            except tk.TclError:
+                return
+            if (n < 0 and top > 0.0) or (n > 0 and bot < 1.0):
+                return                                            # 표가 아직 굴러갈 수 있으면 표가 굴린다
+        cv.yview_scroll(n * 2, "units")
+
+    def _focus_into_view(self, e):
+        """키보드(Tab)로 위 칸의 가려진 칸에 초점이 가면 그 칸이 보이게 굴린다."""
+        w = e.widget
+        try:
+            cv = self._canvas
+            if not isinstance(w, tk.Misc) or not str(w).startswith(str(self._host)) or self._host.winfo_reqheight() <= cv.winfo_height():
+                return
+            y0 = w.winfo_rooty() - self._host.winfo_rooty(); y1 = y0 + w.winfo_height()
+            H = max(1, self._host.winfo_height()); top, bot = cv.yview()
+            vis0, vis1 = top * H, bot * H
+            if y0 < vis0:
+                cv.yview_moveto(max(0.0, (y0 - self.px(12)) / H))
+            elif y1 > vis1:
+                cv.yview_moveto(min(1.0, (y1 + self.px(12) - (vis1 - vis0)) / H))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _drop_mouse_focus(self, w):
+        """마우스로 누른 단추의 초점을 그 단추가 든 창(대화 상자면 대화 상자)으로 돌린다 — 초점 고리는 Tab 으로 옮길 때만 보이게."""
+        try:
+            if self.focus_get() is w:
+                w.winfo_toplevel().focus_set()
+        except (KeyError, tk.TclError):
+            pass
+
+    def _reveal(self, w):
+        """위 칸에서 w 가 다 보이게 굴린다(펼친 고급·세부 설정). 위 칸보다 크면 w 의 위쪽부터 보인다."""
+        try:
+            self.update_idletasks()
+            cv = self._canvas; H = max(1, self._host.winfo_height()); view = cv.winfo_height()
+            if self._host.winfo_reqheight() <= view or not w.winfo_ismapped():
+                return
+            y0 = w.winfo_rooty() - self._host.winfo_rooty(); y1 = y0 + w.winfo_height()
+            top, bot = cv.yview(); vis0, vis1 = top * H, bot * H
+            if y1 + self.px(12) > vis1 or y0 < vis0:
+                want = min(y0 - self.px(12), y1 + self.px(12) - view)
+                cv.yview_moveto(max(0.0, min(1.0, want / H)) if y1 - y0 + self.px(24) <= view else max(0.0, (y0 - self.px(12)) / H))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _bottom_keep(self, total: int | None = None) -> int:
+        """아래 칸에 늘 남길 높이: 실행 줄·진행 막대·고르기 단추(기록을 뺀 부분) + 기록 2~5줄.
+        창이 낮으면(노트북 화면) 설정 칸에 먼저 자리를 주고 기록 줄을 줄인다(설정 칸 최소 P(300))."""
+        try:
+            from tkinter import font as tkfont
+            line = tkfont.Font(self, font=self.font_mono).metrics("linespace") + 2      # 기록 칸의 줄 사이(spacing1·spacing3) 포함
+        except Exception:
+            line = self.px(18)
+        fixed = self._bottom.winfo_reqheight() - self.nb.winfo_reqheight() + self.px(26) + self.px(10)   # 기록 칸 여백 + 경계 손잡이 두께
+        want = min(self._host.winfo_reqheight(), self.px(520))      # 설정 칸이 원하는 높이(책갈피 OCR 은 구획 표가 몇 줄 보이게)
+        lines = 5 if total is None else max(2, min(5, (total - fixed - max(self.px(300), want)) // max(1, line)))
+        return max(self.px(160), fixed + lines * line)
+
+    def _fit_sash(self, force: bool = True):
+        """위 칸이 내용을 다 보여 주게 경계를 내리되, 아래 진행·기록 칸은 최소 높이(실행 줄·막대·기록 다섯 줄)를 남긴다.
+        force=False(창 크기가 바뀐 때)면 사용자가 끌어 놓은 자리를 두고, 아래 칸이 최소 높이보다 작아질 때만 올린다."""
+        try:
+            if force:
+                self.update_idletasks()
+            total = self.pane.winfo_height()
+            if total <= 1:
+                self.after(100, self._fit_sash); return
+            keep = self._bottom_keep(total)
+            low = max(self.px(80), min(self.px(160), total - keep))
+            if force:
+                pos = max(low, min(self._host.winfo_reqheight(), total - keep))
+            else:
+                cur = self.pane.sashpos(0)
+                pos = max(low, min(cur, total - keep, self._host.winfo_reqheight()))
+                if pos == cur:
+                    return
+            self.pane.sashpos(0, pos)
+        except tk.TclError:
+            pass
 
     # ---------- 책갈피 교정 탭 ----------
     def _build_collate_tab(self, tab):
-        from .collate.run import POLICIES
+        from .collate.labels import POLICIES, ANCHOR_SOURCES
+        P = self.px
         self.v_hwpx = tk.StringVar(value=self.cfg.get("hwpx", "")); self.v_pdf2 = tk.StringVar(value=self.cfg.get("collate_pdf", "")); self.v_find = tk.StringVar()
         self.v_policy = tk.StringVar(value=POLICIES.get(self.cfg.get("collate_policy", "all"), POLICIES["all"]))
-        self.v_cmemo = tk.BooleanVar(value=self.cfg.get("collate_memo", True))
-        self.collate_rows: list[dict] = []
-        f = ttk.LabelFrame(tab, text="교정할 문서"); f.pack(fill="x")
-        r0 = ttk.Frame(f, style="Panel.TFrame"); r0.pack(fill="x", padx=8, pady=(6, 2))
-        ttk.Label(r0, text="PDF", style="Panel.TLabel", width=6).pack(side="left")
-        ttk.Entry(r0, textvariable=self.v_pdf2).pack(side="left", fill="x", expand=True, padx=(4, 8))
-        self._btn(r0, "PDF 고르기…", self.pick_pdf2, width=13).pack(side="left")
-        r1 = ttk.Frame(f, style="Panel.TFrame"); r1.pack(fill="x", padx=8, pady=(2, 2))
-        ttk.Label(r1, text="HWPX", style="Panel.TLabel", width=6).pack(side="left")
-        ttk.Entry(r1, textvariable=self.v_hwpx).pack(side="left", fill="x", expand=True, padx=(4, 8))
-        self._btn(r1, "HWPX 고르기…", self.pick_hwpx, width=13).pack(side="left")
-        rs = ttk.Frame(f, style="Panel.TFrame"); rs.pack(fill="x", padx=8, pady=(2, 2))
-        ttk.Label(rs, text="책갈피로 쓸 스타일", style="Panel.TLabel").pack(side="left")
+        self.v_cmemo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("collate_memo", "notice"), MEMO_LABELS["notice"]))
         self.v_hstyles = tk.StringVar(value=self.cfg.get("heading_styles", ""))
-        ttk.Entry(rs, textvariable=self.v_hstyles).pack(side="left", fill="x", expand=True, padx=(6, 8))
-        self._btn(rs, "스타일 고르기…", self.pick_styles, width=13).pack(side="left")
-        ttk.Label(rs, text="비우면 이름에 '제목'이 든 스타일 전부 · 앞에 적은 것이 큰 단위", style="Hint.TLabel").pack(side="left", padx=(10, 0))
-        r2 = ttk.Frame(f, style="Panel.TFrame"); r2.pack(fill="x", padx=8, pady=(2, 8))
-        ttk.Label(r2, text="판독기·모델·API 키·속도·읽기 방향은 [세로쓰기 인식] 탭의 설정을 따릅니다(읽기 방향 '자동 판정'이면 글자층으로 가로·세로를 정합니다)", style="Hint.TLabel").pack(side="left")
-        self.v_cforce = tk.BooleanVar(value=False)
-        ttk.Checkbutton(r2, text="기록 있는 쪽도 다시 판독", variable=self.v_cforce).pack(side="right", padx=(12, 0))
-
-        g = ttk.LabelFrame(tab, text="구획(책갈피·제목)"); g.pack(fill="both", expand=True, pady=(8, 0))
-        r3 = ttk.Frame(g, style="Panel.TFrame"); r3.pack(fill="x", padx=8, pady=(6, 4))
-        self._btn(r3, "구획 색인", self.do_collate_index, width=10).pack(side="left")
-        ttk.Label(r3, text="기준", style="Panel.TLabel").pack(side="left", padx=(12, 4))
-        from .collate.run import ANCHOR_SOURCES
         self.v_asrc = tk.StringVar(value=ANCHOR_SOURCES.get(self.cfg.get("anchor_source", "auto"), ANCHOR_SOURCES["auto"]))
-        ttk.Combobox(r3, textvariable=self.v_asrc, values=list(ANCHOR_SOURCES.values()), state="readonly", width=44).pack(side="left")
-        ttk.Label(r3, text="찾기(한자·독음)", style="Panel.TLabel").pack(side="left", padx=(12, 4))
-        e = ttk.Entry(r3, textvariable=self.v_find, width=18); e.pack(side="left"); e.bind("<KeyRelease>", lambda _e: self.refresh_collate_table())
-        self.v_cstat = tk.StringVar(value="HWPX 를 고르고 [구획 색인]을 누르십시오.")
-        r3b = ttk.Frame(g, style="Panel.TFrame"); r3b.pack(fill="x", padx=8, pady=(0, 4))
-        ttk.Label(r3b, textvariable=self.v_cstat, style="Hint.TLabel", wraplength=1080, justify="left").pack(side="left")
-        tf = ttk.Frame(g); tf.pack(fill="both", expand=True, padx=8)
-        cols = ("no", "lv", "name", "read", "para", "pdf", "page", "how")
-        self.ctable = ttk.Treeview(tf, columns=cols, show="headings", height=8, selectmode="browse")
-        for c, t, w, a in (("no", "번호", 50, "e"), ("lv", "급", 36, "center"), ("name", "HWPX 책갈피·제목", 280, "w"), ("read", "독음", 150, "w"), ("para", "문단", 60, "e"),
-                           ("pdf", "PDF 책갈피", 220, "w"), ("page", "PDF 쪽", 60, "e"), ("how", "짝", 70, "center")):
-            self.ctable.heading(c, text=t); self.ctable.column(c, width=w, anchor=a, stretch=(c in ("name", "pdf", "read")))
-        sb = ttk.Scrollbar(tf, orient="vertical", command=self.ctable.yview); self.ctable.configure(yscrollcommand=sb.set)
-        self.ctable.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
-        self.ctable.bind("<Double-1>", lambda _e: self.do_collate(apply=False))
+        self.v_cforce = tk.BooleanVar(value=False)
+        self.collate_rows: list[dict] = []
+        c = self._card(tab, "교정할 문서"); c.pack(fill="x")
+        b = c.body; b.columnconfigure(1, weight=1)
+        rows = (("PDF", self.v_pdf2, "PDF 고르기…", self.pick_pdf2, "책갈피가 든 원본 PDF. 비우면 [일반 OCR] 의 PDF 를 씁니다."),
+                ("HWPX", self.v_hwpx, "HWPX 고르기…", self.pick_hwpx, "교정할 HWPX. 원본은 그대로 두고 '<이름>_교정.hwpx' 사본에 고칩니다."),
+                ("책갈피로 쓸 스타일", self.v_hstyles, "스타일 고르기…", self.pick_styles, "비우면 이름에 '제목'이 든 스타일 전부. 쉼표로 여러 개, 앞에 적은 것이 큰 단위입니다."))
+        for i, (lab, var, bt, cmd, tip) in enumerate(rows):
+            self._field_label(b, lab, i)
+            e = ttk.Entry(b, textvariable=var); e.grid(row=i, column=1, sticky="ew", pady=P(3)); Tip(e, tip, self)
+            self._btn(b, bt, cmd).grid(row=i, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
+        foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
+        ttk.Checkbutton(foot, text="기록 있는 쪽도 다시 판독", variable=self.v_cforce).pack(side="right", padx=(P(12), 0))
+        self._hint(foot, "판독기·모델·API 키·속도·읽기 방향은 [일반 OCR] 의 설정을 따릅니다. 읽기 방향이 '자동 판정'이면 글자층으로 가로·세로를 정합니다.").pack(side="left", fill="x", expand=True)
 
-        r4 = ttk.Frame(g, style="Panel.TFrame"); r4.pack(fill="x", padx=8, pady=(6, 8))
-        ttk.Label(r4, text="교정 정책", style="Panel.TLabel").pack(side="left")
-        ttk.Combobox(r4, textvariable=self.v_policy, values=list(POLICIES.values()), state="readonly", width=34).pack(side="left", padx=(4, 10))
-        ttk.Checkbutton(r4, text="한컴 메모로 근거 남기기", variable=self.v_cmemo).pack(side="left")
-        self._btn(r4, "교정본 열기", self.open_collated, width=11).pack(side="right")
-        self._btn(r4, "보고 열기", self.open_collate_report, width=10).pack(side="right", padx=(0, 6))
-        self._btn(r4, "▶  HWPX 전체 교정", self.do_collate_all, style="Accent.TButton").pack(side="right", padx=(0, 10))
-        self._btn(r4, "이 구획 교정", lambda: self.do_collate(apply=True), width=11).pack(side="right", padx=(0, 6))
-        self._btn(r4, "이 구획 대조만", lambda: self.do_collate(apply=False), width=12).pack(side="right", padx=(0, 6))
-        ttk.Label(tab, text="[▶ HWPX 전체 교정]은 구획을 차례로 전부 대조해 HWPX 사본(<이름>_교정.hwpx) 하나에 고쳐 넣고 요약(_전체_요약.html)을 남깁니다. 원본은 건드리지 않습니다. "
-                           "기록이 없는 쪽은 모델로 읽고, 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다. 표에서 구획 하나를 골라 [이 구획 교정]·[이 구획 대조만]으로 부분만 할 수도 있습니다. "
-                           "자동 교정은 파란 글자·연두 형광펜, 확인 요청은 빨간 글자·노란 형광펜으로 표시되고 근거는 메모에 남습니다.", style="Hint.TLabel", wraplength=1080, justify="left").pack(fill="x", pady=(6, 0))
+        g = self._card(tab, "구획 (책갈피·제목)"); g.pack(fill="x", pady=(P(10), 0))
+        gb = g.body
+        r3 = ttk.Frame(gb, style="Panel.TFrame"); r3.pack(fill="x")
+        self._btn(r3, "구획 색인", self.do_collate_index, tip="HWPX 의 책갈피·제목 스타일로 구획을 나누고 PDF 책갈피와 짝을 맞춥니다").pack(side="left")
+        ttk.Label(r3, text="기준", style="Field.TLabel").pack(side="left", padx=(P(14), P(6)))
+        ttk.Combobox(r3, textvariable=self.v_asrc, values=list(ANCHOR_SOURCES.values()), state="readonly", width=self._cw(ANCHOR_SOURCES.values())).pack(side="left")
+        e = ttk.Entry(r3, textvariable=self.v_find, width=16); e.pack(side="right"); e.bind("<KeyRelease>", lambda _e: self.refresh_collate_table())
+        ttk.Label(r3, text="찾기(한자·독음)", style="Field.TLabel").pack(side="right", padx=(P(14), P(6)))
+        Tip(e, "한자뿐 아니라 한글 독음으로도 찾습니다(대계 → 大薊, 인삼 → 人參·人蔘).", self)
+        self.v_cstat = tk.StringVar(value="HWPX 를 고르고 [구획 색인]을 누르십시오.")
+        self._hint(gb, textvariable=self.v_cstat).pack(fill="x", pady=(P(6), P(6)))
+        tf = ttk.Frame(gb, style="Panel.TFrame"); tf.pack(fill="both", expand=True)
+        cols = ("no", "lv", "name", "read", "para", "pdf", "page", "how")
+        self.ctable = ttk.Treeview(tf, columns=cols, show="headings", height=7, selectmode="browse")
+        for cc, t, w, an in (("no", "번호", 54, "e"), ("lv", "급", 40, "center"), ("name", "HWPX 책갈피·제목", 220, "w"), ("read", "독음", 120, "w"), ("para", "문단", 64, "center"),
+                             ("pdf", "PDF 책갈피", 180, "w"), ("page", "PDF 쪽", 66, "center"), ("how", "짝", 74, "center")):
+            self.ctable.heading(cc, text=t); self.ctable.column(cc, width=P(w), minwidth=P(min(w, 60)), anchor=an, stretch=(cc in ("name", "pdf", "read")))
+        self.ctable.tag_configure("odd", background=self.colors["STRIPE"])
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.ctable.yview); self.ctable.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); self.ctable.pack(side="left", fill="both", expand=True)
+        self.ctable.bind("<Double-1>", lambda _e: self.do_collate(apply=False))
+        self._hint(tab, "기록이 없는 쪽은 모델로 읽고, 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다. "
+                        "자동 교정은 초록(3차 자형 판별 근거)·파랑(판독 일치·사전·반복·글자층 근거, 확인 권장), 확인 요청은 빨강으로 칠합니다. "
+                        "메모는 지운 자리·넣지 않은 자리·구조 차이·반영하지 않은 제안에만 답니다(원래 글자와 근거 전체는 보고 화면). 이전처럼 모든 교정에 메모를 원하면 '모든 표시에 메모'.",
+                   page=True).pack(fill="x", pady=(P(8), 0))
 
     def pick_pdf2(self):
         p = filedialog.askopenfilename(title="책갈피가 든 원본 PDF", filetypes=[("PDF", "*.pdf"), ("모든 파일", "*.*")])
@@ -709,11 +1210,11 @@ class App(tk.Tk):
         return [s.strip() for s in self.v_hstyles.get().split(",") if s.strip()]
 
     def anchor_source(self) -> str:
-        from .collate.run import ANCHOR_SOURCES
+        from .collate.labels import ANCHOR_SOURCES
         return next((k for k, v in ANCHOR_SOURCES.items() if v == self.v_asrc.get()), "auto")
 
     def collate_policy(self) -> str:
-        from .collate.run import POLICIES
+        from .collate.labels import POLICIES
         return next((k for k, v in POLICIES.items() if v == self.v_policy.get()), "all")
 
     def _need_hwpx(self) -> bool:
@@ -749,7 +1250,7 @@ class App(tk.Tk):
                 from .collate import zh as _zh, reading as _rd2
                 lines = [f"\n▶ 구획 색인\n   {msg}"]
                 if not _zh.available():
-                    lines.append("   ⚠ 간체·번체 변환 패키지(opencc)가 없어 PDF 책갈피(간체)와 HWPX 제목(번체)이 맞지 않습니다. [세로쓰기 인식] 탭의 [패키지 설치·점검] 뒤 프로그램을 다시 시작하십시오.")
+                    lines.append("   ⚠ 간체·번체 변환 패키지(opencc)가 없어 PDF 책갈피(간체)와 HWPX 제목(번체)이 맞지 않습니다. [일반 OCR] 의 고급 — [패키지 설치·점검] 뒤 프로그램을 다시 시작하십시오.")
                 if not _rd2.available():
                     lines.append("   ⚠ 독음 변환 패키지(hanja)가 없어 한글 발음으로 찾기가 되지 않습니다. 같은 방법으로 설치하십시오.")
                 if pdf_anchors:
@@ -771,10 +1272,13 @@ class App(tk.Tk):
         raw = self.v_find.get().strip(); q = zh.compare_key(normalize_name(raw))
         for i in self.ctable.get_children():
             self.ctable.delete(i)
+        k = 0
         for r in self.collate_rows:
             if q and q not in zh.compare_key(normalize_name(r["name"])) and q not in zh.compare_key(normalize_name(r["pdf"])) and not reading.matches(r["name"], raw):
                 continue
-            self.ctable.insert("", "end", iid=str(r["no"]), values=(r["no"], r["lv"], ("    " * (r["lv"] - 1)) + r["name"], r.get("read", ""), r["para"], r["pdf"], r["page"], r["how"]))
+            k += 1
+            self.ctable.insert("", "end", iid=str(r["no"]), values=(r["no"], r["lv"], ("    " * (r["lv"] - 1)) + r["name"], r.get("read", ""), r["para"], r["pdf"], r["page"], r["how"]),
+                               tags=("odd",) if k % 2 == 0 else ())
 
     def _selected_anchor(self) -> int | None:
         sel = self.ctable.selection()
@@ -813,8 +1317,8 @@ class App(tk.Tk):
         argv = ["collate", self.pdf2(), "--work", str(self.work2()), "--hwpx", self.v_hwpx.get().strip(), "--anchor-index", str(idx),
                 "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts(print_offset=False, force=self.v_cforce.get())
         if apply: argv.append("--apply")
-        if not self.v_cmemo.get(): argv.append("--no-memo")
-        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.v_cmemo.get()}); save_config(self.cfg)
+        argv += ["--memo", self.collate_memo_mode()] + self._glyph_opts()
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode()}); save_config(self.cfg)
         self.nb.select(0)
         self.start(argv, ("교정 반영·저장" if apply else "대조") + f" — {row['name'][:20]}")
 
@@ -833,8 +1337,8 @@ class App(tk.Tk):
         argv = ["collate", self.pdf2(), "--work", str(self.work2()), "--hwpx", self.v_hwpx.get().strip(), "--all", "--apply",
                 "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) \
                + self._read_opts(print_offset=False, force=self.v_cforce.get())
-        if not self.v_cmemo.get(): argv.append("--no-memo")
-        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.v_cmemo.get()}); save_config(self.cfg)
+        argv += ["--memo", self.collate_memo_mode()] + self._glyph_opts()
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode()}); save_config(self.cfg)
         self.nb.select(0)
         self.start(argv, "HWPX 전체 교정", open_after=self.work2() / "collate" / "_전체_요약.html")
 
@@ -855,8 +1359,13 @@ class App(tk.Tk):
         if out.exists(): open_path(out)
         else: messagebox.showinfo(APP_NAME, f"교정본이 아직 없습니다: {out.name}")
 
-    def _btn(self, parent, text, cmd, **kw) -> ttk.Button:
-        b = ttk.Button(parent, text=text, command=cmd, **kw); self.buttons.append(b); return b
+    def _btn(self, parent, text, cmd, tip: str | None = None, **kw) -> ttk.Button:
+        """작업 중에는 잠기는 단추. 너비는 글자에 맞춘다(고정 너비로 글자가 잘리던 문제). tip 은 마우스를 올리면 보이는 설명."""
+        kw.pop("width", None)
+        b = ttk.Button(parent, text=text, command=cmd, cursor="hand2", **kw); self.buttons.append(b)
+        if tip:
+            Tip(b, tip, self)
+        return b
 
     # ---------- 도우미 ----------
     def pdf(self) -> str:
@@ -867,7 +1376,7 @@ class App(tk.Tk):
 
     def _need_pdf(self) -> bool:
         if not self.pdf() or not Path(self.pdf()).exists():
-            messagebox.showinfo(APP_NAME, "먼저 [PDF 고르기…] 로 PDF 파일을 고르십시오."); return False
+            messagebox.showinfo(APP_NAME, "먼저 [PDF·이미지 고르기…] 로 PDF 나 이미지를 고르십시오."); return False
         return True
 
     def _pages(self) -> list[str]:
@@ -882,8 +1391,8 @@ class App(tk.Tk):
             return 0
 
     def _need_records(self, what: str) -> bool:
-        """판독 기록을 쓰는 도구(비교 다시 계산·3차 판별·장부·보고·검수 화면) 앞에서: 첫 탭 PDF 에 기록이 없고 책갈피 OCR 탭 PDF 에 있으면 그 PDF 로 바꿔 준다.
-        (대조용 복사본 PDF 를 첫 탭에 두면 결과 폴더가 비어 '판독 기록이 없습니다' 가 나던 문제)"""
+        """판독 기록을 쓰는 도구(비교 다시 계산·3차 판별·장부·보고·검수 화면) 앞에서: 일반 OCR 의 PDF 에 기록이 없고 책갈피 OCR 의 PDF 에 있으면 그 PDF 로 바꿔 준다.
+        (대조용 복사본 PDF 를 일반 OCR 에 두면 결과 폴더가 비어 '판독 기록이 없습니다' 가 나던 문제)"""
         if not self._need_pdf():
             return False
         n1 = self._n_records(self.pdf())
@@ -892,14 +1401,14 @@ class App(tk.Tk):
         other = self.v_pdf2.get().strip() if hasattr(self, "v_pdf2") else ""
         n2 = self._n_records(other) if other and other != self.pdf() else 0
         if n2:
-            if messagebox.askyesno(APP_NAME, f"첫 탭의 PDF 에는 판독 기록이 없습니다.\n  {self.pdf()}\n  → 결과 폴더 {self.work()}\n\n"
-                                             f"책갈피 OCR 탭의 PDF 에는 {n2}쪽 기록이 있습니다.\n  {other}\n\n{what}을(를) 그 PDF 로 할까요? (첫 탭의 PDF 도 그것으로 바뀝니다)"):
+            if messagebox.askyesno(APP_NAME, f"[일반 OCR] 의 PDF 에는 판독 기록이 없습니다.\n  {self.pdf()}\n  → 결과 폴더 {self.work()}\n\n"
+                                             f"[책갈피 OCR] 의 PDF 에는 {n2}쪽 기록이 있습니다.\n  {other}\n\n{what}을(를) 그 PDF 로 할까요? ([일반 OCR] 의 PDF 도 그것으로 바뀝니다)"):
                 self.v_pdf.set(other); self.cfg["last_pdf"] = other; save_config(self.cfg); self.refresh_table()
                 self._append(f"PDF: {other}\n결과 폴더: {self.work()}\n")
                 return True
             return False
         messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [▶ 한 번에 인식] 을 하거나, "
-                                      f"기록이 있는 원본 PDF 를 [PDF 고르기…] 로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
+                                      f"기록이 있는 원본 PDF 를 [PDF·이미지 고르기…] 로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
         return False
 
     def _read_opts(self, print_offset: bool = True, force: bool | None = None) -> list[str]:
@@ -916,21 +1425,32 @@ class App(tk.Tk):
         o += ["--workers", (self.v_workers.get().strip() or "6")]
         o += ["--second-model", self.v_model2.get().strip()]          # 빈 값이면 1차와 같은 모델, auto 면 자동
         o += ["--second-thinking", "low" if self.v_think2.get() else "full"]
-        o += ["--chunk-lines", (self.v_chunk.get().strip() or "0"), "--media-resolution", "auto" if self.v_mres.get() else "default"]
+        o += ["--chunk-lines", (self.v_chunk.get().strip() or "0"), "--media-resolution", self.media_res_key()]
         o += ["--mode", self.mode_key()]
         if not self.v_cache.get():
             o.append("--no-cache")
         o += ["--checkpoint", (self.v_ckpt.get().strip() or "0")]
         return o
 
+    def _glyph_opts(self) -> list[str]:
+        """3차 판별 선택(run·adjudicate·collate 에만 — read 명령에는 없는 선택이다)."""
+        return ["--adjudicate-blind"] if self.v_blind.get() else []
+
     def _build_opts(self) -> list[str]:
         o = []
         if self.v_docx.get(): o.append("--docx")
         if not self.v_join.get(): o.append("--no-join-pages")
         if not self.v_hl.get(): o.append("--no-highlight")
+        if not self.v_ctx.get(): o.append("--no-context")
         if not self.v_pb.get(): o.append("--no-page-breaks")
-        o += ["--check-list", self.check_list_mode()]
+        o += ["--check-list", self.check_list_mode(), "--memo", self.memo_mode()]
         return o
+
+    def memo_mode(self) -> str:
+        return next((k for k, v in MEMO_LABELS.items() if v == self.v_memo.get()), "notice")
+
+    def collate_memo_mode(self) -> str:
+        return next((k for k, v in MEMO_LABELS.items() if v == self.v_cmemo.get()), "notice")
 
     def check_list_mode(self) -> str:
         return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "none")
@@ -938,13 +1458,37 @@ class App(tk.Tk):
     def mode_key(self) -> str:
         return next((k for k, v in MODE_LABELS.items() if v == self.v_mode.get()), "auto")
 
+    def media_res_key(self) -> str:
+        return next((k for k, v in MRES_LABELS.items() if v == self.v_mres.get()), "high")
+
     def toggle_advanced(self):
-        on = not self.v_adv.get(); self.v_adv.set(on)
-        if on:
-            self.adv_frame.pack(fill="x", pady=(6, 0)); self.b_adv.configure(text="고급 — 단계별 실행·도구 ▴")
+        self.v_adv.set(not self.v_adv.get()); self._apply_advanced()
+        self.cfg["advanced_open"] = self.v_adv.get(); save_config(self.cfg)
+        if self.v_adv.get():
+            self.after(60, lambda: self._reveal(self.adv_frame))          # 펼친 단추들이 화면 밖이면 보이게 굴린다
+
+    def _apply_advanced(self):
+        if self.v_adv.get():
+            self.adv_frame.pack(fill="x", pady=(self.px(6), 0)); self.b_adv.configure(text="▾  고급 — 단계별 실행·도구")
         else:
-            self.adv_frame.pack_forget(); self.b_adv.configure(text="고급 — 단계별 실행·도구 ▾")
-        self.cfg["advanced_open"] = on; save_config(self.cfg)
+            self.adv_frame.pack_forget(); self.b_adv.configure(text="▸  고급 — 단계별 실행·도구")
+        if hasattr(self, "pane"):
+            self.after_idle(self._fit_sash)
+
+    def toggle_details(self):
+        self.v_details.set(not self.v_details.get()); self._apply_details()
+        self.cfg["details_open"] = self.v_details.get(); save_config(self.cfg)
+        if self.v_details.get():
+            self.after(60, lambda: self._reveal(self.details))
+
+    def _apply_details(self):
+        """판독 카드의 세부 설정(2차 판독 모델·속도·조각·단계)을 펼치거나 접는다. 보통은 기본값이면 된다."""
+        if self.v_details.get():
+            self.details.grid(row=5, column=0, columnspan=3, sticky="ew"); self.b_details.configure(text="세부 설정 접기 ▴")
+        else:
+            self.details.grid_remove(); self.b_details.configure(text="세부 설정 ▾")
+        if hasattr(self, "pane"):
+            self.after_idle(self._fit_sash)
 
     def _prepare_env(self) -> bool:
         if self.v_reader.get() == "gemini":
@@ -971,21 +1515,40 @@ class App(tk.Tk):
                 self.log.delete("1.0", f"{n - self.MAX_LOG_LINES + 500}.0")
         except Exception:
             pass
-        self.log.see("end"); self.log.configure(state="disabled")
+        self.log.see("end-2c"); self.log.configure(state="disabled")    # 끝의 빈 줄 대신 마지막 글줄이 보이게
 
-    def _set_running(self, on: bool):
+    def _set_running(self, on: bool, command: str = ""):
+        """작업 중에는 단추를 잠그고, 진행 막대를 0 에서 새로 시작한다(좌우로 오가는 막대 대신 끝까지 차는 막대)."""
         self.running = on
         for b in self.buttons:
             b.configure(state="disabled" if on else "normal")
-        self.b_stop.configure(state="normal" if on else "disabled")
-        if on: self.progress.start(12)
-        else: self.progress.stop()
+        for b in (self.b_stop, getattr(self, "b_stop2", None)):
+            if b is not None:
+                b.configure(state="normal" if on else "disabled")
+        if on:
+            self.tracker = Tracker(command)
+            self.progress.configure(value=0); self._prog_shown = 0.0
+            self.v_prog.set("0%" if self.tracker.plan else "")
+
+    def _bar_value(self, f: float) -> int:
+        """0~1 → 막대 값(0~1000). 0 보다 크면 둥근 끝 두 개가 들어갈 만큼은 보이게 한다(겹쳐 그려지는 모양 방지)."""
+        v = int(round(f * 1000))
+        width = max(1, self.progress.winfo_width())
+        if 0 < v < 1000:
+            v = max(v, -(-self._bar_cap * 1000 // width))
+        return min(1000, v)
+
+    def _on_progress(self, stage: str, done: int, total: int):
+        f = self.tracker.update(stage, done, total)
+        self.progress.configure(value=self._bar_value(f)); self._prog_shown = time.time()
+        self.v_prog.set(self.tracker.live_text())
 
     def start(self, argv: list[str], label: str, open_after: Path | None = None):
         if self.running:
             return
         self.open_after = open_after
-        self._set_running(True); self.v_status.set(label + " 중…")
+        cmd = argv[0] if argv else ""
+        self._set_running(True, cmd); self.v_status.set(label + " 중…")
         self.q.put(("log", f"\n▶ {label}\n   yeone-ocr {' '.join(argv)}\n"))
         def target():
             rc = 1
@@ -996,12 +1559,16 @@ class App(tk.Tk):
                 with contextlib.redirect_stdout(w), contextlib.redirect_stderr(w):
                     from . import cli
                     cli.CANCEL.clear()
-                    rc = cli.main(argv)
+                    cli.PROGRESS = lambda st, d, t: self.q.put(("progress", st, d, t))
+                    try:
+                        rc = cli.main(argv)
+                    finally:
+                        cli.PROGRESS = None
             except SystemExit as e:
                 rc = e.code if isinstance(e.code, int) else 1
                 if e.code and not isinstance(e.code, int): self.q.put(("log", str(e.code) + "\n"))
             except ModuleNotFoundError as e:
-                self.q.put(("log", f"\n오류: 패키지가 없습니다: {e.name}. [필요한 패키지 설치·점검] 단추를 누르십시오.\n"))
+                self.q.put(("log", f"\n오류: 패키지가 없습니다: {e.name}. [▸ 고급 → 패키지 설치·점검] 단추를 누르십시오.\n"))
                 if w: w.problems.append(f"오류: 패키지가 없습니다: {e.name}")
             except Exception:
                 self.q.put(("log", traceback.format_exc()))
@@ -1023,21 +1590,34 @@ class App(tk.Tk):
                     self._keycheck_result(item[1])
                 elif item[0] == "sections":
                     self.collate_rows = item[1]; self.v_cstat.set(item[2]); self.refresh_collate_table()
+                    self.after(60, lambda: self._reveal(self.ctable.master))      # 색인 결과 표가 위 칸 아래로 숨지 않게(낮은 화면)
                 elif item[0] == "styles_suggest":
                     if not self.v_hstyles.get().strip():
                         self.v_hstyles.set(item[1])
+                elif item[0] == "progress":
+                    self._on_progress(item[1], item[2], item[3])
+                elif item[0] == "bundle":
+                    self._bundle_msg(*item[1:])
         except queue.Empty:
             pass
+        if self.running and time.time() - self._prog_shown > 1.0:
+            self.v_prog.set(self.tracker.live_text()); self._prog_shown = time.time()      # 남은 시간(또는 지난 시간) 글을 1초마다 새로
         self.after(100, self._poll)
 
     def _finish(self, rc, label):
         self._set_running(False)
+        stopped = rc == 130                              # [중지]로 멈춘 명령은 130 을 돌려준다(멈추기 전에 일을 다 끝냈으면 0 = 완료)
         ok = (rc == 0 or rc is None)
-        self.v_status.set(f"{label} {'끝' if ok else ('중지됨' if rc == 130 else '오류 (진행 기록 확인)')}")
+        self.v_status.set(f"{label} {'끝' if ok else ('중지됨' if stopped else '오류 (진행 기록 확인)')}")
+        took = "걸린 시간 " + fmt_duration(time.time() - self.tracker.t0)
+        if ok:
+            self.tracker.finish(); self.progress.configure(value=1000); self.v_prog.set(f"100% · 완료 · {took}")
+        else:
+            self.v_prog.set(f"{self.tracker.frac * 100:.0f}% · {'중지됨' if stopped else '멈춤(오류)'} · {took}")
         self._append(f"— {label} {'끝' if ok else '중단'} (rc={rc})\n")
         self.refresh_table()
         w = getattr(self, "_last_writer", None)
-        if not ok and rc != 130 and w is not None and w.problems:
+        if not ok and not stopped and w is not None and w.problems:
             messagebox.showerror(APP_NAME, f"{label} 이(가) 중단되었습니다.\n\n" + "\n".join(w.problems[-3:]))
         self._last_writer = None
         if ok and self.open_after and Path(self.open_after).exists():
@@ -1049,10 +1629,95 @@ class App(tk.Tk):
 
     # ---------- 단추 동작 ----------
     def choose_pdf(self):
-        p = filedialog.askopenfilename(title="PDF 고르기", filetypes=[("PDF", "*.pdf"), ("모든 파일", "*.*")])
-        if p:
-            self.v_pdf.set(p); self.cfg["last_pdf"] = p; save_config(self.cfg); self.refresh_table()
-            self._append(f"PDF: {p}\n결과 폴더: {self.work()}\n")
+        imgs = " ".join("*" + e for e in IMAGE_EXTS)
+        ps = filedialog.askopenfilenames(title="PDF·이미지 고르기 (이미지는 여러 장 고를 수 있음)",
+                                         filetypes=[("PDF·이미지", "*.pdf " + imgs), ("PDF", "*.pdf"), ("이미지", imgs), ("모든 파일", "*.*")])
+        ps = [p for p in (ps or ()) if p]
+        if not ps:
+            return
+        if len(ps) > 1:
+            self._bundle_images(ps); return             # 묶기는 작업 스레드에서 — 끝나면 _use_pdf 로 이어진다
+        self._use_pdf(ps[0])
+
+    def _use_pdf(self, p: str):
+        self.v_pdf.set(p); self.cfg["last_pdf"] = p; save_config(self.cfg); self.refresh_table()
+        kind = "이미지" if Path(p).suffix.lower() in IMAGE_EXTS else "PDF"
+        self._append(f"{kind}: {p}\n결과 폴더: {self.work()}\n")
+        if kind == "이미지" and self.mode_key() == "auto":
+            self._append("  이미지에는 글자층이 없어 읽기 방향을 세로쓰기로 봅니다. 가로쓰기 책이면 [읽기 방향] 을 바꾸십시오.\n")
+
+    @staticmethod
+    def _bundle_path(srcs: list[Path], progress=None) -> Path:
+        """묶음 파일 경로: '<첫 이름>~<끝 이름> (N장 지문).pdf'. 지문은 고른 이미지마다 (이름·크기·내용의 sha1) 을 이름 순서로 모아 낸
+        sha1 앞 8자리라 가운데 이미지만 다른 선택이나 바꿔 넣은·고친 이미지는 이름이 달라지고(결과 폴더도 따로), 폴더를 옮기거나 복사해
+        경로·수정 시각이 바뀌어도 그대로다(묶음·결과 폴더를 함께 옮기면 판독 기록이 이어진다). 내용은 8MiB 이하면 파일 전체(BMP·TIFF 의
+        가운데만 고쳐 크기가 같아도 알아본다), 넘으면 앞·가운데·끝 64KiB 씩만 읽는다. progress(끝난 장, 전체) 로 진행을 알린다(느린 드라이브)."""
+        import hashlib
+        h = hashlib.sha1()
+        for i, s in enumerate(srcs, 1):
+            with open(s, "rb") as f:
+                n = os.fstat(f.fileno()).st_size; d = hashlib.sha1()
+                if n <= 8 << 20:
+                    d.update(f.read())
+                else:
+                    for at in (0, n // 2, n - 65536):
+                        f.seek(at); d.update(f.read(65536))
+            h.update(f"{s.name}|{n}|{d.hexdigest()}\n".encode("utf-8"))
+            if progress: progress(i, len(srcs))
+        return srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+
+    def _bundle_images(self, paths: list[str]) -> None:
+        """이미지 여러 장 → 이름의 숫자 순서로 한 PDF 로 묶어 첫 이미지 옆에 저장(무손실: JPEG 는 그대로, 나머지는 PNG).
+        이름에 고른 이미지들의 지문이 들어가므로 정확히 같은 선택으로 이미 묶은 파일이 있을 때만 그대로 쓴다(판독 기록이 이어지게).
+        지문 계산과 묶기는 작업 스레드에서 하고(느린 드라이브에서도 창이 멈추지 않게) 끝날 때까지 단추를 잠근다. 끝나면 _bundle_msg 가 _use_pdf 로 잇는다."""
+        bad = [p for p in paths if Path(p).suffix.lower() not in IMAGE_EXTS]
+        if bad:
+            messagebox.showinfo(APP_NAME, "여러 개를 고를 때는 이미지만 고르십시오(PDF 는 한 번에 하나).\n  " + "\n  ".join(Path(b).name for b in bad[:5])); return
+        if self.running: return
+        from .pdfio import _natural_key
+        srcs = sorted((Path(p) for p in paths), key=_natural_key)
+        names = " → ".join(s.name for s in srcs[:8]) + (" …" if len(srcs) > 8 else "")
+        self._set_running(True); self.v_status.set(f"이미지 {len(srcs)}장을 한 권으로 묶는 중…")
+        for b in (self.b_stop, getattr(self, "b_stop2", None)):          # 묶기는 중간에 멈추지 않는다
+            if b is not None: b.configure(state="disabled")
+        def t():
+            out = part = None; log = ""
+            err = "이미지를 묶지 못했습니다"
+            try:
+                out = self._bundle_path(srcs, progress=lambda d, n: self.q.put(("bundle", "hash", d, n)))
+                if out.exists():
+                    err = None; log = f"같은 이미지 {len(srcs)}장으로 묶은 파일을 다시 씀: {out.name}\n  {names}\n"; return
+                old = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장).pdf")       # 0.6.4 전 이름(지문 없음)
+                part = out.with_name(out.name + ".part")                       # 다 쓴 뒤에만 이름을 붙인다(끊긴 묶음을 다시 쓰지 않게)
+                from .pdfio import save_images_as_pdf
+                save_images_as_pdf(srcs, part, progress=lambda d, n: self.q.put(("bundle", "prog", d, n)))
+                os.replace(part, out); err = None
+                log = f"이미지 {len(srcs)}장을 이름 순서로 묶음: {out.name}\n  {names}\n" + (
+                    f"  참고: 예전 판이 묶은 '{old.name}' 이(가) 옆에 있습니다 — 그 판독 기록은 '{work_dir_for(str(old)).name}' 에 따로 있으니 이어 쓰려면 [PDF·이미지 고르기…] 로 그 PDF 를 고르십시오.\n"
+                    if old.exists() and work_dir_for(str(old)).is_dir() else "")                # 판독 기록(결과 폴더)이 없으면 알리지 않는다
+            except ModuleNotFoundError as e:
+                err = f"패키지가 없어 이미지를 묶지 못했습니다: {e.name}. [▸ 고급 → 패키지 설치·점검] 을 누르십시오."
+            except Exception as e:
+                err = f"이미지를 묶지 못했습니다: {e}"
+            finally:
+                if err and part is not None:
+                    with contextlib.suppress(OSError): part.unlink()
+                self.q.put(("bundle", "done", out, err, log))
+        threading.Thread(target=t, daemon=True).start()
+
+    def _bundle_msg(self, kind: str, *a):
+        """작업 스레드의 묶기 알림(주 스레드에서 _poll 이 부른다): ('prog', 끝난 장, 전체) 또는 ('done', 묶음 경로, 오류, 기록 글)."""
+        if kind in ("prog", "hash"):
+            d, n = a
+            self.progress.configure(value=self._bar_value(d / n if n else 1.0))
+            self.v_status.set(f"이미지를 한 권으로 묶는 중… {d}/{n}장" if kind == "prog" else f"고른 이미지 확인 중(같은 묶음이 있는지)… {d}/{n}장"); return
+        out, err, log = a
+        self._set_running(False); self.v_status.set("준비됨")
+        if err:
+            self.progress.configure(value=0); self.v_prog.set("이미지 묶기 실패")
+            messagebox.showerror(APP_NAME, err); return
+        self.progress.configure(value=1000); self.v_prog.set("이미지 묶기 끝")
+        self._append(log); self._use_pdf(str(out))
 
     def toggle_key(self):
         self.e_key.configure(show="" if self.e_key.cget("show") else "•")
@@ -1075,7 +1740,9 @@ class App(tk.Tk):
 
     def _keycheck_result(self, res: dict):
         self._set_running(False)
-        self.v_status.set(res["message"][:90])
+        self.progress.configure(value=1000 if res.get("ok") else 0); self.v_prog.set("키 확인됨" if res.get("ok") else "키 확인 실패")
+        msg = res["message"]
+        self.v_status.set(msg if len(msg) <= 48 else msg[:46].rstrip() + "… (진행 기록)")
         self._append("키 확인: " + res["message"] + ("\n주의: " + res["shape_warning"] if res.get("shape_warning") else "") + "\n")
         if not res["ok"]:
             messagebox.showerror(APP_NAME, res["message"] + ("\n\n" + res["shape_warning"] if res.get("shape_warning") else "")); return
@@ -1090,9 +1757,10 @@ class App(tk.Tk):
         self.cfg.update({"pages": self.v_pages.get(), "print_offset": self.v_off.get(), "upscale": self.v_up.get(), "reader": self.v_reader.get(),
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
+                         "context_hint": self.v_ctx.get(), "memo_mode": self.memo_mode(),
                          "workers": int(self.v_workers.get() or 6), "second_model": self.v_model2.get().strip(),
-                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "last_pdf": self.pdf(),
-                         "chunk_lines": int(self.v_chunk.get() or 0), "media_high": self.v_mres.get(), "mode": self.mode_key()})
+                         "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "adjudicate_blind": self.v_blind.get(), "last_pdf": self.pdf(),
+                         "chunk_lines": int(self.v_chunk.get() or 0), "media_res": self.media_res_key(), "mode": self.mode_key()})
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
@@ -1131,7 +1799,7 @@ class App(tk.Tk):
             from .estimate import format_estimate
             return format_estimate(self.estimate_data())
         except ModuleNotFoundError as e:
-            return f"패키지가 없어 계산하지 못했습니다: {e.name}. [필요한 패키지 설치·점검] 을 누르십시오."
+            return f"패키지가 없어 계산하지 못했습니다: {e.name}. [▸ 고급 → 패키지 설치·점검] 을 누르십시오."
         except Exception as e:
             return f"계산 실패: {e}"
 
@@ -1141,7 +1809,7 @@ class App(tk.Tk):
         try:
             EstimateDialog(self, self.estimate_data())
         except ModuleNotFoundError as e:
-            messagebox.showerror(APP_NAME, f"패키지가 없어 계산하지 못했습니다: {e.name}. [필요한 패키지 설치·점검] 을 누르십시오.")
+            messagebox.showerror(APP_NAME, f"패키지가 없어 계산하지 못했습니다: {e.name}. [▸ 고급 → 패키지 설치·점검] 을 누르십시오.")
         except Exception as e:
             messagebox.showerror(APP_NAME, f"비용 계산 실패: {e}")
 
@@ -1184,7 +1852,7 @@ class App(tk.Tk):
     def do_run(self):
         if self._need_pdf() and self._prepare_env() and self._confirm_cost():
             self.nb.select(0)
-            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._build_opts(), "한 번에 인식 (PDF 전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
+            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts() + self._build_opts(), "한 번에 인식 (PDF 전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
 
     def do_stop(self):
         try:
@@ -1218,19 +1886,22 @@ class App(tk.Tk):
             from .pdfio import parse_pages, open_pdf
             w = Work(self.pdf(), str(self.work())); doc = open_pdf(self.pdf())
             recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)))
-            n_sites = sum(len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs)
+            per_page = [len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs]
+            n_sites = sum(per_page); n_calls = sum(-(-n // 8) for n in per_page if n)
         except Exception as e:
             messagebox.showerror(APP_NAME, f"판독 기록을 읽지 못했습니다: {e}"); return
         if not recs:
             messagebox.showinfo(APP_NAME, f"이 쪽 범위에 판독 기록이 없습니다.\n결과 폴더: {self.work()}"); return
         if not n_sites:
             messagebox.showinfo(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."); return
-        if not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(호출 {n_sites}회, 글자 조각이라 토큰은 적음).\n"
+        if not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(쪽마다 8자리씩 묶어 한 호출, 쪽은 동시에 — 묶음 호출 약 {n_calls}회, 빠진 자리는 낱개로 더).\n"
+                                             "앞뒤 글자는 글로 주지 않고(조각에는 보임) 후보 차례를 섞어 자형만 묻습니다(눈가림)."
+                                             + (f" 고른 자리는 후보 없이 한 번 더 읽어 같을 때만 확정합니다(호출 최대 약 {n_calls}회 더)." if self.v_blind.get() else "") + "\n"
                                              f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. 계속할까요?"):
             return
         self.nb.select(0)
         argv = ["adjudicate", self.pdf(), "--work", str(self.work())] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
-        if not self.v_cache.get(): argv.append("--no-cache")
+        argv += ["--workers", (self.v_workers.get().strip() or "6")] + self._glyph_opts()
         self.start(argv, "3차 글자 판별")
 
     def do_ledger(self):
@@ -1242,7 +1913,7 @@ class App(tk.Tk):
         if not self._need_pdf(): return
         w = self.work()
         if not w.exists():
-            messagebox.showinfo(APP_NAME, "아직 결과 폴더가 없습니다. 먼저 [② 준비] 또는 [▶ 한 번에 실행] 을 누르십시오."); return
+            messagebox.showinfo(APP_NAME, "아직 결과 폴더가 없습니다. 먼저 [▶ 한 번에 인식] 을 누르십시오."); return
         open_path(w)
 
     def open_hwpx(self):
@@ -1266,7 +1937,8 @@ class App(tk.Tk):
 
     def _pkg_result(self, missing: list[str]):
         if missing:
-            self.v_pkg.set("빠진 패키지: " + ", ".join(missing) + "  → [필요한 패키지 설치·점검]")
+            self.v_pkg.set(f"빠진 패키지 {len(missing)}개 → ▸ 고급의 [패키지 설치·점검]")       # 긴 목록은 머리띠를 밀어내므로 기록에
+            self._append("빠진 패키지: " + ", ".join(missing) + "\n")
             if not getattr(self, "_asked_install", False) and not self.running:
                 self._asked_install = True
                 if messagebox.askyesno(APP_NAME, "필요한 패키지가 빠져 있습니다:\n  " + ", ".join(missing) + "\n\n지금 설치할까요? (몇 분 걸릴 수 있습니다)"):
@@ -1278,14 +1950,28 @@ class App(tk.Tk):
         if self.running: return
         req = Path(__file__).resolve().parent.parent / "requirements.txt"
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + (["-r", str(req)] if req.exists() else [p for _, p in PACKAGES])
-        self._set_running(True); self.v_status.set("패키지 설치 중… (몇 분 걸릴 수 있음)"); self.nb.select(0)
+        self._set_running(True, "install"); self.v_status.set("패키지 설치 중… (몇 분 걸릴 수 있음)"); self.nb.select(0)
         self.q.put(("log", "\n▶ 패키지 설치\n   " + " ".join(cmd) + "\n"))
+        wanted = {p.lower().replace("_", "-") for _, p in PACKAGES}
         def t():
-            rc = 1
+            rc = 1; seen: set[str] = set(); n_get = got = 0
             try:
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
                 for line in p.stdout:
                     self.q.put(("log", line))
+                    # pip 출력의 세 마디: 패키지 확인(Collecting·Requirement already satisfied) → 내려받기(Downloading·Using cached) → 설치
+                    m = re.match(r"(?:Collecting|Requirement already satisfied:)\s+([A-Za-z0-9_.\-]+)", line)
+                    if m:
+                        if line.startswith("Collecting"):
+                            n_get += 1
+                        name = m.group(1).lower().replace("_", "-")
+                        if name in wanted and name not in seen:
+                            seen.add(name); self.q.put(("progress", "resolve", len(seen), len(wanted)))
+                    elif re.match(r"\s*(?:Downloading|Using cached)\s+\S+\.(?:whl|tar\.gz|zip)\b", line) and ".metadata" not in line:
+                        got += 1                                    # 이 줄은 내려받기 '시작' — 끝난 것은 앞 파일까지
+                        self.q.put(("progress", "download", min(got - 1, n_get), max(n_get, 1)))
+                    elif line.startswith("Installing collected packages"):
+                        self.q.put(("progress", "download", max(n_get, 1), max(n_get, 1))); self.q.put(("progress", "setup", 0, 1))
                 rc = p.wait()
             except Exception:
                 self.q.put(("log", traceback.format_exc()))
@@ -1321,7 +2007,7 @@ class App(tk.Tk):
                     figs = sum(1 for r in m["regions"] if r["kind"] in ("원형나경도", "산도", "계통도", "도식", "삽화", "복잡한표"))
                 except Exception:
                     pass
-            self.table.insert("", "end", values=(n, pr, statuses, unc, figs))
+            self.table.insert("", "end", values=(n, pr, statuses, unc, figs), tags=("odd",) if n % 2 else ())
 
     def on_close(self):
         if self.running and not messagebox.askyesno(APP_NAME, "작업이 진행 중입니다. 그래도 닫을까요?"):

@@ -3,6 +3,7 @@
 좌표(bbox)는 Gemini 관례대로 [ymin, xmin, ymax, xmax] 0~1000 정규화 값이다.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from pydantic import BaseModel, Field, ConfigDict
 
 # 영역 유형. 지침 3장의 A~G형을 영역 단위로 풀어 쓴 것.
@@ -81,10 +82,39 @@ class RegionRereadItem(_M):
 
 
 class GlyphChoice(_M):
-    """3차 글자 판별의 답. choice 는 후보 가운데 하나(자형 근거가 보일 때만), 아니면 빈 글."""
-    choice: str = Field("", alias="c")
+    """3차 글자 판별의 답. choice 는 후보 가운데 하나(자형 근거가 보일 때만), 아니면 빈 글.
+    필드 차례가 곧 모델이 쓰는 차례다(0.6.5): 조각에 보이는 글자(w) → 본 자형(e) → 고른 글자(c). 보고 적은 뒤에 고르게 한다."""
+    window: str = Field("", alias="w")         # 조각에 보이는 글자 전부(조각이 엉뚱한 자리면 코드가 앞뒤 글자와 맞춰 가려낸다)
     evidence: str = Field("", alias="e")       # 본 자형 한 줄(갈고리·점·획 길이 등)
-    window: str = Field("", alias="w")         # 조각에 보이는 글자 전부(앞뒤 글자 확인용 — 조각이 엉뚱한 자리면 가려낸다)
+    choice: str = Field("", alias="c")
+
+
+class GlyphChoiceItem(_M):
+    """묶음 3차 판별의 자리 하나. s 는 호출자가 붙인 자리 번호(【s】 표시와 같음)."""
+    site_id: str = Field("", alias="s")
+    window: str = Field("", alias="w")
+    evidence: str = Field("", alias="e")
+    choice: str = Field("", alias="c")
+
+
+@dataclass(frozen=True)
+class GlyphAsk:
+    """3차 글자 판별 질문 하나 — 모델에게 글로 주는 것만 담는다(눈가림). 앞뒤 글자는 글로 넣지 않는다(조각 그림에는 이웃 글자가 보인다):
+    판독기가 받지 못하니 프롬프트에 새어 들어갈 수 없다. 앞뒤 글자는 답을 받은 뒤 코드 검사(window_ok)에만 쓴다.
+    - candidates: 묻는 차례대로의 후보(고정 씨앗으로 섞은 것). 빈 튜플이면 후보 없이 읽게 하는 눈가림 확인 질문.
+    - pos: 조각 안 읽기 방향 순번(1부터, 대상 첫 글자). 0 이면 모름. k: 대상 글자 수. count: 조각에 든 글자 수(0=모름).
+    - measured: 자리를 실측했는가(글자층·먹 셈 일치). 아니면 순번은 어림이다. tick: 조각 여백에 눈금을 그렸는가."""
+    candidates: tuple[str, ...] = ()
+    pos: int = 0
+    k: int = 1                     # 대상 글자 수. 0 이면 후보마다 글자 수가 달라 1~2자로만 가리킨다
+    count: int = 0
+    measured: bool = False
+    tick: bool = False
+
+
+class MultiGlyphChoice(_M):
+    """글자 조각 여러 장을 한 호출로 판별한 결과."""
+    items: list[GlyphChoiceItem] = Field(default_factory=list)
 
 
 class MultiRegionReread(_M):

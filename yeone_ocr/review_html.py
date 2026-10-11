@@ -26,6 +26,9 @@ header h1{font-size:18px;margin:0}header small{opacity:.8}
 .reg.img-kind{border-left-color:#1f5fbf}.reg.title{border-left-color:#c1341f}
 .reg p{margin:4px 0;line-height:1.75;font-size:15px;white-space:pre-wrap}
 mark{background:#ffd9a8;padding:0 2px}
+.g{color:#0B7A3B;text-decoration:underline dotted #0B7A3B}.b{color:#1F4FBF;background:#E1EBFF;text-decoration:underline dashed #1F4FBF}
+mark{color:#C00000;font-weight:bold;background:#FFFF00}mark.c{text-decoration:underline solid #C00000}.note{color:#777;font-size:12px}
+.grades{font-size:12px;color:#5a4a3e}.ctx td{font-size:12px;padding:1px 6px}
 .unc li,.diff li,.ver li{font-size:13px;margin:2px 0}
 .diff{columns:2;column-gap:16px}.ver .error{color:#b3261e}
 .status span{display:inline-block;font-size:12px;background:#e4d7b4;border-radius:10px;padding:1px 8px;margin:2px}
@@ -36,6 +39,17 @@ details summary{cursor:pointer;font-size:13px;color:#5a4a3e}
 def _mark(t: str) -> str:
     t = html.escape(t)
     return t.replace("〔", "<mark>〔").replace("〕", "〕</mark>")
+
+
+def _graded(text: str, spans) -> str:
+    """문단 글을 문서와 같은 확인 등급으로: 〔〕 표시는 노랑, 3차가 고른 글자는 초록·파랑, 〔〕 안 문맥 추정 후보는 파란 밑줄."""
+    from .grades import styled_runs
+    out = []
+    for seg, kind, _ in styled_runs(text, spans):
+        e = html.escape(seg)
+        out.append({"body": e, "mark": f"<mark>{e}</mark>", "note": f"<span class=note>{e}</span>", "green": f"<span class=g>{e}</span>",
+                    "blue": f"<span class=b>{e}</span>", "red_ctx": f"<mark class=c>{e}</mark>"}.get(kind, e))
+    return "".join(out)
 
 
 ORPHAN_RE = re.compile(r"가로 (\d+)~(\d+)%, 세로 (\d+)~(\d+)%")
@@ -71,13 +85,21 @@ def overlay_boxes(pr: PageReading) -> str:
     return "".join(parts)
 
 
-def make_review(work: Work, records: list[dict], out_path: str | None = None) -> str:
+def make_review(work: Work, records: list[dict], out_path: str | None = None, context: dict | None = None) -> str:
     out = Path(out_path) if out_path else work.dir / "review.html"
     parts = [f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>검수 · {html.escape(work.pdf_path.name)}</title><style>{CSS}</style></head><body>",
-             f"<header><h1>연어OCR 검수 — {html.escape(work.pdf_path.name)}</h1><small>쪽 {len(records)}개 · 〔 〕 표시는 확인이 필요한 자리 · 수정은 readings/pNNN.json 을 고친 뒤 build 를 다시 실행</small></header>"]
+             f"<header><h1>연어OCR 검수 — {html.escape(work.pdf_path.name)}</h1><small>쪽 {len(records)}개 · 〔 〕 표시는 확인이 필요한 자리 · 수정은 readings/pNNN.json 을 고친 뒤 build 를 다시 실행</small>"
+             "<div class=grades>글자 색(문서와 같음): <span class=g>초록</span> = 1차·2차가 갈려 3차 자형 판별로 고름(정밀도 미측정, 훑어 확인) · "
+             "<span class=b>파랑</span> = 골랐지만 조각 위치를 확인 못 했거나 이 판독의 다른 대목과 어긋남 · <mark>〔 〕</mark> = 정하지 못함(원본 확인) · "
+             "<mark>〔</mark><mark class=c>入</mark><mark>/人〕</mark> 실선 밑줄 = 이 판독의 다른 대목이 더 쓰는 후보(문맥 추정, 확정 아님)</div></header>"]
+    from .grades import page_grades
     for rec in records:
         pr = PageReading.model_validate(rec["merged"])
         n = pr.pdf_page
+        try:
+            pg = page_grades(rec, (context or {}).get(n), "notice")
+        except Exception:
+            pg = None
         img = os.path.relpath(work.page_image_path(n), out.parent)
         sts = " ".join(f"<span>{html.escape(s)}</span>" for s in work.statuses(n))
         parts.append(f"<section class=page id=p{n}><div class=img><div class=sheet><img src='{img}' loading=lazy alt='PDF {n}쪽'>{overlay_boxes(pr)}</div>"
@@ -96,9 +118,10 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None) ->
             if reg.kind in TITLE_KINDS:
                 parts.append(f"<p><b>{_mark(reg.title_text)}</b></p>")
             elif reg.kind in TEXT_KINDS or reg.kind == "기타":
-                for p in reg.paragraphs:
+                for pi, p in enumerate(reg.paragraphs):
                     cols = "".join(f"<li><small>{c.col_from_right}열</small> {_mark(c.text)}</li>" for c in sorted(p.columns, key=lambda c: c.col_from_right))
-                    parts.append(f"<p>{_mark(paragraph_text(p))}</p><details><summary>열별 보기</summary><ol>{cols}</ol></details>")
+                    sp = pg.spans.get((reg.id, pi), []) if pg is not None else []
+                    parts.append(f"<p>{_graded(paragraph_text(p), sp)}</p><details><summary>열별 보기</summary><ol>{cols}</ol></details>")
                 p2 = (rec.get("pass2") or {}).get(reg.id)
                 if p2 and p2.get("columns"):
                     cols2 = "".join(f"<li><small>{c.get('col_from_right')}열</small> {html.escape(c.get('text', ''))}</li>" for c in sorted(p2["columns"], key=lambda c: c.get("col_from_right", 0)))
@@ -108,8 +131,22 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None) ->
             if reg.note:
                 parts.append(f"<small>메모: {html.escape(reg.note)}</small>")
             parts.append("</div>")
-        parts.append("<h4>판독 확인 필요 <small style='font-weight:normal'>(HWPX 에는 넣지 않음. 본문의 〔 〕 표시와 이 목록으로 원본과 대조)</small></h4><ul class=unc>" + ("".join(f"<li>{html.escape(u.region_id)} {('오른쪽에서 '+str(u.col_from_right)+'번째 열 ') if u.col_from_right else ''}{html.escape(u.position)} {_mark(u.context)}</li>" for u in pr.uncertain) or "<li>없음</li>") + "</ul>")
+        from .grades import classify_uncertain, page_body, decided_keys
+        body_t, dec = page_body(pr), decided_keys(rec)
+        tag = {"shown": "본문 표시", "decided": "3차 확정", "notice": "고지"}
+        parts.append("<h4>판독 확인 필요 <small style='font-weight:normal'>(본문 표시 = 문서의 〔 〕 · 3차 확정 = 문서의 초록·파랑 · 고지 = 문서에 메모로만)</small></h4><ul class=unc>" + ("".join(f"<li><small>[{tag[classify_uncertain(u, body_t, dec)]}]</small> {html.escape(u.region_id)} {('오른쪽에서 '+str(u.col_from_right)+'번째 열 ') if u.col_from_right else ''}{html.escape(u.position)} {_mark(u.context)}</li>" for u in pr.uncertain) or "<li>없음</li>") + "</ul>")
         ver = rec.get("verify") or []
+        ctx_sites = ((context or {}).get(n) or {}).get("sites") or []
+        if ctx_sites:
+            name = {"suggest": "후보 밑줄", "contradicts": "3차와 어긋남(파랑)", "agrees": "3차와 같음", "neutral": "근거 부족", "excluded": "대상 아님"}
+            rows = "".join(f"<tr><td>{html.escape(x.get('region_id', ''))}</td><td>{html.escape(x['a'])}/{html.escape(x['b'])}</td>"
+                           f"<td>{'3차 「' + html.escape(x['choice']) + '」' if x.get('state') == 'decided' else '미정'}</td><td>{name.get(x['verdict'], x['verdict'])}</td>"
+                           f"<td>{html.escape(x.get('left', ''))}□{html.escape(x.get('right', ''))} · {html.escape(' · '.join(f'{k} {v}' for k, v in (x.get('score') or {}).items()))}</td>"
+                           f"<td>{html.escape(x.get('reason', ''))}</td></tr>" for x in ctx_sites)
+            parts.append(f"<details><summary>문맥 추정 {sum(1 for x in ctx_sites if x.get('verdict') == 'suggest')}곳 — 이 판독의 다른 대목(1차·2차가 같게 읽은 글)에서 센 수, 확정 아님</summary>"
+                         f"<table class=ctx><tr><td>자리</td><td>후보</td><td>상태</td><td>판정</td><td>근거(앞□뒤 · 점수)</td><td>까닭</td></tr>{rows}</table></details>")
+        if pg is not None and pg.page_notices:
+            parts.append("<h4>고지</h4><ul class=unc>" + "".join(f"<li>{html.escape(t)}</li>" for t in pg.page_notices) + "</ul>")
         parts.append("<h4>구조 검사</h4><ul class=ver>" + ("".join(f"<li class={i['level']}>{html.escape(i['rule'])} ({html.escape(i['where'])}) — {html.escape(i['msg'])}</li>" for i in ver) or "<li>이상 없음</li>") + "</ul>")
         td = rec.get("textlayer_diff") or {}
         if td:

@@ -305,3 +305,31 @@ def page_bands(im: Image.Image, axis: str = "y", exclude: list[Frac] | None = No
                 out.append(_swap(b) if axis == "y" else b)
         x = x2
     return out
+
+
+def ink_runs(prof: np.ndarray, density: float = 0.002, min_px: int = 2) -> list[list[int]]:
+    """먹 비율 프로파일에서 먹이 이어지는 구간 [시작, 끝) 목록."""
+    on = prof > density
+    out: list[list[int]] = []; i = 0; n = len(on)
+    while i < n:
+        if not on[i]:
+            i += 1; continue
+        j = i
+        while j < n and on[j]:
+            j += 1
+        if j - i >= min_px:
+            out.append([i, j])
+        i = j
+    return out
+
+
+def merge_glyph_runs(runs: list[list[int]], pitch: float, gap_frac: float = 0.25, max_len: float = 1.0) -> list[list[int]]:
+    """글자 방향 먹 구간을 글자 단위로 합친다. 한 글자 안의 획 사이 틈(三·川·二)은 글자 크기(pitch, 줄 두께)의 gap_frac 보다 좁고,
+    합친 길이가 pitch 의 max_len 배를 넘지 않으면 같은 글자로 본다. 300dpi 렌더 실측(세로·가로, 명조·고딕 4벌)에서 이 값이 가장 잘 맞았다."""
+    out: list[list[int]] = []
+    for r in runs:
+        if out and (r[0] - out[-1][1]) < gap_frac * pitch and (r[1] - out[-1][0]) <= max_len * pitch:
+            out[-1][1] = r[1]
+        else:
+            out.append([r[0], r[1]])
+    return out
