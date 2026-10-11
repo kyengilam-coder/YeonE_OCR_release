@@ -67,6 +67,39 @@ def fit_figure_bbox(im: Image.Image, fr: Frac, pad: float = 0.01, thr: float = 0
     return {"bbox": tuple(round(v, 4) for v in bb), "touching": bad, "steps": len(history), "history": history}
 
 
+def grow_to_components(im: Image.Image, fr: Frac, min_frac: float = 0.12, max_area_mult: float = 4.5) -> Frac:
+    """모델 좌표가 도판을 크게 잘랐을 때(원형 도판의 반쪽만 잡는 등) 좌표를 도판 전체로 넓힌다.
+    좌표 테두리를 가로지르는 연결 성분(먹 덩어리) 가운데 큰 것(쪽 너비·높이의 min_frac 이상: 도판의 테두리·선)을 모두 품게 한다.
+    글자는 성분이 작아 끌려오지 않고, 테두리를 건드리지 않는 판 테두리(版框)도 끌려오지 않는다. 쪽 전체만 한 성분(스캔 검은 가장자리)과
+    넓이가 max_area_mult 배를 넘는 확장은 믿지 않고 그대로 둔다. OpenCV 가 없으면 그대로."""
+    try:
+        import cv2
+    except Exception:
+        return fr
+    g = np.asarray(im.convert("L"))
+    H, W = g.shape
+    x0, y0 = max(0, int(fr[0] * W)), max(0, int(fr[1] * H))
+    x1, y1 = min(W - 1, int(fr[2] * W)), min(H - 1, int(fr[3] * H))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return fr
+    _, b = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
+    edge = np.concatenate([labels[y0, x0:x1 + 1], labels[y1, x0:x1 + 1], labels[y0:y1 + 1, x0], labels[y0:y1 + 1, x1]])
+    nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+    for lab in set(np.unique(edge).tolist()) - {0}:
+        x, y, w, h, _area = stats[lab]
+        if w < min_frac * W and h < min_frac * H:
+            continue                                   # 글자·작은 기호
+        if w >= 0.9 * W and h >= 0.9 * H:
+            continue                                   # 쪽 전체만 한 덩어리(스캔 가장자리 등)
+        nx0, ny0, nx1, ny1 = min(nx0, x), min(ny0, y), max(nx1, x + w), max(ny1, y + h)
+    if (nx0, ny0, nx1, ny1) == (x0, y0, x1, y1):
+        return fr
+    if (nx1 - nx0) * (ny1 - ny0) > max_area_mult * (x1 - x0) * (y1 - y0):
+        return fr
+    return (round(min(fr[0], nx0 / W), 4), round(min(fr[1], ny0 / H), 4), round(max(fr[2], nx1 / W), 4), round(max(fr[3], ny1 / H), 4))
+
+
 ALL_SIDES = ("left", "right", "top", "bottom")
 
 

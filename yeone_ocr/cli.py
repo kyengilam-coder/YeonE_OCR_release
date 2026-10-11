@@ -23,7 +23,7 @@ from . import __version__
 from .state import Work, HUMAN_ONLY, STATUSES, legacy_work_dir
 from .pdfio import open_pdf, parse_pages, page_image, text_layer
 from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac
-from .layout import upscale, crop_frac, fit_figure_bbox, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered, snap_to_gaps, split_bands
+from .layout import upscale, crop_frac, fit_figure_bbox, grow_to_components, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered, snap_to_gaps, split_bands
 from .merge import merge_passes, compare_textlayer
 from .verify import verify_page, check_hwpx_file
 from .blocks import assemble_blocks, Block
@@ -760,6 +760,9 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
 
 
 # ---------- build ----------
+CROP_FIT = 2        # 도판 자르기 방식이 바뀌면 올린다 — 예전 판으로 잘라 둔 도판을 [④ 문서 만들기] 때 다시 자른다(0.6.6: 연결 성분으로 넓힘)
+
+
 def make_crops(work: Work, rec: dict, img: Image.Image) -> dict:
     """도판을 원본 이미지에서 잘라 저장한다. 같은 좌표로 이미 잘라 둔 파일이 있으면 다시 자르지 않는다(중간 저장을 자주 해도 빠르게)."""
     crops = dict(rec.get("crops") or {})
@@ -769,15 +772,17 @@ def make_crops(work: Work, rec: dict, img: Image.Image) -> dict:
         if reg.kind not in IMAGE_KINDS:
             continue
         old = crops.get(reg.id)
-        if old and old.get("path") and Path(old["path"]).exists() and old.get("bbox_model") == list(bbox_frac(reg.bbox)):
+        if old and old.get("path") and Path(old["path"]).exists() and old.get("bbox_model") == list(bbox_frac(reg.bbox)) and old.get("fit") == CROP_FIT:
             out[reg.id] = old; continue
-        fit = fit_figure_bbox(img, bbox_frac(reg.bbox), pad=0.01)
+        grown = grow_to_components(img, bbox_frac(reg.bbox))           # 모델 좌표가 도판을 크게 자른 경우(원형 도판 반쪽 등) 도판 전체로
+        fit = fit_figure_bbox(img, grown, pad=0.01)
         crop = crop_frac(img, fit["bbox"], pad=0.01)
         path = work.crops_dir / f"p{pr.pdf_page:03d}_{reg.id}.jpg"     # 스캔 도판은 JPEG 가 PNG 의 1/4~1/5 크기. 수백 장이 들어가도 문서가 가볍다
         (crop.convert("L") if crop.mode not in ("L", "RGB") else crop).save(path, "JPEG", quality=90)
         out[reg.id] = {"path": str(path), "kind": reg.kind, "bbox_model": list(bbox_frac(reg.bbox)), "bbox_used": list(fit["bbox"]),
                        "steps": fit["steps"], "touching": fit["touching"], "frac_w": round(fit["bbox"][2] - fit["bbox"][0] + 0.02, 4),
-                       "ratio": round(crop.height / max(1, crop.width), 4), "size": list(crop.size)}
+                       "ratio": round(crop.height / max(1, crop.width), 4), "size": list(crop.size),
+                       "grown": grown != bbox_frac(reg.bbox), "fit": CROP_FIT}
     return out
 
 

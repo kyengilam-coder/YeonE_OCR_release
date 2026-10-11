@@ -45,6 +45,23 @@ def _raw(msg: str) -> str:
     return " (서버 메시지: " + (m.group(1) if m else re.sub(r"\s+", " ", msg)[:220]) + ")"
 
 
+def is_daily_quota(msg: str) -> bool:
+    """429 가 하루 한도(quotaId '...PerDay...')에 걸린 것인지. 분당 한도와 달리 기다려 다시 해도 그날은 풀리지 않는다."""
+    return bool(re.search(r"PerDay|per[_ ]day", msg, re.I))
+
+
+def daily_reset_hint() -> str:
+    """Gemini 하루 한도는 태평양 시간 자정에 다시 찬다. 그 시각을 이 PC 의 시각으로 알려 준다."""
+    try:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        pt = datetime.now(ZoneInfo("America/Los_Angeles"))
+        reset = (pt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return reset.astimezone().strftime("%m월 %d일 %H:%M") + "(이 PC 시각)"
+    except Exception:                      # tzdata 가 없는 Windows 등
+        return "태평양 시간 자정(한국 시간 오후 4시, 겨울철 오후 5시)"
+
+
 def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
     """(한 줄 설명, 재시도 가치 여부)."""
     code = getattr(e, "code", None) or getattr(e, "status_code", None)
@@ -60,6 +77,10 @@ def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
     if "RESOURCE_EXHAUSTED" in msg or code == 429:
         if re.search(r"limit:\s*0\b", msg):
             return f"이 키(무료 등급)에서는 모델 '{model}' 의 요청 한도가 0 입니다. Google AI Studio 에서 결제를 켜거나, flash 계열 모델을 고르십시오." + _raw(msg), False
+        if is_daily_quota(msg):
+            return (f"모델 '{model}' 의 하루 요청 한도를 다 썼습니다. 다시 시도해도 오늘은 같으므로 멈춥니다. 끝난 쪽은 기록에 남아 있으니 "
+                    f"{daily_reset_hint()} 이후 [▶] 를 다시 누르면 남은 쪽부터 이어서 합니다('기록 있는 쪽도 다시 판독' 은 끄십시오). "
+                    "더 빨리 하려면 Google AI Studio 에서 결제를 켜거나 flash 계열 모델을 고르십시오." + _raw(msg)), False
         return "요청 한도(쿼터)를 넘었습니다. 서버가 알려 준 시간만큼 기다렸다 다시 시도합니다. 자주 나면 쪽 범위를 줄이거나 결제를 켜십시오." + _raw(msg), True
     if code and 500 <= int(code) < 600:
         return f"Gemini 서버 오류({code}). 잠시 뒤 다시 시도하십시오.", True

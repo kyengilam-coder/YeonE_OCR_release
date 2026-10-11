@@ -167,6 +167,25 @@ class Layout(unittest.TestCase):
         crop = crop_frac(im, fit["bbox"], pad=0.01)
         self.assertTrue(all(v == 0 for v in edge_ink(crop).values()))
 
+    def test_grow_to_components_recovers_half_cut_figure(self):
+        from yeone_ocr.layout import grow_to_components
+        im = page_with_circle()
+        f = detect_figures(im)[0]
+        half = (f[0], f[1], (f[0] + f[2]) / 2, f[3])          # 모델이 원의 왼쪽 반만 잡은 경우(0.6.5 실측: 第七圖 艮丙龍)
+        g = grow_to_components(im, half)
+        self.assertAlmostEqual(g[2], f[2], delta=0.01)
+        fit = fit_figure_bbox(im, g)
+        self.assertEqual(fit["touching"], [])
+
+    def test_grow_to_components_ignores_frame_and_glyphs(self):
+        from yeone_ocr.layout import grow_to_components
+        im = Image.new("L", (900, 1300), 245); d = ImageDraw.Draw(im)
+        d.rectangle([40, 40, 860, 1260], outline=0, width=4)     # 판 테두리(版框): 도판 좌표 테두리를 건드리지 않음
+        d.ellipse([300, 400, 600, 700], outline=0, width=5)      # 도판
+        d.rectangle([640, 540, 660, 560], fill=0)                # 도판 옆 글자 하나(작은 성분)
+        box = (290 / 900, 390 / 1300, 650 / 900, 710 / 1300)     # 오른쪽 변이 글자를 가로지름
+        self.assertEqual(grow_to_components(im, box), box)
+
 
 class ExpandText(unittest.TestCase):
     def test_expand_until_clean_recovers_cut_glyphs(self):
@@ -348,6 +367,12 @@ class GeminiHelpers(unittest.TestCase):
         class Q4(Exception): code = 429
         msg, retry = friendly_error(Q4("429 RESOURCE_EXHAUSTED ... limit: 0, model: gemini-3.1-pro-preview"), "gemini-3.1-pro-preview")
         self.assertIn("한도가 0", msg); self.assertFalse(retry)
+        daily = ("429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota. limit: 250, model: gemini-3.1-pro-preview. Please retry in 39.6s.', "
+                 "'details': [{'violations': [{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]}, {'retryDelay': '39s'}]}}")
+        msg, retry = friendly_error(Q4(daily), "gemini-3.1-pro-preview")
+        self.assertIn("하루 요청 한도", msg); self.assertFalse(retry)     # 하루 한도는 재시도하지 않고 멈춤(fatal)
+        minute = daily.replace("PerDay", "PerMinute")
+        msg, retry = friendly_error(Q4(minute), "gemini-3.1-pro-preview"); self.assertTrue(retry)   # 분당 한도는 기다렸다 재시도
         self.assertTrue(key_shape_warning(""))
         class E(Exception): code = 400
         msg, retry = friendly_error(E("400 INVALID_ARGUMENT ... API_KEY_INVALID ... API key not valid"))
