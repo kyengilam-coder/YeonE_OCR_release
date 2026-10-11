@@ -153,6 +153,56 @@ class Gua(unittest.TestCase):
         self.assertEqual(st["marks"], 0); self.assertEqual(m.uncertain, [])
 
 
+class GeminiKeys(unittest.TestCase):
+    def test_split_keys(self):
+        from yeone_ocr.reader_gemini import split_keys
+        a, b, c = "AIza" + "a" * 35, "AIza" + "b" * 35, "AQ." + "C" * 50
+        self.assertEqual(split_keys(a), [a])
+        self.assertEqual(split_keys(a[:10] + " \n" + a[10:]), [a])            # 줄이 꺾인 키 하나는 하나
+        self.assertEqual(split_keys(f"{a}, {b}\n{c};{a}"), [a, b, c])        # 쉼표·줄바꿈·세미콜론, 겹친 키는 하나로
+        self.assertEqual(split_keys(a + b), [a, b])                           # 구분 없이 붙여 넣어도 머리로 가름
+        self.assertEqual(split_keys(""), [])
+
+    def test_daily_quota_rotates_to_next_key(self):
+        import pydantic
+        from yeone_ocr import reader_gemini as rg
+        a, b = "AIza" + "a" * 35, "AIza" + "b" * 35
+        class Out(pydantic.BaseModel):
+            x: int
+        class Q(Exception):
+            code = 429
+        daily = Q("429 RESOURCE_EXHAUSTED {'quotaId': 'GenerateRequestsPerDayPerProjectPerModel'} retry in 1s")
+        calls = []
+        class Models:
+            def __init__(self, key): self.key = key
+            def generate_content(self, **kw):
+                calls.append(self.key)
+                if self.key == a:
+                    raise daily
+                class R: text = '{"x": 7}'; usage_metadata = None
+                return R()
+        class Client:
+            def __init__(self, key): self.models = Models(key)
+        orig = rg.make_client
+        rg.make_client = lambda key, vx=False, timeout_ms=0: Client(key)
+        try:
+            r = rg.GeminiReader(model="gemini-3.1-pro-preview", api_key=f"{a}, {b}", use_cache=False)
+            out = r._call(None, "p", Out, extra_parts=["p"])
+            self.assertEqual(out.x, 7); self.assertEqual(calls, [a, b]); self.assertEqual(r.key_idx, 1)
+            self.assertEqual(r.n_429, 0)                                       # 키 바꾸기는 속도 조절(동시 쪽 수 줄이기) 대상이 아님
+            r2 = rg.GeminiReader(model="gemini-3.1-pro-preview", api_key=a, use_cache=False)
+            with self.assertRaises(rg.ReaderError) as cm:                     # 키가 하나뿐이면 전처럼 멈춤
+                r2._call(None, "p", Out, extra_parts=["p"])
+            self.assertTrue(cm.exception.fatal)
+            r.keys = [a, b]; r.key_idx = 1; r.key = b
+            Models.generate_content = lambda self, **kw: (_ for _ in ()).throw(daily)
+            with self.assertRaises(rg.ReaderError) as cm:                     # 모든 키가 한도면 멈추고 그렇다고 알림
+                r._call(None, "p", Out, extra_parts=["p"])
+            self.assertIn("키 2개가 모두", str(cm.exception))
+        finally:
+            rg.make_client = orig
+
+
 class Layout(unittest.TestCase):
     def test_detect_and_fit(self):
         im = page_with_circle()

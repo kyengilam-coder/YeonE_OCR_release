@@ -813,7 +813,8 @@ class App(tk.Tk):
         self._btn(b, "키 확인·모델 고르기", self.check_key, tip="키가 맞는지 Gemini 에 확인하고, 실제로 호출되는 모델 목록에서 고릅니다.").grid(row=2, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         self._field_label(b, "API 키", 3)
         self.e_key = ttk.Entry(b, textvariable=self.v_key, show="•"); self.e_key.grid(row=3, column=1, sticky="ew", pady=P(3))
-        self._btn(b, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC 의 설정 파일에만 저장됩니다.").grid(row=3, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
+        Tip(self.e_key, "API 키. 다른 프로젝트의 키를 쉼표로 이어 여러 개 넣을 수 있습니다(예: AIza…, AIza…). 한 키가 하루 한도에 걸리면 다음 키로 넘어가 이어서 읽습니다.", self)
+        self._btn(b, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC 의 설정 파일에만 저장됩니다. 다른 프로젝트의 키를 쉼표로 더 넣으면 하루 한도에 걸릴 때 다음 키로 넘어갑니다.").grid(row=3, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
         ttk.Checkbutton(foot, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
         self.v_details = tk.BooleanVar(value=bool(self.cfg.get("details_open", False)))
@@ -1492,13 +1493,14 @@ class App(tk.Tk):
 
     def _prepare_env(self) -> bool:
         if self.v_reader.get() == "gemini":
-            from .reader_gemini import normalize_key, key_shape_warning
-            key = normalize_key(self.v_key.get())
+            from .reader_gemini import split_keys, join_keys, key_shape_warning
+            keys = split_keys(self.v_key.get())
+            key = join_keys(keys)
             if key != self.v_key.get():
-                self.v_key.set(key)                  # 공백·따옴표 등을 걷어 낸 값으로 바꿔 보여 준다
-            if not key:
+                self.v_key.set(key)                  # 공백·따옴표 등을 걷어 낸 값으로 바꿔 보여 준다(키가 여러 개면 쉼표로)
+            if not keys:
                 messagebox.showwarning(APP_NAME, "Gemini API 키가 없습니다. 설정에 키를 넣거나 판독기를 '기존 텍스트 레이어만' 으로 바꾸십시오."); return False
-            warn = key_shape_warning(key)
+            warn = "\n".join((f"키 {i}: " if len(keys) > 1 else "") + w for i, w in ((i, key_shape_warning(k)) for i, k in enumerate(keys, 1)) if w)
             if warn and not messagebox.askyesno(APP_NAME, warn + "\n\n그래도 이 키로 진행할까요?"):
                 return False
             os.environ["GEMINI_API_KEY"] = key
@@ -1725,14 +1727,17 @@ class App(tk.Tk):
     def check_key(self):
         """키가 쓸 수 있는지 Gemini 에 물어보고, 쓸 수 있는 모델 목록에서 고르게 한다."""
         if self.running: return
-        from .reader_gemini import normalize_key
-        key = normalize_key(self.v_key.get()); self.v_key.set(key)
+        from .reader_gemini import split_keys, join_keys
+        keys = split_keys(self.v_key.get()); self.v_key.set(join_keys(keys))
         model = self.v_model.get().strip()
         self._set_running(True); self.v_status.set("키 확인 중… (모델을 실제로 짧게 호출해 봅니다)")
         def t():
             try:
                 from .reader_gemini import check_key
-                res = check_key(key, model)
+                res = check_key(keys[0] if keys else "", model)
+                if res.get("ok") and len(keys) > 1:      # 나머지 키는 쓸 수 있는지만(모델 목록 조회) 본다
+                    bad = [f"키 {i}(…{k[-4:]})" for i, k in enumerate(keys[1:], 2) if not check_key(k, model, probe=False).get("ok")]
+                    res["message"] += f" · 키 {len(keys)}개" + (f" — 쓸 수 없는 키: {', '.join(bad)}" if bad else " 모두 쓸 수 있음(하루 한도에 걸리면 다음 키로 넘어감)")
             except Exception as e:
                 res = {"ok": False, "message": f"확인 실패: {e}", "models": [], "shape_warning": ""}
             self.q.put(("keycheck", res))

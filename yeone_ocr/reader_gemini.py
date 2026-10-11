@@ -27,6 +27,21 @@ def normalize_key(key: str | None) -> str:
     return "".join(k.split())
 
 
+def split_keys(raw: str | None) -> list[str]:
+    """API 키 칸의 글 → 키 목록. 키를 여러 개(쉼표·줄바꿈 등으로) 넣으면 하루 한도에 걸릴 때 다음 키로 넘어간다.
+    Google 키는 'AIza'(39자) 또는 'AQ.' 로 시작하므로 그 머리로 가른다(붙여 넣다 줄이 꺾인 키 하나는 그대로 하나)."""
+    k = normalize_key(re.sub(r"[,;]", " ", raw or ""))
+    out: list[str] = []
+    for part in re.split(r"(?=AIza|AQ\.)", k):
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+def join_keys(keys: list[str]) -> str:
+    return ", ".join(keys)
+
+
 def key_shape_warning(key: str) -> str:
     """Google API 키는 'AIza…'(39자) 또는 새 형식 'AQ.…'(50자 안팎)이다. 그 밖의 모양이면 경고문을 돌려준다."""
     if not key:
@@ -181,7 +196,8 @@ def probe_model(api_key: str, model: str, vertexai: bool = False) -> tuple[bool,
 
 def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int = 8) -> dict:
     """키가 쓸 수 있는지, 어느 접속 경로(AI Studio / Vertex 익스프레스)에서 쓰이는지, 지정한 모델이 있는지 확인한다."""
-    k = normalize_key(api_key)
+    ks = split_keys(api_key)
+    k = ks[0] if ks else ""                  # 키를 여러 개 넣었으면 첫 키(나머지는 창 프로그램이 따로 확인)
     out = {"ok": False, "key_len": len(k), "shape_warning": key_shape_warning(k), "models": [], "model_ok": None,
            "message": "", "api": "", "endpoints": {}, "probe": {}, "working_model": ""}
     if not k:
@@ -246,13 +262,17 @@ class GeminiReader:
     def __init__(self, model: str | None = None, api_key: str | None = None, thinking_budget: int | None = None, retries: int = 3, api: str = "auto",
                  use_cache: bool = True, thinking: str | None = None, media_resolution: str | None = None, system: str | None = None):
         from google.genai import types     # 지연 임포트: mock 만 쓸 때는 SDK 없이도 돌아가게
-        key = normalize_key(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-        if not key:
+        keys = split_keys(api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+        if not keys:
             raise ReaderError("GEMINI_API_KEY 가 없습니다. 창 프로그램의 'Gemini API 키' 칸에 넣거나 (PowerShell) $env:GEMINI_API_KEY='...' 로 설정하십시오.")
-        warn = key_shape_warning(key)
-        if warn:
-            print("주의: " + warn, flush=True)
+        for i, k in enumerate(keys, 1):
+            warn = key_shape_warning(k)
+            if warn:
+                print(f"주의: {'키 ' + str(i) + ': ' if len(keys) > 1 else ''}{warn}", flush=True)
+        key = keys[0]
         self.types = types
+        self.keys = keys                                 # 하루 한도에 걸리면 다음 키로(한도는 프로젝트마다 따로다)
+        self.key_idx = 0
         self.key = key
         self.api = api                                   # auto | studio | vertex
         self.vertexai = (api == "vertex")
@@ -279,7 +299,7 @@ class GeminiReader:
 
     def _cache_key(self) -> tuple:
         import hashlib
-        return (self.model, self.vertexai, hashlib.sha1(self._system.encode("utf-8")).hexdigest())
+        return (self.model, self.vertexai, hashlib.sha1(getattr(self, "key", "").encode("utf-8")).hexdigest()[:12], hashlib.sha1(self._system.encode("utf-8")).hexdigest())
 
     def _make_cache(self, stale: str | None = None) -> None:
         """지침 전문을 컨텍스트 캐시에 올린다. 호출마다 지침을 다시 보내지 않아 빠르고 싸다. 모델이 지원하지 않으면 그냥 넘어간다.
@@ -302,6 +322,24 @@ class GeminiReader:
                 self.cache_name = None
                 self.cache_note = f"지침 캐시 미사용({friendly_error(e, self.model)[0][:80]})"
                 _CACHE_REGISTRY.pop(key, None)
+
+    def _rotate_key(self, used_idx: int) -> bool:
+        """used_idx 키가 하루 한도에 걸렸다. 다음 키로 바꾸면 True(다른 스레드가 이미 바꿨어도 True), 남은 키가 없으면 False."""
+        with self._lock:
+            if self.key_idx != used_idx:
+                return True
+            if used_idx + 1 >= len(self.keys):
+                return False
+            self.key_idx = used_idx + 1
+            self.key = self.keys[self.key_idx]
+            self.vertexai = (self.api == "vertex"); self._switched = False
+            self.client = make_client(self.key, self.vertexai)
+            had_cache = self.cache_name is not None
+            self.cache_name = None                       # 캐시는 키의 프로젝트에 속한다 — 새 키로 다시 만든다
+            print(f"주의: 키 {used_idx + 1}/{len(self.keys)} 이(가) 모델 '{self.model}' 의 하루 한도에 걸려 키 {self.key_idx + 1}(…{self.key[-4:]})로 바꿔 계속합니다.", flush=True)
+        if had_cache:
+            self._make_cache()
+        return True
 
     def _config(self, schema):
         t = self.types
@@ -367,6 +405,7 @@ class GeminiReader:
         attempts = max(self.retries, 5)
         for i in range(attempts):
             used_cache = self.cache_name                                  # 이 호출이 쓰는 캐시(실패하면 이 이름이 만료된 것)
+            used_key = self.key_idx                                       # 이 호출이 쓰는 키(하루 한도면 다음 키로)
             try:
                 resp = self.client.models.generate_content(model=self.model, contents=contents, config=self._config(schema))
                 um = getattr(resp, "usage_metadata", None)
@@ -396,6 +435,11 @@ class GeminiReader:
                 last_msg, retry = friendly_error(e, self.model)
                 code = getattr(e, "code", None) or getattr(e, "status_code", None)
                 if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
+                    if is_daily_quota(str(e)):
+                        if self._rotate_key(used_key):
+                            continue                         # 다음 키로 같은 호출을 다시(속도 조절 대상 아님)
+                        if len(self.keys) > 1:
+                            last_msg = f"넣은 키 {len(self.keys)}개가 모두 하루 한도에 걸렸습니다. " + last_msg
                     with self._lock:
                         self.n_429 += 1
                 if (self.thinking or self.thinking_budget is not None) and code == 400 and "think" in str(e).lower():
