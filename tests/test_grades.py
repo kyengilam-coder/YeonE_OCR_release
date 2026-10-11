@@ -286,6 +286,91 @@ class GradesUnit(unittest.TestCase):
         apply_structural_rules([it]); self.assertTrue(it.notice)
 
 
+class DecidedReplay(unittest.TestCase):
+    """0.6.8 — decided_positions 는 3차 기록을 차례대로 다시 놓아(replay) 이웃이 바뀐 앞뒤 글자로 견준다. 기록한 pre/post 는 판별 때(이웃 표시를 1차 글자로
+    접은) 글이라, 같은 차례에서 이웃 표시가 다른 후보로 정해지면 낡는다 — 〔於/不〕〔於/不〕〔於/不〕 → 於·不·不 의 셋째 기록이 둘째 자리에 칠해졌다."""
+    MARKS = [("於", "不"), ("於", "不"), ("己入", "已"), ("經", "已無"), ("人", "入"), ("之", "也之")]
+    ALPHA = "於不已己入人之也經"
+
+    def _flow(self, cols, runs):
+        """실제 3차 흐름(find_sites → apply_choice(done=…), 차례마다 run 을 적음)과, 같은 흐름을 표지로 따라간 참 자리.
+        runs: 차례마다 고르는 함수 f(자리) → 고른 글자(빈 글 = 미정). 돌려주는 값: (병합문, 기록, {기록 번호: (문단 글 시작, 끝)})."""
+        import re
+        from dataclasses import asdict
+        from yeone_ocr.adjudicate import find_sites, apply_choice
+        m = PageReading.model_validate(rec(1, cols)["merged"])
+        toks = []
+        for col in cols:                                                    # 열마다 [글자 | [1차, 2차, None 또는 (기록 번호, 고른 글자)]]
+            t = []; last = 0
+            for mm in re.finditer(r"〔([^〔〕/]{1,2})/([^〔〕]{1,2})〕", col):
+                t.extend(col[last:mm.start()]); t.append([mm.group(1), mm.group(2), None]); last = mm.end()
+            toks.append(t + list(col[last:]))
+        render = lambda t: "".join(x if isinstance(x, str) else (f"〔{x[0]}/{x[1]}〕" if x[2] is None else x[2][1]) for x in t)
+        es: list[dict] = []
+        for n, pick in enumerate(runs, 1):
+            pending = [[x for x in t if not isinstance(x, str) and x[2] is None] for t in toks]; done: dict = {}
+            for s in find_sites(m):
+                x = pending[s.col_index].pop(0); self.assertEqual((x[0], x[1]), (s.a, s.b))
+                ch = pick(s)
+                if ch:
+                    self.assertTrue(apply_choice(m, s, ch, done=done.get(s.col_index, [])))
+                    done.setdefault(s.col_index, []).append((s.char_index, s.a, ch)); x[2] = (len(es), ch)
+                es.append({**asdict(s), "run": n, "choice": ch, "window": "", "evidence": "획"})
+            self.assertEqual([c.text for c in m.regions[0].paragraphs[0].columns], [render(t) for t in toks])   # 표지 흐름 = 실제 흐름
+        truth = {}; off = 0
+        for t in toks:
+            at = off
+            for x in t:
+                w = len(x) if isinstance(x, str) else len(f"〔{x[0]}/{x[1]}〕" if x[2] is None else x[2][1])
+                if not isinstance(x, str) and x[2] is not None:
+                    truth[x[2][0]] = (at, at + len(x[2][1]))
+                at += w
+            off = at
+        return m, es, truth
+
+    def _check(self, cols, runs):
+        from yeone_ocr.grades import decided_positions
+        from yeone_ocr.evaluate import _revert_adjudications, SENT_RE
+        m, es, truth = self._flow(cols, runs)
+        found, missing = decided_positions(m, es)
+        ids = {id(e): k for k, e in enumerate(es)}
+        self.assertEqual(({ids[id(f.entry)]: (f.start, f.end) for f in found}, missing), (truth, []), (cols, [(e["run"], e["choice"]) for e in es]))
+        back, lost = _revert_adjudications(m, es, 0)                          # 3차 전 글로 되돌리기(eval)도 같은 자리를 쓴다
+        self.assertEqual([SENT_RE.sub("", c.text) for c in back.regions[0].paragraphs[0].columns], cols)
+        if len(runs) == 1:
+            self.assertEqual(lost, 0)
+        return found
+
+    def test_repeated_marks_each_on_own_site(self):
+        picks = iter("於不不")
+        found = self._check(["〔於/不〕〔於/不〕〔於/不〕"], [lambda s: next(picks)])
+        self.assertEqual([(f.start, f.end, f.entry["choice"]) for f in found], [(0, 1, "於"), (1, 2, "不"), (2, 3, "不")])
+        r = rec(1, ["〔於/不〕〔於/不〕〔於/不〕" + FILLER]); m, es, _ = self._flow(["〔於/不〕〔於/不〕〔於/不〕" + FILLER], [lambda s, p=iter("於不不"): next(p)])
+        for e in es:
+            e["window"] = (e["pre"][-1:] or "") + e["choice"] + (e["post"][:1] or "")
+        r.update(merged=m.model_dump(), adjudications=es)
+        self.assertEqual(page_grades(r).spans, {("r1", 0): [(0, 1, "green"), (1, 2, "green"), (2, 3, "green")]})   # 색이 제 글자에
+        picks = iter(["不", "", "不", "於"])                                                     # 둘째 차례: 미정이던 가운데 표시를 於 로
+        self._check(["〔於/不〕〔於/不〕〔於/不〕"], [lambda s: next(picks), lambda s: next(picks)])
+        picks = iter(["已", "已無", "也之", "不"])                                                # 길이가 바뀌는 이웃
+        self._check(["〔己入/已〕〔經/已無〕〔之/也之〕〔於/不〕"], [lambda s: next(picks)])
+
+    def test_fuzz_repeated_marks_and_length_changes(self):
+        """같은 표시가 되풀이되는 열·글자 수가 바뀌는 후보·여러 차례·두 열에서, 확정 기록마다 찾은 자리가 참 자리와 같다."""
+        import random
+        rng = random.Random(20261011)
+        for _ in range(400):
+            cols = []
+            for _ in range(rng.randint(1, 2)):
+                if rng.random() < 0.3:
+                    a, b = rng.choice(self.MARKS); cols.append("".join(f"〔{a}/{b}〕" + (rng.choice(self.ALPHA) if rng.random() < 0.3 else "") for _ in range(rng.randint(2, 5))))
+                else:
+                    cols.append("".join((lambda ab: f"〔{ab[0]}/{ab[1]}〕")(rng.choice(self.MARKS)) if rng.random() < 0.45 else rng.choice(self.ALPHA)
+                                        for _ in range(rng.randint(2, 9))))
+            pick = lambda s: rng.choice([s.a, s.b, s.b, ""])
+            self._check(cols, [pick] * rng.randint(1, 3))
+
+
 class Documents(unittest.TestCase):
     def _blocks(self, r, **kw):
         ctx = analyze(corpus() + [r], [r])

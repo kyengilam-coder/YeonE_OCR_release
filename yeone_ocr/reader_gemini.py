@@ -102,8 +102,16 @@ def friendly_error(e: Exception, model: str = "") -> tuple[str, bool]:
     if "timeout" in msg.lower() or "timed out" in msg.lower():
         return "Gemini 응답이 제한 시간 안에 오지 않았습니다. 인터넷 연결을 확인하고 다시 시도하십시오.", True
     if "validation error" in msg.lower() or "JSON" in msg:
-        return "모델 응답이 정해진 형식(JSON)에 맞지 않았습니다. 같은 쪽을 다시 판독하면 대개 해결됩니다.", True
+        return FORMAT_MSG, True
     return f"{type(e).__name__}: {msg[:300]}", True
+
+
+FORMAT_MSG = "모델 응답이 정해진 형식(JSON)에 맞지 않았습니다. 같은 쪽을 다시 판독하면 대개 해결됩니다."
+FORMAT_ATTEMPTS = 3        # 응답 형식 오류는 세 번까지만(한도·서버 오류의 5번과 달리 기다려도 나아지지 않는 편)
+
+
+def is_format_error(e: Exception, model: str = "") -> bool:
+    return friendly_error(e, model)[0] == FORMAT_MSG
 
 
 def make_client(api_key: str, vertexai: bool = False, timeout_ms: int = 180_000):
@@ -251,6 +259,56 @@ def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int 
     return out
 
 
+def cap_message(limit: int) -> str:
+    return (f"모델 호출 상한 {limit}회에 닿아 멈춤 — 끝난 쪽은 기록에 남음. [세부 설정] 의 호출 상한을 늘리거나 0(상한 없음)으로 바꾸십시오"
+            "(명령줄 --max-calls). 다시 실행하면 남은 쪽부터 이어서 합니다.")
+
+
+class CallCap:
+    """한 명령(cli.main 한 번) 동안 이 프로세스의 모든 판독기가 함께 세는 모델 호출 상한(비용 안전장치). 0 = 상한 없음.
+    성공·실패를 가리지 않고 호출 시도마다(재시도 포함) 하나씩 센다. 창 프로그램은 한 프로세스에서 명령을 여럿 돌리므로 명령마다 reset 한다."""
+    def __init__(self):
+        self.limit = 0; self.used = 0; self._lock = threading.Lock()
+
+    def reset(self, limit: int = 0) -> None:
+        with self._lock:
+            self.limit = max(0, int(limit or 0)); self.used = 0
+
+    def take(self) -> None:
+        """호출 하나를 센다. 상한에 닿았으면 부르지 않고 멈춘다(fatal — 다른 쪽도 같은 이유로 못 부른다)."""
+        with self._lock:
+            if self.limit and self.used >= self.limit:
+                raise ReaderError(cap_message(self.limit), fatal=True)
+            self.used += 1
+
+
+CALL_CAP = CallCap()
+
+
+def set_call_cap(limit: int = 0) -> None:
+    """상한을 정하고 센 수를 0 으로(cli.main 이 명령마다 부른다)."""
+    CALL_CAP.reset(limit)
+
+
+THINKING_LEVELS = ("low", "medium", "high")
+THINKING_BUDGET_25 = {"low": 512, "medium": 4096, "high": 24576}     # 2.5 이하는 수준 대신 예산. high = 2.5 Flash·Flash-Lite 의 최대
+THINKING_HIGH_25_PRO = 32768                                          # 2.5 Pro 의 최대(범위 128~32768)
+
+
+def thinking_kw(model: str, level: str | None) -> dict:
+    """생각 수준 → ThinkingConfig 인자. 어느 계열에서나 low ≤ medium ≤ high(높을수록 더 생각) — 어느 수준도 '모델 기본'(설정 없음)으로 두지 않는다.
+    - Gemini 3 이상: thinking_level LOW · MEDIUM · HIGH(모델이 받지 않으면 _call 이 모델 기본 = 동적 생각으로 계속).
+    - 그 밖(2.5 등): thinking_budget low 512 · medium 4096 · high 24576(Flash·Flash-Lite 최대), 2.5 Pro 의 high 는 32768(최대).
+      high 를 모델 기본으로 두면 생각 끔이 기본인 2.5 Flash-Lite 에서 high 가 low 보다 덜 생각한다(측정에서 high 를 재면 생각 없음을 잰다).
+    수준이 없거나 모르는 값(auto·full)이면 {} = 모델 기본."""
+    lv = (level or "").lower()
+    if lv not in THINKING_LEVELS:
+        return {}
+    if re.search(r"gemini-[3-9]", model or ""):
+        return {"thinking_level": lv.upper()}
+    return {"thinking_budget": THINKING_HIGH_25_PRO if lv == "high" and re.search(r"gemini-2\.5-pro", model or "") else THINKING_BUDGET_25[lv]}
+
+
 _CACHE_REGISTRY: dict[tuple, str] = {}        # (모델, 접속 경로, 지침 해시) → 캐시 이름. 한 실행의 1차·2차 판독기가 같은 캐시를 쓴다
 CACHE_MIN_CHARS = 6000                         # 이보다 짧은 시스템 지시(3차 판별용)는 캐시 최소 토큰(모델별 1~4천)에 못 미쳐 캐시를 만들지 않는다
 _CACHE_LOCK = threading.Lock()
@@ -280,7 +338,8 @@ class GeminiReader:
         self.client = make_client(key, self.vertexai)    # 응답 제한 시간 180초. 없으면 네트워크 문제 때 영영 기다릴 수 있다
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
         self.thinking_budget = thinking_budget
-        self.thinking = thinking          # None=모델 기본, "low"=생각 줄임(2차 전사용). 거부되면 자동 해제
+        # None=모델 기본, low·medium·high=생각 수준(2차 전사는 low, 1차는 --page-thinking). 거부되면 자동 해제
+        self.thinking = (thinking or "").lower() if (thinking or "").lower() in THINKING_LEVELS else None
         # 이미지 토큰 예산. low/medium/high 는 호출 설정으로, ultra_high(Gemini 3: 2,240 토큰)는 이미지 조각(Part)마다 붙인다(SDK 전역 열거형에 없음).
         # 모델이 거부하면 ultra_high → high → 기본값 순으로 자동으로 내린다.
         self.media_resolution = (media_resolution or "").lower() if (media_resolution or "").lower() in ("low", "medium", "high", "ultra_high") else None
@@ -323,6 +382,20 @@ class GeminiReader:
                 self.cache_note = f"지침 캐시 미사용({friendly_error(e, self.model)[0][:80]})"
                 _CACHE_REGISTRY.pop(key, None)
 
+    def _switch_route(self, used_vx: bool, used_key: int) -> bool:
+        """이 호출이 쓴 접속 경로(AI Studio ↔ Vertex 익스프레스)가 403·404 로 거절됐다. 경로를 한 번만 바꾼다(잠금 안에서 — 두 스레드가 함께 거절을 보고
+        경로를 두 번 뒤집거나, 늦은 스레드가 바뀐 줄 모르고 멈추던 경쟁). 다른 스레드가 이미 바꿨거나 키가 바뀌었으면 True(새 경로로 다시),
+        바꾼 경로에서 또 거절됐으면 False."""
+        with self._lock:
+            if self.key_idx != used_key or self.vertexai != used_vx:
+                return True
+            if self._switched:
+                return False
+            self._switched = True; self.vertexai = not used_vx
+            self.client = make_client(self.key, self.vertexai)
+        print(f"주의: {'Vertex 익스프레스' if self.vertexai else 'AI Studio'} 접속 경로로 바꿔 다시 시도합니다.", flush=True)
+        return True
+
     def _rotate_key(self, used_idx: int) -> bool:
         """used_idx 키가 하루 한도에 걸렸다. 다음 키로 바꾸면 True(다른 스레드가 이미 바꿨어도 True), 남은 키가 없으면 False."""
         with self._lock:
@@ -356,10 +429,21 @@ class GeminiReader:
                 self.media_resolution = None
         if self.thinking_budget is not None:
             kw["thinking_config"] = t.ThinkingConfig(thinking_budget=self.thinking_budget)
-        elif self.thinking == "low":
-            # 3.x 는 thinking_level, 2.5 는 thinking_budget 으로 생각을 줄인다(전사 작업이라 깊은 생각이 필요 없음)
-            kw["thinking_config"] = t.ThinkingConfig(thinking_level="LOW") if re.search(r"gemini-[3-9]", self.model) else t.ThinkingConfig(thinking_budget=512)
+        elif self.thinking and (tk := thinking_kw(self.model, self.thinking)):
+            kw["thinking_config"] = t.ThinkingConfig(**tk)         # 3.x 는 thinking_level, 2.5 는 thinking_budget
         return t.GenerateContentConfig(**kw)
+
+    def settings_note(self) -> str:
+        """생각·해상도 설정 한 줄(측정 실행의 진행 기록이 스스로 설명되게 머리줄에 적는다)."""
+        if self.thinking_budget is not None:
+            th = f"생각 예산 {self.thinking_budget}"
+        elif self.thinking:
+            tk = thinking_kw(self.model, self.thinking)
+            th = f"생각 {self.thinking}" + (f"(예산 {tk['thinking_budget']})" if "thinking_budget" in tk else ("" if tk else "(모델 기본)"))
+        else:
+            th = "생각 모델 기본"
+        mr = self.media_resolution
+        return f"{th} · 해상도 " + ((mr + ("(조각별)" if mr == "ultra_high" else "")) if mr else "기본")
 
     def image_part(self, img: Image.Image):
         """이미지 조각(Part). ultra_high 면 조각마다 해상도 수준을 붙인다(조각별 media_resolution 은 Gemini 3 계열만 받는다).
@@ -401,13 +485,20 @@ class GeminiReader:
         """이미지 한 장(또는 extra_parts 로 여러 장)과 지시문을 보내 schema 대로 받는다."""
         t = self.types
         contents = extra_parts if extra_parts is not None else [self.image_part(img), prompt]
-        last_msg = ""; tried_msgs: list[str] = []
+        last_msg = ""; tried_msgs: list[str] = []; fmt_fails = 0
         attempts = max(self.retries, 5)
         for i in range(attempts):
             used_cache = self.cache_name                                  # 이 호출이 쓰는 캐시(실패하면 이 이름이 만료된 것)
-            used_key = self.key_idx                                       # 이 호출이 쓰는 키(하루 한도면 다음 키로)
+            with self._lock:                                              # 이 호출이 쓰는 키(하루 한도면 다음 키로)·접속 경로·클라이언트 — 한꺼번에(다른 스레드가 바꾸는 중일 수 있다)
+                used_key, used_vx, client = self.key_idx, self.vertexai, self.client
             try:
-                resp = self.client.models.generate_content(model=self.model, contents=contents, config=self._config(schema))
+                config = self._config(schema)                             # 재시도 try 밖에서: 설정을 못 만드는 것은 응답 오류가 아니다(옛 SDK 가 thinking_level 을 모름 등)
+            except Exception as e:
+                raise ReaderError(f"호출 설정을 만들지 못했습니다 — 설치된 google-genai SDK 가 이 설정(생각 수준·해상도 등)을 모르는 듯합니다: {type(e).__name__}: {str(e)[:160]} "
+                                  "→ pip install -U google-genai 로 SDK 를 올리거나 [세부 설정] 의 생각 줄이기·조각 해상도를 끄십시오(1차 생각 수준·쪽 해상도는 auto 로).", fatal=True) from e
+            CALL_CAP.take()                                               # 호출 상한(--max-calls) — 재시도 try 밖에서: 닿으면 부르지 않고 바로 멈춘다
+            try:
+                resp = client.models.generate_content(model=self.model, contents=contents, config=config)
                 um = getattr(resp, "usage_metadata", None)
                 if um is not None and not getattr(self, "_usage_fields_logged", False):
                     # 생각 토큰이 0 으로만 기록되던 문제를 가리기 위해 SDK 가 주는 사용량 필드를 한 번 그대로 적어 둔다
@@ -460,14 +551,11 @@ class GeminiReader:
                 if code == 400 and "resolution" in str(e).lower() and self.media_resolution:
                     self._step_down(None, f"주의: {self.model} 이 이미지 해상도 설정(media_resolution)을 받지 않아 기본값으로 계속합니다.")
                     continue
-                if code in (403, 404) and self.api == "auto" and not self._switched and self.key.startswith("AQ."):
-                    tried_msgs.append(("AI Studio 경로: " if not self.vertexai else "Vertex 경로: ") + last_msg)
-                    self._switched = True; self.vertexai = not self.vertexai
-                    self.client = make_client(self.key, self.vertexai)
-                    print(f"주의: {'Vertex 익스프레스' if self.vertexai else 'AI Studio'} 접속 경로로 바꿔 다시 시도합니다.", flush=True)
+                if code in (403, 404) and self.api == "auto" and self.key.startswith("AQ.") and self._switch_route(used_vx, used_key):
+                    tried_msgs.append(("Vertex 경로: " if used_vx else "AI Studio 경로: ") + last_msg)
                     continue
                 if not retry:                      # 키·권한·모델 이름 오류는 다시 해도 같다
-                    tried_msgs.append(("Vertex 경로: " if self.vertexai else "AI Studio 경로: ") + last_msg) if tried_msgs else None
+                    tried_msgs.append(("Vertex 경로: " if used_vx else "AI Studio 경로: ") + last_msg) if tried_msgs else None
                     final = " / ".join(tried_msgs) if tried_msgs else last_msg
                     if code in (403, 404):
                         try:                       # 되는 모델을 찾아 바로 제안한다
@@ -477,6 +565,10 @@ class GeminiReader:
                         except Exception:
                             pass
                     raise ReaderError(final) from e
+                if last_msg == FORMAT_MSG:
+                    fmt_fails += 1
+                    if fmt_fails >= FORMAT_ATTEMPTS:   # 응답 형식 오류는 세 번까지만 — 기다려도 나아지지 않는 편이라 쪽마다 30초를 버리지 않게
+                        raise ReaderError(f"{fmt_fails}회 시도 뒤에도 실패: {last_msg}", fatal=False) from e
                 if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
                     d = retry_delay_seconds(str(e))
                     print(f"주의: 요청 한도 초과 — {d:.0f}초 뒤 다시 시도 ({i + 1}/{attempts})", flush=True)

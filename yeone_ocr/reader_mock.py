@@ -9,6 +9,7 @@ from PIL import Image
 from .schema import PageReading, Region, Paragraph, Column, RegionReread, frac_bbox
 from .pdfio import TextLayer
 from .layout import detect_figures, overlap_ratio
+from .reader_gemini import ReaderError
 
 LABEL_RE = re.compile(r"[-–—ー一]\s*(\d{1,4})\s*[-–—ー一]")
 
@@ -20,8 +21,16 @@ class MockReader:
 
     def __init__(self, textlayers: dict[int, TextLayer]):
         self.textlayers = textlayers
+        # 검사용 갈고리(기본은 모두 꺼짐): fail_pages 의 쪽은 1차 판독이 일시 오류(ReaderError fatal=False),
+        # pass2_fail_once 는 쪽 → 2차(reread_region)에서 한 번 던질 예외, calls 는 호출 횟수.
+        self.fail_pages: set[int] = set()
+        self.pass2_fail_once: dict[int, Exception] = {}
+        self.calls = {"read_page": 0, "reread_region": 0, "reread_regions": 0}
 
     def read_page(self, img: Image.Image, file_name: str, pdf_page: int, total: int, extra: str = "") -> PageReading:
+        self.calls["read_page"] += 1
+        if pdf_page in self.fail_pages:
+            raise ReaderError(f"mock: {pdf_page}쪽 판독 실패(검사용 일시 오류)", fatal=False)
         tl = self.textlayers.get(pdf_page) or TextLayer(page_width=1, page_height=1)
         W, H = (tl.page_width or 1), (tl.page_height or 1)
         figs = detect_figures(img)
@@ -49,7 +58,12 @@ class MockReader:
                            regions=regions, page_note="mock 판독기: 기존 OCR 레이어 + 도판 자동 감지. 글자 정확도는 기존 OCR 그대로이며 원본 대조가 필요함")
 
     def reread_region(self, crop: Image.Image, kind: str, region_id: str, pdf_page: int) -> RegionReread:
+        self.calls["reread_region"] += 1
+        e = self.pass2_fail_once.pop(pdf_page, None)
+        if e is not None:
+            raise e
         return RegionReread()   # 2차 판독 없음
 
     def reread_regions(self, crops, pdf_page: int) -> dict[str, RegionReread]:
+        self.calls["reread_regions"] += 1
         return {}

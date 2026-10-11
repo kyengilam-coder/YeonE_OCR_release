@@ -1,8 +1,9 @@
 """혼동 장부(confusion ledger). 결과 폴더에 쌓인 판독 기록과 책갈피 OCR 대조 결과에서 '어느 글자가 어느 글자로 읽혔는가'를 모은다.
 
-출처 세 가지
+출처 네 가지
 - 1차·2차 판독이 갈린 자리: readings/*.json 의 merged 글에 든 〔a/b〕 표시(= 두 모델이 다르게 읽은 글자)
 - 판독 ↔ PDF 글자층(다른 OCR 엔진)의 한 글자 차이: readings/*.json 의 textlayer_diff
+- 합의 판독 의심: readings/*.json 의 suspects 가운데 자형 판별이 글자층 쪽인 자리(outcome differs) — 1차·2차 합의 글자 → 자형 판별 글자(출처 '합의↔자형')
 - 책갈피 OCR 대조: collate/*.json 의 항목(HWPX 글자 ↔ 판독 글자). A·B1·B2 모두 넣되 갈래를 함께 적는다
 
 장부는 통계일 뿐 어느 쪽이 맞는지 정하지 않는다(지침 21: 자동 치환 금지). 쓰임새는
@@ -34,6 +35,7 @@ def build_ledger(work_dir: str | Path) -> dict:
             d["examples"].append({"page": page, "ctx": ex})
     n_pages = 0
     from .schema import PageReading, TEXT_KINDS, region_text
+    from .adjudicate import SUSPECT_SOURCE
     for f in sorted((work / "readings").glob("p*.json")) if (work / "readings").exists() else []:
         try:
             rec = json.loads(f.read_text(encoding="utf-8"))
@@ -51,6 +53,9 @@ def build_ledger(work_dir: str | Path) -> dict:
         for it in (rec.get("textlayer_diff") or {}).get("items", []):
             if it.get("op") == "replace" and len(it.get("reading", "")) == 1 and len(it.get("layer", "")) == 1 and CJK.match(it["reading"]) and CJK.match(it["layer"]):
                 add("판독↔글자층", it["reading"], it["layer"], it.get("ctx", ""), pg)
+        for su in rec.get("suspects") or []:
+            if isinstance(su, dict) and su.get("outcome") == "differs" and su.get("consensus") and su.get("layer"):
+                add(SUSPECT_SOURCE, su["consensus"], su["layer"], (su.get("pre") or "")[-5:] + "「" + su["consensus"] + "」" + (su.get("post") or "")[:5], pg)
     n_sections = 0
     for f in sorted((work / "collate").glob("*.json")) if (work / "collate").exists() else []:
         try:

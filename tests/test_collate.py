@@ -174,11 +174,13 @@ class Collate(unittest.TestCase):
         a = next(it for it in items if it.kind == "A"); self.assertEqual((a.hwpx, a.ocr, a.new, a.para, a.auto), ("有", "无", "無", 101, True))
         b2 = next(it for it in items if it.kind == "B2"); self.assertEqual(b2.new, "發"); self.assertEqual(b2.candidates, ["發", "髮"]); self.assertTrue(b2.auto)
         self.assertFalse(next(it for it in items if it.kind == "B1").auto)
-        self.assertEqual(summary(items)["auto"], 3)
+        c = next(it for it in items if it.kind == "C"); self.assertFalse(c.auto); self.assertIn("사람이 넣음", c.note); self.assertIn("切記", c.new)   # 긴 구간은 제안만
+        self.assertEqual(summary(items)["auto"], 2)                                                                  # A + B2(C 삽입은 자동 아님)
         sure = collate(hwpx_cells(self.HW, 100), ocr_cells([(7, "\n".join(self._ocr()))]), policy="sure")
         self.assertEqual([it.kind for it in sure if it.auto], ["A"])
         memo = collate(hwpx_cells(self.HW, 100), ocr_cells([(7, "\n".join(self._ocr()))]), policy="memo")
         self.assertFalse(any(it.auto for it in memo))
+        self.assertEqual({(it.kind, it.action) for it in memo}, kinds)                                              # 정책은 auto 만 바꾼다
         # 표기만 다른 것(이체자·부호)은 차이로 보지 않는다
         same = collate(hwpx_cells(["人蔘, 大補元氣."], 0), ocr_cells([(1, "人参，大补元气。")]))
         self.assertEqual(same, [])
@@ -194,9 +196,13 @@ class Collate(unittest.TestCase):
         items = collate(hwpx_cells(["凡例十則"], 0), ocr_cells([(1, "几例十则")]), policy="all")
         self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)]); self.assertIn("헷갈리기", items[0].note)
         self.assertIn("「凡」", items[0].hw_ctx); self.assertIn("「几」", items[0].oc_ctx)
-        # 問 vs 间(1:1)은 그대로 A 자동
+        # 問 vs 间(1:1)도 자형 혼동 묶음 — 1차·2차가 같이 틀릴 수 있어 자동 반영하지 않고 3차 판별(글자 조각)이 가린다(0.6.8)
         items = collate(hwpx_cells(["津液充滿無問"], 0), ocr_cells([(1, "津液充满无间")]), policy="all")
-        self.assertEqual([(it.kind, it.new, it.auto) for it in items], [("A", "間", True)]); self.assertEqual(items[0].hw_ctx, "津液充滿無「問」")
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)]); self.assertEqual(items[0].hw_ctx, "津液充滿無「問」")
+        self.assertIn("헷갈리기", items[0].note); self.assertIn("3차 판별", items[0].note)
+        # 묶음에 없는 보통 오탈(有↔无)은 그대로 A 자동
+        items = collate(hwpx_cells(["陶云有毒"], 0), ocr_cells([(1, "陶云无毒")]), policy="sure")
+        self.assertEqual([(it.kind, it.new, it.auto) for it in items], [("A", "無", True)])
 
     def test_trim(self):
         paras = [(5, "앞 구획 끝 문장"), (5, "大蓟"), (5, "1. 本草经疏"), (6, "2. 本草新编"), (6, "小蓟"), (6, "小蓟 本문")]
@@ -218,13 +224,14 @@ class Edit(unittest.TestCase):
             self.assertTrue(all(l.ok for l in log), [l.note for l in log if not l.ok])
             out = ed.save_copy(os.path.join(td, "out.hwpx"))
             bk2 = HwpxBook(out); t = bk2.texts()
-            self.assertIn("陶云無毒", t[sec.start + 1]); self.assertIn("初起之發血症", t[sec.start + 2]); self.assertIn("切記切記切記", t[sec.start + 2])
+            self.assertIn("陶云無毒", t[sec.start + 1]); self.assertIn("初起之發血症", t[sec.start + 2]); self.assertNotIn("切記切記切記", t[sec.start + 2])   # 긴 구간(C)은 넣지 않음
             self.assertEqual(t[sec.start + 1].count("胎因熱則不安"), 0)                 # B1 은 글자를 넣지 않음
             self.assertEqual(len(bk2.paragraphs), len(bk.paragraphs))                   # 문단 수 그대로
             z = zipfile.ZipFile(out); x = z.read("Contents/section0.xml").decode(); h = z.read("Contents/header.xml").decode()
             self.assertEqual(x.count('type="MEMO"'), 4); self.assertEqual(x.count("<hp:fieldEnd"), 4)       # 'all'(파이썬 기본): 항목마다
             self.assertIn('textColor="#1F4FBF"', h); self.assertIn('textColor="#C00000"', h); self.assertIn('shadeColor="#E1EBFF"', h)   # 파랑·빨강
             self.assertIn("[자동 교정] 원래 「有」 → 「無」", x); self.assertIn("여러 번체로 갈라짐: 發/髮", x)
+            self.assertIn("[제안] 빠진 구간 「此乃前人", x); self.assertIn("사람이 넣음", x); self.assertNotIn("[자동 삽입·확인]", x)   # 긴 구간은 제안 메모
             # 다른 구획은 그대로
             self.assertEqual(t[sec.end], "小薊"); self.assertEqual(t[-1], "人蔘, 大補元氣.")
             # 고지 사항만(기본): 색으로 전할 수 있는 자동 교정·표시에는 메모가 없고, 범례와 고지만 남는다
@@ -306,7 +313,7 @@ class Accumulate(unittest.TestCase):
             # 3) 같은 구획(大薊)을 한 번 더 돌려도 메모가 겹치지 않는다(이미 고친 글자는 차이가 없고, 표시만 한 자리는 다시 표시하지 않음)
             bk3 = HwpxBook(out); sec3 = bk3.section(bk3.anchors(), 1)
             items3 = collate(hwpx_cells(bk3.section_texts(sec3), sec3.start), ocr_cells([(7, "\n".join(ocr))]))
-            self.assertEqual({it.kind for it in items3}, {"B1"})                             # 고쳐진 것은 사라지고 표시만 하던 B1 만 남음
+            self.assertEqual({it.kind for it in items3}, {"B1", "C"})                        # 고쳐진 것은 사라지고 표시만 하던 B1·긴 구간 제안(C)만 남음
             ed3 = Editor(bk3); log3 = ed3.apply(items3); ed3.save_copy(out)
             self.assertTrue(all(l.ok for l in log3)); self.assertTrue(all("이미 표시" in l.note for l in log3))
             x = zipfile.ZipFile(out).read("Contents/section0.xml").decode()
@@ -410,14 +417,19 @@ class StructuralRules(unittest.TestCase):
 
     def test_repeated_pair_is_promoted(self):
         # 幹↔于 가 한 구획에서 5회 이상 되풀이되고 문맥으로도 못 가리면 → 책 전체 변환 오류로 보고 교정 후보(於)로
+        # (0.6.8 검토: collate 는 표시만 하고, 올리기는 run_section 이 3차 판별을 못 할 때 promote_repeated 로)
+        from yeone_ocr.collate.collate import promote_repeated
         hw = ["甲幹乙", "丙幹丁", "戊幹己", "庚幹辛", "壬幹癸", "子幹丑"]
         oc = ["甲于乙", "丙于丁", "戊于己", "庚于辛", "壬于癸", "子于丑"]
         items = self._items(hw, oc)
-        self.assertEqual(len(items), 6)
+        self.assertTrue(len(items) == 6 and all(it.kind == "B1" and it.action == "mark" for it in items))
+        self.assertEqual(promote_repeated(items, policy="all"), 6)
         self.assertTrue(all(it.kind == "B2" and it.action == "replace" and it.new == "於" and it.auto and "repeat" in it.witness for it in items),
                         [(i.kind, i.action, i.new, i.witness) for i in items])
+        items = self._items(hw, oc); promote_repeated(items, policy="sure")
+        self.assertTrue(all(it.kind == "B2" and not it.auto for it in items))                   # B2 는 '확실한 것만' 에서 자동 아님
         # 네 번이면 그대로 표시만
-        items = self._items(hw[:4], oc[:4])
+        items = self._items(hw[:4], oc[:4]); self.assertEqual(promote_repeated(items, policy="all"), 0)
         self.assertTrue(all(it.kind == "B1" and it.action == "mark" for it in items))
 
 
@@ -979,3 +991,588 @@ class NotesAndLegacy(unittest.TestCase):
             notes = re.findall(r"〔[^〔〕]*〕", t)
             self.assertTrue(notes and all(n.startswith(INLINE_NOTE_PREFIXES) for n in notes), notes)
             self.assertEqual(sum(b - a for a, b in note_spans(t)), sum(len(n) for n in notes))       # 다음 실행에서 대조하지 않음
+
+
+class Safety068(unittest.TestCase):
+    """0.6.8 — 자형 혼동 쌍은 3차 판별로, 긴 구간 삽입은 제안만, 3차 → 글자층 순서, 교정본 안전 저장·보존, 기록 다시 계산 억제."""
+    def setUp(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+
+    def test_confusable_pair_waits_for_glyph_check(self):
+        from yeone_ocr.collate.run import glyph_candidate
+        # 問↔间·卯↔卵: 1차·2차가 같은 쪽으로 틀릴 수 있는 자형 쌍 — 어느 정책에서도 자동 반영하지 않고 3차 판별 대상(B1)
+        for hw, oc in (("津液充滿無問", "津液充满无间"), ("卯時服之", "卵时服之")):
+            for policy in ("all", "sure", "memo"):
+                items = collate(hwpx_cells([hw], 0), ocr_cells([(1, oc)]), policy=policy)
+                self.assertEqual([(it.kind, it.action, it.auto, it.new) for it in items], [("B1", "mark", False, "")], (hw, policy))
+                self.assertIn("헷갈리기", items[0].note); self.assertTrue(glyph_candidate(items[0]))
+        # 묶음에 없는 보통 오탈은 그대로 자동(sure 에서도), 자형 편향 쌍(人/入)은 지금처럼 '자형 편향' 표시
+        self.assertEqual([(it.kind, it.auto) for it in collate(hwpx_cells(["甘草一錢"], 0), ocr_cells([(1, "甘草三钱")]), policy="sure")], [("A", True)])
+        items = collate(hwpx_cells(["能人陰分"], 0), ocr_cells([(1, "能入阴分")]), policy="all")
+        self.assertEqual([(it.kind, it.auto) for it in items], [("B1", False)]); self.assertIn("자형 편향", items[0].note)
+        # 문맥 규칙이 판독 편을 든 干/于 자리(witness=ocr)는 예외로 자동 그대로(干·于 도 CONFUSABLES 묶음)
+        items = collate(hwpx_cells(["生干斯長干斯"], 0), ocr_cells([(1, "生于斯长于斯")]), policy="all")
+        self.assertEqual([(it.kind, it.new, it.auto, it.witness) for it in items], [("B2", "於", True, "ocr")] * 2)
+
+    def test_long_insert_is_never_auto(self):
+        hw = ["大薊根陶云有毒誤也"]; oc = ["大蓟根陶云有毒误也此乃前人未发之秘学者宜细玩之不可忽也切记切记切记切记"]
+        for policy in ("all", "sure", "memo"):
+            items = collate(hwpx_cells(hw, 0), ocr_cells([(1, "\n".join(oc))]), policy=policy)
+            self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("C", "insert", False)], policy)
+            self.assertIn("사람이 넣음", items[0].note); self.assertIn("切記", items[0].new)                 # 제안 글(번체)은 보고·메모에
+        with tempfile.TemporaryDirectory() as td:
+            bk = HwpxBook(make_paras(os.path.join(td, "c.hwpx"), hw)); pi = bk.texts().index(hw[0])
+            items = collate(hwpx_cells(hw, pi), ocr_cells([(1, "\n".join(oc))]), policy="all")
+            ed = Editor(bk, memo="notice"); log = ed.apply(items)
+            self.assertTrue(all(l.ok and l.memo for l in log)); self.assertEqual(bk.texts()[pi], hw[0])    # 글자는 그대로, 고지 메모만
+            x = zipfile.ZipFile(ed.save_copy(os.path.join(td, "o.hwpx"))).read("Contents/section0.xml").decode()
+            self.assertIn("[제안] 빠진 구간 「此乃前人", x); self.assertIn("사람이 넣음", x); self.assertNotIn("[자동 삽입·확인]", x)
+            bk2 = HwpxBook(make_paras(os.path.join(td, "i.hwpx"), hw)); Editor(bk2, memo="inline").apply(items)
+            self.assertRegex(bk2.texts()[pi], r"〔삽입 제안: 빠진 구간 \d+자〕$")
+
+    def test_layer_witness_respects_glyph_check(self):
+        from yeone_ocr.collate.collate import Item
+        # 3차 판별이 판독 글자로 가린 자리(witness 에 glyph): 글자층이 HWPX 편이어도 뒤집지 않는다
+        items = [Item("A", "replace", 0, 4, 5, "問", "间", "間", pdf_page=3, auto=True, oc_ctx="津液充满无「间」", witness="glyph=ocr")]
+        st = witness_filter(items, {3: "津液充满无问"})
+        self.assertEqual([(x.kind, x.auto, x.witness) for x in items], [("A", True, "glyph=ocr")]); self.assertEqual((st["glyph"], st["checked"]), (1, 0))
+        # 3차 판별을 할 수 있을 때(promote=False)는 글자층만으로 干/于 혼동 자리를 교정 후보로 올리지 않는다(글자층은 같은 화소를 본 다른 OCR)
+        items = collate(hwpx_cells(["甲於乙丙丁"], 0), ocr_cells([(3, "甲干乙丙丁")]), policy="all")
+        st = witness_filter(items, {3: "甲干乙丙丁"}, promote=False)
+        self.assertEqual([(x.kind, x.action, x.auto) for x in items], [("B1", "mark", False)]); self.assertEqual(st["ocr"], 1); self.assertIn("layer=ocr", items[0].witness)
+        # 글자층이 HWPX 편이면 지금처럼 뺀다
+        items = collate(hwpx_cells(["甲於乙丙丁"], 0), ocr_cells([(3, "甲干乙丙丁")]), policy="all")
+        witness_filter(items, {3: "甲于乙丙丁"}, promote=False); self.assertEqual(items, [])
+        # 3차를 못 할 때(기본 promote=True)는 지금처럼 올린다
+        items = collate(hwpx_cells(["甲於乙丙丁"], 0), ocr_cells([(3, "甲干乙丙丁")]), policy="all")
+        witness_filter(items, {3: "甲干乙丙丁"}); self.assertEqual([(x.kind, x.auto) for x in items], [("B2", True)])
+
+    def test_run_section_asks_glyph_before_layer(self):
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from yeone_ocr import cli
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.collate.collate import Item
+        with tempfile.TemporaryDirectory() as td:
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors(); pi = bk.section(an, 1).start + 1
+            work = SimpleNamespace(dir=Path(td), load_record=lambda n: None, textlayer_path=lambda n: Path(td, "없음.json"))
+            calls = []
+            def fake_adj(items, **k):
+                calls.append(("glyph", [it.kind for it in items])); return {"asked": 1, "hwpx": 0, "ocr": 0, "undecided": 1}
+            def fake_wit(items, layers, policy="all", promote=True):
+                calls.append(("layer", promote)); return {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0, "weak": 0, "glyph": 0}
+            old = R.log, R.ensure_pages_read, cli.resolve_mode, R.collate, R.adjudicate_items, R.witness_filter, R.glyph_reader
+            try:
+                R.log = lambda m: None; R.ensure_pages_read = lambda *a, **k: None; cli.resolve_mode = lambda *a, **k: None
+                R.collate = lambda *a, **k: [Item("B1", "mark", pi, 0, 1, "問", "间", "", pdf_page=7, note="헷갈리기 쉬운 자형 쌍", oc_ctx="無「间」")]
+                R.adjudicate_items = fake_adj; R.witness_filter = fake_wit
+                for reader in (object(), None):
+                    calls.clear(); R.glyph_reader = lambda args, r=reader: r
+                    R.run_section(Namespace(pdf_pages="7", apply=False, policy="all", out=None), pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[],
+                                  matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+                    if reader is not None:
+                        self.assertEqual(calls, [("glyph", ["B1"]), ("layer", False)])      # 3차 먼저, 글자층만으로는 올리지 않음
+                    else:
+                        self.assertEqual(calls, [("layer", True)])                          # 3차를 못 하면 글자층만으로 올린다
+            finally:
+                R.log, R.ensure_pages_read, cli.resolve_mode, R.collate, R.adjudicate_items, R.witness_filter, R.glyph_reader = old
+
+    def test_save_copy_is_atomic_and_keeps_one_backup(self):
+        from yeone_ocr.collate.collate import Item
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "b_교정.hwpx"); bak = Path(td, "b_교정.bak.hwpx")
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); pi = bk.section(bk.anchors(), 1).start + 1
+            ed = Editor(bk, memo="notice"); ed.apply([Item("A", "replace", pi, 0, 1, "1", "9", "9", auto=True)])
+            self.assertEqual(ed.save_copy(out), out); self.assertFalse(bak.exists()); v1 = Path(out).read_bytes()      # 첫 저장: 백업 없음
+            ed2 = Editor(HwpxBook(out), memo="notice"); ed2.apply([Item("A", "replace", pi, 1, 2, ".", "、", "、", auto=True)]); ed2.save_copy(out)
+            v2 = Path(out).read_bytes(); self.assertEqual(bak.read_bytes(), v1); self.assertNotEqual(v2, v1)        # 백업 = 직전 판
+            self.assertTrue(HwpxBook(out).texts()[pi].startswith("9、"))
+            ed3 = Editor(HwpxBook(out), memo="notice"); ed3.apply([Item("A", "replace", pi, 0, 1, "9", "8", "8", auto=True)]); ed3.save_copy(out)
+            self.assertEqual(bak.read_bytes(), v2); v3 = Path(out).read_bytes()                                       # 한 세대만(이전 .bak 덮어씀)
+            # 쓰다 멈추면 깨지는 것은 임시 파일뿐 — 교정본·백업은 그대로
+            ed4 = Editor(HwpxBook(out), memo="notice")
+            def broken(path, **k):
+                Path(path).write_bytes(b"half"); raise RuntimeError("disk full")
+            ed4.doc.save_to_path = broken
+            with self.assertRaises(RuntimeError):
+                ed4.save_copy(out)
+            self.assertEqual(Path(out).read_bytes(), v3); self.assertEqual(bak.read_bytes(), v2)
+            self.assertEqual(sorted(f for f in os.listdir(td) if f.startswith("b_교정")), ["b_교정.bak.hwpx", "b_교정.hwpx"])   # 임시 파일 안 남김
+
+    def test_mismatched_corrected_copy_is_set_aside_not_overwritten(self):
+        import fitz
+        from argparse import Namespace
+        from yeone_ocr.collate import run as R
+        with tempfile.TemporaryDirectory() as td:
+            # set_aside: 비어 있는 첫 번호로 옮긴다(지우지 않음)
+            p = Path(td, "x_교정.hwpx"); p.write_bytes(b"1"); Path(td, "x_교정_이전_1.hwpx").write_bytes(b"0")
+            self.assertEqual(R.set_aside(p).name, "x_교정_이전_2.hwpx"); self.assertFalse(p.exists()); self.assertEqual(Path(td, "x_교정_이전_2.hwpx").read_bytes(), b"1")
+            # cmd_collate --apply: 교정본의 구획 목록이 원본과 다르면(제목 스타일 없는 문서를 교정본 자리에) 옆으로 옮기고 '주의:' 로 알린 뒤 원본에서 시작
+            pdf = os.path.join(td, "a.pdf"); d = fitz.open(); d.new_page(); d.save(pdf); d.close()
+            src = make_book(os.path.join(td, "b.hwpx")); out = R.corrected_path(src)
+            make_book(out, plain=True); before = Path(out).read_bytes()
+            logs = []; old = R.run_all, R.log
+            try:
+                R.run_all = lambda *a, **k: {"stopped": False}; R.log = logs.append
+                args = Namespace(pdf=pdf, work=os.path.join(td, "w"), hwpx=src, all=True, anchor_source="hwpx", heading_styles="", out=None, apply=True)
+                self.assertEqual(R.cmd_collate(args), 3)                                          # 끝났어도 '완료'로만 보이지 않게(창이 주의를 알림창에)
+                self.assertFalse(Path(out).exists()); self.assertEqual(Path(td, "b_교정_이전_1.hwpx").read_bytes(), before)
+                warn = [l for l in logs if l.startswith("주의:") and "구획 목록" in l]; self.assertEqual(len(warn), 1); self.assertIn("b_교정_이전_1.hwpx", warn[0])
+                # 대조만(--apply 없음)이면 덮어쓸 일이 없으니 옮기지 않고 알리기만
+                make_book(out, plain=True); logs.clear(); args.apply = False
+                self.assertEqual(R.cmd_collate(args), 0); self.assertTrue(Path(out).exists())
+                self.assertTrue(any(l.startswith("주의:") and "구획 목록" in l for l in logs)); self.assertFalse(Path(td, "b_교정_이전_2.hwpx").exists())
+                # 구획 목록이 같으면 교정본에 이어서(옮기지 않음)
+                make_book(out); logs.clear(); args.apply = True
+                self.assertEqual(R.cmd_collate(args), 0); self.assertTrue(Path(out).exists()); self.assertTrue(any("이어서" in l for l in logs))
+                self.assertFalse(any(l.startswith("주의:") for l in logs))
+            finally:
+                R.run_all, R.log = old
+
+    def test_remerge_only_when_rules_changed_and_backs_up(self):
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from yeone_ocr import cli, prompts, __version__
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.state import Work
+        from yeone_ocr.schema import PageReading
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "a.pdf"); Path(pdf).write_bytes(b"")                      # Work 는 이름만 쓴다
+            work = Work(pdf, os.path.join(td, "w")); prev = work.readings_dir / "prev" / "p007.json"
+            merged = PageReading.model_validate({"pdf_page": 7, "regions": [{"id": "r1", "kind": "본문", "bbox": [0, 0, 1000, 1000],
+                                                                             "paras": [{"cols": [{"n": 1, "t": "大蓟根陶云有毒"}]}]}]}).model_dump()
+            rec = {"pdf_page": 7, "version": __version__, "mode": prompts.MODE, "pass1": {"x": 1}, "pass2": {"r1": {"x": 1}}, "merged": merged}
+            work.save_record(7, rec)
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
+            calls = []
+            def fake_remerge(r, layer, layer_d=None):
+                calls.append(r["pdf_page"]); r = dict(r); r["version"] = __version__; r["remerged"] = True; return r
+            logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record
+            try:
+                R.log = logs.append; R.ensure_pages_read = lambda *a, **k: None; cli.resolve_mode = lambda *a, **k: None; cli.remerge_record = fake_remerge
+                run = lambda: R.run_section(Namespace(pdf_pages="7", apply=False, policy="all", out=None, no_glyph_check=True), pdf_doc=[None] * 7, work=work, book=bk,
+                                            anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+                run()
+                self.assertEqual(calls, []); self.assertFalse(prev.exists())                          # 같은 판·같은 모드: 다시 계산하지 않음(손 고침 보존)
+                rec["version"] = "0.6.0"; work.save_record(7, rec); logs.clear()
+                run()
+                self.assertEqual(calls, [7]); self.assertEqual(json.loads(prev.read_text(encoding="utf-8"))["version"], "0.6.0")   # 계산 전 기록을 남김
+                now = work.load_record(7); self.assertEqual((now["version"], now["mode"], now.get("remerged")), (__version__, prompts.MODE, True))
+                warn = [l for l in logs if l.startswith("주의:") and "다시 계산" in l]; self.assertEqual(len(warn), 1, logs); self.assertIn("readings/prev", warn[0])
+                logs.clear(); run()
+                self.assertEqual(calls, [7]); self.assertFalse([l for l in logs if "다시 계산" in l])     # 이제 같은 판·모드 → 건너뜀
+                # 모드가 다르면 다시 계산하되, 이미 있는 prev 는 덮어쓰지 않는다
+                r2 = work.load_record(7); r2["mode"] = "다른모드"; work.save_record(7, r2); run()
+                self.assertEqual(calls, [7, 7]); self.assertEqual(json.loads(prev.read_text(encoding="utf-8"))["version"], "0.6.0")
+            finally:
+                R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record = old
+
+
+class Review068(unittest.TestCase):
+    """0.6.8 검토 — 치환으로 묶인 긴 구간, 반복 승격과 3차 판별, 번체 판독의 자형 쌍, 판독 일부 실패, 끝 코드, 사본 경로, 교정본 저장 실패."""
+    def setUp(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+
+    def _section_run(self, R, cli, bk, an, work, args, items_fn, reader):
+        """run_section 을 대조 결과만 바꿔 끼워 돌린다. (3차에 넘어간 갈래, 글자층 대조 때 갈래) 를 돌려준다."""
+        from types import SimpleNamespace
+        calls = []
+        def fake_adj(items, **k):
+            calls.append(("glyph", [it.kind for it in items])); return {"asked": 0, "hwpx": 0, "ocr": 0, "undecided": 0}
+        def fake_wit(items, layers, policy="all", promote=True):
+            calls.append(("layer", promote, [it.kind for it in items])); return {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0, "weak": 0, "glyph": 0}
+        old = R.log, R.ensure_pages_read, cli.resolve_mode, R.collate, R.adjudicate_items, R.witness_filter, R.glyph_reader
+        try:
+            R.log = lambda m: None; R.ensure_pages_read = lambda *a, **k: False; cli.resolve_mode = lambda *a, **k: None
+            R.collate = lambda *a, **k: items_fn(); R.adjudicate_items = fake_adj; R.witness_filter = fake_wit; R.glyph_reader = lambda a: reader
+            R.run_section(args, pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+        finally:
+            R.log, R.ensure_pages_read, cli.resolve_mode, R.collate, R.adjudicate_items, R.witness_filter, R.glyph_reader = old
+        return calls
+
+    def test_long_span_in_replace_is_never_auto(self):
+        """옆 글자 하나가 달라 difflib 이 치환으로 묶은 긴 구간(1자 ↔ 23자, 22자 ↔ 1자)도 어느 정책에서도 넣거나 지우지 않는다."""
+        extra = "甲乙丙丁戊庚辛壬癸子寅卯辰巳午申酉戌亥天地玄"
+        cases = ((["大薊根陶云有毒誤矣"], "大蓟根陶云有毒误也" + extra),                       # 판독에만 긴 구간(삽입 쪽)
+                 (["大薊根陶云有毒誤矣" + extra[:-1] + "而已"], "大蓟根陶云有毒误也而已"),         # HWPX 에만 긴 구간(삭제 쪽)
+                 (["大薊根陶云有毒誤矣甲乙丙而已"], "大蓟根陶云有毒误也而已"),                     # 짧아도 HWPX 에서 3자 넘게 지워지는 치환
+                 (["大薊根陶云矣", "有毒"], "大蓟根陶云也" + extra))                               # 문단 둘에 걸친 치환(조각마다는 짧아도)
+        for hw, oc in cases:
+            for policy in ("all", "sure", "memo"):
+                items = collate(hwpx_cells(hw, 0), ocr_cells([(1, oc)]), policy=policy)
+                got = [(it.kind, it.action, it.auto, it.hwpx, it.ocr) for it in items]
+                self.assertTrue(items and all(it.kind == "C" and it.action == "mark" and not it.auto and not it.new for it in items), (hw, policy, got))
+        self.assertIn("긴 구간", collate(hwpx_cells(cases[0][0], 0), ocr_cells([(1, cases[0][1])]))[0].note)
+        # 짧은 치환은 지금처럼 자동(1자 ↔ 2자, 2자 ↔ 1자)
+        for hw, oc in ((["大薊根陶云有毒誤矣"], "大蓟根陶云有毒误也而"), (["大薊根陶云有毒誤矣乎"], "大蓟根陶云有毒误也")):
+            self.assertEqual([(it.kind, it.action, it.auto) for it in collate(hwpx_cells(hw, 0), ocr_cells([(1, oc)]), policy="sure")], [("A", "replace", True)], hw)
+        with tempfile.TemporaryDirectory() as td:                                                     # 교정본 글자는 그대로, 표시·메모만
+            hw, oc = cases[0]
+            bk = HwpxBook(make_paras(os.path.join(td, "c.hwpx"), hw)); pi = bk.texts().index(hw[0])
+            log = Editor(bk, memo="notice").apply(collate(hwpx_cells(hw, pi), ocr_cells([(1, oc)]), policy="all"))
+            self.assertTrue(log and all(l.ok for l in log)); self.assertEqual(bk.texts()[pi], hw[0])
+
+    def test_repeated_confusable_pair_waits_for_glyph_check(self):
+        """問↔间 이 다섯 번 되풀이돼도 반복 수로 올리지 않는다 — 한 글꼴에서 같은 쪽으로 되풀이해 틀리는 것이 바로 그 위험(3차 판별만 가림)."""
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from yeone_ocr import cli
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.collate.collate import promote_repeated
+        from yeone_ocr.collate.run import glyph_candidate
+        hw = ["甲問乙丙丁戊己庚辛壬癸", "子問丑寅卯辰巳午未申酉", "戌問亥天地玄黃宇宙洪荒", "日問月盈昃辰宿列張寒來", "暑問往秋收冬藏閏餘成歲"]
+        oc = "\n".join(zh.to_simplified(t).replace("问", "间") for t in hw)
+        for policy in ("sure", "all"):
+            items = collate(hwpx_cells(hw, 0), ocr_cells([(1, oc)]), policy=policy)
+            self.assertEqual(promote_repeated(items, policy=policy), 0)
+            self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)] * 5)
+            self.assertTrue(all(glyph_candidate(it) and "repeat" not in it.witness for it in items))
+        # 干/于 반복 승격은 3차 판별을 못 할 때만, 3차 판별에는 표시(B1) 그대로 넘긴다
+        hw6 = ["甲幹乙", "丙幹丁", "戊幹己", "庚幹辛", "壬幹癸", "子幹丑"]; oc6 = "\n".join(["甲于乙", "丙于丁", "戊于己", "庚于辛", "壬于癸", "子于丑"])
+        real = collate
+        with tempfile.TemporaryDirectory() as td:
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
+            work = SimpleNamespace(dir=Path(td), load_record=lambda n: None, textlayer_path=lambda n: Path(td, "없음.json"))
+            args = Namespace(pdf_pages="7", apply=False, policy="all", out=None)
+            fn = lambda: real(hwpx_cells(hw6, 0), ocr_cells([(7, oc6)]), policy="all")
+            self.assertEqual(self._section_run(R, cli, bk, an, work, args, fn, object()), [("glyph", ["B1"] * 6), ("layer", False, ["B1"] * 6)])
+            self.assertEqual(self._section_run(R, cli, bk, an, work, args, fn, None), [("layer", True, ["B2"] * 6)])
+
+    def test_traditional_ocr_is_folded_before_pair_rules(self):
+        """세로쓰기(번체 인쇄) 판독 間·帥·風·鳥 도 간체 기준 자형 쌍 묶음에 걸린다. 반복 수도 접어서 센다."""
+        from yeone_ocr.collate.collate import promote_repeated
+        from yeone_ocr.collate.run import glyph_candidate
+        for hw, oc in (("津液充滿無問", "津液充滿無間"), ("其師曰可", "其帥曰可"), ("鳳鳴岐山", "風鳴岐山"), ("烏頭一錢", "鳥頭一錢")):
+            for policy in ("sure", "all"):
+                items = collate(hwpx_cells([hw], 0), ocr_cells([(1, oc)]), policy=policy)
+                self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)], (hw, oc, policy))
+                self.assertTrue(glyph_candidate(items[0]))
+        hw6 = ["甲幹乙", "丙幹丁", "戊幹己", "庚幹辛", "壬幹癸", "子幹丑"]
+        items = collate(hwpx_cells(hw6, 0), ocr_cells([(1, "\n".join(["甲于乙", "丙於丁", "戊于己", "庚於辛", "壬于癸", "子於丑"]))]), policy="all")
+        self.assertEqual(promote_repeated(items, policy="all"), 6)                                   # 간체 于 셋 + 번체 於 셋 = 같은 쌍 여섯
+        self.assertTrue(all(it.action == "replace" and it.new == "於" for it in items))
+
+    def test_glyph_check_in_vertical_mode_matches_printed_form(self):
+        """세로쓰기 3차 판별: 후보는 인쇄 꼴(번체)로 묻고, 답은 접어서 맞춘다(問 이라 답하면 HWPX 편, 간체 间 이라 답해도 판독 편)."""
+        from PIL import Image
+        from yeone_ocr.schema import PageReading, GlyphChoice
+        from yeone_ocr.state import Work
+        from yeone_ocr.collate.run import adjudicate_items
+        class Fake:
+            def __init__(self, ans): self.ans = ans; self.asked = []
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                self.asked.append(set(ask.candidates)); return GlyphChoice(choice=self.ans, evidence="문 안의 획")
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+            pr = PageReading.model_validate({"pdf_page": 7, "regions": [{"id": "r1", "kind": "본문", "bbox": [100, 50, 300, 950], "paras": [{"cols": [{"n": 1, "t": "津液充滿無間其效"}]}]}]})
+            work.save_record(7, {"pdf_page": 7, "pass1": pr.model_dump(), "merged": pr.model_dump()}); Image.new("L", (900, 1300), 255).save(work.page_image_path(7))
+            got = {}
+            for ans in ("問", "间", "間"):
+                items = collate(hwpx_cells(["津液充滿無問其效"], 0), ocr_cells([(7, "津液充滿無間其效")]), policy="sure")
+                f = Fake(ans); st = adjudicate_items(items, work=work, doc=None, reader=f, horizontal=False, policy="sure", min_px=0)
+                self.assertEqual(f.asked, [{"問", "間"}], ans)                                       # 번체 인쇄에 간체 问 을 섞어 묻지 않는다
+                got[ans] = (st["hwpx"], st["ocr"], [(it.kind, it.new, it.auto) for it in items])
+        self.assertEqual(got["問"], (1, 0, []))
+        self.assertEqual(got["间"], (0, 1, [("A", "間", True)])); self.assertEqual(got["間"], got["间"])
+
+    def test_partial_read_section_is_not_collated(self):
+        """쪽 판독 일부 실패(cmd_read 3): 기록이 빠진 쪽이 있는 구획은 대조하지 않고(거짓 C 표시가 교정본에 남지 않게) 3 을 돌려준다.
+        전체 교정은 그 구획만 건너뛰고 계속한다. 다시 판독만 실패하고 기록이 있으면 있던 기록으로 대조하되 역시 3."""
+        import fitz
+        from argparse import Namespace
+        from yeone_ocr import cli
+        from yeone_ocr.collate import run as R
+        class W:
+            def __init__(self, recs): self.recs = recs
+            def load_record(self, n): return self.recs.get(n)
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "a.pdf"); d = fitz.open()
+            for _ in range(8):
+                d.new_page()
+            d.save(pdf); d.close()
+            src = make_book(os.path.join(td, "b.hwpx")); out = R.corrected_path(src)
+            logs = []; reads = []; old = cli.cmd_prepare, cli.cmd_read, R.log, R.find_title_pages
+            try:
+                cli.cmd_prepare = lambda *a, **k: 0; R.log = logs.append
+                cli.cmd_read = lambda *a, **k: (reads.append(1), 3)[1]                                   # 7쪽 판독 실패(일시 오류) — 기록을 남기지 않음
+                with self.assertRaises(R.PartialRead):
+                    R.ensure_pages_read(Namespace(pages=None), W({}), None, (1, 2))
+                self.assertTrue(R.ensure_pages_read(Namespace(pages=None, force=True), W({1: {}, 2: {}}), None, (1, 2)))
+                self.assertFalse(issubclass(R.PartialRead, R.ReadFailed))                                # 전체 교정을 멈추는 오류가 아니다
+                args = Namespace(pdf=pdf, work=os.path.join(td, "w"), hwpx=src, all=False, anchor_index=2, pdf_pages="7", apply=True, policy="sure",
+                                 no_glyph_check=True, mode="vertical", anchor_source="hwpx", heading_styles="", out=None)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(R.cmd_collate(args), 3)
+                self.assertFalse(Path(out).exists())                                                    # 빈 판독과 대조한 표시가 교정본에 남지 않음
+                self.assertTrue(any(l.startswith("주의:") and "쪽 7" in l and "대조하지 않았" in l for l in logs), logs)
+                self.assertFalse(any(l.startswith("대조:") for l in logs))
+                # 전체 교정: 그 구획들만 건너뛰고 끝까지, 3
+                logs.clear(); reads.clear(); R.find_title_pages = lambda *a, **k: (7, 7)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(R.cmd_collate(Namespace(**{**vars(args), "all": True, "anchor_index": None})), 3)
+                summ = json.loads(Path(td, "w", "collate", "_전체_요약.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(reads), 3); self.assertFalse(summ["failed"]); self.assertTrue(summ["partial"])
+                self.assertEqual(len(summ["skipped"]), 3); self.assertTrue(all(s.endswith("(판독 일부 실패)") for s in summ["skipped"]), summ["skipped"])
+            finally:
+                cli.cmd_prepare, cli.cmd_read, R.log, R.find_title_pages = old; cli.CANCEL.clear()
+
+    def test_collate_returns_3_when_something_needs_a_look(self):
+        """판독 일부 실패·손 고침 다시 계산·교정본 옮김은 끝났어도 3 — 창이 '완료'로만 보이지 않고 '주의:' 를 알림창에 보이게."""
+        import fitz
+        from argparse import Namespace
+        from yeone_ocr.collate import run as R
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "a.pdf"); d = fitz.open(); d.new_page(); d.save(pdf); d.close()
+            src = make_book(os.path.join(td, "b.hwpx"))
+            one = Namespace(pdf=pdf, work=os.path.join(td, "w"), hwpx=src, all=False, anchor_index=2, anchor_source="hwpx", heading_styles="", out=None)
+            old = R.run_all, R.run_section
+            try:
+                for r, rc in (({}, 0), ({"remerged": []}, 0), ({"remerged": [7]}, 3), ({"read_partial": True}, 3)):
+                    R.run_section = lambda *a, r=r, **k: dict(r)
+                    self.assertEqual(R.cmd_collate(one), rc, r)
+                    self.assertEqual(R.cmd_collate(Namespace(**{**vars(one), "anchor_index": None, "section": "小薊"})), rc, r)
+                for r, rc in (({"stopped": False}, 0), ({"partial": True}, 3), ({"partial": True, "failed": "x"}, 1), ({"partial": True, "stopped": True}, 130)):
+                    R.run_all = lambda *a, r=r, **k: dict(r)
+                    self.assertEqual(R.cmd_collate(Namespace(**{**vars(one), "all": True})), rc, r)
+            finally:
+                R.run_all, R.run_section = old
+
+    def test_remerge_backup_path_is_logged(self):
+        """다시 계산 전 사본: Work.backup_record 가 경로를 돌려주면(같은 이름이 있으면 새 이름) 그 경로를, 참·거짓이면 prev/pNNN.json 을 알린다."""
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from yeone_ocr import cli, prompts, __version__
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.state import Work
+        from yeone_ocr.schema import PageReading
+        class StampWork(Work):                                       # 새 규칙: 내용이 다른 사본이 이미 있으면 시각을 붙인 새 이름으로 남기고 그 경로
+            def backup_record(self, page):
+                dst = self.readings_dir / "prev" / f"p{page:03d}.20261011-120000.json"; dst.parent.mkdir(exist_ok=True)
+                dst.write_bytes(self.record_path(page).read_bytes()); return dst
+        self.assertEqual(R.backup_record(SimpleNamespace(backup_record=lambda n: "w/readings/prev/x.json"), 7), Path("w/readings/prev/x.json"))
+        self.assertIsNone(R.backup_record(SimpleNamespace(backup_record=lambda n: False), 7)); self.assertIsNone(R.backup_record(SimpleNamespace(backup_record=lambda n: None), 7))
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "a.pdf"); Path(pdf).write_bytes(b"")
+            merged = PageReading.model_validate({"pdf_page": 7, "regions": [{"id": "r1", "kind": "본문", "bbox": [0, 0, 1000, 1000],
+                                                                             "paras": [{"cols": [{"n": 1, "t": "大蓟根陶云有毒"}]}]}]}).model_dump()
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
+            def fake_remerge(r, layer, layer_d=None):
+                r = dict(r); r["version"] = __version__; return r
+            logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record
+            try:
+                R.log = logs.append; R.ensure_pages_read = lambda *a, **k: False; cli.resolve_mode = lambda *a, **k: None; cli.remerge_record = fake_remerge
+                for cls, name in ((Work, "readings/prev/p007.json"), (StampWork, "readings/prev/p007.20261011-120000.json")):
+                    work = cls(pdf, os.path.join(td, cls.__name__)); logs.clear()
+                    work.save_record(7, {"pdf_page": 7, "version": "0.6.0", "mode": prompts.MODE, "pass1": {"x": 1}, "pass2": {"r1": {"x": 1}}, "merged": merged})
+                    r = R.run_section(Namespace(pdf_pages="7", apply=False, policy="all", out=None, no_glyph_check=True), pdf_doc=[None] * 7, work=work, book=bk,
+                                      anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+                    warn = [l for l in logs if l.startswith("주의:") and "다시 계산" in l]
+                    self.assertEqual(len(warn), 1, logs); self.assertIn(f"{name} 에 남김", warn[0]); self.assertTrue(Path(work.dir, name).exists())
+                    self.assertEqual(r["remerged"], [7]); self.assertTrue(R.to_check(r))
+                # 사본을 남기지 않은 쪽(이미 있음)이 있으면 그 사실도 적는다
+                logs.clear(); R.note_remerged(SimpleNamespace(dir=Path(td)), [7, 8], [None, Path(td, "readings", "prev", "p008.json")])
+                self.assertIn("readings/prev/p008.json 에 남김(사본이 이미 있던 쪽은 그 사본)", logs[0])
+            finally:
+                R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record = old
+
+    def test_save_copy_leaves_no_temp_and_keeps_copy_when_swap_fails(self):
+        """교정본이 한컴에 열려 있어 바꿔 넣기가 실패해도: 교정본은 그대로 있고(사라지는 틈 없음) 임시 파일은 남지 않는다."""
+        from unittest import mock
+        from yeone_ocr.collate.collate import Item
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "b_교정.hwpx")
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); pi = bk.section(bk.anchors(), 1).start + 1
+            ed = Editor(bk, memo="notice"); ed.apply([Item("A", "replace", pi, 0, 1, "1", "9", "9", auto=True)]); ed.save_copy(out)
+            v1 = Path(out).read_bytes(); real = os.replace
+            def locked(bad):
+                def rep(src, dst, *a, **k):
+                    if bad(os.path.abspath(str(src)), os.path.abspath(str(dst))):
+                        raise PermissionError("한컴이 교정본을 열고 있음")
+                    return real(src, dst, *a, **k)
+                return rep
+            def edited(ch):
+                ed2 = Editor(HwpxBook(out), memo="notice"); ed2.apply([Item("A", "replace", pi, 0, 1, "9", ch, ch, auto=True)]); return ed2
+            # 교정본 자리에 바꿔 넣지 못함(열려 있음): 실패하되 교정본은 그대로(0.6.8 초판은 이미 .bak 으로 옮겨 교정본이 사라졌다), 임시 파일 없음
+            with mock.patch("os.replace", side_effect=locked(lambda s, d: d == os.path.abspath(out))):
+                with self.assertRaises(PermissionError):
+                    edited("8").save_copy(out)
+            self.assertEqual(Path(out).read_bytes(), v1); self.assertFalse([f for f in os.listdir(td) if ".tmp" in f], os.listdir(td))
+            # 교정본을 옮기지 못해도(열려 있음) 백업은 복사로 만들므로 저장된다(0.6.8 초판은 옮기다 실패해 임시 파일을 남겼다)
+            with mock.patch("os.replace", side_effect=locked(lambda s, d: s == os.path.abspath(out))):
+                edited("7").save_copy(out)
+            self.assertEqual(Path(td, "b_교정.bak.hwpx").read_bytes(), v1); self.assertTrue(HwpxBook(out).texts()[pi].startswith("7"))
+            self.assertFalse([f for f in os.listdir(td) if ".tmp" in f], os.listdir(td))
+
+
+class SingleReadAndStops(unittest.TestCase):
+    """0.6.8 검토 2 — 2차 판독이 빠진(1차만 읽은) 영역의 글자는 표시만, 3차 판별의 호출 상한·치명 오류는 멈춤, 교정본 저장 실패·구획 오류는 '완료' 가 아님."""
+    def setUp(self):
+        if not zh.available():
+            self.skipTest("opencc 없음")
+
+    @staticmethod
+    def _rec(regions: dict, ok2: list, failed2: list, unc: list | None = None) -> dict:
+        """regions: {영역 id: [문단 글]}. ok2 는 2차가 된 영역, failed2 는 2차가 실패한 영역(pass2_failed)."""
+        from yeone_ocr import prompts, __version__
+        from yeone_ocr.schema import PageReading
+        regs = [{"id": rid, "kind": "본문", "bbox": [0, 0, 1000, 1000], "paras": [{"cols": [{"n": 1, "t": t}]} for t in paras]} for rid, paras in regions.items()]
+        m = PageReading.model_validate({"pdf_page": 7, "regions": regs, "uncertain": unc or []}).model_dump()
+        p2 = {rid: {"columns": [{"col_from_right": 1, "text": "".join(regions[rid])}]} for rid in ok2}
+        return {"pdf_page": 7, "version": __version__, "mode": prompts.MODE, "pass1": m, "pass1_raw": m, "pass2": p2, "pass2_failed": failed2, "merged": m}
+
+    def test_single_read_region_is_marked_never_corrected(self):
+        """검토 재현(INT-1): 2차가 실패해 1차만으로 들어간 영역의 한 글자 차이(血熱↔血熟)가 A 로 자동 반영되고 '1차·2차 판독 일치' 메모가 붙었다.
+        그 영역의 글자는 어느 정책에서도 표시만(B1) — 영역 끝에서 빠진 글자(그 뒤가 다른 영역)도 지우지 않는다. 2차가 된 영역은 그대로 A."""
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from yeone_ocr import cli
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.state import Work
+        p1 = "1.『本草经疏』：大蓟根，陶云无毒，误也。女子赤白沃，血热所致也。"                         # 2차가 된 영역: 有→無 는 A
+        p2 = "2.『本草新编』：大蓟，破血止血其奇，但用于初起之血症大获奇。"                              # 1차만: 甚→其·功 빠짐은 표시만
+        rec = self._rec({"r1": ["大蓟", p1], "r2": [p2], "r3": ["小蓟"]}, ["r1", "r3"], ["r2"],
+                        [{"region_id": "r2", "context": "2차 판독 실패(서버 오류 503) — 이 영역은 1차 판독만으로 들어감, 원본 확인"}])
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "a.pdf"); Path(pdf).write_bytes(b"")
+            work = Work(pdf, os.path.join(td, "w")); work.save_record(7, rec)
+            src = make_book(os.path.join(td, "b.hwpx")); bk = HwpxBook(src); an = bk.anchors()
+            logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode
+            try:
+                R.log = logs.append; R.ensure_pages_read = lambda *a, **k: False; cli.resolve_mode = lambda *a, **k: None
+                r = R.run_section(Namespace(pdf_pages="7", apply=True, policy="all", out=None, no_glyph_check=True, memo="all"), pdf_doc=[None] * 7, work=work, book=bk,
+                                  anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+            finally:
+                R.log, R.ensure_pages_read, cli.resolve_mode = old
+            got = sorted((it.kind, it.action, it.auto, it.hwpx, it.ocr) for it in r["items"])
+            self.assertEqual(got, [("A", "replace", True, "有", "无"), ("B1", "mark", False, "功", ""), ("B1", "mark", False, "甚", "其")], got)
+            self.assertTrue(all("1차만" in it.note for it in r["items"] if it.kind == "B1"))
+            texts = HwpxBook(r["saved"]).texts()
+            self.assertTrue(any("陶云無毒" in t for t in texts)); self.assertTrue(any("破血止血甚奇" in t and "大獲奇功" in t for t in texts), texts)
+            self.assertEqual(r["single_read"], [7]); self.assertTrue(R.to_check(r))                     # '끝' 으로만 보이지 않게(3)
+            warn = [l for l in logs if l.startswith("주의:") and "1차만" in l]; self.assertEqual(len(warn), 1, logs); self.assertIn("쪽 7", warn[0])
+            self.assertIn("· 1차만</small>", Path(r["report"]).read_text(encoding="utf-8"))
+        self.assertEqual(R.single_read_regions(rec), {"r2"})
+        self.assertEqual([o for _, _, o in R.reading_paras(rec)], [False, False, True, False]); self.assertEqual(R.reading_text(rec)[2], (7, p2))
+        # 대조만: 1차만 영역의 끝에서 빠진 글자(뒤는 2차가 된 영역)는 표시만, 2차가 된 글끼리는 그대로 A
+        items = collate(hwpx_cells(["甲乙丙丁戊己"], 0), ocr_cells([(1, "甲乙丙", True), (1, "戊己", False)]), policy="all")
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("B1", "mark", False)])
+        items = collate(hwpx_cells(["甲乙丙丁戊己"], 0), ocr_cells([(1, "甲乙丙", False), (1, "戊己")]), policy="all")
+        self.assertEqual([(it.kind, it.action, it.auto) for it in items], [("A", "delete", True)])
+        items = collate(hwpx_cells(["甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌"], 0), ocr_cells([(1, "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收", True)]), policy="all")
+        self.assertEqual([(it.kind, it.auto) for it in items], [("B1", False)])                              # 긴 구간도 1차만이면 넣지 않음
+
+    def test_single_read_regions_cover_every_unchecked_kind(self):
+        """1차만 읽은 영역: 2차 실패([id]·{id: 사유}), 조각 일부 실패·덜 읽은 조각, 2차 답이 비어 pass2 에 없는 영역, 1차만 들어간 긴 구간.
+        2차를 끈 기록(pass2 가 비고 실패 표시 없음)과 제목 영역은 넣지 않는다."""
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.merge import LONG_SEG_NO_P2, LONG_SEG_DIFFER
+        base = lambda **k: {**self._rec({"a": ["甲乙"], "b": ["丙丁"], "c": ["戊己"]}, ["a", "b", "c"], []), **k}
+        self.assertEqual(R.single_read_regions(base()), set())
+        self.assertEqual(R.single_read_regions(base(pass2_failed={"b": "503"})), {"b"})
+        r = base(); r["pass2"]["b"]["pass2_failed"] = "503"; self.assertEqual(R.single_read_regions(r), {"b"})
+        r = base(); r["pass2"]["c"].update(chunks=3, chunks_read=2); self.assertEqual(R.single_read_regions(r), {"c"})
+        r = base(); del r["pass2"]["a"]; self.assertEqual(R.single_read_regions(r), {"a"})
+        for head in (LONG_SEG_NO_P2, LONG_SEG_DIFFER):
+            r = base(); r["merged"]["uncertain"] = [{"region_id": "c", "context": f"{head}(14자): 「…」"}]; self.assertEqual(R.single_read_regions(r), {"c"})
+        self.assertEqual(R.single_read_regions(base(pass2={})), set())                                    # --no-second-pass 로 읽은 쪽
+        r = base(); r["merged"]["regions"][0]["kind"] = "제목"; del r["pass2"]["a"]; self.assertEqual(R.single_read_regions(r), set())
+
+    def test_glyph_check_stop_halts_collate(self):
+        """검토 재현(ops-2): 3차 판별이 호출 상한·키·한도(치명)에 걸리면 남은 자리는 묻지 않고(표시 그대로) 이 구획은 마저 끝내되 '오류:' 줄을 남기고
+        전체 교정을 멈춘다(1). 예전에는 오류를 삼켜 '3곳 물음' 으로 적고 다음 구획으로 넘어가 끝 코드 0 이었다."""
+        import fitz
+        from argparse import Namespace
+        from types import SimpleNamespace
+        from yeone_ocr import cli
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.collate.collate import Item
+        with tempfile.TemporaryDirectory() as td:
+            bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors(); pi = bk.section(an, 1).start + 1
+            work = SimpleNamespace(dir=Path(td), load_record=lambda n: None, textlayer_path=lambda n: Path(td, "없음.json"))
+            stop = "모델 호출 상한 1회에 닿아 멈춤"
+            logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, R.collate, R.adjudicate_items, R.glyph_reader
+            try:
+                R.log = logs.append; R.ensure_pages_read = lambda *a, **k: False; cli.resolve_mode = lambda *a, **k: None
+                R.collate = lambda *a, **k: [Item("B1", "mark", pi, 0, 1, "問", "间", "", pdf_page=7, note="헷갈리기 쉬운 자형 쌍", oc_ctx="無「间」")]
+                R.adjudicate_items = lambda items, **k: {"asked": 1, "hwpx": 0, "ocr": 0, "undecided": 1, "stopped": stop, "skipped": 2}
+                R.glyph_reader = lambda a: object()
+                r = R.run_section(Namespace(pdf_pages="7", apply=False, policy="all", out=None), pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[],
+                                  matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+            finally:
+                R.log, R.ensure_pages_read, cli.resolve_mode, R.collate, R.adjudicate_items, R.glyph_reader = old
+            self.assertEqual(r["halt"], stop); self.assertTrue(Path(r["report"]).exists())                  # 구획은 마저 끝냄(보고 남김)
+            self.assertTrue(any(l.startswith("오류: 자형 3차 판별을 멈췄습니다") and stop in l for l in logs), logs)
+            self.assertTrue(any("멈춤으로 못 물음 2" in l for l in logs))
+            # 전체 교정·한 구획: 1, 다음 구획으로 넘어가지 않음
+            pdf = os.path.join(td, "a.pdf"); d = fitz.open(); d.new_page(); d.save(pdf); d.close()
+            args = Namespace(pdf=pdf, work=os.path.join(td, "w"), hwpx=bk.path, all=True, anchor_source="hwpx", heading_styles="", out=None)
+            calls = []
+            def halted(*a, **k):
+                calls.append(1); return {"section": "x", "pages": (7, 7), "summary": {"A": 0, "B1": 1, "B2": 0, "C": 0, "auto": 0, "mark": 1}, "report": "x.html",
+                                         "saved": None, "items": [], "halt": stop}
+            old = R.run_section, R.find_title_pages
+            try:
+                R.run_section = halted; R.find_title_pages = lambda *a, **k: (7, 7)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(R.cmd_collate(args), 1)
+                    self.assertEqual(len(calls), 1)
+                    self.assertTrue(json.loads(Path(td, "w", "collate", "_전체_요약.json").read_text(encoding="utf-8"))["failed"])
+                    self.assertEqual(R.cmd_collate(Namespace(**{**vars(args), "all": False, "anchor_index": 2})), 1)
+            finally:
+                R.run_section, R.find_title_pages = old
+
+    def test_save_failure_or_crashed_section_is_not_success(self):
+        """검토 재현(INT-3): 한컴에 열린 교정본이라 저장하지 못하면 전체 교정이 '건너뜀' 줄만 남기고 끝 코드 0('끝')이었다.
+        저장 실패는 '오류:' 줄과 함께 멈추고(1), 그 밖의 구획 오류는 '오류:' 줄을 남기고 계속하되 3."""
+        import fitz
+        from argparse import Namespace
+        from unittest import mock
+        from yeone_ocr import prompts, __version__
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.state import Work
+        from yeone_ocr.schema import PageReading
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "a.pdf"); d = fitz.open()
+            for _ in range(8):
+                d.new_page()
+            d.save(pdf); d.close()
+            work = Work(pdf, os.path.join(td, "w"))
+            paras = ["大蓟", "1.『本草经疏』：大蓟根，陶云有毒，误也。女子赤白沃，血熟所致也。", "2.『本草新编』：大蓟，破血止血甚奇，但用于初起之血症大获奇功。",
+                     "小蓟", "小蓟，性凉。治吐血衄血。", "人参", "人参，大补元气。"]
+            m = PageReading.model_validate({"pdf_page": 7, "regions": [{"id": "r1", "kind": "본문", "bbox": [0, 0, 1000, 1000],
+                                                                        "paras": [{"cols": [{"n": 1, "t": t}]} for t in paras]}]}).model_dump()
+            work.save_record(7, {"pdf_page": 7, "version": __version__, "mode": prompts.MODE, "pass1": m, "pass2": {"r1": {"columns": [{"col_from_right": 1, "text": "x"}]}}, "merged": m})
+            src = make_book(os.path.join(td, "b.hwpx"))
+            args = Namespace(pdf=pdf, work=str(work.dir), hwpx=src, all=True, anchor_index=None, apply=True, policy="sure", no_glyph_check=True, mode=prompts.MODE,
+                             anchor_source="hwpx", heading_styles="", out=None, pdf_pages=None, memo=None)
+            secs = []; real = R.run_section
+            def counted(*a, **k):
+                secs.append(k["idx"]); return real(*a, **k)
+            old = R.find_title_pages, R.ensure_pages_read, R.run_section
+            try:
+                R.find_title_pages = lambda *a, **k: (7, 7); R.ensure_pages_read = lambda *a, **k: False; R.run_section = counted
+                buf = io.StringIO()
+                with mock.patch.object(R.Editor, "save_copy", side_effect=PermissionError(13, "다른 프로그램이 파일을 쓰고 있음")), contextlib.redirect_stdout(buf):
+                    self.assertEqual(R.cmd_collate(args), 1)
+                    self.assertEqual(R.cmd_collate(Namespace(**{**vars(args), "all": False, "section": "大薊"})), 1)
+                lines = buf.getvalue().splitlines()
+                self.assertEqual(len(secs), 2, lines)                                                      # 전체 교정은 첫 구획에서 멈춤(+ 한 구획 1번)
+                self.assertEqual(sum(1 for l in lines if l.startswith("오류:") and "저장하지 못했습니다" in l), 2, lines)
+                self.assertFalse(Path(R.corrected_path(src)).exists())
+                # 저장과 무관한 구획 오류: '오류:' 줄, 다음 구획은 계속, 3
+                secs.clear(); buf = io.StringIO()
+                def crash_first(*a, **k):
+                    secs.append(k["idx"])
+                    if len(secs) == 1:
+                        raise ValueError("이상한 문단")
+                    return real(*a, **k)
+                R.run_section = crash_first
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(R.cmd_collate(args), 3)
+                lines = buf.getvalue().splitlines()
+                self.assertTrue(any(l.startswith("오류:") and "이상한 문단" in l for l in lines), lines); self.assertGreater(len(secs), 1)
+                self.assertTrue(json.loads(Path(work.dir, "collate", "_전체_요약.json").read_text(encoding="utf-8"))["partial"])
+            finally:
+                R.find_title_pages, R.ensure_pages_read, R.run_section = old

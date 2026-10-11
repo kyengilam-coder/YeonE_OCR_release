@@ -6,8 +6,8 @@
   run 바로 아래의 hp:tab / ctrl(id=tab) 은 "\\t" 한 글자.
 - 고친 글자는 원래 글자 모양을 바탕으로 색·형광펜·밑줄만 바꾼 글자 모양(charPr)을 새로 만들어 입힌다(일반 OCR 과 같은 확인 등급).
     초록(점선 밑줄)  자동 교정 — 판독(1차·2차 일치)대로, 또는 3차 자형 판별로 승격한 것(A)
-    파랑(파선 밑줄)  자동 교정 — 간체 한 글자가 여러 번체로 갈려 사전으로 고른 것(B2), 글자층·반복 근거로 승격한 것, 긴 구간 삽입(C)
-    빨강(굵게+노랑) 확인 요청 — 글자는 HWPX 그대로(B1·C 표시, 반영하지 않은 제안)
+    파랑(파선 밑줄)  자동 교정 — 간체 한 글자가 여러 번체로 갈려 사전으로 고른 것(B2), 글자층·반복 근거로 승격한 것
+    빨강(굵게+노랑) 확인 요청 — 글자는 HWPX 그대로(B1·C 표시, 긴 구간 삽입 제안 — 어느 정책에서도 자동으로 넣지 않음, 반영하지 않은 제안)
   교정이 만든 글자 모양에는 보이지 않는 표지(취소선 '없음'의 색 = 등급 색)를 단다 — 일반 OCR 로 만든 문서의 같은 색 글자와 가르려고.
 - 메모(memo_mode): notice(기본) = 색으로 전할 수 없는 고지 사항에만 — 지운 글자, 폭 없는 표시, 구조 차이(C), 반영하지 않은 제안,
   한글 풀이 자리 — 와 문서 앞의 범례 하나. all = 모든 항목에 근거(0.6.3 까지의 방식). inline = 메모 없이 고지만 글 뒤(폭 있는 표시는 그 범위 뒤) 〔…〕
@@ -17,7 +17,7 @@
 - 원본 파일은 덮어쓰지 않고 사본으로 저장한다.
 """
 from __future__ import annotations
-import random, time
+import os, random, shutil, time
 from copy import deepcopy
 from dataclasses import dataclass
 from lxml import etree
@@ -545,14 +545,15 @@ class Editor:
 
     def _memo_text(self, it: Item) -> str:
         where = f"PDF {it.pdf_page}쪽" if it.pdf_page else "PDF"
-        if not it.auto and it.action in ("replace", "insert", "delete"):     # 반영하지 않은 제안(교정 정책) — 고쳤다고 적지 않는다
+        if not it.auto and it.action in ("replace", "insert", "delete"):     # 반영하지 않은 제안(교정 정책·긴 구간) — 고쳤다고 적지 않는다
             what = {"replace": f"「{it.hwpx}」 → 「{it.new}」", "insert": f"빠진 {'구간' if it.kind == 'C' else '글자'} 「{it.new[:60]}」 넣기",
                     "delete": f"「{it.hwpx}」 지우기(원본에 없음)"}[it.action]
+            why = f"긴 구간({len(it.ocr)}자)은 어느 정책에서도 자동으로 넣지 않음 — 원본 확인 뒤 사람이 넣음" if it.kind == "C" else "교정 정책상 반영하지 않음"
             return (f"[제안] {what} · {where} 판독 「{(it.ocr or '-')[:60]}」" + (f" · 후보 {'/'.join(it.candidates)}" if it.candidates else "")
-                    + " · 교정 정책상 반영하지 않음, 글자는 그대로 둠")
+                    + f" · {why}, 글자는 그대로 둠")
         if it.kind == "A":
             what = {"replace": f"원래 「{it.hwpx}」 → 「{it.new}」", "insert": f"빠진 글자 「{it.new}」 넣음", "delete": f"「{it.hwpx}」 지움(원본에 없음)"}[it.action]
-            return f"[자동 교정] {what} · {where} 판독 「{it.ocr or '-'}」 · 1차·2차 판독 일치"
+            return f"[자동 교정] {what} · {where} 판독 「{it.ocr or '-'}」 · 판독에 불확실 표시 없음(2차를 했으면 1차·2차 일치)"
         if it.kind == "B2":
             return f"[자동 교정·확인] 원래 「{it.hwpx}」 → 「{it.new}」 · 간체 「{it.ocr}」 가 여러 번체로 갈라짐: {'/'.join(it.candidates)} · {where}"
         if it.kind == "B1":
@@ -565,8 +566,23 @@ class Editor:
 
     # ----- 저장 -----
     def save_copy(self, out_path: str) -> str:
+        """같은 폴더의 임시 파일(<이름>.tmp.hwpx)에 다 쓴 뒤 바꿔 넣는다 — 쓰다 멈춰도 쌓아 온 교정본이 깨지지 않게.
+        있던 교정본은 <이름>.bak.hwpx 로 한 세대만 남긴다(이전 .bak 은 덮어씀). 백업은 옮기지 않고 복사 — 바꿔 넣기가 실패해도
+        (한컴에 열린 교정본 등) 교정본이 사라지는 틈이 없고, 어디서 실패하든 임시 파일은 지운다."""
         for sec in getattr(self.doc, "sections", []) or []:
             if hasattr(sec, "mark_dirty"):
                 sec.mark_dirty()
-        self.doc.save_to_path(out_path)
+        out = str(out_path); root, ext = os.path.splitext(out); ext = ext or ".hwpx"
+        tmp = f"{root}.tmp{ext}"                        # 확장자는 그대로(.hwp 로 저장하면 python-hwpx 가 확장자로 가른다)
+        try:
+            self.doc.save_to_path(tmp)
+            if os.path.exists(out):
+                shutil.copy2(out, f"{root}.bak{ext}")
+            os.replace(tmp, out)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
         return out_path

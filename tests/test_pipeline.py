@@ -520,8 +520,12 @@ class GuiConfig(unittest.TestCase):
         from yeone_ocr.gui import upgrade_config, DEFAULTS, SPEED_DEFAULTS_VERSION
         old = dict(DEFAULTS); old.update({"workers": 3, "second_model": "", "checkpoint": 20}); old.pop("speed_defaults", None)
         up = upgrade_config(old)
-        self.assertEqual(up["workers"], 6); self.assertEqual(up["second_model"], "auto")
+        self.assertEqual(up["workers"], 8); self.assertEqual(up["second_model"], "auto")                  # 0.6.8: 동시 기본 8
         self.assertEqual(up["speed_defaults"], SPEED_DEFAULTS_VERSION)
+        six = dict(DEFAULTS); six.update({"workers": 6, "collate_policy": "all", "speed_defaults": 5})    # 0.6.7 까지의 기본값(6·all)은 새 기본값으로
+        self.assertEqual((upgrade_config(six)["workers"], upgrade_config(six)["collate_policy"]), (8, "sure"))
+        four = dict(DEFAULTS); four.update({"workers": 4, "collate_policy": "memo", "speed_defaults": 5})  # 직접 고른 값은 그대로
+        self.assertEqual((upgrade_config(four)["workers"], upgrade_config(four)["collate_policy"]), (4, "memo"))
         # 사용자가 직접 바꾼 값은 유지
         mine = dict(DEFAULTS); mine.update({"workers": 5, "second_model": "gemini-2.5-flash"}); mine.pop("speed_defaults", None)
         up2 = upgrade_config(mine)
@@ -969,6 +973,144 @@ class AdjudicateBatch(unittest.TestCase):
         self.assertEqual(calls, [2])                                                             # 첫 묶음 뒤 중지 → 남은 자리는 묻지 않고 기록도 남기지 않는다
         st = rec["adjudicate_stats"]; self.assertEqual((st["failed"], st["undecided"], st["skipped"], st["batched"]), (0, 2, 1, 2))
         self.assertEqual(len(rec["adjudications"]), 2)
+
+    def test_batches_are_split_evenly(self):
+        """9자리를 8장씩 묶으면 5+4 로(8+1 이 아니라). 묶음 수는 ⌈n/batch⌉, 크기는 거의 같고 batch 를 넘지 않는다. batch=2 의 홀수 장은 마지막 하나만 낱개."""
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page, even_chunks
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, GlyphChoice
+        self.assertEqual([len(c) for c in even_chunks(list(range(9)), 8)], [5, 4])
+        self.assertEqual([len(c) for c in even_chunks(list(range(17)), 8)], [6, 6, 5])
+        self.assertEqual([len(c) for c in even_chunks(list(range(16)), 8)], [8, 8])
+        self.assertEqual([len(c) for c in even_chunks(list(range(3)), 2)], [2, 1])
+        self.assertEqual(even_chunks(list(range(5)), 8), [[0, 1, 2, 3, 4]]); self.assertEqual(even_chunks([], 8), [])
+        self.assertEqual(sum(even_chunks(list(range(9)), 8), []), list(range(9)))                   # 차례는 그대로
+        reg = Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[
+            Column(col_from_right=k + 1, text=f"甲〔入/人〕乙{k}") for k in range(9)])])
+        pr = PageReading(pdf_page=1, regions=[reg]); rec = {"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}
+
+        class R:
+            model = "m"
+            def __init__(self): self.sizes = []; self.single = 0
+            def adjudicate_many(self, crops, h, p):
+                self.sizes.append(len(crops)); return {sid: GlyphChoice(choice="", evidence="뭉개짐", window="") for sid, *_ in crops}
+            def adjudicate(self, *a, **k): self.single += 1; return GlyphChoice(choice="", evidence="", window="")
+        r = R(); out = adjudicate_page(rec, Image.new("L", (900, 1300), 255), r, True, batch=8)
+        self.assertEqual((r.sizes, r.single, out["adjudicate_stats"]["batched"]), ([5, 4], 0, 9))
+        r = R(); adjudicate_page(dict(rec), Image.new("L", (900, 1300), 255), r, True, batch=4)
+        self.assertEqual((r.sizes, r.single), ([3, 3, 3], 0))
+        pr3 = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[
+            Column(col_from_right=k + 1, text=f"甲〔入/人〕乙{k}") for k in range(3)])])])
+        r = R(); adjudicate_page({"pdf_page": 1, "pass1": pr3.model_dump(), "merged": pr3.model_dump()}, Image.new("L", (900, 1300), 255), r, True, batch=2)
+        self.assertEqual((r.sizes, r.single), ([2], 1))
+
+    def test_apply_choice_requires_neighbour_match(self):
+        """같은 열에 같은 표시가 둘이고 뒤 자리만 확정 기록이 있는데, 다시 적용할 때 글이 한 글자 밀려 있으면(사람이 고침·다시 계산)
+        글자 번호가 맞는 첫 표시가 아니라 앞뒤 글자가 맞는 둘째 표시를 바꾼다(이전엔 거리만 보고 첫 표시를 바꿨다).
+        앞뒤 글자가 하나도 안 맞는 자리뿐이면 손대지 않고 못 찾음으로 센다."""
+        from dataclasses import asdict
+        from yeone_ocr.adjudicate import find_sites, apply_choice, apply_adjudications
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, region_text
+        def page(text):
+            return PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text=text)])])])
+        sites = find_sites(page("甲〔入/人〕〔入/人〕丁"))
+        self.assertEqual([(s.char_index, s.pre, s.post) for s in sites], [(1, "甲", "入丁"), (2, "甲入", "丁")])
+        shifted = page("X甲〔入/人〕〔入/人〕丁")                                                        # 첫 표시가 기록의 글자 번호(2) 자리에 와 있다
+        self.assertTrue(apply_choice(shifted, sites[1], "人")); self.assertEqual(region_text(shifted.regions[0]), "X甲〔入/人〕人丁")
+        shifted = page("X甲〔入/人〕〔入/人〕丁"); st = {}
+        self.assertEqual(apply_adjudications(shifted, [{**asdict(sites[1]), "choice": "人"}], st), 1)
+        self.assertEqual((region_text(shifted.regions[0]), st["unmapped"]), ("X甲〔入/人〕人丁", 0))
+        # 제자리의 표시는 이웃이 안 맞아도(이웃 표시가 다른 후보로 확정됨) 받는다 — 단, 이웃이 맞는 다른 자리가 없을 때
+        own = page("甲人〔入/人〕丁")                                                                   # 앞 표시가 人 으로 확정된 뒤
+        self.assertTrue(apply_choice(own, sites[1], "入")); self.assertEqual(region_text(own.regions[0]), "甲人入丁")
+        # 바로 옆 글자가 다른 후보로 확정된 표시였고(〔於/不〕→不) 글이 한 글자 밀렸어도 그 옆 글자(也)가 맞으면 받는다
+        s2 = find_sites(page("也〔於/不〕〔此/肝〕"))[1]; self.assertEqual((s2.char_index, s2.pre, s2.post), (2, "也於", ""))
+        near = page("X也不〔此/肝〕"); self.assertTrue(apply_choice(near, s2, "肝")); self.assertEqual(region_text(near.regions[0]), "X也不肝")
+        # 거리가 가까워도 앞뒤 글자가 하나도 안 맞으면 다른 자리의 표시 — 손대지 않는다
+        other = page("乙丙丁〔入/人〕戊"); st = {}
+        self.assertFalse(apply_choice(other, sites[1], "人"))
+        self.assertEqual(apply_adjudications(other, [{**asdict(sites[1]), "choice": "人"}], st), 0)
+        self.assertEqual((region_text(other.regions[0]), st["unmapped"]), ("乙丙丁〔入/人〕戊", 1))
+        # 앞뒤 글자 기록이 없는 옛 기록은 가장 가까운 표시(이전 규칙)
+        bare = {**asdict(sites[1]), "pre": "", "post": "", "choice": "人"}
+        self.assertEqual(apply_adjudications(other, [bare]), 1); self.assertEqual(region_text(other.regions[0]), "乙丙丁人戊")
+
+    def test_apply_choice_keeps_own_site_when_neighbours_were_just_decided(self):
+        """열 끝 표시의 바로 앞 두 자리가 같은 차례에서 다른 후보로 정해지면(〔於/不〕〔於/不〕→不不, 〔效效/先〕→先) 기록한 앞 글자가 제자리 옆과
+        안 맞아 보여, 같은 열의 미정 〔日/曰〕 을 바꾸고 정한 자리는 표시로 남기던 문제 — 3차 판별 때도, 다시 계산 뒤 다시 적용할 때도."""
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page, apply_adjudications
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, GlyphChoice
+        def page(text):
+            return PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[100, 50, 300, 950], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text=text)])])])
+
+        class R:
+            model = "m"
+            def __init__(self, answers): self.answers = list(answers)
+            def adjudicate(self, crop, ask, horizontal, pdf_page): return GlyphChoice(choice=self.answers.pop(0), evidence="획", window="")
+        for text, answers, want in (("於〔日/曰〕乙丙丁戊〔於/不〕〔於/不〕〔日/曰〕", ["", "不", "不", "曰"], "於〔日/曰〕乙丙丁戊不不曰"),
+                                    ("效〔日/曰〕乙丙丁戊〔效效/先〕〔日/曰〕", ["", "先", "曰"], "效〔日/曰〕乙丙丁戊先曰")):
+            pr = page(text)
+            rec = adjudicate_page({"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}, Image.new("L", (900, 1300), 255), R(answers), True, batch=1)
+            self.assertEqual(PageReading.model_validate(rec["merged"]).regions[0].paragraphs[0].columns[0].text, want)
+            fresh = page(text); st = {}
+            self.assertEqual(apply_adjudications(fresh, rec["adjudications"], st), len([a for a in answers if a]))
+            self.assertEqual((fresh.regions[0].paragraphs[0].columns[0].text, st["unmapped"]), (want, 0))
+
+    def test_apply_choice_random_runs_change_only_decided_sites(self):
+        """무작위 열(같은 표시가 되풀이되고 열 끝에 표시가 몰림, 길이가 바뀌는 후보 〔效效/先〕): 3차를 1~3차례 돌리며 차례마다 무작위 자리만 정한다.
+        판별 때 바뀐 글, 원본에 기록을 다시 적용한 글(다시 계산), 차례 안 기록 차례를 섞어 다시 적용한 글이 모두 '정한 자리(참 번호)만 고른 글자,
+        미정 자리는 표시 그대로' 와 같아야 한다."""
+        import random
+        from PIL import Image
+        from yeone_ocr.adjudicate import adjudicate_page, apply_adjudications
+        from yeone_ocr.schema import PageReading, Region, Paragraph, Column, GlyphChoice
+        img = Image.new("L", (300, 900), 255)
+        def page(texts):
+            return PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[50, 100, 950, 300],
+                                                           paragraphs=[Paragraph(columns=[Column(col_from_right=c + 1, text=t) for c, t in enumerate(texts)])])])
+        def render(cols, picks):
+            return ["".join(t if isinstance(t, str) else picks.get(t[0], f"〔{t[1]}/{t[2]}〕") for t in toks) for toks in cols]
+        def texts(p):
+            return [c.text for c in p.regions[0].paragraphs[0].columns]
+
+        class R:
+            model = "m"
+            def __init__(self, answers): self.answers = list(answers)
+            def adjudicate(self, crop, ask, horizontal, pdf_page): return GlyphChoice(choice=self.answers.pop(0), evidence="획", window="")
+        marks = [("日", "曰"), ("於", "不"), ("效效", "先")]
+        for seed in range(120):
+            rng = random.Random(seed); cols = []; k = 0
+            for _ in range(rng.randint(1, 2)):
+                toks = [rng.choice("於日不乙") if rng.random() < 0.5 else None for _ in range(rng.randint(3, 6))] + [None] * rng.randint(1, 3)   # None = 표시, 열 끝에 몰림
+                for n, t in enumerate(toks):
+                    if t is None:
+                        toks[n] = (k, *rng.choice(marks)); k += 1
+                cols.append(toks)
+            orig = render(cols, {}); rec = {"pdf_page": 1, "pass1": page(orig).model_dump(), "merged": page(orig).model_dump()}; picks = {}
+            for _ in range(rng.randint(1, 3)):
+                answers = []
+                for kk, a, b in (t for toks in cols for t in toks if not isinstance(t, str) and t[0] not in picks):   # find_sites 차례
+                    answers.append(rng.choice([a, b]) if rng.random() < 0.6 else "")
+                    if answers[-1]:
+                        picks[kk] = answers[-1]
+                rec = adjudicate_page(rec, img, R(answers), True, batch=1, ticks=False)
+                self.assertEqual(texts(PageReading.model_validate(rec["merged"])), render(cols, picks), (seed, orig))
+            recs = rec["adjudications"]
+            shuffled = [a for r in sorted({a["run"] for a in recs}) for a in rng.sample([a for a in recs if a["run"] == r], sum(a["run"] == r for a in recs))]
+            for rs in (recs, shuffled):
+                fresh = page(orig); st = {}
+                apply_adjudications(fresh, rs, st)
+                self.assertEqual((texts(fresh), st["unmapped"]), (render(cols, picks), 0), (seed, orig))
+
+    def test_window_symbols_between_neighbours_are_not_counted(self):
+        """조각 검사(_around)는 앞뒤 글자 사이의 글자만 센다. 모델이 w 에 부호를 넣으면(〔曰〕·︑曰︒·▲曰▲) 맞는 창을 '조각 위치가 어긋남' 으로
+        버리던 문제. □(못 읽은 글자)는 글자로 센다."""
+        from yeone_ocr.adjudicate import window_ok, window_matches
+        for w in ("子〔曰〕不", "子︑曰︒不", "子▲曰▲不", "子○曰○不", "子□不", "子 曰 不 亦"):
+            self.assertTrue(window_ok(w, "學而子", "日", "不亦說"), w); self.assertTrue(window_matches(w, "學而子", "不亦說"), w)
+        for w in ("子□□□不", "子甲乙丙不", "不x子"):
+            self.assertFalse(window_ok(w, "學而子", "日", "不亦說"), w); self.assertFalse(window_matches(w, "學而子", "不亦說"), w)
 
     def test_many_prompt_and_schema(self):
         from yeone_ocr.prompts import adjudicate_many_prompt
@@ -1424,3 +1566,179 @@ class GlyphReadersAndEstimate(unittest.TestCase):
         labels = {r["model"]: r["label"] for r in e["rows"]}
         self.assertEqual(labels["gemini-2.5-pro (3차)"], "3차 · 글자 판별"); self.assertEqual(labels["gemini-2.5-flash (3차 보완)"], "3차 · 글자 판별")
         self.assertEqual(labels["gemini-2.5-pro"], "1차 · 쪽 전체 판독"); self.assertIsNotNone(e["usd_low"]); self.assertEqual(e["calls"], 6)
+
+
+# ---------------- 0.6.8: 호출 설정 오류·형식 오류 재시도 · 창 프로그램의 순수 논리 ----------------
+class GeminiRetries(unittest.TestCase):
+    """호출 설정을 못 만드는 것(옛 SDK)은 응답 오류가 아니라 바로 멈춤(fatal, 호출 없이). 응답 형식 오류는 3번까지, 서버 오류는 5번."""
+    def _reader(self, gen):
+        from yeone_ocr import reader_gemini as rg
+        calls = []
+        class Models:
+            def generate_content(self, **kw):
+                calls.append(kw); return gen(len(calls))
+        class Client:
+            models = Models()
+        orig = rg.make_client; rg.make_client = lambda key, vx=False, timeout_ms=0: Client()
+        try:
+            r = rg.GeminiReader(model="gemini-2.5-pro", api_key="AIza" + "a" * 35, use_cache=False)
+        finally:
+            rg.make_client = orig
+        return r, calls
+
+    def test_config_error_is_fatal_without_calling(self):
+        import pydantic
+        from yeone_ocr import reader_gemini as rg
+        class Out(pydantic.BaseModel):
+            x: int
+        r, calls = self._reader(lambda k: None)
+        r._config = lambda schema: (_ for _ in ()).throw(TypeError("ThinkingConfig got an unexpected keyword 'thinking_level'"))
+        with self.assertRaises(rg.ReaderError) as cm:
+            r._call(None, "p", Out, extra_parts=["p"])
+        self.assertTrue(cm.exception.fatal); self.assertIn("SDK", str(cm.exception)); self.assertIn("thinking_level", str(cm.exception))
+        self.assertEqual(calls, [])                                                            # 호출·기다림 없이
+
+    def test_format_errors_stop_after_three_but_server_errors_get_five(self):
+        import pydantic
+        from yeone_ocr import reader_gemini as rg
+        class Out(pydantic.BaseModel):
+            x: int
+        class R:
+            text = "이것은 JSON 이 아님"; usage_metadata = None
+        slept = []; old = rg.time.sleep; rg.time.sleep = slept.append
+        try:
+            r, calls = self._reader(lambda k: R())
+            with self.assertRaises(rg.ReaderError) as cm:
+                r._call(None, "p", Out, extra_parts=["p"])
+            self.assertFalse(cm.exception.fatal); self.assertEqual(len(calls), 3); self.assertIn("3회 시도", str(cm.exception)); self.assertIn("JSON", str(cm.exception))
+            self.assertEqual(slept, [1, 2])
+            class S(Exception):
+                code = 503
+            slept.clear(); r2, calls2 = self._reader(lambda k: (_ for _ in ()).throw(S("503 UNAVAILABLE")))
+            with self.assertRaises(rg.ReaderError) as cm2:
+                r2._call(None, "p", Out, extra_parts=["p"])
+            self.assertEqual(len(calls2), 5); self.assertFalse(cm2.exception.fatal); self.assertEqual(slept, [1, 2, 4, 8, 16])
+            class Ok:
+                text = '{"x": 3}'; usage_metadata = None
+            r3, calls3 = self._reader(lambda k: R() if k < 3 else Ok())                   # 세 번째에 맞게 오면 그대로
+            self.assertEqual(r3._call(None, "p", Out, extra_parts=["p"]).x, 3); self.assertEqual(len(calls3), 3)
+        finally:
+            rg.time.sleep = old
+        try:
+            Out.model_validate_json("nope")
+        except Exception as e:
+            self.assertTrue(rg.is_format_error(e))
+        self.assertFalse(rg.is_format_error(RuntimeError("timed out")))
+
+
+def _gui():
+    """tkinter 가 없는 환경(검사 서버)에서도 창 모듈의 순수 논리를 검사할 수 있게 가짜 tkinter 를 끼운다. 있으면 진짜를 쓴다."""
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        import types
+        def cls(n):
+            return type(n, (), {"__init__": lambda self, *a, **k: None})
+        def getter(n):
+            return cls(n) if n[:1].isupper() else (lambda *a, **k: None)
+        tk = types.ModuleType("tkinter"); tk.__getattr__ = getter; tk.TclError = type("TclError", (Exception,), {})
+        for sub in ("ttk", "filedialog", "messagebox", "simpledialog", "font"):
+            m = types.ModuleType("tkinter." + sub); m.__getattr__ = getter; setattr(tk, sub, m); sys.modules["tkinter." + sub] = m
+        sys.modules["tkinter"] = tk
+    from yeone_ocr import gui
+    return gui
+
+
+class GuiLogic(unittest.TestCase):
+    """0.6.8 — 창 프로그램의 순수 논리: 끝난 명령의 말(실패한 쪽 있음), 닫을 때 기다리기, 설정 파일 권한, 새 기본값 입히기."""
+    def test_finish_words(self):
+        gui = _gui()
+        self.assertEqual(gui.finish_words(0)[0], "ok"); self.assertEqual(gui.finish_words(None)[0], "ok")
+        kind, status, head = gui.finish_words(3)
+        self.assertEqual(kind, "partial"); self.assertIn("실패한 쪽 있음", status); self.assertIn("진행 기록 확인", status); self.assertEqual(head, "100% · 완료(실패 쪽 있음)")
+        self.assertEqual(gui.finish_words(130)[:2], ("stopped", "중지됨")); self.assertEqual(gui.finish_words(1)[0], "error"); self.assertEqual(gui.finish_words(2)[0], "error")
+        self.assertEqual(gui.finish_words(0)[2], "100% · 완료")
+        # 책갈피 교정의 3 은 쪽 실패가 아니라 '주의:'(교정본 옮김·다시 계산) — '실패한 쪽' 이라 하지 않는다
+        kind, status, head = gui.finish_words(3, ["주의: 교정본 a_교정.hwpx 의 구획 목록이 원본과 달라 a_교정_이전_1.hwpx 로 옮겼습니다"])
+        self.assertEqual(kind, "partial"); self.assertIn("확인할 것", status); self.assertNotIn("실패", status + head)
+        self.assertIn("실패한 쪽 있음", gui.finish_words(3, ["오류: 판독에 실패한 쪽 1개: 2"])[1])
+        k, msg = gui.finish_alert(3, "HWPX 전체 교정", ["주의: 비교 표시를 다시 계산했습니다"])
+        self.assertEqual(k, "warning"); self.assertIn("확인할 것", msg); self.assertNotIn("실패한 쪽", msg)
+
+    def test_keep_waiting_for_worker_on_close(self):
+        gui = _gui()
+        self.assertTrue(gui.keep_waiting(True, 100.0, 105.0)); self.assertFalse(gui.keep_waiting(False, 100.0, 105.0))
+        self.assertFalse(gui.keep_waiting(True, 100.0, 100.0 + gui.CLOSE_WAIT_SEC))                  # 한도가 차면 더 기다리지 않는다
+        self.assertTrue(gui.keep_waiting(True, 0.0, 1.0, limit=2.0)); self.assertFalse(gui.keep_waiting(True, 0.0, 2.0, limit=2.0))
+
+    def test_save_config_is_private(self):
+        import stat, tempfile
+        gui = _gui(); old = gui.CONFIG_PATH
+        with tempfile.TemporaryDirectory() as td:
+            gui.CONFIG_PATH = Path(td) / "cfg" / "config.json"
+            try:
+                gui.save_config({"api_key": "AIza" + "x" * 35, "workers": 8})
+                self.assertEqual(json.loads(gui.CONFIG_PATH.read_text(encoding="utf-8"))["workers"], 8)
+                if os.name != "nt":
+                    self.assertEqual(stat.S_IMODE(gui.CONFIG_PATH.stat().st_mode), 0o600)
+                gui.CONFIG_PATH.chmod(0o644); gui.save_config({"workers": 1})                      # 이전 판이 만든 느슨한 파일도 조인다
+                if os.name != "nt":
+                    self.assertEqual(stat.S_IMODE(gui.CONFIG_PATH.stat().st_mode), 0o600)
+                self.assertEqual(json.loads(gui.CONFIG_PATH.read_text(encoding="utf-8")), {"workers": 1})
+            finally:
+                gui.CONFIG_PATH = old
+
+    def test_new_defaults_match_cli_and_upgrade(self):
+        gui = _gui()
+        from yeone_ocr.cli import build_parser
+        self.assertEqual((gui.DEFAULTS["workers"], gui.DEFAULTS["collate_policy"], gui.SPEED_DEFAULTS_VERSION), (8, "sure", 6))
+        ap = build_parser()
+        self.assertEqual(ap.parse_args(["run", "x.pdf"]).workers, gui.DEFAULTS["workers"]); self.assertEqual(ap.parse_args(["adjudicate", "x.pdf"]).workers, gui.DEFAULTS["workers"])
+        self.assertEqual(ap.parse_args(["collate", "x.pdf", "--hwpx", "a.hwpx"]).policy, gui.DEFAULTS["collate_policy"])
+        old = dict(gui.DEFAULTS); old.update({"workers": 6, "collate_policy": "all", "speed_defaults": 5})
+        up = gui.upgrade_config(old); self.assertEqual((up["workers"], up["collate_policy"], up["speed_defaults"]), (8, "sure", 6))
+        mine = dict(gui.DEFAULTS); mine.update({"workers": 4, "collate_policy": "memo", "speed_defaults": 5})
+        up2 = gui.upgrade_config(mine); self.assertEqual((up2["workers"], up2["collate_policy"]), (4, "memo"))
+        new = {"workers": 6, "collate_policy": "all", "speed_defaults": 6}
+        up3 = gui.upgrade_config(new); self.assertEqual((up3["workers"], up3["collate_policy"]), (6, "all"))   # 새 판에서 직접 고른 6·all 은 그대로
+
+
+class GuiFinishAlert(unittest.TestCase):
+    """끝난 뒤 알림창: 성공(0)이어도 '주의:' 줄(책갈피 교정의 다시 계산·교정본 옮김 등)을 알리고, 3차 판별을 못 마친 것(4)은 실패한 쪽(3)과 다른 말로."""
+    def test_finish_alert_words(self):
+        gui = _gui()
+        kind, status, head = gui.finish_words(4)
+        self.assertEqual(kind, "partial"); self.assertIn("3차", status); self.assertNotIn("실패한 쪽", status); self.assertIn("3차", head)
+        note = "주의: 판독 기록(merged)에 손으로 고친 글은 사라지고, 계산 전 기록은 readings/prev/p007.json 에 남김"
+        wait = "주의: 요청 한도 초과 — 20초 뒤 다시 시도 (1/5)"
+        self.assertIsNone(gui.finish_alert(0, "HWPX 전체 교정", []))
+        self.assertIsNone(gui.finish_alert(0, "HWPX 전체 교정", [wait, wait]))                     # 스스로 풀린 대기만이면 알리지 않는다
+        k, msg = gui.finish_alert(0, "HWPX 전체 교정", [note, wait, note])
+        self.assertEqual(k, "warning"); self.assertIn("확인할 것", msg); self.assertEqual(msg.count(note), 1); self.assertNotIn("요청 한도", msg)
+        self.assertIsNone(gui.finish_alert(130, "HWPX 전체 교정", [note]))                          # 중지는 알림창 없이
+        k, msg = gui.finish_alert(3, "③ 판독", ["오류: 판독에 실패한 쪽 1개: 2"] + [wait] * 8)
+        self.assertEqual(k, "warning"); self.assertIn("실패한 쪽이 있습니다", msg); self.assertIn("1개: 2", msg)   # 대기 줄이 정작 볼 줄을 밀어내지 않는다
+        k, msg = gui.finish_alert(4, "HWPX 인식", ["오류: 3차 판별 실패 — 하루 요청 한도"])
+        self.assertEqual(k, "warning"); self.assertIn("3차 글자 판별을 마치지 못해", msg); self.assertNotIn("실패한 쪽", msg)
+        k, msg = gui.finish_alert(1, "HWPX 인식", [f"오류: {i}" for i in range(5)])
+        self.assertEqual(k, "error"); self.assertIn("오류: 4", msg); self.assertNotIn("오류: 1", msg)
+
+    def test_finish_shows_notes_after_success(self):
+        """검토 재현(c5): 책갈피 교정이 '주의:' 를 남기고 0 으로 끝나면 알림창이 하나도 뜨지 않았다."""
+        import queue, types
+        from unittest import mock
+        gui = _gui()
+        w = gui.QueueWriter(queue.Queue())
+        w.write("주의: 판독 기록(merged)에 손으로 고친 글은 사라지고 …\n"); w.write("  쪽 7: 다시 계산\n주의: 교정본 a_교정.hwpx 의 구획 목록이 원본과 달라 …\n")
+        var = lambda: types.SimpleNamespace(set=lambda v: None)
+        app = types.SimpleNamespace(_set_running=lambda on, command="": None, _closing=False, v_status=var(), v_prog=var(), _append=lambda s: None,
+                                    tracker=types.SimpleNamespace(t0=0.0, frac=1.0, finish=lambda: None), progress=types.SimpleNamespace(configure=lambda **k: None),
+                                    refresh_table=lambda: None, open_after=None, _last_writer=w)
+        with mock.patch.object(gui, "messagebox") as mb:
+            gui.App._finish(app, 0, "HWPX 전체 교정")
+        self.assertEqual(mb.showwarning.call_count, 1); self.assertFalse(mb.showerror.called)
+        self.assertIn("교정본 a_교정.hwpx", mb.showwarning.call_args[0][1]); self.assertIsNone(app._last_writer)
+        app._last_writer = gui.QueueWriter(queue.Queue())
+        with mock.patch.object(gui, "messagebox") as mb:
+            gui.App._finish(app, 0, "HWPX 전체 교정")
+        self.assertFalse(mb.showwarning.called)                                                       # 알릴 줄이 없으면 그대로

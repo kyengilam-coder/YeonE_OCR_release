@@ -20,12 +20,14 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 6, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "all", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
+            "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "advanced_open": False, "details_open": False}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
 MRES_LABELS = {"default": "기본", "high": "높음(high)", "ultra_high": "최고(ultra_high · Gemini 3)"}   # 2차 조각 이미지 토큰 예산
+PAGE_THINK_LABELS = {"auto": "자동(모델 기본)", "low": "낮음(low)", "medium": "중간(medium)", "high": "높음(high)"}         # 1차(쪽 전체) 생각 수준 --page-thinking
+PAGE_MRES_LABELS = {"auto": "자동(설정 없음)", "high": "높음(high)", "ultra_high": "최고(ultra_high · Gemini 3)"}          # 1차 쪽 이미지 토큰 예산 --page-media-resolution
 STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료"]
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
@@ -65,7 +67,8 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 """
 
 
-SPEED_DEFAULTS_VERSION = 5  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음 / 4: 0.6.0 조각 8줄 묶음·2차 조각 고해상 / 5: 0.6.2 조각 해상도 3단(media_res)
+SPEED_DEFAULTS_VERSION = 6  # 2: 0.4.1 동시 6(자동 조절)·2차 모델 auto·2차 생각 줄이기 / 3: 0.4.4 쪽 끝 확인 목록 없음 / 4: 0.6.0 조각 8줄 묶음·2차 조각 고해상 / 5: 0.6.2 조각 해상도 3단(media_res) / 6: 0.6.8 동시 8·책갈피 교정 정책 '확실한 것만'
+CLOSE_WAIT_SEC = 15.0       # 작업 중 창을 닫을 때 작업 스레드가 쪽을 마저 쓰기를 기다리는 한도
 
 
 def upgrade_config(cfg: dict) -> dict:
@@ -81,6 +84,11 @@ def upgrade_config(cfg: dict) -> dict:
         cfg["check_list"] = "none"
     if ver < 4:
         cfg.setdefault("chunk_lines", DEFAULTS["chunk_lines"])
+    if ver < 6:                                               # 0.6.8: 옛 기본값(동시 6·정책 all)이면 새 기본값으로, 직접 바꾼 값은 그대로
+        if int(cfg.get("workers", 6) or 6) == 6:
+            cfg["workers"] = DEFAULTS["workers"]
+        if cfg.get("collate_policy", "all") == "all":
+            cfg["collate_policy"] = DEFAULTS["collate_policy"]
     if "media_high" in cfg:                                   # 0.6.0~0.6.1 의 켬/끔 → 3단 선택 (load_config 가 DEFAULTS 를 먼저 섞으므로 setdefault 가 아니라 대입)
         cfg["media_res"] = "high" if cfg.pop("media_high") else "default"
     cfg.setdefault("media_res", DEFAULTS["media_res"])
@@ -104,8 +112,62 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
+    """설정 파일에는 API 키가 그대로 들어가므로 본인만 읽게(0o600) 만든다 — Windows 에서는 뜻이 없고 그 밖에서는 맞는 권한."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
+    fd = os.open(CONFIG_PATH, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(cfg, ensure_ascii=False, indent=1))
+    try:
+        os.chmod(CONFIG_PATH, 0o600)                           # 이전 판이 만든 파일도
+    except OSError:
+        pass
+
+
+def _pages_failed(problems: list[str] | None) -> bool:
+    """끝 코드 3 이 쪽 판독 실패 때문인지('오류:' 줄 — 판독 실패·2차 덜 됨). 책갈피 교정의 3 은 '주의:' 만 남긴다(교정본 옮김·다시 계산·판독 덜 된 구획 건너뜀)."""
+    return problems is None or any(p.startswith("오류:") and "쪽" in p and ("실패" in p or "덜 " in p) for p in problems)
+
+
+def finish_words(rc, problems: list[str] | None = None) -> tuple[str, str, str]:
+    """끝난 명령의 반환값 → (종류, 상태 글 꼬리, 진행 글의 머리). 0=끝, 3=끝났지만 실패한 쪽 있음(쪽 실패 없이 '주의:' 만이면 확인할 것 있음),
+    4=끝났지만 3차 글자 판별을 못 마침, 130=중지, 그 밖=오류. 창 없이 검사할 수 있게 따로 둔다."""
+    if rc == 0 or rc is None:
+        return "ok", "끝", "100% · 완료"
+    if rc == 3 and not _pages_failed(problems):
+        return "partial", "끝 (확인할 것 있음 — 진행 기록 확인)", "100% · 완료(확인할 것 있음)"
+    if rc == 3:
+        return "partial", "끝 (실패한 쪽 있음 — 진행 기록 확인)", "100% · 완료(실패 쪽 있음)"
+    if rc == 4:
+        return "partial", "끝 (3차 글자 판별 못 마침 — 〔a/b〕 남음)", "100% · 완료(3차 판별 못 마침)"
+    if rc == 130:
+        return "stopped", "중지됨", "중지됨"
+    return "error", "오류 (진행 기록 확인)", "멈춤(오류)"
+
+
+PASSING_NOTES = ("주의: 요청 한도 초과 —",)   # 스스로 풀린 일시 대기(429 재시도) — 끝난 뒤 알림창에 올리면 정작 볼 줄을 밀어낸다
+
+
+def finish_alert(rc, label: str, problems: list[str]) -> tuple[str, str] | None:
+    """끝난 명령 뒤 알림창 ("warning"|"error", 글) 또는 None. 창 없이 검사할 수 있게 따로 둔다.
+    성공(0)이어도 '주의:'·'오류:' 줄이 있으면 알린다(깨진 기록 치움 등). 책갈피 교정의 다시 계산·교정본 옮김·판독 덜 된 구획은 끝 코드 3(확인할 것 있음)이다."""
+    kind = finish_words(rc)[0]
+    ps = list(dict.fromkeys(p for p in problems if not p.startswith(PASSING_NOTES)))
+    if not ps or kind == "stopped":
+        return None
+    if kind == "error":
+        return "error", f"{label} 이(가) 중단되었습니다.\n\n" + "\n".join(ps[-3:])
+    if rc == 4:
+        head = f"{label} 이(가) 끝났지만 3차 글자 판별을 마치지 못해 〔a/b〕 표시가 남았습니다. 다시 실행하면 3차 판별을 이어서 합니다."
+    elif kind == "partial" and _pages_failed(ps):
+        head = f"{label} 이(가) 끝났지만 실패한 쪽이 있습니다. 다시 실행하면 그 쪽만 다시 시도합니다."
+    else:
+        head = f"{label} 이(가) 끝났습니다 — 확인할 것:"
+    return "warning", head + "\n\n" + "\n".join(ps[-6:])
+
+
+def keep_waiting(alive: bool, since: float, now: float, limit: float = CLOSE_WAIT_SEC) -> bool:
+    """창을 닫을 때 작업 스레드를 더 기다릴지: 아직 살아 있고 한도 안이면 True."""
+    return bool(alive) and (now - since) < limit
 
 
 def missing_packages() -> list[str]:
@@ -130,31 +192,101 @@ def work_dir_for(pdf: str) -> Path:
     return p.with_name(p.stem + "_YeonE_OCR")
 
 
+SECRET_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+
+def child_env() -> dict:
+    """바깥 프로그램(pip·xdg-open·open)에 넘길 환경 — API 키는 뺀다(설치 스크립트나 열린 프로그램이 키를 물려받지 않게)."""
+    return {k: v for k, v in os.environ.items() if k.upper() not in SECRET_ENV}
+
+
 def open_path(path: str | Path) -> None:
     path = str(path)
     if sys.platform.startswith("win"):
-        os.startfile(path)                      # type: ignore[attr-defined]
+        os.startfile(path)                      # type: ignore[attr-defined]   (ShellExecute 는 환경을 따로 받지 않는다)
     elif sys.platform == "darwin":
-        subprocess.Popen(["open", path])
+        subprocess.Popen(["open", path], env=child_env())
     else:
-        subprocess.Popen(["xdg-open", path])
+        subprocess.Popen(["xdg-open", path], env=child_env())
+
+
+def max_calls_value(s) -> int | None:
+    """호출 상한 칸 → 0 이상의 정수(비우면 0 = 상한 없음). 숫자가 아니면 None(상한 없음으로 잘못 읽지 않게 실행을 막는다)."""
+    t = str(s if s is not None else "").strip().replace(",", "")
+    if not t:
+        return 0
+    return int(t) if t.isascii() and t.isdigit() else None
+
+
+def fx_from_config(cfg: dict, today: str) -> tuple[tuple[float, str] | None, bool]:
+    """설정에 남긴 자동 조회 환율(fx_auto·fx_auto_date) → (쓸 값 또는 None, 새로 조회할지). 하루 한 번만 조회한다.
+    지난날 값도 조회가 실패하면 기본값보다 나으므로 날짜를 붙여 쓴다."""
+    try:
+        rate = float(cfg.get("fx_auto") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    day = str(cfg.get("fx_auto_date") or "")
+    if not 0 < rate < 1e7:
+        return None, True
+    if day == today:
+        return (rate, "오늘 자동 조회"), False
+    return (rate, f"{day} 자동 조회" if day else "이전 자동 조회"), True
+
+
+FIG_KINDS = ("원형나경도", "산도", "계통도", "도식", "삽화", "복잡한표")
+
+
+def table_rows(w: Path) -> list[tuple]:
+    """쪽별 상태 표의 줄 (PDF 쪽, 인쇄 쪽, 상태, 확인 필요, 도판). 판독 기록을 모두 읽으므로(700쪽이면 몇 초) 작업 스레드에서 부른다."""
+    try:
+        st = json.loads((w / "state.json").read_text(encoding="utf-8"))
+        pages = st.get("pages", {})
+        total = st.get("total_pages") or (max((int(k) for k in pages), default=0))
+    except Exception:
+        return []
+    rows = []
+    for n in range(1, total + 1):
+        p = pages.get(str(n), {})
+        statuses = " · ".join(p.get("statuses", ["미처리"])) or "미처리"
+        pr, unc, figs = "", "", ""
+        rp = w / "readings" / f"p{n:03d}.json"
+        if rp.exists():
+            try:
+                m = json.loads(rp.read_text(encoding="utf-8"))["merged"]
+                pr = m.get("print_page", ""); unc = len(m.get("uncertain", []))
+                figs = sum(1 for r in m["regions"] if r["kind"] in FIG_KINDS)
+            except Exception:
+                pass
+        rows.append((n, pr, statuses, unc, figs))
+    return rows
 
 
 class QueueWriter(io.TextIOBase):
-    """작업 스레드의 출력을 창으로 보낸다. '오류:' 로 시작하는 줄은 따로 모아 끝난 뒤 알림창에 보여 준다."""
+    """작업 스레드의 출력을 창으로 보낸다. '오류:'·'주의:' 로 시작하는 줄은 따로 모아 끝난 뒤 알림창에 보여 준다(finish_alert).
+    줄은 스레드마다 따로 모아 끝난 줄만 한 번에(창·모음 함께, 잠금 안에서) 보낸다 — print 는 글과 줄바꿈을 따로 쓰므로(write 두 번) 그사이
+    다른 판독 스레드의 줄이 끼면 한 버퍼에서는 줄이 섞여 '주의: 요청 한도 초과 —' 뒤에 붙은 '오류:' 줄이 주의로 모이거나 주의 줄이 진행 줄 속에 숨었다."""
     def __init__(self, q: queue.Queue):
-        self.q = q; self.problems: list[str] = []; self._buf = ""   # (errors 는 TextIOBase 의 예약 속성이라 못 씀)
+        self.q = q; self.problems: list[str] = []                   # (errors 는 TextIOBase 의 예약 속성이라 못 씀)
+        self._lock = threading.Lock()                                # 판독 스레드 여럿이 함께 쓴다(창에 보낸 차례와 problems 차례가 같게)
+        self._tls = threading.local()                                # 스레드마다: buf = 아직 줄바꿈이 오지 않은 글, shown = 그중 flush 로 창에 먼저 보낸 길이
     def write(self, s):
         if s:
-            self.q.put(("log", s))
-            self._buf += s
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
-                if line.strip().startswith(("오류:", "주의:")):
-                    self.problems.append(line.strip())
+            t = self._tls; buf = getattr(t, "buf", "") + s
+            if "\n" in buf:
+                cut = buf.rindex("\n") + 1; done = buf[:cut].split("\n")[:-1]
+                with self._lock:
+                    self.q.put(("log", buf[getattr(t, "shown", 0):cut]))
+                    self.problems.extend(x.strip() for x in done if x.strip().startswith(("오류:", "주의:")))
+                buf = buf[cut:]; t.shown = 0
+            t.buf = buf
         return len(s)
     def flush(self):
-        pass
+        """줄바꿈 없이 flush 한 글(진행 점 등)은 창에만 먼저 보낸다. 오류·주의 판정은 그 줄이 끝날 때 통째로."""
+        t = self._tls; buf = getattr(t, "buf", ""); shown = getattr(t, "shown", 0)
+        if len(buf) > shown:
+            with self._lock:
+                self.q.put(("log", buf[shown:]))
+            t.shown = len(buf)
 
 
 class MarkDialog(tk.Toplevel):
@@ -452,8 +584,9 @@ class App(tk.Tk):
         self._build()
         self.after(100, self._poll)
         self.after(400, self.check_packages)
-        self._fx: tuple[float, str] | None = None
-        threading.Thread(target=self._fetch_fx, daemon=True).start()
+        self._fx, need_fx = fx_from_config(self.cfg, time.strftime("%Y-%m-%d"))     # 환율은 하루 한 번만 조회(받은 값은 설정에 남김)
+        if need_fx:
+            threading.Thread(target=self._fetch_fx, daemon=True).start()
         if self.cfg.get("last_pdf") and Path(self.cfg["last_pdf"]).exists():
             self.v_pdf.set(self.cfg["last_pdf"]); self.refresh_table()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -792,7 +925,7 @@ class App(tk.Tk):
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
         self.v_memo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), MEMO_LABELS["notice"]))
         self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "none"), CHECK_LIST_LABELS["none"]))
-        self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 3))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
+        self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 8))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
         self.v_think2 = tk.BooleanVar(value=self.cfg.get("second_thinking_low", True))
         self.v_blind = tk.BooleanVar(value=bool(self.cfg.get("adjudicate_blind", False)))
@@ -829,7 +962,7 @@ class App(tk.Tk):
         self._field_label(d, "속도", 2)
         sp = ttk.Frame(d, style="Panel.TFrame"); sp.grid(row=2, column=1, columnspan=2, sticky="w", pady=P(3))
         ttk.Label(sp, text="동시 최대", style="Field.TLabel").pack(side="left", padx=(0, P(4)))
-        s1 = ttk.Spinbox(sp, from_=1, to=8, width=3, textvariable=self.v_workers); s1.pack(side="left")
+        s1 = ttk.Spinbox(sp, from_=1, to=12, width=3, textvariable=self.v_workers); s1.pack(side="left")
         ttk.Label(sp, text="쪽 · 확대", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
         ttk.Entry(sp, textvariable=self.v_up, width=4).pack(side="left")
         ttk.Label(sp, text="배 · 중간 저장", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
@@ -857,9 +990,38 @@ class App(tk.Tk):
         Tip(cb, "3차 판별은 앞뒤 글자를 글로 알려 주지 않고(조각 그림에는 이웃 글자가 보입니다) 후보 차례를 섞어 자형만 묻습니다. "
                 "이것을 켜면 고른 자리를 후보도 주지 않고 한 번 더 읽게 해, 두 답이 같을 때만 확정합니다. 다르면 표시〔a/b〕를 그대로 남깁니다. "
                 "호출이 더 듭니다(일반 OCR: 쪽마다 확정 자리 8곳당 1회 · 책갈피 OCR 교정에도 적용: 확정 항목마다 1회).", self)
+        self.v_suspects = tk.BooleanVar(value=bool(self.cfg.get("suspects", True)))
+        bs = ttk.Frame(d, style="Panel.TFrame"); bs.grid(row=6, column=1, columnspan=2, sticky="w", pady=P(3))
+        cs = ttk.Checkbutton(bs, text="합의 판독도 글자층과 다르면 자형으로 확인(표시만)", variable=self.v_suspects); cs.pack(side="left")
+        ttk.Label(bs, text="쪽당 최대 8곳 · 본문은 그대로", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        Tip(cs, "1차·2차가 같게 읽어 〔a/b〕 가 없는 글자도, PDF 글자층(기존 OCR)과 한 글자만 다르고 그 두 글자가 入/人·曰/日·問/間 처럼 자형이 헷갈리는 쌍이면 "
+                "3차 판별과 같은 방식으로 글자 조각을 묻습니다. 자형이 글자층 쪽이면 본문은 판독대로 두고 확인 항목 「합의 판독 의심」과 문서 메모만 답니다(지침 20 — 기존 OCR 은 의심만 올림). "
+                "이미 물은 자리는 다시 묻지 않습니다. 끄면 〔a/b〕 자리만 묻습니다.", self)
         from tkinter import font as tkfont
         lw = max(tkfont.Font(self, font=self.font_base).measure(t) for t in ("판독기", "읽기 방향", "모델", "API 키", "2차 판독 모델", "속도", "2차 조각", "판독 단계", "3차 판별")) + P(18)
         b.columnconfigure(0, minsize=lw); d.columnconfigure(0, minsize=lw)   # 세부 설정을 펼쳐도 입력칸 왼쪽 끝이 한 줄로 맞게
+        self.v_think1 = tk.StringVar(value=PAGE_THINK_LABELS.get(self.cfg.get("page_thinking", "auto"), PAGE_THINK_LABELS["auto"]))
+        self.v_mres1 = tk.StringVar(value=PAGE_MRES_LABELS.get(self.cfg.get("page_media_res", "auto"), PAGE_MRES_LABELS["auto"]))
+        self.v_maxcalls = tk.StringVar(value=str(self.cfg.get("max_calls", 0)))
+        self._field_label(d, "1차 판독", 8)
+        p1 = ttk.Frame(d, style="Panel.TFrame"); p1.grid(row=8, column=1, columnspan=2, sticky="w", pady=P(3))
+        ttk.Label(p1, text="생각 수준", style="Field.TLabel").pack(side="left", padx=(0, P(4)))
+        t1 = ttk.Combobox(p1, textvariable=self.v_think1, values=list(PAGE_THINK_LABELS.values()), state="readonly", width=self._cw(PAGE_THINK_LABELS.values()))
+        t1.pack(side="left")
+        ttk.Label(p1, text="· 쪽 해상도", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
+        m1 = ttk.Combobox(p1, textvariable=self.v_mres1, values=list(PAGE_MRES_LABELS.values()), state="readonly", width=self._cw(PAGE_MRES_LABELS.values()))
+        m1.pack(side="left")
+        Tip(t1, "1차 생각 수준: 쪽 전체 판독(영역 나누기·1차 글)의 생각 수준. 자동 = 모델 기본(지금까지와 같음). 낮추면 빠르고 싸지만 정확도가 달라질 수 있으니 "
+                "같은 표본 쪽을 결과 폴더만 바꿔 측정(yeone-ocr eval)으로 비교한 뒤 바꾸십시오. Gemini 3 은 생각 수준, 2.5 는 생각 예산(낮음 512 · 중간 4096 · 높음 24576, 2.5 Pro 32768). "
+                "모델이 받지 않으면 저절로 모델 기본으로 계속합니다.", self)
+        Tip(m1, "1차 쪽 해상도: 쪽 전체 이미지의 토큰 예산. 자동 = 설정 없음(지금까지와 같음). 최고(ultra_high)는 Gemini 3 전용이며 거부되면 저절로 높음 → 기본으로 내립니다. "
+                "측정(yeone-ocr eval)으로 비교한 뒤 바꾸십시오.", self)
+        self._field_label(d, "호출 상한", 9)
+        mcf = ttk.Frame(d, style="Panel.TFrame"); mcf.grid(row=9, column=1, columnspan=2, sticky="w", pady=P(3))
+        mc_ = ttk.Spinbox(mcf, from_=0, to=1000000, increment=100, width=7, textvariable=self.v_maxcalls); mc_.pack(side="left")
+        ttk.Label(mcf, text="회 · 0 = 없음 · 재시도 포함, 한 번 실행 전체", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        Tip(mc_, "호출 상한(0=없음): 한 번 실행(한 번에 인식·판독·3차 판별·책갈피 교정)에서 모델을 부르는 횟수의 상한입니다. 재시도도 한 번으로 셉니다. "
+                 "닿으면 멈추고 끝난 쪽은 기록에 남으며, 다시 누르면 남은 쪽부터 이어서 합니다. 비용이 걱정되면 미리 보기의 예상 호출 수보다 조금 크게 두십시오.", self)
         self._apply_details()
         # 문서
         b = c3.body; b.columnconfigure(0, weight=1)
@@ -1116,7 +1278,7 @@ class App(tk.Tk):
         from .collate.labels import POLICIES, ANCHOR_SOURCES
         P = self.px
         self.v_hwpx = tk.StringVar(value=self.cfg.get("hwpx", "")); self.v_pdf2 = tk.StringVar(value=self.cfg.get("collate_pdf", "")); self.v_find = tk.StringVar()
-        self.v_policy = tk.StringVar(value=POLICIES.get(self.cfg.get("collate_policy", "all"), POLICIES["all"]))
+        self.v_policy = tk.StringVar(value=POLICIES.get(self.cfg.get("collate_policy", "sure"), POLICIES["sure"]))
         self.v_cmemo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("collate_memo", "notice"), MEMO_LABELS["notice"]))
         self.v_hstyles = tk.StringVar(value=self.cfg.get("heading_styles", ""))
         self.v_asrc = tk.StringVar(value=ANCHOR_SOURCES.get(self.cfg.get("anchor_source", "auto"), ANCHOR_SOURCES["auto"]))
@@ -1216,7 +1378,7 @@ class App(tk.Tk):
 
     def collate_policy(self) -> str:
         from .collate.labels import POLICIES
-        return next((k for k, v in POLICIES.items() if v == self.v_policy.get()), "all")
+        return next((k for k, v in POLICIES.items() if v == self.v_policy.get()), "sure")
 
     def _need_hwpx(self) -> bool:
         if not self.pdf2() or not Path(self.pdf2()).exists():
@@ -1423,7 +1585,7 @@ class App(tk.Tk):
             o += ["--print-offset", off]          # 비우거나 0 이면 자동 판정. 책갈피 OCR 은 다른 책이라 인식 탭의 보정값을 쓰지 않는다
         if (self.v_force.get() if force is None else force):
             o.append("--force")
-        o += ["--workers", (self.v_workers.get().strip() or "6")]
+        o += ["--workers", (self.v_workers.get().strip() or "8")]
         o += ["--second-model", self.v_model2.get().strip()]          # 빈 값이면 1차와 같은 모델, auto 면 자동
         o += ["--second-thinking", "low" if self.v_think2.get() else "full"]
         o += ["--chunk-lines", (self.v_chunk.get().strip() or "0"), "--media-resolution", self.media_res_key()]
@@ -1431,11 +1593,19 @@ class App(tk.Tk):
         if not self.v_cache.get():
             o.append("--no-cache")
         o += ["--checkpoint", (self.v_ckpt.get().strip() or "0")]
+        o += ["--page-thinking", self.page_think_key(), "--page-media-resolution", self.page_mres_key()] + self._cap_opts()
         return o
 
-    def _glyph_opts(self) -> list[str]:
-        """3차 판별 선택(run·adjudicate·collate 에만 — read 명령에는 없는 선택이다)."""
-        return ["--adjudicate-blind"] if self.v_blind.get() else []
+    def _cap_opts(self) -> list[str]:
+        """호출 상한(read·run·adjudicate·collate). 숫자가 아니면 _prepare_env 가 실행 전에 막는다."""
+        n = max_calls_value(self.v_maxcalls.get()) or 0
+        return ["--max-calls", str(n)] if n else []
+
+    def _glyph_opts(self, suspects: bool = False) -> list[str]:
+        """3차 판별 선택(run·adjudicate·collate 에만 — read 명령에는 없는 선택이다). suspects=True(run·adjudicate)면 합의 판독 의심을 끈 것도 넘긴다
+        (collate 에는 그 선택이 없다)."""
+        v = getattr(self, "v_suspects", None)
+        return (["--adjudicate-blind"] if self.v_blind.get() else []) + (["--no-suspects"] if suspects and v is not None and not v.get() else [])
 
     def _build_opts(self) -> list[str]:
         o = []
@@ -1461,6 +1631,12 @@ class App(tk.Tk):
 
     def media_res_key(self) -> str:
         return next((k for k, v in MRES_LABELS.items() if v == self.v_mres.get()), "high")
+
+    def page_think_key(self) -> str:
+        return next((k for k, v in PAGE_THINK_LABELS.items() if v == self.v_think1.get()), "auto")
+
+    def page_mres_key(self) -> str:
+        return next((k for k, v in PAGE_MRES_LABELS.items() if v == self.v_mres1.get()), "auto")
 
     def toggle_advanced(self):
         self.v_adv.set(not self.v_adv.get()); self._apply_advanced()
@@ -1504,6 +1680,8 @@ class App(tk.Tk):
             if warn and not messagebox.askyesno(APP_NAME, warn + "\n\n그래도 이 키로 진행할까요?"):
                 return False
             os.environ["GEMINI_API_KEY"] = key
+        if max_calls_value(self.v_maxcalls.get()) is None:
+            messagebox.showwarning(APP_NAME, f"호출 상한은 0 이상의 정수여야 합니다(0 = 상한 없음). 지금 값: {self.v_maxcalls.get()!r}"); return False
         self.save_settings(quiet=True)
         return True
 
@@ -1576,7 +1754,8 @@ class App(tk.Tk):
                 self.q.put(("log", traceback.format_exc()))
             finally:
                 self.q.put(("done", rc, label))          # 어떤 경우에도 창에 끝을 알린다
-        threading.Thread(target=target, daemon=True).start()
+        self._worker = threading.Thread(target=target, daemon=True)   # 창을 닫을 때 이 스레드가 쪽을 마저 쓰기를 기다린다(on_close)
+        self._worker.start()
 
     def _poll(self):
         try:
@@ -1600,6 +1779,10 @@ class App(tk.Tk):
                     self._on_progress(item[1], item[2], item[3])
                 elif item[0] == "bundle":
                     self._bundle_msg(*item[1:])
+                elif item[0] == "table":
+                    self._fill_table(*item[1:])
+                elif item[0] == "fx":
+                    self._fx_fetched(item[1], item[2])
         except queue.Empty:
             pass
         if self.running and time.time() - self._prog_shown > 1.0:
@@ -1608,23 +1791,26 @@ class App(tk.Tk):
 
     def _finish(self, rc, label):
         self._set_running(False)
-        stopped = rc == 130                              # [중지]로 멈춘 명령은 130 을 돌려준다(멈추기 전에 일을 다 끝냈으면 0 = 완료)
-        ok = (rc == 0 or rc is None)
-        self.v_status.set(f"{label} {'끝' if ok else ('중지됨' if stopped else '오류 (진행 기록 확인)')}")
-        took = "걸린 시간 " + fmt_duration(time.time() - self.tracker.t0)
-        if ok:
-            self.tracker.finish(); self.progress.configure(value=1000); self.v_prog.set(f"100% · 완료 · {took}")
-        else:
-            self.v_prog.set(f"{self.tracker.frac * 100:.0f}% · {'중지됨' if stopped else '멈춤(오류)'} · {took}")
-        self._append(f"— {label} {'끝' if ok else '중단'} (rc={rc})\n")
-        self.refresh_table()
+        if getattr(self, "_closing", False):             # 닫는 중에 끝났으면 알림창 없이 조용히
+            self._last_writer = None; return
         w = getattr(self, "_last_writer", None)
-        if not ok and not stopped and w is not None and w.problems:
-            messagebox.showerror(APP_NAME, f"{label} 이(가) 중단되었습니다.\n\n" + "\n".join(w.problems[-3:]))
+        kind, status, head = finish_words(rc, w.problems if w is not None else None)    # [중지]로 멈춘 명령은 130(멈추기 전에 일을 다 끝냈으면 0), 실패한 쪽이 있으면 3, 3차 판별을 못 마치면 4
+        ok, partial, stopped = kind == "ok", kind == "partial", kind == "stopped"
+        self.v_status.set(f"{label} {status}")
+        took = "걸린 시간 " + fmt_duration(time.time() - self.tracker.t0)
+        if ok or partial:
+            self.tracker.finish(); self.progress.configure(value=1000); self.v_prog.set(f"{head} · {took}")
+        else:
+            self.v_prog.set(f"{self.tracker.frac * 100:.0f}% · {head} · {took}")
+        self._append(f"— {label} {'끝' if ok or partial else '중단'} (rc={rc})\n")
+        self.refresh_table()
+        alert = finish_alert(rc, label, w.problems if w is not None else [])
+        if alert:
+            (messagebox.showerror if alert[0] == "error" else messagebox.showwarning)(APP_NAME, alert[1])
         self._last_writer = None
-        if ok and self.open_after and Path(self.open_after).exists():
+        if (ok or partial) and self.open_after and Path(self.open_after).exists():
             open_path(self.open_after)
-        elif ok and ("HWPX" in label and "인식" in label):
+        elif (ok or partial) and ("HWPX" in label and "인식" in label):
             if messagebox.askyesno(APP_NAME, "끝났습니다. 검수 화면(review.html)을 열까요?"):
                 self.do_review()
         self.open_after = None
@@ -1763,19 +1949,32 @@ class App(tk.Tk):
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
                          "context_hint": self.v_ctx.get(), "memo_mode": self.memo_mode(),
-                         "workers": int(self.v_workers.get() or 6), "second_model": self.v_model2.get().strip(),
+                         "workers": int(self.v_workers.get() or 8), "second_model": self.v_model2.get().strip(),
                          "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "adjudicate_blind": self.v_blind.get(), "last_pdf": self.pdf(),
-                         "chunk_lines": int(self.v_chunk.get() or 0), "media_res": self.media_res_key(), "mode": self.mode_key()})
+                         "chunk_lines": int(self.v_chunk.get() or 0), "media_res": self.media_res_key(), "mode": self.mode_key(),
+                         "page_thinking": self.page_think_key(), "page_media_res": self.page_mres_key()})
+        if getattr(self, "v_suspects", None) is not None:
+            self.cfg["suspects"] = self.v_suspects.get()
+        mc = max_calls_value(self.v_maxcalls.get())
+        self.cfg["max_calls"] = mc if mc is not None else self.cfg.get("max_calls", 0)     # 잘못 넣은 값은 저장하지 않는다(실행은 _prepare_env 가 막음)
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
 
     def _fetch_fx(self):
+        """환율 자동 조회(작업 스레드). 받은 값은 큐로 넘겨 창 스레드가 설정에 남긴다(하루 한 번만 묻게). 실패하면 있던 값(지난날 값) 그대로."""
         try:
             from .estimate import fetch_fx_krw
-            self._fx = fetch_fx_krw()
+            got = fetch_fx_krw()
         except Exception:
-            self._fx = None
+            got = None
+        if got:
+            self.q.put(("fx", got[0], time.strftime("%Y-%m-%d")))
+
+    def _fx_fetched(self, rate: float, day: str):
+        self._fx = (rate, "오늘 자동 조회")
+        self.cfg["fx_auto"] = rate; self.cfg["fx_auto_date"] = day
+        save_config(self.cfg)
 
     def fx_setting(self) -> tuple[float | None, str]:
         """환율: 직접 입력값 > 자동 조회값 > (없음 → estimate 가 기본값을 씀)."""
@@ -1857,7 +2056,7 @@ class App(tk.Tk):
     def do_run(self):
         if self._need_pdf() and self._prepare_env() and self._confirm_cost():
             self.nb.select(0)
-            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts() + self._build_opts(), "한 번에 인식 (PDF 전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
+            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._build_opts(), "한 번에 인식 (PDF 전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
 
     def do_stop(self):
         try:
@@ -1897,16 +2096,34 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"판독 기록을 읽지 못했습니다: {e}"); return
         if not recs:
             messagebox.showinfo(APP_NAME, f"이 쪽 범위에 판독 기록이 없습니다.\n결과 폴더: {self.work()}"); return
+        sus = bool(self.v_suspects.get()); n_sus = sus_calls = None
+        if sus:
+            try:                                         # 합의 의심도 모델 없이 미리 센다(저장된 기록·글자층 파일로 — 명령이 묻기 전에 세는 것과 같은 셈)
+                from . import cli
+                from .adjudicate import suspects_pending, suspect_freq, SUSPECT_MAX
+                freq = suspect_freq(w.dir)
+                ks = [suspects_pending(r, cli._load_layer(w, doc, r["pdf_page"]).get("plain", ""), SUSPECT_MAX, False, freq) for r in recs]
+                n_sus = sum(ks); sus_calls = sum(-(-k // 8) for k in ks if k)
+            except Exception:
+                pass                                     # 못 세면 수 없이 알린다
+        sus_note = ("1차·2차가 같게 읽었지만 PDF 글자층과 자형이 헷갈리는 쌍(入/人 등) 한 글자가 다른 자리(합의 판독 의심"
+                    + (f") {n_sus}곳도 같은 방식으로 묻습니다(쪽당 최대 8곳 · 묶음 호출 약 {sus_calls}회 더" + (f", 재확인 최대 약 {sus_calls}회 더" if self.v_blind.get() else "") + ")"
+                       if n_sus is not None else ", 쪽당 최대 8곳)도 같은 방식으로 묻습니다") + " — 본문은 그대로, 확인 항목만.\n")
+        if not n_sites and (not sus or n_sus == 0):
+            messagebox.showinfo(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."
+                                + ("\n합의 판독 의심 자리도 새로 물을 곳이 없습니다." if sus else "")); return
         if not n_sites:
-            messagebox.showinfo(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."); return
-        if not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(쪽마다 8자리씩 묶어 한 호출, 쪽은 동시에 — 묶음 호출 약 {n_calls}회, 빠진 자리는 낱개로 더).\n"
+            if not messagebox.askyesno(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음).\n" + sus_note
+                                       + ("물을 자리가 없으면 호출 없이 끝납니다. " if n_sus is None else "") + "계속할까요?"):
+                return
+        elif not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(쪽마다 8자리씩 묶어 한 호출, 쪽은 동시에 — 묶음 호출 약 {n_calls}회, 빠진 자리는 낱개로 더).\n"
                                              "앞뒤 글자는 글로 주지 않고(조각에는 보임) 후보 차례를 섞어 자형만 묻습니다(눈가림)."
                                              + (f" 고른 자리는 후보 없이 한 번 더 읽어 같을 때만 확정합니다(호출 최대 약 {n_calls}회 더)." if self.v_blind.get() else "") + "\n"
-                                             f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. 계속할까요?"):
+                                             f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. " + (sus_note if sus else "") + "계속할까요?"):
             return
         self.nb.select(0)
         argv = ["adjudicate", self.pdf(), "--work", str(self.work())] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
-        argv += ["--workers", (self.v_workers.get().strip() or "6")] + self._glyph_opts()
+        argv += ["--workers", (self.v_workers.get().strip() or "8")] + self._glyph_opts(suspects=True) + self._cap_opts()
         self.start(argv, "3차 글자 판별")
 
     def do_ledger(self):
@@ -1961,7 +2178,7 @@ class App(tk.Tk):
         def t():
             rc = 1; seen: set[str] = set(); n_get = got = 0
             try:
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=child_env())   # 설치 스크립트가 API 키를 물려받지 않게
                 for line in p.stdout:
                     self.q.put(("log", line))
                     # pip 출력의 세 마디: 패키지 확인(Collecting·Requirement already satisfied) → 내려받기(Downloading·Using cached) → 설치
@@ -1988,35 +2205,52 @@ class App(tk.Tk):
 
     # ---------- 쪽별 상태 ----------
     def refresh_table(self):
+        """쪽별 상태 표를 새로. 판독 기록 읽기는 작업 스레드에서 하고(300~700쪽이면 창이 1~3초 멈추던 것) 줄은 큐로 받아 창 스레드가 채운다."""
+        pdf = self.pdf()
+        self._table_gen = gen = getattr(self, "_table_gen", 0) + 1
+        if pdf != getattr(self, "_table_pdf", None):            # 다른 PDF 의 줄은 바로 비운다(같은 PDF 면 새 줄이 올 때까지 둔다 — 깜박이지 않게)
+            self._fill_table(gen, pdf, [])
+        if not pdf:
+            return
+        w = self.work()
+        def t():
+            try:
+                rows = table_rows(w)
+            except Exception:
+                rows = []
+            self.q.put(("table", gen, pdf, rows))
+        threading.Thread(target=t, daemon=True).start()
+
+    def _fill_table(self, gen: int, pdf: str, rows: list) -> None:
+        """작업 스레드가 읽은 줄로 표를 채운다(창 스레드). 그사이 PDF 를 바꿨거나 더 새 요청이 있으면 버린다."""
+        if gen != getattr(self, "_table_gen", gen) or pdf != self.pdf():
+            return
         for i in self.table.get_children():
             self.table.delete(i)
-        if not self.pdf():
-            return
-        w = self.work(); sp = w / "state.json"
-        if not sp.exists():
-            return
-        try:
-            st = json.loads(sp.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        total = st.get("total_pages") or (max((int(k) for k in st.get("pages", {})), default=0))
-        for n in range(1, total + 1):
-            p = st.get("pages", {}).get(str(n), {})
-            statuses = " · ".join(p.get("statuses", ["미처리"])) or "미처리"
-            pr, unc, figs = "", "", ""
-            rp = w / "readings" / f"p{n:03d}.json"
-            if rp.exists():
-                try:
-                    rec = json.loads(rp.read_text(encoding="utf-8")); m = rec["merged"]
-                    pr = m.get("print_page", ""); unc = len(m.get("uncertain", []))
-                    figs = sum(1 for r in m["regions"] if r["kind"] in ("원형나경도", "산도", "계통도", "도식", "삽화", "복잡한표"))
-                except Exception:
-                    pass
-            self.table.insert("", "end", values=(n, pr, statuses, unc, figs), tags=("odd",) if n % 2 else ())
+        for r in rows:
+            self.table.insert("", "end", values=r, tags=("odd",) if r[0] % 2 else ())
+        self._table_pdf = pdf
 
     def on_close(self):
-        if self.running and not messagebox.askyesno(APP_NAME, "작업이 진행 중입니다. 그래도 닫을까요?"):
-            return
+        if self.running and not getattr(self, "_closing", False):
+            if not messagebox.askyesno(APP_NAME, "작업이 진행 중입니다. 그래도 닫을까요?\n(지금 쓰는 쪽을 마저 쓰고 멈춥니다 — 몇 초 걸릴 수 있습니다)"):
+                return
+            # 바로 끊지 않는다: 작업 스레드(daemon)가 기록을 쓰는 중에 창이 사라지면 쓰다 만 파일이 남는다 → 중지를 걸고 끝나기를 잠시 기다린다
+            self._closing = True; self._closing_since = time.time()
+            try:
+                from . import cli
+                cli.CANCEL.set()
+            except Exception:
+                pass
+            self.v_status.set("멈추는 중… (지금 쪽을 마저 쓰면 닫힙니다)")
+            self._close_when_idle(); return
+        self.save_settings(quiet=True)
+        self.destroy()
+
+    def _close_when_idle(self):
+        w = getattr(self, "_worker", None)
+        if keep_waiting(w is not None and w.is_alive(), self._closing_since, time.time()):
+            self.after(200, self._close_when_idle); return
         self.save_settings(quiet=True)
         self.destroy()
 

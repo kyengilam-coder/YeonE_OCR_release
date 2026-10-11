@@ -5,10 +5,10 @@
 정렬: difflib.SequenceMatcher 로 구획 전체를 한 줄로 이어 글자 단위 정렬. 문단 경계는 HWPX 쪽 글자 지도로 되찾는다.
 
 분류
-  A  확실한 오탈: 판독이 확실(〔〕 없음)하고 간→번이 1:1 이며 HWPX 와 다름 → 자동 교정
+  A  확실한 오탈: 판독이 확실(〔〕 없음)하고 간→번이 1:1 이며 HWPX 와 다름 → 자동 교정. 단 자형이 비슷한 쌍(CONFUSABLES)은 B1 로 내려 3차 판별이 가린다
   B2 1:多 글자: 판독은 확실하나 간체 한 글자가 여러 번체로 갈라짐 → 어구 사전으로 고른 번체로 자동 교정, 후보를 메모에
-  B1 판독 불확실: 그 자리의 판독에 〔疑〕·〔a/b〕 표시가 있음 → 글자는 두고 표시만
-  C  구조 차이: 긴 구간(LONG 이상)이 한쪽에만 있음 → 누락은 삽입(표시), 추가·순서는 표시만
+  B1 판독 불확실: 그 자리의 판독에 〔疑〕·〔a/b〕 표시가 있거나, 2차 판독이 빠져 1차만으로 읽은 영역(once)의 글자 → 글자는 두고 표시만
+  C  구조 차이: 긴 구간(LONG 이상)이 한쪽에만 있음(옆 글자와 치환으로 묶인 것도)·HWPX 여러 글자가 판독에 없음 → 어느 정책에서도 표시만. 누락 구간은 '삽입 제안'으로 메모·보고에 남기고 사람이 원본 확인 뒤 넣는다
   D  표기 차이: 부호·공백·이체자만 다름 → 기본 무시
 """
 from __future__ import annotations
@@ -18,7 +18,8 @@ from . import zh
 
 LONG = 20                      # 이 길이 이상이 한쪽에만 있으면 글자 오탈이 아니라 구조 차이(C)로 본다
 CTX = 6                        # 보고에 보여 줄 앞뒤 글자 수
-# 자형이 비슷해 판독기가 서로 헷갈리기 쉬운 글자 묶음(간체 기준). 번체 후보까지 여럿(B2)이면 자동 반영하지 않고 표시만 한다
+# 자형이 비슷해 판독기가 서로 헷갈리기 쉬운 글자 묶음(간체 기준). 한 글자 차이(A·B2)는 1차·2차가 같은 쪽으로 틀린 것일 수 있어 자동 반영하지 않고
+# 표시만 한다(B1) — 글자 조각 확인(3차 판별)이 가린다
 CONFUSABLES = [set(g) for g in ("干于千", "日曰", "己已巳", "土士", "未末", "天夭", "人入", "刀力", "木本", "戊戌戍", "冶治", "乌鸟", "纲网", "问间闻",
                                  "王玉", "大太犬", "子于", "几凡", "血皿", "目日月", "白自", "戈弋", "丸九", "旦且", "田由甲申", "史吏", "宫官",
                                  "侯候", "兔免", "祟崇", "荼茶", "午牛", "币市", "师帅", "凤风", "析折", "斤斥", "卯卵", "微徽",
@@ -49,7 +50,8 @@ class Char:
     key: str                   # 비교용 글자(간체)
     para: int                  # HWPX: 문단 번호 / OCR: pdf 쪽
     pos: int                   # HWPX: 문단 안 글자 위치 / OCR: 글자 위치
-    uncertain: bool = False    # OCR: 〔〕 표시 안이거나 바로 옆
+    uncertain: bool = False    # OCR: 〔〕 표시 안이거나 바로 옆, 또는 once
+    once: bool = False         # OCR: 2차 판독이 빠져 1차만으로 읽은 영역의 글자(run.single_read_regions) — 어느 정책에서도 표시만(B1)
 
 
 @dataclass
@@ -112,8 +114,9 @@ def note_spans(text: str) -> list[tuple[int, int]]:
     return out
 
 
-def _cells(text: str, para: int, *, strip: bool = False, skip: list[tuple[int, int]] = ()) -> list[Char]:
-    """글 → 비교 글자 목록. 부호·공백은 뺀다. 위치(pos)는 원래 글의 글자 번호 그대로라 편집에 바로 쓴다. skip 구간(작업 표시)의 글자도 뺀다."""
+def _cells(text: str, para: int, *, strip: bool = False, skip: list[tuple[int, int]] = (), once: bool = False) -> list[Char]:
+    """글 → 비교 글자 목록. 부호·공백은 뺀다. 위치(pos)는 원래 글의 글자 번호 그대로라 편집에 바로 쓴다. skip 구간(작업 표시)의 글자도 뺀다.
+    once: 1차만으로 읽은 영역의 글 — 글자마다 불확실로 둔다."""
     s, unc_spans = (strip_marks(text) if strip else (text, []))
     out: list[Char] = []
     for i, ch in enumerate(s):
@@ -122,7 +125,7 @@ def _cells(text: str, para: int, *, strip: bool = False, skip: list[tuple[int, i
         key = zh.compare_key(ch)
         if not key:
             continue
-        out.append(Char(ch, key[0], para, i, any(a <= i < b for a, b in unc_spans)))
+        out.append(Char(ch, key[0], para, i, once or any(a <= i < b for a, b in unc_spans), once))
     return out
 
 
@@ -133,11 +136,12 @@ def hwpx_cells(paras: list[str], first_para: int) -> list[Char]:
     return out
 
 
-def ocr_cells(pages: list[tuple[int, str]]) -> list[Char]:
-    """[(pdf 쪽, 판독 글)] → 글자 목록. 판독 글은 build 와 같은 문단 글(〔〕 표시 포함)."""
+def ocr_cells(pages: list[tuple]) -> list[Char]:
+    """[(pdf 쪽, 판독 글[, 1차만])] → 글자 목록. 판독 글은 build 와 같은 문단 글(〔〕 표시 포함).
+    셋째 값이 참이면 2차 판독이 빠져 1차만으로 읽은 영역의 글(run.reading_paras) — 그 글자의 차이는 어느 정책에서도 표시만(B1)."""
     out = []
-    for page, t in pages:
-        out.extend(_cells(t, page, strip=True))
+    for page, t, *once in pages:
+        out.extend(_cells(t, page, strip=True, once=bool(once and once[0])))
     return out
 
 
@@ -157,6 +161,12 @@ def _confusable(a: str, b: str) -> bool:
 
 def _weak_pair(a: str, b: str) -> bool:
     return a != b and any(a in g and b in g for g in WEAK_WITNESS)
+
+
+def _long_change(n_hw: int, n_oc: int) -> bool:
+    """글자 오탈이 아니라 구조 차이(C)로 볼 길이: 한쪽이 LONG 이상이거나, HWPX 에서 MAX_DELETE_AUTO 넘게 지워지는 차이.
+    삽입·삭제뿐 아니라 치환(1자 ↔ 23자 …)에도 같이 쓴다 — 옆 글자 하나가 달라 difflib 이 치환으로 묶어도 규칙을 비켜 가지 않게."""
+    return max(n_hw, n_oc) >= LONG or n_hw - n_oc > MAX_DELETE_AUTO
 
 
 def book_titles(texts: list[str]) -> set[str]:
@@ -221,23 +231,24 @@ def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) 
                 _mark(it, "C", f"서명(『』) 일부로 보임 — 책이 줄여 적은 자리일 수 있어 자동 삭제하지 않음", notice=True); continue
 
 
-def promote_repeated(items: list["Item"], min_count: int = REPEAT_MIN) -> int:
-    """같은 (HWPX, 판독) 한 글자 쌍이 구획 안에서 min_count 회 이상 반복되고 그 자리가 '혼동 가능성' 표시(B1)로 남아 있으면,
-    개별 자형 혼동이 아니라 책 전체에 걸친 변환 오류(간체 于→幹 일괄 변환 등)로 보고 교정 후보(B2/A)로 올린다. 올린 수를 돌려준다."""
+def promote_repeated(items: list["Item"], min_count: int = REPEAT_MIN, policy: str = "all") -> int:
+    """같은 (HWPX, 판독) 한 글자 쌍이 구획 안에서 min_count 회 이상 반복되고 그 자리가 干/于 '혼동 가능성' 표시(B1)로 남아 있으면,
+    개별 자형 혼동이 아니라 책 전체에 걸친 변환 오류(간체 于→幹 일괄 변환 등)로 보고 교정 후보(B2/A)로 올린다. 올린 수를 돌려준다.
+    자형이 헷갈리기 쉬운 쌍(CONFUSABLES, 問/間 …)은 올리지 않는다 — 한 글꼴에서 같은 쪽으로 되풀이해 틀리는 것이 바로 그 위험이라 3차 판별만 가린다.
+    3차 판별(글자 조각)을 못 할 때만 부른다(run_section) — 3차가 가릴 자리를 반복 수만으로 먼저 올리지 않게."""
     from collections import Counter
-    cnt = Counter((zh.compare_key(it.hwpx), it.ocr) for it in items
+    cnt = Counter((zh.compare_key(it.hwpx), zh.compare_key(it.ocr)) for it in items
                   if len(it.hwpx) == 1 and len(it.ocr) == 1 and it.action in ("replace", "mark") and it.kind in ("A", "B1", "B2"))
     n = 0
     for it in items:
-        if not (it.kind == "B1" and it.action == "mark" and len(it.hwpx) == 1 and len(it.ocr) == 1):
+        if not (it.kind == "B1" and it.action == "mark" and len(it.hwpx) == 1 and len(it.ocr) == 1 and "혼동" in it.note):
             continue
-        if not ("혼동" in it.note or "헷갈리기" in it.note):
-            continue
-        key = (zh.compare_key(it.hwpx), it.ocr)
+        key = (zh.compare_key(it.hwpx), zh.compare_key(it.ocr))
         if cnt[key] < min_count or _weak_pair(key[0], key[1]):
             continue
         new = _s2t_from_ctx(it.oc_ctx, it.ocr); cands = zh.candidates(it.ocr)
         it.kind = "B2" if len(cands) > 1 else "A"; it.action = "replace"; it.new = new; it.candidates = cands if len(cands) > 1 else []
+        it.auto = (policy == "all") if it.kind == "B2" else (policy in ("sure", "all"))
         it.witness = (it.witness + "+" if it.witness else "") + "repeat"
         it.note += f" · 같은 쌍 「{it.hwpx}」↔「{it.ocr}」 이 이 구획에서 {cnt[key]}회 반복 — 책 전체의 변환 오류로 보여 교정 후보로 올림"
         n += 1
@@ -297,7 +308,7 @@ def _ctx(cells: list[Char], lo: int, hi: int) -> str:
 
 
 def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[str] | None = None) -> list[Item]:
-    """정렬해 차이 항목을 만든다. policy: memo(아무것도 자동 반영 안 함) | sure(A만) | all(A+B2+누락 삽입).
+    """정렬해 차이 항목을 만든다. policy: memo(아무것도 자동 반영 안 함) | sure(A만) | all(A+B2). C(긴 구간)는 어느 정책에서도 표시만.
     titles: HWPX 의 서명 집합(book_titles) — 서명 일부로 보이는 짧은 삭제를 자동으로 하지 않기 위해."""
     a = "".join(c.key for c in hw); b = "".join(c.key for c in oc)
     sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
@@ -308,6 +319,10 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
         hw_span, oc_span = hw[i1:i2], oc[j1:j2]
         hw_text = "".join(c.ch for c in hw_span); oc_text = "".join(c.ch for c in oc_span)
         uncertain = any(c.uncertain for c in oc_span) or (not oc_span and j1 < len(oc) and oc[min(j1, len(oc) - 1)].uncertain)
+        # 1차만 읽은 영역 끝에서 빠진 글자(그 뒤가 다른 영역·판독 끝)도 그 영역의 판독 — 앞 글자가 once 면 지우지 않는다
+        once = any(c.once for c in oc_span) or (not oc_span and ((j1 < len(oc) and oc[j1].once) or (0 < j1 <= len(oc) and oc[j1 - 1].once)))
+        uncertain = uncertain or once
+        unote = "2차 판독이 빠져 1차만으로 읽은 영역(원본 확인)" if once else "판독이 불확실한 자리"
         page = oc_span[0].para if oc_span else (oc[min(j1, len(oc) - 1)].para if oc else 0)
         # 문단 경계를 넘는 HWPX 구간은 문단별로 쪼갠다(편집은 문단 안에서만)
         groups: list[list[Char]] = []
@@ -316,6 +331,7 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
                 groups[-1].append(c)
             else:
                 groups.append([c])
+        long_op = _long_change(len(hw_span), len(oc_span))
         if op == "insert" or not groups:
             # HWPX 에 없는 글이 판독에 있음 → 삽입 자리는 앞 글자 뒤
             if i1 > 0:
@@ -326,9 +342,9 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
                 para, pos = 0, 0
             hctx, octx = _ctx(hw, i1, i1), _ctx(oc, j1, j2)
             if uncertain:
-                items.append(Item("B1", "mark", para, pos, pos, "", oc_text, "", pdf_page=page, note="판독이 불확실한 자리라 넣지 않음", hw_ctx=hctx, oc_ctx=octx))
+                items.append(Item("B1", "mark", para, pos, pos, "", oc_text, "", pdf_page=page, note=unote + "라 넣지 않음", hw_ctx=hctx, oc_ctx=octx))
             elif len(oc_span) >= LONG:
-                items.append(Item("C", "insert", para, pos, pos, "", oc_text, _s2t_context(oc, j1, j2), pdf_page=page, note=f"HWPX 에 없는 긴 구간({len(oc_span)}자)", hw_ctx=hctx, oc_ctx=octx))
+                items.append(Item("C", "insert", para, pos, pos, "", oc_text, _s2t_context(oc, j1, j2), pdf_page=page, note=f"HWPX 에 없는 긴 구간({len(oc_span)}자) — 원본 확인 뒤 사람이 넣음", hw_ctx=hctx, oc_ctx=octx))
             else:
                 new = _s2t_context(oc, j1, j2)
                 amb = [c.ch for c in oc_span if zh.is_ambiguous(c.ch)]
@@ -342,7 +358,7 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
             gi = hw.index(g[0]); hctx = _ctx(hw, gi, gi + len(g)); octx = _ctx(oc, j1, j2)
             if op == "delete" or not oc_span:
                 if uncertain:
-                    items.append(Item("B1", "mark", para, start, end, g_text, "", "", pdf_page=page, note="판독이 불확실한 자리", hw_ctx=hctx, oc_ctx=octx))
+                    items.append(Item("B1", "mark", para, start, end, g_text, "", "", pdf_page=page, note=unote, hw_ctx=hctx, oc_ctx=octx))
                 elif len(hw_span) >= LONG:
                     items.append(Item("C", "mark", para, start, end, g_text, "", "", pdf_page=page, note=f"판독에 없는 긴 구간({len(hw_span)}자) — PDF 범위·누락 확인", hw_ctx=hctx, oc_ctx=octx))
                 elif len(hw_span) <= MAX_DELETE_AUTO:
@@ -358,9 +374,13 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
             seg_text = "".join(c.ch for c in seg)
             octx = _ctx(oc, k1, k2)
             if uncertain or any(c.uncertain for c in seg):
-                items.append(Item("B1", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="판독이 불확실한 자리", hw_ctx=hctx, oc_ctx=octx))
+                items.append(Item("B1", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note=unote, hw_ctx=hctx, oc_ctx=octx))
             elif len(g) >= LONG and len(seg) >= LONG:
                 items.append(Item("C", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="긴 구간이 서로 다름 — 문단 순서·범위 확인", hw_ctx=hctx, oc_ctx=octx))
+            elif long_op or _long_change(len(g), len(seg)):
+                # 한쪽에 긴 구간이 붙은 치환(「矣」↔「也甲乙…」 23자, 22자 ↔ 1자): 삽입(LONG)·삭제(MAX_DELETE_AUTO) 규칙과 같이 표시만
+                items.append(Item("C", "mark", para, start, end, g_text, seg_text, "", pdf_page=page,
+                                  note=f"한쪽에 긴 구간이 붙은 치환(HWPX {len(g)}자 ↔ 판독 {len(seg)}자) — 원본 확인 뒤 사람이 고침", hw_ctx=hctx, oc_ctx=octx))
             else:
                 new = _s2t_context(oc, k1, k2) if seg else ""
                 amb = [c.ch for c in seg if zh.is_ambiguous(c.ch)]
@@ -375,24 +395,31 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
     apply_structural_rules(items, titles)
     # 于·干·於·幹·乾 묶음은 문맥으로 먼저 가린다
     resolve_gan_yu(items)
-    # 혼동하기 쉬운 글자 + 번체 후보 여럿(B2) → 판독 오류일 수 있으니 표시만(문맥 규칙이 판독 편을 든 자리는 예외)
+    # 혼동하기 쉬운 자형 쌍의 한 글자 차이(A·B2) → 1차·2차가 같은 쪽으로 틀렸을 수 있으니 표시만 하고 3차 판별(글자 조각)에 넘긴다
+    # (문맥 규칙이 판독 편을 든 자리는 예외, 자형 편향 쌍은 아래에서 따로)
     for it in items:
-        if it.kind == "B2" and it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and it.witness != "ocr" and _confusable(zh.compare_key(it.hwpx), it.ocr):
+        if it.action != "replace" or it.kind not in ("A", "B2") or len(it.hwpx) != 1 or len(it.ocr) != 1 or it.witness == "ocr":
+            continue
+        hk, ok = zh.compare_key(it.hwpx), zh.compare_key(it.ocr)      # 묶음은 간체 기준 — 번체로 읽은 판독(세로쓰기 間·帥 …)도 접어서 맞춘다
+        if not _confusable(hk, ok):
+            continue
+        if it.kind == "B2":
             it.kind, it.action, it.new = "B1", "mark", ""
-            it.note = f"판독 글자 「{it.ocr}」 는 「{zh.compare_key(it.hwpx)}」 와 자형이 비슷해 헷갈리기 쉽고 번체 후보도 여럿({'/'.join(it.candidates)}) — 원본 확인"
+            it.note = f"판독 글자 「{it.ocr}」 는 「{hk}」 와 자형이 비슷해 헷갈리기 쉽고 번체 후보도 여럿({'/'.join(it.candidates)}) — 원본 확인"
+        elif not _weak_pair(hk, ok):
+            _mark(it, "B1", f"「{it.hwpx}」↔「{it.ocr}」 는 판독기가 헷갈리기 쉬운 자형 쌍 — 1차·2차가 같이 틀렸을 수 있어 자동 반영하지 않고 글자 조각 확인(3차 판별)으로 가림")
     # 入/人·曰/日 같은 자형 쌍은 OCR 엔진들이 같은 방향으로 틀리고 인쇄 자체가 오자인 일도 있어 한 글자 차이를 자동 반영하지 않는다
     for it in items:
-        if it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and it.kind in ("A", "B2") and _weak_pair(zh.compare_key(it.hwpx), it.ocr):
+        if it.action == "replace" and len(it.hwpx) == 1 and len(it.ocr) == 1 and it.kind in ("A", "B2") and _weak_pair(zh.compare_key(it.hwpx), zh.compare_key(it.ocr)):
             _mark(it, "B1", f"「{it.hwpx}」↔「{it.ocr}」 는 OCR 이 같은 방향으로 틀리기 쉬운 자형 편향 쌍 — 글자 조각으로 원본 확인(3차 판별)")
-    # 같은 쌍이 구획 안에서 되풀이되면 변환 오류로 보고 교정 후보로 올린다
-    promote_repeated(items)
-    # 정책에 따라 자동 반영 여부
+    # 같은 쌍이 되풀이되는 자리의 교정 후보 승격(promote_repeated)은 여기서 하지 않는다 — run_section 이 3차 판별을 못 할 때만 부른다
+    # 정책에 따라 자동 반영 여부. C 삽입은 어느 정책에서도 자동으로 넣지 않는다 — 1차만 읽은 긴 구간·겹쳐 읽은 열·구획 자르기 오류가 섞여 사람 원고에 넣기엔 위험
     for it in items:
+        if it.kind in ("A", "B2") and it.action in ("replace", "insert", "delete") and _long_change(len(it.hwpx), len(it.ocr)):
+            _mark(it, "C", f"한쪽에 긴 구간이 붙은 차이(HWPX {len(it.hwpx)}자 ↔ 판독 {len(it.ocr)}자) — 원본 확인 뒤 사람이 고침")   # 어느 길로 왔든 긴 구간은 자동 반영하지 않는다
         if it.kind == "A" and it.action in ("replace", "insert", "delete"):
             it.auto = policy in ("sure", "all")
         elif it.kind == "B2" and it.action in ("replace", "insert"):
-            it.auto = policy == "all"
-        elif it.kind == "C" and it.action == "insert":
             it.auto = policy == "all"
         else:
             it.auto = False
@@ -415,17 +442,20 @@ def _layer_key(text: str) -> str:
     return "".join(c.key for c in _cells(text or "", 0))
 
 
-def witness_filter(items: list[Item], layers: dict[int, str], policy: str = "all") -> dict:
+def witness_filter(items: list[Item], layers: dict[int, str], policy: str = "all", promote: bool = True) -> dict:
     """한 글자 차이마다 그 쪽 PDF 글자층(다른 OCR 엔진)에서 같은 자리를 찾아 본다.
-    글자층이 HWPX 와 같으면 판독 오류로 보고 차이에서 뺀다. 글자층이 판독과 같으면 두 증인이 겹치므로 표시만 하던 干/于 자리도 교정 후보(B2)로 올린다.
-    돌려주는 값은 통계 {"checked", "hwpx", "ocr", "none"}."""
+    글자층이 HWPX 와 같으면 판독 오류로 보고 차이에서 뺀다. 글자층이 판독과 같으면(promote) 두 증인이 겹치므로 표시만 하던 干/于 자리도 교정 후보(B2)로 올린다
+    — 글자층은 같은 화소를 본 다른 OCR 이라 자형 판별을 대신하지 못하므로 3차 판별(글자 조각)을 못 할 때만(run.py 가 promote 로 알림).
+    3차 판별이 이미 가린 자리(witness 에 glyph)는 어느 쪽으로도 건드리지 않는다. 돌려주는 값은 통계 {"checked", "hwpx", "ocr", "none", "weak", "glyph"}."""
     import re
     keys = {pg: _layer_key(t) for pg, t in (layers or {}).items() if t}
-    st = {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0, "weak": 0}
+    st = {"checked": 0, "hwpx": 0, "ocr": 0, "none": 0, "weak": 0, "glyph": 0}
     for it in items:
         if it.action not in ("replace", "mark") or len(it.hwpx) != 1 or len(it.ocr) != 1 or it.kind == "D":
             continue
-        if "자형 편향" in it.note or _weak_pair(zh.compare_key(it.hwpx), it.ocr):
+        if "glyph" in (it.witness or ""):
+            st["glyph"] += 1; continue                  # 3차 판별이 인쇄 자형을 직접 보고 가린 자리 — 글자층이 뒤집지 않는다
+        if "자형 편향" in it.note or _weak_pair(zh.compare_key(it.hwpx), zh.compare_key(it.ocr)):
             st["weak"] += 1; continue                   # 글자층도 같은 식으로 틀릴 수 있는 쌍 — 증인으로 쓰지 않는다
         lk = keys.get(it.pdf_page)
         if not lk:
@@ -453,7 +483,7 @@ def witness_filter(items: list[Item], layers: dict[int, str], policy: str = "all
         elif found == ok:
             st["ocr"] += 1
             it.witness = (it.witness + "+" if it.witness else "") + "layer=ocr"
-            if it.kind == "B1" and "혼동" in it.note:          # 두 증인이 겹치는 干/于 자리 → 교정 후보로
+            if promote and it.kind == "B1" and "혼동" in it.note:   # 두 증인이 겹치는 干/于 자리 → 교정 후보로(3차 판별을 못 할 때만)
                 new = zh.to_traditional(it.ocr)
                 cands = zh.candidates(it.ocr)
                 it.kind, it.action, it.new, it.candidates = ("B2" if len(cands) > 1 else "A"), "replace", new, (cands if len(cands) > 1 else [])

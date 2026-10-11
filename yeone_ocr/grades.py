@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from .merge import MARK_RE, columns_in_reading_order
 from .schema import PageReading, TEXT_KINDS
+from .adjudicate import SUSPECT_NOTE, suspect_uncertain
 
 # ---------- 등급별 글자 모양(HWPX·DOCX·검수 화면 공용) ----------
 # 색만으로는 색각 이상·흑백 인쇄에서 구별되지 않으므로 밑줄 모양도 등급마다 다르게 둔다.
@@ -88,7 +89,8 @@ def _plain_map(text: str) -> tuple[str, list[int | None]]:
 def locate_choice(col_text: str, char_index: int, choice: str, pre: str = "", post: str = "", near: int = 3) -> int | None:
     """3차가 고른 글자(choice)가 열 글의 어느 위치(원래 글의 글자 번호)에 들어 있는지. 표시 밖의 보통 글자여야 하고,
     제자리(char_index) 가까이(±near)에서 앞뒤 글자가 가장 잘 맞는 자리를 고른다. 없으면 None.
-    (제자리는 판별 때의 글자 번호를 같은 차례의 앞쪽 선택과 뒤 차례의 선택이 바꾼 길이만큼 고친 번호 — decided_positions 가 고쳐 넘긴다.
+    (제자리는 판별 때의 글자 번호를 같은 차례의 앞쪽 선택과 뒤 차례의 선택이 바꾼 길이만큼 고친 번호, 앞뒤 글자는 그 뒤에 정해진 이웃을 넣은 글자 —
+    decided_positions 가 기록을 다시 놓아 고쳐 넘긴다.
     그래도 사람이 고쳤거나 비교를 다시 계산해 한두 자 밀릴 수 있으므로 가까운 범위를 본다.)
     제자리 글자가 앞뒤 글자 하나라도 맞으면 그 자리를 앞세우고, 제자리가 아닌 후보는 앞뒤 글자 하나는 맞아야 받는다
     (이웃 표시를 b 로 정했거나 사람이 고친 뒤에 근처의 같은 글자 — 1차·2차가 같게 읽은 글자 — 를 잡지 않게)."""
@@ -140,47 +142,100 @@ def adjudication_runs(adjudications: list[dict] | None) -> list[int]:
     return out
 
 
+def _col_where(reg) -> list[tuple[int, int, object]]:
+    """영역의 읽기 순서 열마다 (문단 번호, 문단 글 안의 그 열 시작 위치, 열) — columns_in_reading_order 와 같은 차례."""
+    where = []
+    for pi, p in enumerate(reg.paragraphs):
+        off = 0
+        for c in sorted(p.columns, key=lambda c: c.col_from_right):
+            where.append((pi, off, c)); off += len(c.text or "")
+    return where
+
+
+def _replay_edit(st: list, pe: int, old: int, new: str) -> list:
+    """먼저 놓은 확정 자리 st=[제자리, 고른 글자, 앞 글자, 뒤 글자](지금 글 기준)에 뒤에 바꾼 표시(pe 부터 접은 글 old 자 → new)를 반영한다:
+    앞에서 바뀌면 제자리를 길이 차만큼 밀고, 앞뒤 글자 창에 걸리면 그 글자를 바뀐 글자로(adjudicate._context_after 와 같은 셈). 제자리와 겹치면 그대로."""
+    pos, ch, pre, post = st
+    if pe + old <= pos:
+        s = pe - (pos - len(pre))
+        if s + old > 0:
+            pre = pre[:max(0, s)] + new + pre[s + old:]
+        return [pos + len(new) - old, ch, pre, post]
+    end = pos + len(ch)
+    if pe >= end:
+        s = pe - end
+        if s < len(post):
+            post = post[:s] + new + post[s + old:]
+        return [pos, ch, pre, post]
+    return st
+
+
 def decided_positions(merged: PageReading, adjudications: list[dict] | None) -> tuple[list[Located], list[dict]]:
     """3차 확정 글자의 자리(문단 글 기준)와 못 찾은 판별 기록. 문단 글 = 그 문단 열들을 열 번호 순으로 이은 글(schema.paragraph_text).
     id 가 겹친 영역의 기록은 어느 영역인지 가릴 수 없으므로 못 찾은 것으로 둔다.
-    제자리는 (영역, 열)마다 확정 기록을 목록 차례(시간 차례)로 다시 놓아 구한다: 판별 때 글자 번호 + 같은 차례(adjudication_runs)에서
-    그보다 앞쪽에 고른 글자의 길이 차(〔己入/已〕→已 면 -1). 하나를 놓을 때마다 앞 차례에서 놓은 자리 중 그보다 뒤인 것을 그 길이 차만큼 민다
-    (뒤 차례의 글자 번호는 앞 차례가 바꾼 글에서 셌으므로 앞 차례의 길이 차는 이미 들어 있고, 앞 차례의 자리는 뒤 차례가 바꾼 만큼 밀린다)."""
+    제자리와 앞뒤 글자는 확정 기록을 차례(adjudication_runs) 순으로 다시 놓아(replay) 구한다 — 3차가 바꾼 차례 그대로:
+    - 놓을 때: 판별 때 글자 번호 + 같은 차례·같은 열에서 먼저 바꾼 앞쪽 글자의 길이 차(〔己入/已〕→已 면 -1), 앞뒤 글자는 같은 차례에서 먼저 바꾼
+      이웃을 고른 글자로 넣은 것(adjudicate._context_after — apply_choice 가 견주는 글자와 같다)
+    - 놓은 뒤: 그 열에서 뒤에 바꾼 표시마다 먼저 놓은 자리를 밀고 앞뒤 글자 창을 고친다(_replay_edit) — 〔於/不〕〔於/不〕〔於/不〕 을 於·不·不 로 정하면
+      셋째 기록의 앞 글자는 기록한 於 가 아니라 不 이고 첫째 기록의 뒤 글자도 不 이다(기록 그대로 견주면 셋째가 둘째 자리에 칠해졌다)."""
+    from types import SimpleNamespace
+    from .adjudicate import _context_after
     found: list[Located] = []; missing: list[dict] = []
     dup = dup_region_ids(merged)
     regs = {r.id: r for r in merged.regions if r.kind in TEXT_KINDS and r.id not in dup}
-    own: dict[int, int] = {}                                         # 기록 번호 → 지금 열 글(표시를 접은 글)에서의 제자리
-    placed: dict[tuple, list[tuple[int, int, int, int]]] = {}         # (영역 id, 열 번호) → [(기록 번호, 차례, 판별 때 글자 번호, 고른 글자 길이 - 1차 글자 길이)]
-    for k, (a, run) in enumerate(zip(adjudications or [], adjudication_runs(adjudications))):
+    own: dict[int, list] = {}                                        # 기록 번호 → [지금 글에서의 제자리, 고른 글자, 앞 글자, 뒤 글자]
+    cols: dict[tuple, list[int]] = {}                                # (영역 id, 열 번호) → 놓은 기록 번호들
+    done: dict[tuple, list[tuple[int, str, str]]] = {}               # (영역 id, 열 번호, 차례) → [(판별 때 글자 번호, 1차 글자, 고른 글자)]
+    order = sorted(enumerate(zip(adjudications or [], adjudication_runs(adjudications))), key=lambda t: t[1][1])   # 차례 순(같은 차례는 목록 차례)
+    for k, (a, run) in order:
         if not a.get("choice"):
             continue
-        i0, d = int(a.get("char_index", 0)), len(a["choice"]) - len(a.get("a", ""))
-        col = placed.setdefault((a.get("region_id", ""), int(a.get("col_index", -1))), [])
-        own[k] = i0 + sum(dd for _, r, j, dd in col if r == run and j < i0)
-        for kk, r, _, _ in col:
-            if r < run and own[kk] > own[k]:
-                own[kk] += d                                         # 앞 차례에서 놓은 뒤쪽 글자는 이 글자의 길이 차만큼 밀린다
-        col.append((k, run, i0, d))
+        key = (a.get("region_id", ""), int(a.get("col_index", -1)))
+        i0, la, ch = int(a.get("char_index", 0)), a.get("a", ""), a["choice"]
+        dn = done.setdefault((*key, run), [])
+        pos = i0 + sum(len(c) - len(x) for j, x, c in dn if j < i0)
+        pre, post = _context_after(SimpleNamespace(char_index=i0, a=la, pre=a.get("pre", ""), post=a.get("post", "")), dn)
+        for kk in cols.setdefault(key, []):
+            own[kk] = _replay_edit(own[kk], pos, len(la), ch)        # 이 자리를 바꾼 만큼 먼저 놓은 자리를 밀고 그 앞뒤 글자를 고친다
+        own[k] = [pos, ch, pre, post]; cols[key].append(k); dn.append((i0, la, ch))
     for k, a in enumerate(adjudications or []):
         if not a.get("choice"):
             continue
         reg = regs.get(a.get("region_id", ""))
         if reg is None:
             missing.append(a); continue
-        # 읽기 순서 열 번호 → (문단 번호, 문단 글 안의 그 열 시작 위치)
-        where = []
-        for pi, p in enumerate(reg.paragraphs):
-            off = 0
-            for c in sorted(p.columns, key=lambda c: c.col_from_right):
-                where.append((pi, off, c)); off += len(c.text or "")
+        where = _col_where(reg)                                      # 읽기 순서 열 번호 → (문단 번호, 문단 글 안의 그 열 시작 위치, 열)
         ci = int(a.get("col_index", -1))
         if not 0 <= ci < len(where):
             missing.append(a); continue
         pi, off, col = where[ci]
-        at = locate_choice(col.text or "", own[k], a["choice"], a.get("pre", ""), a.get("post", ""))
+        pos, ch, pre, post = own[k]
+        at = locate_choice(col.text or "", pos, ch, pre, post)
         if at is None:
             missing.append(a); continue
-        found.append(Located(reg.id, pi, off + at, off + at + len(a["choice"]), a))
+        found.append(Located(reg.id, pi, off + at, off + at + len(ch), a))
+    return found, missing
+
+
+def suspect_positions(merged: PageReading, suspects: list[dict] | None) -> tuple[list[Located], list[dict]]:
+    """합의 판독 의심 가운데 자형이 글자층 쪽인 기록(outcome differs)의 글자 자리(문단 글 기준)와 못 찾은 기록.
+    본문은 합의 글자 그대로이므로 그 글자를 앞뒤 글자로 찾는다(locate_choice — 뒤에 3차가 이웃 표시를 정해 한두 자 밀려도 찾는다)."""
+    found: list[Located] = []; missing: list[dict] = []
+    dup = dup_region_ids(merged)
+    regs = {r.id: r for r in merged.regions if r.kind in TEXT_KINDS and r.id not in dup}
+    for e in suspects or []:
+        if e.get("outcome") != "differs" or not e.get("consensus"):
+            continue
+        reg = regs.get(e.get("region_id", ""))
+        where = _col_where(reg) if reg is not None else []
+        ci = int(e.get("col", -1))
+        at = None
+        if 0 <= ci < len(where):
+            pi, off, col = where[ci]
+            at = locate_choice(col.text or "", int(e.get("char_index", 0)), e["consensus"], e.get("pre", ""), e.get("post", ""))
+        if at is None:
+            missing.append(e); continue
+        found.append(Located(reg.id, pi, off + at, off + at + len(e["consensus"]), e))
     return found, missing
 
 
@@ -224,7 +279,10 @@ def _where(u, horizontal: bool = False) -> str:
 
 def classify_uncertain(u, body_text: str, decided: set) -> str:
     """확인 항목이 문서에 이미 보이는지: shown(본문의 〔〕 로 보임) | decided(3차가 정해 초록·파랑으로 보임) | notice(어디에도 안 보임 → 고지).
-    '3차 판별: 「x」 확정' 주석 글에 기대지 않는다(비교 다시 계산이 확인 항목을 새로 만들면 그 주석이 사라진다)."""
+    '3차 판별: 「x」 확정' 주석 글에 기대지 않는다(비교 다시 계산이 확인 항목을 새로 만들면 그 주석이 사라진다).
+    합의 판독 의심(SUSPECT_NOTE)은 〔〕 표시가 아니라 고지다 — 앞뒤 글에 〔a/b〕 가 섞여 있어도 notice."""
+    if (u.context or "").startswith(SUSPECT_NOTE):
+        return "notice"
     marks = [m for m in MARK_RE.findall(u.context or "") if not m.startswith(NOTE_PREFIXES)]
     if marks and all(m in body_text for m in marks):
         return "shown"
@@ -295,8 +353,16 @@ def page_grades(rec: dict, ctx: dict | None = None, memo_mode: str = "notice", u
         if memo_mode == "all":
             memos.setdefault(key, []).append((off, f"[문맥 추정 — 확정 아님] {s.get('reason', '')}"))
     # ---- 쪽 고지(쪽 기록 줄 끝 글자에 하나로) ----
+    # 합의 판독 의심: 글자를 찾으면 메모를 그 글자에 달고(3차 어긋남 메모처럼) 쪽 고지에서는 뺀다. 못 찾으면 쪽 고지로 남는다
+    on_char: set = set()
+    for f in suspect_positions(pr, rec.get("suspects"))[0]:
+        e = f.entry; stats["suspects"] = stats.get("suspects", 0) + 1
+        memos.setdefault((f.region_id, f.para_index), []).append((f.start, f"[합의 의심] 1차·2차 「{e.get('consensus', '')}」, 자형 판별·글자층 「{e.get('layer', '')}」 "
+                                                                            "— 글자는 판독대로 둠(원본 확인)"))
+        u = suspect_uncertain(e); on_char.add((u.region_id, u.context))
     body = page_body(pr); dec = decided_keys(rec)
-    hidden = [f"{_where(u, horizontal)}: {(u.context or '').strip()[:80]}".strip(": ") for u in pr.uncertain if classify_uncertain(u, body, dec) == "notice"]
+    hidden = [f"{_where(u, horizontal)}: {(u.context or '').strip()[:80]}".strip(": ") for u in pr.uncertain
+              if classify_uncertain(u, body, dec) == "notice" and (u.region_id, u.context) not in on_char]
     if hidden:
         notices.append("[본문에 표시되지 않은 확인 항목] " + " / ".join(hidden[:4]) + (f" 외 {len(hidden) - 4}건 — 검수 화면(review.html)" if len(hidden) > 4 else ""))
     errs = [i for i in rec.get("verify") or [] if i.get("level") == "error"]

@@ -8,7 +8,8 @@ Frac = tuple[float, float, float, float]   # (x0,y0,x1,y1) 0~1
 
 
 def to_png_bytes(im: Image.Image) -> bytes:
-    buf = io.BytesIO(); im.save(buf, "PNG"); return buf.getvalue()
+    """모델에 보낼 PNG(무손실). compress_level=1: 기본(6)보다 ~3배 빠르고 ~15% 클 뿐 — 쪽당 CPU 의 대부분이 PNG 인코딩이다."""
+    buf = io.BytesIO(); im.save(buf, "PNG", compress_level=1); return buf.getvalue()
 
 
 def upscale(im: Image.Image, factor: float) -> Image.Image:

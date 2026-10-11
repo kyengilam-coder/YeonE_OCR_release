@@ -131,10 +131,11 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
             if reg.note:
                 parts.append(f"<small>메모: {html.escape(reg.note)}</small>")
             parts.append("</div>")
-        from .grades import classify_uncertain, page_body, decided_keys
+        from .grades import classify_uncertain, page_body, decided_keys, SUSPECT_NOTE
         body_t, dec = page_body(pr), decided_keys(rec)
         tag = {"shown": "본문 표시", "decided": "3차 확정", "notice": "고지"}
-        parts.append("<h4>판독 확인 필요 <small style='font-weight:normal'>(본문 표시 = 문서의 〔 〕 · 3차 확정 = 문서의 초록·파랑 · 고지 = 문서에 메모로만)</small></h4><ul class=unc>" + ("".join(f"<li><small>[{tag[classify_uncertain(u, body_t, dec)]}]</small> {html.escape(u.region_id)} {('오른쪽에서 '+str(u.col_from_right)+'번째 열 ') if u.col_from_right else ''}{html.escape(u.position)} {_mark(u.context)}</li>" for u in pr.uncertain) or "<li>없음</li>") + "</ul>")
+        parts.append("<h4>판독 확인 필요 <small style='font-weight:normal'>(본문 표시 = 문서의 〔 〕 · 3차 확정 = 문서의 초록·파랑 · 고지 = 문서에 메모로만 · "
+                     "합의 의심 = 1차·2차가 같게 읽었지만 자형 판별과 글자층이 다른 글자, 글은 판독대로 · 문서에는 그 글자에 메모)</small></h4><ul class=unc>" + ("".join(f"<li><small>[{'합의 의심' if u.context.startswith(SUSPECT_NOTE) else tag[classify_uncertain(u, body_t, dec)]}]</small> {html.escape(u.region_id)} {('오른쪽에서 '+str(u.col_from_right)+'번째 열 ') if u.col_from_right else ''}{html.escape(u.position)} {_mark(u.context)}</li>" for u in pr.uncertain) or "<li>없음</li>") + "</ul>")
         ver = rec.get("verify") or []
         ctx_sites = ((context or {}).get(n) or {}).get("sites") or []
         if ctx_sites:

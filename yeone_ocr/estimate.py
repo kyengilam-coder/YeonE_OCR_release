@@ -35,6 +35,7 @@ PRICES: dict[str, dict[str, float]] = {
 }
 DEFAULT_FX_KRW = 1400.0          # 환율 조회에 실패했을 때
 FX_URLS = ("https://open.er-api.com/v6/latest/USD", "https://api.frankfurter.app/latest?from=USD&to=KRW")
+FX_MAX_BYTES = 1 << 20           # 환율 응답은 몇 KB — 1MB 를 넘으면 읽지 않고 버린다(엉뚱한 응답이 메모리를 채우지 않게)
 
 
 def image_tokens(w: int, h: int) -> int:
@@ -94,14 +95,17 @@ def guess_second_model(primary: str, second: str) -> str:
 
 
 def fetch_fx_krw(timeout: float = 4.0) -> tuple[float, str] | None:
-    """원/달러 환율을 무료 공개 API 에서 가져온다. 실패하면 None."""
+    """원/달러 환율을 무료 공개 API 에서 가져온다. 실패하면 None. 응답은 FX_MAX_BYTES 까지만 읽는다."""
     for url in FX_URLS:
         try:
             with urllib.request.urlopen(url, timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            rate = (data.get("rates") or {}).get("KRW")
-            if rate:
-                return float(rate), "오늘 자동 조회"
+                raw = r.read(FX_MAX_BYTES + 1)
+            if len(raw) > FX_MAX_BYTES:
+                continue
+            data = json.loads(raw.decode("utf-8"))
+            rate = float((data.get("rates") or {}).get("KRW") or 0)
+            if 0 < rate < 1e7:                                       # 엉뚱한 값(0·무한)은 버린다
+                return rate, "오늘 자동 조회"
         except Exception:
             continue
     return None
@@ -126,9 +130,12 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
            "rows": [], "price_lines": [], "notes": []}
     if n == 0:
         return out
-    done = {r["pdf_page"] for r in (records or []) if "pass1" in r}
+    done = {r["pdf_page"] for r in (records or []) if "pass1" in r and not r.get("pass2_failed")}
     todo = [p for p in pages if p not in done]
     out["already_read"] = n - len(todo)
+    redo = sorted(r["pdf_page"] for r in (records or []) if r.get("pass2_failed") and r["pdf_page"] in pages)
+    if redo:                                               # 2차가 덜 된 쪽은 다시 읽는다 — 보통 덜 된 영역의 2차만이라 실제는 이보다 적다(1차 설정·모델이 바뀌었으면 1차도)
+        out["notes"].append(f"2차가 덜 된 쪽 {len(redo)}개는 다 읽는 셈으로 잡았습니다(실제로는 덜 된 영역의 2차만 다시 묻는 일이 많아 더 적음).")
     m2 = guess_second_model(model, second_model) if second_pass else model
     out["second_model"] = m2
     p1 = resolve_price(model, prices)

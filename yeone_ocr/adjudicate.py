@@ -18,14 +18,17 @@
 - 판별기는 지침 전문 대신 자형 전용 시스템 지시(prompts.glyph_system_prompt)를 쓰고, 답은 w(보인 글) → e(자형) → c(고른 글자) 차례로 쓴다.
 - 원본 글자 크기가 문턱(min_px)보다 작으면 묻지 않고 미정으로 둔다(지침 24: 확대로 없는 획이 살아나지 않는다).
 - blind=True 면 확정한 자리를 후보 없이 한 번 더 읽게 해(identify) 객관식 답과 같을 때만 확정한다.
+
+합의 판독 의심(0.6.8, suspect_page) — 1차·2차가 같게 틀린 글자는 〔a/b〕 가 생기지 않는다. 표시 밖 글자가 PDF 글자층과 1:1 로 다르고 두 글자가
+자형 혼동 묶음이면 같은 방식(후보 [합의 글자, 글자층 글자])으로 묻고, 자형이 글자층 쪽이면 본문은 그대로 두고 확인 항목만 단다(지침 20).
 """
 from __future__ import annotations
-import re, unicodedata
+import functools, re, time, unicodedata
 from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
 import numpy as np
 from PIL import Image
-from .schema import PageReading, Region, Column, TEXT_KINDS, bbox_frac, GlyphChoice, GlyphAsk
+from .schema import PageReading, Region, Column, Uncertain, TEXT_KINDS, bbox_frac, GlyphChoice, GlyphAsk
 from .merge import columns_in_reading_order, MARK_RE
 from .layout import ink_runs, merge_glyph_runs
 
@@ -443,10 +446,39 @@ def glyph_crop(img: Image.Image, box: tuple[float, float, float, float], zoom: i
     return canvas
 
 
-def apply_choice(merged: PageReading, site: Site, choice: str, moved: int = 0) -> bool:
-    """표시 자리를 고른 글자로 바꾼다. 같은 표시가 그 열에 여럿이면 글자 번호(char_index)가 맞는 것을, 없으면 가장 가까운 것을 바꾼다
-    (앞 자리가 미정이고 뒤 자리만 확정됐을 때 첫 표시를 바꾸던 잘못 방지). moved = 같은 차례에서 이 열 앞쪽에 이미 고른 글자의 길이 차 합
-    (〔效效/先〕→先 이면 -1): 글자 번호는 찾을 때의 글에서 셌으므로 바뀐 글에서는 그만큼 고쳐 맞춘다(같은 표시 둘이 뒤바뀌지 않게)."""
+def _context_after(site: Site, done) -> tuple[str, str]:
+    """기록한 앞뒤 글자(pre·post)에 같은 차례에서 이 열에 이미 바꾼 자리(done: [(글자 번호, 1차 글자, 고른 글자)], 찾을 때의 글 기준)를
+    고른 글자로 넣은 것 — 지금 글에서 제자리 옆에 보여야 할 글자. find_sites 는 이웃 표시를 1차 글자로 접어 앞뒤 글자를 적으므로
+    이웃이 다른 후보(〔於/不〕→不)나 길이가 다른 후보로 정해지면 기록 그대로는 제자리의 이웃이 안 맞아 보인다."""
+    ci, la = site.char_index, len(site.a)
+    pre, post = site.pre or "", site.post or ""
+    p0, q0 = ci - len(pre), ci + la                                     # 앞 글자·뒤 글자 창의 첫 글자 번호
+    for j, a, c in sorted(done, reverse=True):                          # 뒤쪽부터 바꿔야 앞쪽 번호가 그대로다
+        if p0 < j + len(a) <= ci:
+            pre = pre[:max(0, j - p0)] + c + pre[j + len(a) - p0:]
+        elif q0 <= j < q0 + len(post):
+            post = post[:j - q0] + c + post[j + len(a) - q0:]
+    return pre, post
+
+
+def apply_choice(merged: PageReading, site: Site, choice: str, moved: int = 0, done=()) -> bool:
+    """표시 자리를 고른 글자로 바꾼다. 같은 표시가 그 열에 여럿이면 글자 번호(char_index)가 맞는 것을 바꾼다
+    (앞 자리가 미정이고 뒤 자리만 확정됐을 때 첫 표시를 바꾸던 잘못 방지). done = 같은 차례에서 이 열에 이미 바꾼 자리
+    [(글자 번호, 1차 글자, 고른 글자)]: 글자 번호는 찾을 때의 글에서 셌으므로 앞쪽 자리의 길이 차(〔效效/先〕→先 이면 -1)만큼 고쳐 맞추고
+    (같은 표시 둘이 뒤바뀌지 않게), 앞뒤 글자도 그 자리를 고른 글자로 넣어 견준다(_context_after). moved 는 예전 부름 방식(길이 차 합만 —
+    앞뒤 글자는 고치지 못한다).
+    제자리에 그 표시가 없으면(사람이 고쳤거나 비교를 다시 계산해 글자가 밀림) 가까운 같은 표시를 찾되, grades.locate_choice 처럼
+    기록한 앞뒤 글자(pre·post) 가운데 하나는 그 자리 옆에 있어야 받는다 — 같은 열의 다른 〔日/曰〕 을 바꾸지 않게.
+    바로 옆 글자가 다른 후보로 확정된 표시였을 수 있으므로(〔於/不〕→不) 그 옆 글자(pre[-2]·post[1])가 맞아도 약하게 쳐 준다.
+    제자리의 표시는 이웃이 안 맞아도 받되 이웃이 맞는 자리가 있으면 그쪽을 앞세운다. 앞뒤 글자 기록이 둘 다 없으면 가장 가까운 표시.
+    맞는 자리가 없으면 False(표시를 그대로 둔다 — apply_adjudications 가 못 찾음으로 센다)."""
+    def side(seen: str, want: str, back: bool) -> int:
+        """이웃 한쪽의 맞음: 바로 옆 글자가 같으면 2, 그 옆 글자만 같으면 1, 아니면 0."""
+        if not want:
+            return 0
+        if back:
+            return 2 if seen.endswith(want[-1]) else (1 if len(want) > 1 and len(seen) > 1 and seen[-2] == want[-2] else 0)
+        return 2 if seen.startswith(want[0]) else (1 if len(want) > 1 and len(seen) > 1 and seen[1] == want[1] else 0)
     for reg in merged.regions:
         if reg.id != site.region_id:
             continue
@@ -454,26 +486,44 @@ def apply_choice(merged: PageReading, site: Site, choice: str, moved: int = 0) -
         if site.col_index >= len(cols):
             return False
         col = cols[site.col_index]; text = col.text or ""
-        hits = [(abs(len(plain(text[:m.start()])) - site.char_index - moved), m.start(), m.end()) for m in MARK_RE.finditer(text) if m.group(0) == site.mark]
-        if not hits:
+        want = site.char_index + moved + sum(len(c) - len(a) for j, a, c in done if j < site.char_index)
+        pre, post = _context_after(site, done)
+        best = None
+        for m in MARK_RE.finditer(text):
+            if m.group(0) != site.mark:
+                continue
+            before = plain(text[:m.start()]); after = plain(text[m.end():])
+            dist = abs(len(before) - want)
+            fit = side(before, pre, True) + side(after, post, False)
+            if (pre or post) and dist and not fit:
+                continue                                                  # 제자리가 아니면 앞뒤 글자 하나는 맞아야 한다
+            key = (dist == 0 and fit > 0, fit, -dist)
+            if best is None or key > best[0]:
+                best = (key, m.start(), m.end())
+        if best is None:
             return False
-        _, a, b = min(hits)
+        _, a, b = best
         col.text = text[:a] + choice + text[b:]
         return True
 
 
-def apply_adjudications(merged: PageReading, adjudications: list[dict] | None) -> int:
+def apply_adjudications(merged: PageReading, adjudications: list[dict] | None, stats: dict | None = None) -> int:
     """저장된 판별 결과를 병합 판독문에 다시 적용한다(비교 다시 계산 뒤에도 판별이 남게). 적용한 수를 돌려준다.
-    판별 때처럼 차례(grades.adjudication_runs)마다 같은 열 앞쪽에서 이미 바꾼 글자의 길이 차만큼 글자 번호를 고쳐 표시를 찾는다."""
+    판별 때처럼 차례(grades.adjudication_runs)마다 같은 열 앞쪽에서 이미 바꾼 글자의 길이 차만큼 글자 번호를 고쳐 표시를 찾는다.
+    stats 를 주면 자리를 못 찾아 적용하지 못한 확정 기록 수를 stats["unmapped"] 에 적는다(등급의 '3차 확정 위치 못 찾음' 과 같은 뜻)."""
     from .grades import adjudication_runs
-    n = 0; moves: dict[tuple, list[tuple[int, int]]] = {}              # (영역 id, 열 번호, 차례) → [(글자 번호, 길이 차)]
+    n = 0; lost = 0; done: dict[tuple, list[tuple[int, str, str]]] = {}  # (영역 id, 열 번호, 차례) → [(글자 번호, 1차 글자, 고른 글자)]
     for a, run in zip(adjudications or [], adjudication_runs(adjudications)):
         if not a.get("choice"):
             continue
         site = Site(**{k: a[k] for k in Site.__dataclass_fields__ if k in a})
         key = (site.region_id, site.col_index, run)
-        if apply_choice(merged, site, a["choice"], sum(d for j, d in moves.get(key, []) if j < site.char_index)):
-            n += 1; moves.setdefault(key, []).append((site.char_index, len(a["choice"]) - len(site.a)))
+        if apply_choice(merged, site, a["choice"], done=done.get(key, [])):
+            n += 1; done.setdefault(key, []).append((site.char_index, site.a, a["choice"]))
+        else:
+            lost += 1
+    if stats is not None:
+        stats["unmapped"] = lost
     return n
 
 
@@ -491,7 +541,15 @@ def window_matches(window: str, pre: str, post: str) -> bool:
     except Exception:
         fold = lambda s: s
     w, pk, nk = fold(w), fold(pk), fold(nk)
+    if pk and nk and pk[-1] in w and nk[0] in w:
+        return _around(w, pk, nk)                                      # 둘 다 보이면 자리를 사이에 두고 이어져야 한다(흩어져 보이면 다른 조각)
     return bool((pk and pk[-1] in w) or (nk and nk[0] in w))
+
+
+def _around(w: str, pk: str, nk: str) -> bool:
+    """앞 글자 뒤 0~2자(표시 글자의 길이) 안에 뒤 글자가 오는지 — 앞뒤 글자가 창 어디엔가 흩어져 있는 것만으로는 자리를 믿지 않는다.
+    사이의 부호(〔〕·︑︒·▲○ 처럼 _PUNCT 에 없는 것 — w 는 부호 포함으로 적게 한다)는 세지 않고 글자와 □(못 읽은 글자)만 센다."""
+    return bool(re.search(re.escape(pk[-1]) + r"(?:[^\w□]*[\w□]){0,2}[^\w□]*" + re.escape(nk[0]), w))
 
 
 def _window_parts(window: str, pre: str, choice: str, post: str):
@@ -523,13 +581,28 @@ def window_ok(window: str, pre: str, choice: str, post: str) -> bool:
         return True
     if adjacent_seen(window, pre, choice, post):
         return True
-    if pk and nk and pk[-1] in w and nk[0] in w:               # 가운데 글자를 다르게 읽었어도 앞뒤가 둘 다 보이면 자리는 맞다
+    if pk and nk and _around(w, pk, nk):                        # 가운데 글자를 다르게 읽었어도 앞뒤가 그 자리를 사이에 두고 보이면 자리는 맞다
         return True
     return False
 
 
 def _fatal(e: Exception) -> bool:
     return bool(getattr(e, "fatal", False))
+
+
+def even_chunks(items: list, batch: int) -> list[list]:
+    """items 를 ⌈n/batch⌉ 묶음으로 거의 같은 크기(batch 를 넘지 않게)로 나눈다 — 9장을 8장씩이면 5+4(8+1 이 아니라: 한 장짜리 호출도
+    묶음만큼 비싸다). 한 장짜리 묶음은 batch 가 2 이고 홀수 장일 때 마지막에만 생기며, 부르는 쪽이 낱개로 묻는다."""
+    n = len(items)
+    if n == 0:
+        return []
+    m = max(1, -(-n // max(1, batch)))
+    base, extra = divmod(n, m)
+    out = []; k = 0
+    for c in range(m):
+        size = base + (1 if c < extra else 0)
+        out.append(list(items[k:k + size])); k += size
+    return out
 
 
 def fold_glyph(s: str) -> str:
@@ -561,32 +634,10 @@ LOWRES_NOTE = "저해상"
 MIN_GLYPH_PX = 16          # 저해상 문턱(원본 글자 크기, 픽셀). 300dpi 렌더 10pt 글자는 약 42px, 150dpi 스캔 8pt 소주는 약 17px. 잠정값 — 측정으로 고친다
 
 
-def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_sites: int = 0, zoom: int = 6, batch: int = 8,
-                    fallback_reader=None, layer_lines: list[dict] | None = None, frame=None, should_stop=None, page_size_pt=None,
-                    min_px: float = 0, blind: bool = False, ticks: bool = True) -> dict:
-    """한 쪽의 〔a/b〕 자리를 판별한다. rec 을 고쳐 돌려준다(merged 글, adjudications, uncertain 메모).
-
-    - 자리마다 창을 글자층 → 먹 실측 → 균등 분할 순으로 잡는다(기록 loc). frame 은 쪽 이미지의 PDF 좌표 틀(pdfio.page_frame).
-    - 눈가림: 판독기에는 GlyphAsk(섞은 후보·조각 안 순번)만 넘긴다. 앞뒤 글자(site.pre/post)는 답의 창(w) 검사에만 쓴다.
-      ticks 면 실측한 자리의 조각 바깥에 눈금을 그린다.
-    - min_px 를 주면 원본에서 잰 글자 크기가 그보다 작은 자리는 묻지 않고 미정으로 둔다(지침 24).
-    - reader 에 adjudicate_many 가 있으면 batch 장씩 한 호출로 묻고, 응답에서 빠졌거나 창(w)이 앞뒤 글자와 안 맞는 자리만 낱개로 다시 묻는다.
-      묶음 호출 자체가 실패하면(한도 초과 등) 그 자리들은 '판별 실패' 로 남기고 낱개로 번지지 않는다(표시가 남으니 다음 실행에서 다시).
-    - fallback_reader 가 있으면 첫 판독기가 못 가린 자리(c="")와 실패한 자리를 그 판독기로 다시 묻는다(예: flash 먼저, pro 보완).
-    - blind 면 확정할 자리를 주 판독기에 후보 없이 한 번 더 읽게 해(identify / identify_many) 객관식 답과 같을 때만 확정한다.
-    - should_stop() 이 참이면 남은 묶음·보완을 건너뛴다(끝난 자리는 적용). 키·권한 오류(fatal)는 그대로 올려 전체를 멈춘다."""
-    merged = PageReading.model_validate(rec["merged"])
-    p1 = PageReading.model_validate(rec["pass1"]) if rec.get("pass1") else merged
-    bboxes = {r.id: r.bbox for r in p1.regions}
-    sites = find_sites(merged)
-    if max_sites:
-        sites = sites[:max_sites]
-    done = list(rec.get("adjudications") or [])
-    stats = {"sites": len(sites), "decided": 0, "undecided": 0, "a": 0, "b": 0, "failed": 0, "loc": {}}
-    pdf_page = rec.get("pdf_page", 0)
-    frame = frame or page_size_pt
-    stop = should_stop or (lambda: False)
-    ink = page_ink(img) if (sites and img is not None) else None
+def _prepare_asks(sites: list[Site], merged: PageReading, bboxes: dict, ink, horizontal: bool, pdf_page, layer_lines, frame,
+                  min_px: float, ticks: bool, stats: dict) -> tuple[list, dict, set]:
+    """자리마다 창(locate_glyph)과 질문(make_ask)을 만든다. 원본 글자가 min_px 보다 작은 자리는 저해상(묻지 않음)으로.
+    돌려주는 값: ([(자리 번호, 자리, 창)], {자리 번호: 질문}, 저해상 자리 번호들). 창을 잡은 방법은 stats["loc"] 에 센다."""
     prepared: list[tuple[str, Site, GlyphWindow]] = []
     asks: dict[str, GlyphAsk] = {}
     lowres: set[str] = set()
@@ -598,7 +649,26 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
         if min_px and win.em_px and win.em_px < min_px:
             lowres.add(sid)                                                # 묻지 않는다
         prepared.append((sid, site, win))
+    return prepared, asks, lowres
+
+
+@dataclass
+class _Quiz:
+    """한 쪽 자리들을 판독기에 물은 결과(_ask_glyphs). results: 자리 번호 → (답, 모델, 오류), by: 답을 낸 판독기,
+    asked: 한 번이라도 보낸 자리, blind_ans: 눈가림 답(읽은 글자 또는 None=실패, 오류), unsupported: 눈가림을 못 하는 판독기가 답한 자리."""
+    results: dict
+    by: dict
+    asked: set
+    blind_ans: dict
+    unsupported: set
+
+
+def _ask_glyphs(prepared: list, asks: dict, lowres: set, img: Image.Image, reader, horizontal: bool, pdf_page, *, zoom: int, batch: int,
+                fallback_reader, stop, blind: bool, stats: dict) -> _Quiz:
+    """3차 묻기(〔a/b〕 자리·합의 의심 자리 공용): 묶음(batch 장씩) → 빠졌거나 창이 안 맞는 자리는 낱개 → 보완 판독기 → (blind 면) 후보 없이 재확인.
+    키·권한 오류(fatal)는 그대로 올리고, stop() 이 참이면 남은 묶음·보완을 건너뛴다. 묶음·보완·재확인 수는 stats 에 적는다."""
     crops: dict[str, Image.Image] = {}
+    win_of = {sid: win for sid, _, win in prepared}
 
     def crop_of(sid: str) -> Image.Image:
         if sid not in crops:
@@ -612,7 +682,6 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
     asked: set[str] = set()                                              # 한 번이라도 모델에 보낸 자리(중지로 못 보낸 자리는 실패로 세지 않는다)
     site_of = {sid: site for sid, site, _ in prepared}
     by: dict[str, object] = {}                                           # sid → 답을 낸 판독기(눈가림 재확인도 그 판독기에)
-    win_of = {sid: win for sid, _, win in prepared}
     to_ask = [it for it in prepared if it[0] not in lowres]
 
     def norm(r: GlyphChoice, site: Site) -> GlyphChoice:
@@ -630,11 +699,9 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
         model = getattr(rd, "model", "")
         pending = [it for it in items if not decided(it[0])]
         if batch > 1 and len(pending) > 1 and hasattr(rd, "adjudicate_many"):
-            k = 0
-            while k < len(pending):
-                chunk = pending[k:k + batch]; k += batch
+            for chunk in even_chunks(pending, batch):                     # 9장을 5+4 로(8+1 이 아니라)
                 if len(chunk) == 1:
-                    break                                                 # 하나 남은 조각은 낱개로
+                    continue                                              # 하나 남은 조각은 낱개로
                 if stop():
                     return
                 asked.update(sid for sid, *_ in chunk)
@@ -709,8 +776,7 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
             rest = list(mine)
             if batch > 1 and len(rest) > 1 and hasattr(rd, "identify_many"):
                 left = []
-                for k in range(0, len(rest), batch):
-                    chunk = rest[k:k + batch]
+                for chunk in even_chunks(rest, batch):
                     if len(chunk) == 1 or stop():
                         left += chunk; continue
                     try:
@@ -752,10 +818,73 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
         stats["batch_rechecked"] = len(rechecked)
     if lowres:
         stats["lowres"] = len(lowres)
+    return _Quiz(results, by, asked, blind_ans, unsupported)
+
+
+def _verdict(q: _Quiz, sid: str, site: Site, stop, blind: bool, stats: dict) -> tuple[str, dict]:
+    """물은 자리 하나의 판정: ("skipped" | "failed" | "judged", 기록 칸). judged 의 choice 는 창 검사(window_ok)와
+    눈가림 재확인(blind)까지 통과한 후보만(아니면 빈 글 — 근거에 까닭). 어긋남·재확인 실패·불일치·중지 수는 stats 에 센다."""
+    if sid not in q.results and (stop() or sid not in q.asked):
+        stats["skipped"] = stats.get("skipped", 0) + 1                     # 중지로 묻지 못한 자리: 기록을 남기지 않는다(다음 실행에서 다시)
+        return "skipped", {}
+    res, model, err = q.results.get(sid, (None, "", "응답 없음"))
+    base = {"model": model} if model else {}
+    if res is None:
+        return "failed", {**base, "choice": "", "evidence": f"판별 실패: {err}"}
+    choice = (res.choice or "").strip()
+    entry = {**base, "choice": choice if choice in (site.a, site.b) else "", "evidence": (res.evidence or "")[:200],
+             "window": (getattr(res, "window", "") or "")[:40]}
+    if entry["choice"] and not window_ok(entry["window"], site.pre, entry["choice"], site.post):
+        entry["choice"] = ""; entry["evidence"] = f"조각 위치가 어긋남(보인 글: {entry['window'][:12]}) — " + entry["evidence"]; stats["misplaced"] = stats.get("misplaced", 0) + 1
+    if entry["choice"] and blind and sid not in q.unsupported:
+        got_b, berr = q.blind_ans.get(sid, (None, "중지로 묻지 못함" if stop() else "응답 없음"))
+        if got_b is None and stop() and not berr.startswith("묶음"):
+            stats["skipped"] = stats.get("skipped", 0) + 1                 # 눈가림 확인 전에 중지: 확정하지 않고 기록도 남기지 않는다(다음 실행에서 다시)
+            return "skipped", {}
+        entry["blind"] = got_b if got_b is not None else ""
+        if got_b is None:
+            entry["choice"] = ""; entry["evidence"] = f"눈가림 확인 실패({berr}) — 확정 보류 · " + entry["evidence"]
+            stats["blind_failed"] = stats.get("blind_failed", 0) + 1
+        elif not blind_agrees(got_b, entry["choice"], (site.a, site.b)):
+            entry["evidence"] = f"눈가림 답 「{got_b or '?'}」 ≠ 객관식 「{entry['choice']}」 — 확정 보류 · " + entry["evidence"]
+            entry["choice"] = ""; stats["blind_rejected"] = stats.get("blind_rejected", 0) + 1
+    return "judged", entry
+
+
+def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_sites: int = 0, zoom: int = 6, batch: int = 8,
+                    fallback_reader=None, layer_lines: list[dict] | None = None, frame=None, should_stop=None, page_size_pt=None,
+                    min_px: float = 0, blind: bool = False, ticks: bool = True) -> dict:
+    """한 쪽의 〔a/b〕 자리를 판별한다. rec 을 고쳐 돌려준다(merged 글, adjudications, uncertain 메모).
+
+    - 자리마다 창을 글자층 → 먹 실측 → 균등 분할 순으로 잡는다(기록 loc). frame 은 쪽 이미지의 PDF 좌표 틀(pdfio.page_frame).
+    - 눈가림: 판독기에는 GlyphAsk(섞은 후보·조각 안 순번)만 넘긴다. 앞뒤 글자(site.pre/post)는 답의 창(w) 검사에만 쓴다.
+      ticks 면 실측한 자리의 조각 바깥에 눈금을 그린다.
+    - min_px 를 주면 원본에서 잰 글자 크기가 그보다 작은 자리는 묻지 않고 미정으로 둔다(지침 24).
+    - reader 에 adjudicate_many 가 있으면 batch 장씩 한 호출로 묻고, 응답에서 빠졌거나 창(w)이 앞뒤 글자와 안 맞는 자리만 낱개로 다시 묻는다.
+      묶음 호출 자체가 실패하면(한도 초과 등) 그 자리들은 '판별 실패' 로 남기고 낱개로 번지지 않는다(표시가 남으니 다음 실행에서 다시).
+    - fallback_reader 가 있으면 첫 판독기가 못 가린 자리(c="")와 실패한 자리를 그 판독기로 다시 묻는다(예: flash 먼저, pro 보완).
+    - blind 면 확정할 자리를 주 판독기에 후보 없이 한 번 더 읽게 해(identify / identify_many) 객관식 답과 같을 때만 확정한다.
+    - should_stop() 이 참이면 남은 묶음·보완을 건너뛴다(끝난 자리는 적용). 키·권한 오류(fatal)는 그대로 올려 전체를 멈춘다.
+    묻는 방식·검사는 합의 의심 자리(suspect_page)와 같다(_prepare_asks → _ask_glyphs → _verdict)."""
+    merged = PageReading.model_validate(rec["merged"])
+    p1 = PageReading.model_validate(rec["pass1"]) if rec.get("pass1") else merged
+    bboxes = {r.id: r.bbox for r in p1.regions}
+    sites = find_sites(merged)
+    if max_sites:
+        sites = sites[:max_sites]
+    done = list(rec.get("adjudications") or [])
+    stats = {"sites": len(sites), "decided": 0, "undecided": 0, "a": 0, "b": 0, "failed": 0, "loc": {}}
+    pdf_page = rec.get("pdf_page", 0)
+    frame = frame or page_size_pt
+    stop = should_stop or (lambda: False)
+    ink = page_ink(img) if (sites and img is not None) else None
+    prepared, asks, lowres = _prepare_asks(sites, merged, bboxes, ink, horizontal, pdf_page, layer_lines, frame, min_px, ticks, stats)
+    q = _ask_glyphs(prepared, asks, lowres, img, reader, horizontal, pdf_page, zoom=zoom, batch=batch, fallback_reader=fallback_reader,
+                    stop=stop, blind=blind, stats=stats)
     confirmed: set[str] = set()
     from .grades import adjudication_runs
     run = 1 + max(adjudication_runs(done), default=0)                   # 이번 3차 차례 번호(기록마다 적는다 — 등급·다시 적용이 차례별 길이 차를 가른다)
-    moves: dict[tuple, list[tuple[int, int]]] = {}                      # (영역 id, 열 번호) → [(글자 번호, 길이 차)] 이번 차례에 바꾼 표시
+    changed: dict[tuple, list[tuple[int, str, str]]] = {}               # (영역 id, 열 번호) → [(글자 번호, 1차 글자, 고른 글자)] 이번 차례에 바꾼 표시
     for sid, site, win in prepared:
         a = asks[sid]
         base = {**asdict(site), "run": run, "box": [round(v, 4) for v in win.box], "loc": win.how, "pos": win.pos, "asked": "/".join(a.candidates)}
@@ -768,37 +897,18 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
                 if site.mark in (u.context or "") and "3차 판별" not in u.context:
                     u.context = u.context + " — 3차 판별: 저해상이라 묻지 않음(원본 확인)"
             continue
-        if sid not in results and (stop() or sid not in asked):
-            stats["skipped"] = stats.get("skipped", 0) + 1                 # 중지로 묻지 못한 자리: 표시를 그대로 두고 기록도 남기지 않는다(다음 실행에서 다시)
+        kind, got = _verdict(q, sid, site, stop, blind, stats)
+        if kind == "skipped":
             continue
-        res, model, err = results.get(sid, (None, "", "응답 없음"))
-        if model:
-            base["model"] = model
-        if res is None:
+        entry = {**base, **got}
+        if kind == "failed":
             stats["failed"] += 1
-            done.append({**base, "choice": "", "evidence": f"판별 실패: {err}"})
+            done.append(entry)
             continue
-        choice = (res.choice or "").strip()
-        entry = {**base, "choice": choice if choice in (site.a, site.b) else "", "evidence": (res.evidence or "")[:200],
-                 "window": (getattr(res, "window", "") or "")[:40]}
-        if entry["choice"] and not window_ok(entry["window"], site.pre, entry["choice"], site.post):
-            entry["choice"] = ""; entry["evidence"] = f"조각 위치가 어긋남(보인 글: {entry['window'][:12]}) — " + entry["evidence"]; stats["misplaced"] = stats.get("misplaced", 0) + 1
-        if entry["choice"] and blind and sid not in unsupported:
-            got_b, berr = blind_ans.get(sid, (None, "중지로 묻지 못함" if stop() else "응답 없음"))
-            if got_b is None and stop() and not berr.startswith("묶음"):
-                stats["skipped"] = stats.get("skipped", 0) + 1             # 눈가림 확인 전에 중지: 확정하지 않고 기록도 남기지 않는다(다음 실행에서 다시)
-                continue
-            entry["blind"] = got_b if got_b is not None else ""
-            if got_b is None:
-                entry["choice"] = ""; entry["evidence"] = f"눈가림 확인 실패({berr}) — 확정 보류 · " + entry["evidence"]
-                stats["blind_failed"] = stats.get("blind_failed", 0) + 1
-            elif not blind_agrees(got_b, entry["choice"], (site.a, site.b)):
-                entry["evidence"] = f"눈가림 답 「{got_b or '?'}」 ≠ 객관식 「{entry['choice']}」 — 확정 보류 · " + entry["evidence"]
-                entry["choice"] = ""; stats["blind_rejected"] = stats.get("blind_rejected", 0) + 1
         if entry["choice"]:
             key = (site.region_id, site.col_index)
-            if apply_choice(merged, site, entry["choice"], sum(d for j, d in moves.get(key, []) if j < site.char_index)):
-                moves.setdefault(key, []).append((site.char_index, len(entry["choice"]) - len(site.a)))
+            if apply_choice(merged, site, entry["choice"], done=changed.get(key, [])):
+                changed.setdefault(key, []).append((site.char_index, site.a, entry["choice"]))
             stats["decided"] += 1; stats["a" if entry["choice"] == site.a else "b"] += 1; confirmed.add(sid)
             for u in merged.uncertain:
                 if site.mark in (u.context or "") and "3차 판별" not in u.context:
@@ -810,10 +920,286 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
                     u.context = u.context + " — 3차 판별: 자형으로 가리지 못함(원본 확인)"
         done.append(entry)
     if "fallback_decided" in stats:                                      # 보완 확정은 재확인·창 검사 뒤에도 남은 자리만 센다
-        stats["fallback_decided"] = sum(1 for sid in confirmed if by.get(sid) is fallback_reader)
+        stats["fallback_decided"] = sum(1 for sid in confirmed if q.by.get(sid) is fallback_reader)
     rec["merged"] = merged.model_dump()
     rec["adjudications"] = done
     rec["adjudicate_stats"] = stats
+    return rec
+
+
+# ---------- 합의 판독 의심(단계 3 신호 ①): 1차·2차가 같게 읽었는데 글자층과 자형 혼동 쌍 한 글자가 다른 자리 ----------
+SUSPECT_NOTE = "합의 판독 의심"           # 확인 항목 머리. remerge 가 이 머리로 남기고(또는 rec['suspects'] 로 다시 만들고) 등급은 쪽 고지로 다룬다
+SUSPECT_MAX = 8                          # 쪽당 묻는 자리 수 상한(--suspect-max). 이미 물은 자리도 센다
+SUSPECT_MIN_RATIO = 0.5                  # 글자층과의 일치율이 이보다 낮은 쪽은 보지 않는다(지침 28: 판독이나 글자층이 크게 흔들린 쪽)
+SUSPECT_SOURCE = "합의↔자형"              # 혼동 장부 출처: 1차·2차 합의 글자 → 자형 판별이 고른 글자층 글자(outcome differs)
+
+
+# 번체 자형 혼동 묶음: 간체 묶음(CONFUSABLES 등)을 번체로 옮겨도 헷갈리는 부분이 그대로 남는 것(한쪽 부수·성부만 간화된 글자)만 손으로 적는다.
+# 於子·無元·幣市·滅火·屬届·膿脹·囉噦 처럼 간화가 글자를 통째로 바꾼 쌍은 넣지 않는다 — 간체로만 닮았고 번체(인쇄된 꼴)로는 닮지 않았다.
+TRAD_CONFUSABLES = ("問間聞", "烏鳥", "綱網", "宮官", "師帥", "鳳風", "鎮慎", "攝懾", "嘗常", "瘌癩")
+
+
+@functools.lru_cache(maxsize=1)
+def confusable_groups() -> tuple[frozenset, ...]:
+    """자형이 헷갈리기 쉬운 묶음(인쇄된 꼴 그대로): 3차 자형 단서(prompts.GLYPH_HINTS) ∪ 책갈피 교정의 CONFUSABLES·WEAK_WITNESS ∪ TRAD_CONFUSABLES.
+    compare_key(번체→간체)로 접지 않는다 — 접으면 於→于·無→无 처럼 생김새가 전혀 다른 번체가 간체 묶음(于子·元无)에 들어간다.
+    접으면 한 글자가 되는 묶음(苡苢 — 이체자)은 뺀다."""
+    from .prompts import GLYPH_HINTS
+    from .collate.collate import CONFUSABLES, WEAK_WITNESS
+    from .collate import zh
+    out: list[frozenset] = []
+    for g in [*GLYPH_HINTS, *CONFUSABLES, *WEAK_WITNESS, *TRAD_CONFUSABLES]:
+        k = frozenset(unicodedata.normalize("NFC", c) for c in g)
+        if len({zh.compare_key(c) for c in k}) > 1 and k not in out:
+            out.append(k)
+    return tuple(out)
+
+
+@functools.lru_cache(maxsize=4096)
+def _printed_forms(ch: str) -> frozenset:
+    """글자 하나가 가리킬 수 있는 인쇄된 꼴: 그 글자 · 이체자 대표 글자(지침 21 — 같은 꼴로 본다) · 간체면 그 번체들(번체 책의 간체 글자층 间 은 인쇄된 間).
+    번체를 간체로 접은 꼴은 넣지 않는다(於 는 于 로 인쇄되지 않는다)."""
+    from .collate import zh
+    out: set = set()
+    for f in {ch, unicodedata.normalize("NFC", ch), zh.fold_variants(unicodedata.normalize("NFC", ch))}:
+        out.add(f); out.update(c for c in zh.candidates(f) if len(c) == 1)
+    return frozenset(out)
+
+
+def variant_pair(a: str, b: str) -> bool:
+    """이체자·간번체·호환 한자 쌍(지침 21): 접으면 같은 글자. 합의 의심으로 묻지 않는다(인쇄된 꼴을 고르는 일이 아니다)."""
+    from .collate import zh
+    from .merge import _fold
+    return a == b or zh.compare_key(a) == zh.compare_key(b) or zh.fold_variants(a) == zh.fold_variants(b) or _fold(a) == _fold(b)
+
+
+def confusable_pair(a: str, b: str) -> bool:
+    """두 글자가 인쇄된 꼴로 한 자형 혼동 묶음에 드는가(접어 같으면 — 간번체·이체자 — 아님).
+    규칙: 두 글자의 인쇄된 꼴(_printed_forms)에서 서로 다른 두 글자가 한 묶음(confusable_groups)에 들어야 한다. 접은 열쇠(compare_key)만 같은 묶음이면
+    모자란다 — 於/子·無/元·幣/市·滅/火·屬/届 은 간체(于子·无元·币市·灭火·属届)로만 닮아 번체 책에서는 자형을 헷갈릴 일이 없는데 3차 질문·합의 의심 알림·장부를 만든다.
+    번체로 읽은 問 ↔ 간체 글자층 间 은 间 이 가리키는 인쇄된 꼴 間 이 번체 묶음 問間聞 에 들어 묻는다."""
+    from .collate import zh
+    if zh.compare_key(a) == zh.compare_key(b):
+        return False
+    pa, pb = _printed_forms(a), _printed_forms(b)
+    return any((pa & g) and (pb & g) and len((pa | pb) & g) > 1 for g in confusable_groups())
+
+
+def _pair_key(a: str, b: str) -> frozenset:
+    from .collate import zh
+    return frozenset((zh.compare_key(a), zh.compare_key(b)))
+
+
+def suspect_freq(work_dir) -> dict:
+    """혼동 장부(confusion.json)의 글자 쌍 빈도 {접은 두 글자: 건수}(출처를 합침). 장부가 없거나 못 읽으면 빈 사전 — 그때는 글 차례로 묻는다."""
+    import json
+    from pathlib import Path
+    try:
+        led = json.loads((Path(work_dir) / "confusion.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict = {}
+    for r in (led.get("pairs") if isinstance(led, dict) else None) or []:
+        if isinstance(r, dict) and r.get("a") and r.get("b"):
+            k = _pair_key(r["a"], r["b"]); out[k] = out.get(k, 0) + int(r.get("count") or 0)
+    return out
+
+
+def find_suspects(merged: PageReading, layer_plain: str, adjudications: list[dict] | None = None, regions=None, freq: dict | None = None) -> tuple[list[Site], dict]:
+    """합의 판독 의심 자리: 〔〕 표시 밖(1차·2차가 같게 읽은 글자)에서 PDF 글자층과 1:1 로 한 글자만 다르고, 두 글자가 자형 혼동 묶음인 자리.
+    글자층 맞춤은 compare_textlayer 와 같은 글(표시는 1차 글자로·공백 없이·전각 부호와 간체 모드 접기)로 새로 한다(저장된 차이는 60항목에서 잘림).
+    빼는 것: 글자층 일치율 SUSPECT_MIN_RATIO 미만인 쪽 전체(지침 28) · 표시 안과 표시 바로 곁(1자) · 3차가 정한 글자와 그 곁 · 숫자·부호·한글 ·
+    이체자 쌍(지침 21) · regions(물을 영역 id — 2차 판독이 있는 영역)에 없는 영역. 차례: freq(장부 쌍 빈도) 높은 것 먼저, 같으면 글 차례.
+    돌려주는 값: (자리 — a=합의 글자, b=글자층 글자, mark="", 글자 번호는 표시를 접은 열 글 기준 / {"ratio", "layer_chars", "low_ratio"})."""
+    import difflib
+    from .merge import _fold, strip_marks_for_compare, WS
+    from .collate import zh
+    from .context import NUMERALS, HANGUL
+    near_dec: set = set()                                                # 3차가 정한 글자와 그 곁(영역 id, 문단 번호, 문단 글 위치)
+    if adjudications:
+        from .grades import decided_positions
+        for L in decided_positions(merged, adjudications)[0]:
+            near_dec.update((L.region_id, L.para_index, i) for i in range(L.start - 1, L.end + 1))
+    chars: list[str] = []; spots: list = []                              # 맞출 글자와 그 자리((영역, 열 번호, 열 수, 글자 번호, 열) 또는 None=묻지 않음)
+    for reg in merged.regions:
+        if reg.kind not in TEXT_KINDS:
+            continue
+        ok_reg = regions is None or reg.id in regions; n_cols = len(columns_in_reading_order(reg)); ci = 0
+        for pi, p in enumerate(reg.paragraphs):
+            off = 0
+            for col in sorted(p.columns, key=lambda c: c.col_from_right):   # columns_in_reading_order 와 같은 차례
+                text = col.text or ""; k = 0; last = 0; prev_end = -1
+                for m in [*MARK_RE.finditer(text), None]:
+                    s = m.start() if m else len(text)
+                    for i in range(last, s):
+                        if not text[i].isspace():                       # compare_textlayer 처럼 공백은 맞추지 않는다(글자 번호에는 센다)
+                            fine = ok_reg and i != prev_end and not (m and i == s - 1) and (reg.id, pi, off + i) not in near_dec
+                            chars.append(text[i]); spots.append((reg.id, ci, n_cols, k, col) if fine else None)
+                        k += 1
+                    if m is None:
+                        break
+                    for ch in WS.sub("", strip_marks_for_compare(m.group(0))):
+                        chars.append(ch); spots.append(None)             # 표시 안 글자(1차·2차가 갈린 자리)
+                    k += len(plain(m.group(0))); last = prev_end = m.end()
+                off += len(text); ci += 1
+    a, b = "".join(chars), WS.sub("", layer_plain or "")
+    info: dict = {"ratio": None, "layer_chars": len(b)}
+    if not a or not b:
+        return [], info
+    sm = difflib.SequenceMatcher(None, _fold(a), _fold(b), autojunk=False)   # 접기는 글자 수를 바꾸지 않는다 — 위치는 a·b 와 1:1
+    info["ratio"] = round(sm.ratio(), 4)
+    if sm.ratio() < SUSPECT_MIN_RATIO:
+        info["low_ratio"] = True
+        return [], info
+    found = []
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op != "replace" or i2 - i1 != 1 or j2 - j1 != 1 or spots[i1] is None:
+            continue
+        x, y = a[i1], b[j1]
+        if not (zh.is_cjk(x) and zh.is_cjk(y)) or x in NUMERALS or y in NUMERALS or HANGUL.search(x + y):
+            continue
+        if variant_pair(x, y) or not confusable_pair(x, y):
+            continue
+        rid, ci, n_cols, k, col = spots[i1]
+        pl = plain(col.text or "")
+        found.append(((-(freq or {}).get(_pair_key(x, y), 0), i1), Site(rid, ci, n_cols, k, len(pl), x, y, pl[:k][-4:], pl[k + 1:k + 5], "")))
+    found.sort(key=lambda t: t[0])
+    return [s for _, s in found], info
+
+
+def _asked_before(prev: list[dict], s: Site) -> int | None:
+    """rec['suspects'] 에서 같은 자리(영역·열·글자 번호, 또는 앞뒤 글자)·같은 두 글자를 물은 마지막 기록 번호.
+    가까운 앞 〔a/b〕 가 뒤 실행에서 길이가 다른 후보로 정해지면 글자 번호와 앞 글자(pre)가 함께 바뀐다 — 뒤 글자·바로 앞 한 자(표시 곁이 아니라 늘 판독 글자)가
+    같고 글자 번호가 4자 안에서 움직였으면 같은 자리로 본다(다시 묻고 기록·알림을 겹쳐 달지 않게)."""
+    for i in range(len(prev) - 1, -1, -1):
+        e = prev[i]
+        if (e.get("region_id"), e.get("col"), e.get("consensus"), e.get("layer")) == (s.region_id, s.col_index, s.a, s.b) \
+                and (e.get("char_index") == s.char_index or (e.get("pre") == s.pre and e.get("post") == s.post)
+                     or (e.get("post") == s.post and (e.get("pre") or "")[-1:] == s.pre[-1:] and abs(int(e.get("char_index") or 0) - s.char_index) <= 4)):
+            return i
+    return None
+
+
+def _to_ask(prev: list[dict], s: Site, force: bool) -> tuple[bool, int | None]:
+    """이 의심 자리를 (다시) 물을지와 앞 기록 번호. 판별 실패로 끝난 앞 기록은 다시 묻는다."""
+    k = _asked_before(prev, s)
+    return force or k is None or prev[k].get("outcome") == "failed", k
+
+
+def _suspect_regions(rec: dict) -> set:
+    """합의 의심을 볼 영역: 2차 판독이 (조각 일부 실패 없이) 있는 영역 — 표시 밖 글자가 1차·2차 합의인 곳.
+    1차만 들어간 긴 구간(merge.LONG_SEGMENT: 2차가 못 읽었거나 크게 달라 1차를 따름)이 있는 영역은 뺀다 — 그 글은 합의가 아니어서
+    알림·메모의 '1차·2차 「x」'와 장부의 합의↔자형이 틀린 말이 된다(context.settled_segments 와 같은 기준)."""
+    from .grades import _pass2_regions
+    from .merge import LONG_SEG_NO_P2, LONG_SEG_DIFFER
+    p2 = rec.get("pass2") or {}
+    one_sided = {u.get("region_id") for u in (rec.get("merged") or {}).get("uncertain") or []
+                 if isinstance(u, dict) and (u.get("context") or "").startswith((LONG_SEG_NO_P2, LONG_SEG_DIFFER))}
+    return {r for r in _pass2_regions(rec) if not (p2.get(r) or {}).get("pass2_failed") and r not in one_sided}
+
+
+def suspects_pending(rec: dict, layer_plain: str, max_n: int = SUSPECT_MAX, force: bool = False, freq: dict | None = None) -> int:
+    """suspect_page 가 물을 새 자리 수(저해상은 아직 빼지 않은 어림) — 묻기 전에 셀 때(쪽 고르기·mock 셈)."""
+    if not max_n or not layer_plain:
+        return 0
+    cands, _ = find_suspects(PageReading.model_validate(rec["merged"]), layer_plain, rec.get("adjudications"), _suspect_regions(rec), freq)
+    prev = rec.get("suspects") or []
+    again = sum(1 for s in cands if _to_ask(prev, s, force)[0])
+    return max(0, min(again, max_n - (len(cands) - again)))           # 상한에는 이미 물은 자리를 모두 센다(suspect_page 와 같이)
+
+
+def suspect_uncertain(e: dict) -> Uncertain:
+    """합의 의심 기록(outcome differs) 하나의 확인 항목. 같은 기록이면 늘 같은 항목이다(remerge 가 다시 만들어도 겹치지 않게)."""
+    from .merge import _pos
+    x, y = e.get("consensus", ""), e.get("layer", "")
+    return Uncertain(region_id=e.get("region_id", ""), col_from_right=int(e.get("col_from_right") or 0),
+                     position=_pos(int(e.get("char_index") or 0), int(e.get("n_chars") or 0)),
+                     context=f"{SUSPECT_NOTE} — 1차·2차 「{x}」, 자형 판별 「{y}」(글자층도 「{y}」) · 「{e.get('pre', '')}{x}{e.get('post', '')}」 — 원본 확인")
+
+
+def suspect_notices(rec: dict) -> list[Uncertain]:
+    """rec['suspects'] 에서 다시 만든 확인 항목(자형이 글자층 쪽인 자리만)."""
+    return [suspect_uncertain(e) for e in rec.get("suspects") or [] if e.get("outcome") == "differs"]
+
+
+def suspect_page(rec: dict, img: Image.Image, reader, horizontal: bool, layer_plain: str, max_n: int = SUSPECT_MAX, force: bool = False,
+                 freq: dict | None = None, zoom: int = 6, batch: int = 8, fallback_reader=None, layer_lines: list[dict] | None = None, frame=None,
+                 should_stop=None, min_px: float = 0, blind: bool = False, ticks: bool = True) -> dict:
+    """한 쪽의 합의 판독 의심 자리(find_suspects)를 〔a/b〕 자리와 똑같이 묻는다: 창·눈가림·섞은 후보 [합의 글자, 글자층 글자]·묶음·창 검사·보완·재확인.
+    본문은 바꾸지 않는다(지침 20: 기존 OCR 은 의심만 올린다 — 자형 판별이 두 판독과 다르면 사람이 정한다). 결과(outcome):
+    - confirmed: 자형이 합의 글자 → 알림 없음
+    - differs: 자형이 글자층 글자(창 검사·재확인 통과) → 확인 항목(SUSPECT_NOTE) 하나. 쪽은 '판독 확인 필요'(명령이 붙임)
+    - undecided: 못 가림·창 어긋남·재확인 불일치 → 알림 없음 · failed: 호출 실패 → 다음 실행에서 다시 묻는다
+    물은 자리는 모두 rec['suspects'] 에, 이번 셈은 rec['suspect_stats'] 에. 같은 자리·같은 두 글자는 다시 묻지 않는다(force 면 다시 묻고 앞 기록을 바꾼다 —
+    다시 물은 호출이 실패하면 앞 답과 그 확인 항목을 둔다).
+    상한 max_n 에는 이미 물은 자리도 센다. 원본 글자가 min_px 보다 작은 자리는 묻지 않고 기록하지 않는다(지침 24). 중지로 못 물은 자리도 기록하지 않는다."""
+    merged = PageReading.model_validate(rec["merged"])
+    p1 = PageReading.model_validate(rec["pass1"]) if rec.get("pass1") else merged
+    bboxes = {r.id: r.bbox for r in p1.regions}
+    cands, info = find_suspects(merged, layer_plain, rec.get("adjudications"), _suspect_regions(rec), freq)
+    prev = list(rec.get("suspects") or [])
+    stats = {"candidates": len(cands), "asked": 0, "confirmed": 0, "differs": 0, "undecided": 0, "failed": 0, "already": 0, "lowres": 0, "loc": {}, "ratio": info.get("ratio")}
+    if info.get("low_ratio"):
+        stats["low_ratio"] = 1
+    pdf_page = rec.get("pdf_page", 0)
+    stop = should_stop or (lambda: False)
+    ink = None; pick = []; asks: dict[str, GlyphAsk] = {}; old_of: dict[str, int | None] = {}
+    plan = [(idx, s, *_to_ask(prev, s, force)) for idx, s in enumerate(cands, 1)]
+    stats["already"] = sum(1 for p in plan if not p[2])                 # 상한에는 이미 물은 자리를 모두 센다 — 장부 빈도로 차례가 바뀌어도 쪽당 max_n 곳을 넘지 않게
+    for idx, s, again, k in plan:
+        if not again:
+            continue
+        if stats["already"] + len(pick) >= max_n:
+            break
+        if ink is None and img is not None:
+            ink = page_ink(img)
+        prepared, one, low = _prepare_asks([s], merged, bboxes, ink, horizontal, pdf_page, layer_lines, frame, min_px, ticks, stats)
+        if low:
+            stats["lowres"] += 1; continue                                  # 저해상: 묻지 않고 상한에도 세지 않는다
+        sid = str(idx); _, site, win = prepared[0]
+        asks[sid] = one["1"]; old_of[sid] = k; pick.append((sid, site, win))
+    q = _ask_glyphs(pick, asks, set(), img, reader, horizontal, pdf_page, zoom=zoom, batch=batch, fallback_reader=fallback_reader,
+                    stop=stop, blind=blind, stats=stats)
+    cols = {}
+    for reg in merged.regions:
+        for ci, c in enumerate(columns_in_reading_order(reg)):
+            cols.setdefault((reg.id, ci), c)
+    drop: set[int] = set(); new: list[dict] = []; kept_by_fallback = 0
+    for sid, site, win in pick:
+        kind, got = _verdict(q, sid, site, stop, blind, stats)
+        if kind == "skipped":
+            continue
+        choice = got.get("choice", "")
+        outcome = "failed" if kind == "failed" else ("confirmed" if choice == site.a else "differs" if choice == site.b else "undecided")
+        c = cols.get((site.region_id, site.col_index))
+        e = {"region_id": site.region_id, "col": site.col_index, "char_index": site.char_index, "n_chars": site.n_chars,
+             "col_from_right": c.col_from_right if c is not None else 0, "pre": site.pre, "post": site.post, "consensus": site.a, "layer": site.b,
+             "choice": choice, "evidence": got.get("evidence", ""), "model": got.get("model", ""), "window": got.get("window", ""), "outcome": outcome,
+             "asked_at": time.strftime("%Y-%m-%d %H:%M:%S"), "asked": "/".join(asks[sid].candidates), "loc": win.how, "box": [round(v, 4) for v in win.box]}
+        if "blind" in got:
+            e["blind"] = got["blind"]
+        if win.em_px:
+            e["em_px"] = round(win.em_px, 1)
+        stats["asked"] += 1; stats[outcome] += 1
+        if outcome in ("confirmed", "differs") and q.by.get(sid) is fallback_reader and fallback_reader is not None:
+            kept_by_fallback += 1
+        k = old_of.get(sid)
+        if outcome == "failed" and k is not None and prev[k].get("outcome") != "failed":
+            continue                                                     # 다시 물었는데 답이 없음(호출 실패): 앞 답과 그 확인 항목을 그대로 둔다
+        if k is not None:                                                # 다시 물은 자리: 앞 기록과 그 확인 항목을 바꾼다
+            drop.add(k); old_u = suspect_uncertain(prev[k])
+            if prev[k].get("outcome") == "differs" and (outcome != "differs" or old_u != suspect_uncertain(e)):
+                merged.uncertain = [u for u in merged.uncertain if u != old_u]
+        if outcome == "differs":
+            u = suspect_uncertain(e)
+            if u not in merged.uncertain:
+                merged.uncertain.append(u)
+        new.append(e)
+    if "fallback_decided" in stats:
+        stats["fallback_decided"] = kept_by_fallback
+    rec["merged"] = merged.model_dump()
+    rec["suspects"] = [e for i, e in enumerate(prev) if i not in drop] + new
+    rec["suspect_stats"] = stats
     return rec
 
 

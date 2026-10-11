@@ -217,7 +217,8 @@ class Parser(unittest.TestCase):
         ap = build_parser()
         a = ap.parse_args(["run", "x.pdf"])
         self.assertEqual((a.mode, a.no_adjudicate, a.print_offset, a.chunk_lines, a.media_resolution), ("auto", False, None, 8, "auto"))
-        self.assertEqual((a.adjudicate_model, a.adjudicate_thinking, a.batch_sites, a.workers, a.workers_start), ("", "low", 8, 6, 4))   # 0.6.2 3차 판별 옵션
+        self.assertEqual((a.adjudicate_model, a.adjudicate_thinking, a.batch_sites, a.workers, a.workers_start), ("", "low", 8, 8, 4))   # 0.6.2 3차 판별 옵션 · 0.6.8 동시 8
+        self.assertEqual(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx"]).policy, "sure")                                        # 0.6.8 책갈피 교정은 확실한 것(A)만 자동
         j = ap.parse_args(["adjudicate", "x.pdf", "--adjudicate-model", "auto", "--batch-sites", "4", "--workers", "2"])
         self.assertEqual((j.adjudicate_model, j.batch_sites, j.workers, j.workers_start, j.adjudicate_thinking), ("auto", 4, 2, 4, "low"))
         a = ap.parse_args(["run", "x.pdf", "--mode", "horizontal_zh", "--no-adjudicate", "--print-offset", "29"])
@@ -313,6 +314,158 @@ class Refit(unittest.TestCase):
         p1 = PageReading(pdf_page=1, regions=[reg])
         fixes = refit_by_layer(p1, layer, True)
         self.assertEqual(fixes["t"]["shift"], 0.0); self.assertGreater(fixes["t"]["move"], 0.01)
+
+    def _repeated_page(self, second_same=False, last_same=False):
+        """글줄 9개: 약재 셋이 각각 3줄, 모두 「性味甘平」 로 시작. 1차는 가운데 약재(줄 3~5)를 빠뜨리고 r1(줄 0~2)·r3(줄 6~8)만 냈다.
+        줄 간격 4%. r3 모델 좌표는 제자리(줄 6) — 빠진 영역의 첫 줄(줄 3)도 MAX_MOVE 안이라 첫 줄 짝 후보가 둘이다."""
+        tops = [0.10 + i * 0.04 for i in range(9)]
+        texts = ["性味甘平無毒", "r1둘째줄의글자들", "r1끝줄의글자들",
+                 "性味甘平無毒", "性味甘平無毒" if second_same else "빠진둘째줄의글자들", "r3끝줄의글자들" if last_same else "빠진끝줄의글자들",
+                 "性味甘平無毒", "性味甘平無毒" if second_same else "r3둘째줄의글자들", "r3끝줄의글자들"]
+        layer = {"page_width": 500.0, "page_height": 700.0, "vertical_columns": [],
+                 "horizontal_lines": [{"bbox": [50.0, t * 700, 450.0, (t + 0.02) * 700], "text": x} for t, x in zip(tops, texts)]}
+        regs = []
+        for rid, k in (("r1", 0), ("r3", 6)):
+            regs.append(Region(id=rid, kind="본문", bbox=[int(tops[k] * 1000), 100, int((tops[k + 2] + 0.02) * 1000), 900],
+                               paragraphs=[Paragraph(columns=[Column(col_from_right=j + 1, text=texts[k + j]) for j in range(3)])]))
+        return PageReading(pdf_page=7, regions=regs), layer, tops
+
+    def test_repeated_first_line_does_not_swallow_missing_region(self):
+        """첫 줄이 되풀이되고 1차가 가운데 영역을 빠뜨려도 r3 의 상자가 빠진 영역의 줄(3~5)까지 넓어지지 않는다
+        (이전엔 첫 줄을 줄 3에 붙이고 끝 줄을 줄 8에서 찾아 6줄짜리 상자가 됐다 → 2차가 빠진 글을 읽어 '2차에만 있음')."""
+        from yeone_ocr.refit import refit_by_layer, span_slack
+        for kw in ({}, {"second_same": True}, {"second_same": True, "last_same": True}):
+            p1, layer, tops = self._repeated_page(**kw)
+            fixes = refit_by_layer(p1, layer, True)
+            self.assertEqual(fixes["r1"]["lines"], [0, 2], kw); self.assertEqual(fixes["r3"]["lines"], [6, 8], kw)
+            r3 = p1.regions[1]
+            self.assertAlmostEqual(r3.bbox[0] / 1000, tops[6], delta=0.008, msg=kw); self.assertAlmostEqual(r3.bbox[2] / 1000, tops[8] + 0.02, delta=0.008, msg=kw)
+        self.assertEqual([span_slack(n) for n in (1, 2, 3, 4, 5, 9)], [1, 1, 1, 2, 2, 2])
+
+    def test_unfit_span_leaves_region_unfixed_with_reason(self):
+        """첫·끝 줄로 맞춘 글자층 줄 수가 영역 줄 수와 크게 다르고 다른 짝도 없으면 좌표를 손대지 않고 사유만 남긴다. refit_regions 는 이를 세지 않는다."""
+        from yeone_ocr.refit import refit_by_layer, refit_regions
+        tops = [0.10 + i * 0.04 for i in range(5)]
+        texts = ["甲乙丙丁戊己", "아무줄하나", "아무줄둘", "아무줄셋", "庚辛壬癸子丑"]
+        layer = {"page_width": 500.0, "page_height": 700.0, "vertical_columns": [],
+                 "horizontal_lines": [{"bbox": [50.0, t * 700, 450.0, (t + 0.02) * 700], "text": x} for t, x in zip(tops, texts)]}
+        reg = Region(id="r", kind="본문", bbox=[110, 100, 190, 900], paragraphs=[Paragraph(columns=[Column(col_from_right=1, text=texts[0]), Column(col_from_right=2, text=texts[4])])])
+        p1 = PageReading(pdf_page=1, regions=[reg]); before = list(reg.bbox)
+        fixes = refit_by_layer(p1, layer, True)
+        self.assertEqual(reg.bbox, before); self.assertFalse(fixes["r"]["fixed"]); self.assertIn("줄 수(5)", fixes["r"]["why"]); self.assertIn("영역 줄 수(2)", fixes["r"]["why"])
+        fix = refit_regions(None, PageReading(pdf_page=1, regions=[reg.model_copy(deep=True)]), True, layer)
+        self.assertEqual((fix["fixed"], fix["how"], fix["max_move"]), (0, "", 0.0)); self.assertFalse(fix["regions"]["r"]["fixed"])
+    @staticmethod
+    def _hlayer(texts, tops, h=0.02):
+        return {"page_width": 500.0, "page_height": 700.0, "vertical_columns": [],
+                "horizontal_lines": [{"bbox": [50.0, t * 700, 450.0, (t + h) * 700], "text": x} for t, x in zip(tops, texts)]}
+
+    @staticmethod
+    def _hreg(rid, texts, y0, y1, kind="본문"):
+        if kind == "제목":
+            return Region(id=rid, kind=kind, bbox=[round(y0 * 1000), 100, round(y1 * 1000), 900], title_text=texts[0])
+        return Region(id=rid, kind=kind, bbox=[round(y0 * 1000), 100, round(y1 * 1000), 900],
+                      paragraphs=[Paragraph(columns=[Column(col_from_right=k + 1, text=x) for k, x in enumerate(texts)])])
+
+    def test_repeated_one_line_regions_follow_the_drift(self):
+        """제목 「【性味】」·본문 한 줄씩인 약재가 이어지고 모델 좌표가 아래로 갈수록 밀리면(줄 간격 4%, 줄마다 0.5%) 밀림이 줄 간격의 절반을
+        넘는 곳부터 제목 상자가 다음 약재의 제목 줄에 붙고 그 본문은 못 맞추던 문제(모델 좌표 그대로에 가까운 줄을 골랐다)."""
+        from yeone_ocr.refit import refit_by_layer
+        tops = [0.10 + i * 0.04 for i in range(16)]
+        texts = [x for e in range(8) for x in ("【性味】", "甘平無毒主治" + "甲乙丙丁戊己庚辛"[e] * 3)]
+        regs = [self._hreg(("h", "b")[k % 2] + str(k // 2), [texts[k]], tops[k] + 0.005 * k, tops[k] + 0.02 + 0.005 * k, ("제목", "본문")[k % 2]) for k in range(16)]
+        fixes = refit_by_layer(PageReading(pdf_page=1, regions=regs), self._hlayer(texts, tops), True)
+        self.assertEqual({r: f.get("lines") for r, f in fixes.items()}, {r.id: [k, k] for k, r in enumerate(regs)})
+
+    def test_one_line_region_leaves_the_next_regions_first_line(self):
+        """한 줄 영역(「性味甘平無毒」)의 상자가 제 줄과 다음 영역의 같은 첫 줄 사이에서 다음 줄 쪽에 가까워도 다음 영역의 첫 줄을 가져가지 않는다
+        (가져가면 다음 영역은 맞출 첫 줄이 없어 손대지 못한다 — 영역을 하나씩 맞추지 않고 쪽 전체로 맞춘다)."""
+        from yeone_ocr.refit import refit_by_layer
+        tops = [0.10 + i * 0.04 for i in range(5)]
+        texts = ["甲乙丙丁戊己庚", "性味甘平無毒", "性味甘平無毒", "主治風寒濕痺", "久服輕身延年"]
+        d = 0.025                                                                                   # 모델 좌표가 줄 간격의 0.6 만큼 아래로
+        regs = [self._hreg("r0", texts[:1], tops[0], tops[0] + 0.02), self._hreg("x", texts[1:2], tops[1] + d, tops[1] + 0.02 + d),
+                self._hreg("y", texts[2:], tops[2] + d, tops[4] + 0.02 + d)]
+        fixes = refit_by_layer(PageReading(pdf_page=1, regions=regs), self._hlayer(texts, tops), True)
+        self.assertEqual({r: f.get("lines") for r, f in fixes.items()}, {"r0": [0, 0], "x": [1, 1], "y": [2, 4]})
+
+    def test_vertical_regions_are_placed_by_their_first_column(self):
+        """세로쓰기 영역의 첫 열은 오른쪽 끝 열이다. 영역 왼쪽 가장자리(마지막 열)로 재면 첫 두 열이 같은 약재 셋이 한 약재씩 밀리고(밀림 없이도),
+        5열 넘는 영역은 첫 열이 MAX_MOVE 밖으로 나가 아예 맞추지 못했다."""
+        from yeone_ocr.refit import refit_by_layer
+        W, H, pitch = 1000.0, 1400.0, 40.0
+        xs = [900 - i * pitch for i in range(9)]
+        txt = lambda e, j: ("性味甘平無毒主治", "久服輕身延年不老")[j] if j < 2 else "甲乙丙丁戊己庚辛"[e] * 6
+        layer = {"page_width": W, "page_height": H, "horizontal_lines": [],
+                 "vertical_columns": [{"x": xs[3 * e + j], "y0": 100.0, "y1": 1200.0, "text": txt(e, j)} for e in range(3) for j in range(3)]}
+        def reg(rid, cols, texts):
+            return Region(id=rid, kind="본문", bbox=[71, round((xs[cols[-1]] - pitch / 2) / W * 1000), 857, round((xs[cols[0]] + pitch / 2) / W * 1000)],
+                          paragraphs=[Paragraph(columns=[Column(col_from_right=k + 1, text=t) for k, t in enumerate(texts)])])
+        p1 = PageReading(pdf_page=1, regions=[reg(f"r{e}", [3 * e, 3 * e + 2], [txt(e, j) for j in range(3)]) for e in range(3)])
+        fixes = refit_by_layer(p1, layer, False)
+        self.assertEqual({r: f.get("lines") for r, f in fixes.items()}, {"r0": [0, 2], "r1": [3, 5], "r2": [6, 8]})
+        layer8 = {**layer, "vertical_columns": [{**c, "text": "天地玄黃宇宙洪荒"[k] * 6} for k, c in enumerate(layer["vertical_columns"][:8])]}
+        fixes = refit_by_layer(PageReading(pdf_page=1, regions=[reg("w", [0, 7], [c["text"] for c in layer8["vertical_columns"]])]), layer8, False)
+        self.assertEqual(fixes["w"].get("lines"), [0, 7])                                          # 8열 영역
+
+    def test_omitted_long_entry_is_not_swallowed_by_a_guessed_last_line(self):
+        """첫 두 줄이 되풀이되는 약재 셋 가운데 4줄짜리를 1차가 빠뜨렸고 r3 의 모델 상자가 빠진 약재 쪽에 있으면, 끝 줄을 못 찾아 줄 수로 짐작한 짝
+        (늘 줄 수가 맞아 검사를 통과)이 r3 을 빠진 약재의 줄에 붙이던 문제 — 끝 줄을 글로 찾은 짝을 앞세운다."""
+        from yeone_ocr.refit import refit_by_layer
+        tops = [0.10 + i * 0.03 for i in range(10)]
+        texts = ["性味甘平無毒", "主治風寒濕痺", "天地玄黃宇宙洪荒", "性味甘平無毒", "主治風寒濕痺", "甲乙丙丁戊己庚", "子丑寅卯辰巳午未",
+                 "性味甘平無毒", "主治風寒濕痺", "日月盈昃辰宿列張"]
+        for top in (3, 5, 7):
+            regs = [self._hreg("r1", texts[:3], tops[0], tops[2] + 0.02), self._hreg("r3", texts[7:], tops[top], tops[9] + 0.02)]
+            fixes = refit_by_layer(PageReading(pdf_page=1, regions=regs), self._hlayer(texts, tops), True)
+            self.assertEqual((fixes["r1"]["lines"], fixes["r3"]["lines"]), ([0, 2], [7, 9]), top)
+
+    def test_random_pages_never_cover_another_regions_lines(self):
+        """무작위 쪽(가로·세로, 줄 간격 1.8~5%, 쪽 맨 아래 밀림 ±8%, 상자 가장자리 잡음, 첫·둘째·끝 줄이 되풀이되는 약재, 한 줄 제목, 머리글 줄,
+        1차 판독 잡음): 맞춘 영역의 줄에 다른 영역(1차가 빠뜨린 영역·머리글 포함)의 줄이 들지 않고, 빠뜨린 영역이 없으면 모든 영역이 제 줄에 맞는다."""
+        import random
+        from yeone_ocr.refit import refit_by_layer
+        from yeone_ocr.schema import frac_bbox
+        pool = [chr(c) for c in range(0x4E00, 0x4E00 + 3000)]
+        for seed in range(160):
+            rng = random.Random(seed); horizontal = seed % 2 == 0; omit = seed % 4 >= 2
+            rnd = lambda a, b: "".join(rng.choice(pool) for _ in range(rng.randint(a, b)))
+            sp = rng.uniform(0.018, 0.05); f1, f2, fl = rng.choice(["性味甘平無毒", "【性味】甘寒無毒"]), "主治風寒濕痺", rnd(8, 8)
+            rep = (rng.random() < 0.7, rng.random() < 0.4, rng.random() < 0.15); style = rng.choice("bhm")
+            entries = [("hdr", "머리글", [str(rng.randint(10, 300))])] if rng.random() < 0.3 else []
+            while sum(len(e[2]) for e in entries) < 0.84 / sp - 8:
+                if style == "h" or (style == "m" and rng.random() < 0.5):
+                    entries.append((f"h{len(entries)}", "제목", ["【性味】"]))
+                n = rng.randint(1, 6)
+                entries.append((f"b{len(entries)}", "본문", [f1 if j == 0 and rep[0] else f2 if j == 1 and rep[1] else fl if j == n - 1 and n > 1 and rep[2] else rnd(4, 14) for j in range(n)]))
+            owner = [e[0] for e in entries for _ in e[2]]; texts = [t for e in entries for t in e[2]]
+            mid = [k for k, e in enumerate(entries) if 0 < k < len(entries) - 1 and e[0] != "hdr"]
+            omitted = {"hdr"} | ({entries[k][0] for k in rng.sample(mid, min(len(mid), rng.randint(1, 2)))} if omit else set())
+            starts = [0.08 + i * sp for i in range(len(texts))]; th = 0.6 * sp
+            D = rng.uniform(0, 0.08) * rng.choice([1, 1, 1, -0.5]); noise = rng.uniform(0, 0.25) * sp
+            layer = {"page_width": 500.0, "page_height": 700.0, "vertical_columns": [], "horizontal_lines": []}
+            for a, t in zip(starts, texts):
+                if horizontal:
+                    layer["horizontal_lines"].append({"bbox": [50.0, a * 700, 450.0, (a + th) * 700], "text": t})
+                else:
+                    layer["vertical_columns"].append({"x": (1 - a - th / 2) * 500, "y0": 60.0, "y1": 640.0, "text": t})
+            regs = []; truth = {}; i = 0
+            for eid, kind, ls in entries:
+                truth[eid] = [i, i + len(ls) - 1]; a0, a1 = starts[i], starts[i + len(ls) - 1] + th; i += len(ls)
+                if eid in omitted:
+                    continue
+                m0, m1 = (a + D * (a - starts[0]) / 0.84 + rng.uniform(-noise, noise) for a in (a0, a1))
+                mt = [t if len(t) < 6 or rng.random() > 0.1 else t[:len(t) // 2] + rng.choice(pool) + t[len(t) // 2 + 1:] for t in ls]
+                bbox = frac_bbox((0.1, m0, 0.9, m1) if horizontal else (1 - m1, 60 / 700, 1 - m0, 640 / 700))
+                regs.append(Region(id=eid, kind=kind, bbox=bbox, title_text=mt[0]) if kind == "제목" else
+                            Region(id=eid, kind=kind, bbox=bbox, paragraphs=[Paragraph(columns=[Column(col_from_right=k + 1, text=x) for k, x in enumerate(mt)])]))
+            fixes = refit_by_layer(PageReading(pdf_page=1, regions=regs), layer, horizontal)
+            for r in regs:
+                got = fixes.get(r.id, {}).get("lines")
+                if got:
+                    self.assertEqual({owner[k] for k in range(got[0], got[1] + 1)}, {r.id}, (seed, r.id, got, truth[r.id]))
+                if omitted == {"hdr"}:
+                    self.assertEqual(got, truth[r.id], (seed, r.id))
 
 
 class HorizontalCover(unittest.TestCase):
@@ -431,6 +584,16 @@ class GlyphWindow(unittest.TestCase):
         self.assertTrue(window_ok("能入阴", "肠，能", "人", "阴分"))             # 앞뒤가 보이면 가운데를 달리 읽어도 자리는 맞다
         self.assertFalse(window_ok("7.《本草便读》", "", "6", ".《本草分经"))       # 실측: 이웃 인용문을 잘라 '7' 로 확정한 사례
         self.assertFalse(window_ok("血，逐寒湿", "肠，能", "人", "阴分"))
+
+    def test_window_needs_neighbours_around_the_slot(self):
+        """앞뒤 글자가 창 어디엔가 흩어져 있는 것만으로는 자리를 믿지 않는다: 앞 글자 뒤 0~2자 안에 뒤 글자가 와야 한다(고른 글자에 붙어 보이면 그대로 통과)."""
+        from yeone_ocr.adjudicate import window_ok, window_matches
+        self.assertFalse(window_ok("阴x能x", "肠，能", "人", "阴分"))              # 차례가 뒤집힘
+        self.assertFalse(window_ok("能xxxx阴", "肠，能", "人", "阴分"))            # 너무 멀다
+        self.assertTrue(window_ok("能阴", "肠，能", "人", "阴分")); self.assertTrue(window_ok("能入阴", "肠，能", "人", "阴分"))
+        self.assertTrue(window_ok("阴xx能人", "肠，能", "人", "阴分"))             # 앞 글자+고른 글자가 붙어 보이면 자리는 맞다
+        self.assertFalse(window_matches("阴x能x", "肠，能", "阴分")); self.assertTrue(window_matches("色赤?心", "色赤", "心，性"))
+        self.assertTrue(window_matches("赤", "色赤", "心，性")); self.assertTrue(window_matches("", "色赤", "心，性"))
 
     def test_adjudicate_page_rejects_misplaced_crop(self):
         from yeone_ocr.adjudicate import adjudicate_page
@@ -1142,3 +1305,791 @@ class BundleImages(unittest.TestCase):
                 app._bundle_images([os.path.join(td, f"s{i}.png") for i in (1, 4)]); self._drain(app)
             self.assertTrue(mb.showerror.called); self.assertEqual(len(app.used), 1); self.assertFalse(app.running)
             self.assertEqual(sorted(f for f in os.listdir(td) if not f.endswith(".png")), [Path(app.used[0]).name])
+
+
+# ---------------- 0.6.8: 깨지지 않는 기록 · 실패 쪽 표시 · 미리 준비 · 부분 기록 · 묶음 나누기 ----------------
+@contextlib.contextmanager
+def patched_mock_reader(**hooks):
+    """cmd_read 가 만드는 MockReader 에 검사용 갈고리를 끼우고, 만든 판독기들을 돌려준다."""
+    from yeone_ocr import cli
+    orig = cli.make_reader; made = []
+    def mk(args, doc, work):
+        r = orig(args, doc, work)
+        for k, v in hooks.items():
+            setattr(r, k, v)
+        made.append(r); return r
+    cli.make_reader = mk
+    try:
+        yield made
+    finally:
+        cli.make_reader = orig
+
+
+def _join_prepare_ahead():
+    import threading
+    for t in threading.enumerate():
+        if t.name == "prepare-ahead":
+            t.join(30)
+
+
+class AtomicState(unittest.TestCase):
+    """기록·상태는 임시 파일에 다 쓴 뒤 바꿔 넣고(도중에 죽어도 쓰다 만 파일이 남지 않음), 깨진 JSON 은 치우고 계속한다."""
+    def test_write_is_atomic_and_leaves_no_partial_file(self):
+        from yeone_ocr import state as S
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+            work.save_record(1, {"pdf_page": 1, "x": "처음"})
+            def half(t):                                                           # 쓰다가 죽는 흉내
+                t.write_text('{"pdf_page": 1, "x": "반', encoding="utf-8"); raise OSError("죽음")
+            with self.assertRaises(OSError):
+                S.write_atomic_with(work.record_path(1), half)
+            self.assertEqual(work.load_record(1)["x"], "처음")                         # 원래 기록 그대로
+            self.assertEqual([p.name for p in work.readings_dir.iterdir()], ["p001.json"])   # 임시 파일이 남지 않는다
+            work.save_state({"file": "a.pdf", "pages": {"1": {"statuses": ["미처리"], "notes": []}}})
+            self.assertEqual([p.name for p in work.dir.iterdir() if p.is_file()], ["state.json"])
+            self.assertEqual(work.load_state()["pages"]["1"]["statuses"], ["미처리"])
+
+    def test_corrupt_record_is_moved_and_page_counts_as_unread(self):
+        from yeone_ocr import state as S
+        warns = []; old = S.WARN; S.WARN = warns.append
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+                work.save_record(1, {"pdf_page": 1}); work.save_record(2, {"pdf_page": 2})
+                work.record_path(2).write_text('{"pdf_page": 2, "merged": {', encoding="utf-8")   # 쓰다 만 파일
+                self.assertIsNone(work.load_record(2))
+                self.assertFalse(work.record_path(2).exists()); self.assertTrue((work.readings_dir / "broken" / "p002.json").exists())
+                self.assertEqual([r["pdf_page"] for r in work.records()], [1])
+                self.assertEqual(len(warns), 1); self.assertTrue(warns[0].startswith("주의:"), warns)
+                work.record_path(3).write_text("", encoding="utf-8")                            # 빈 파일도
+                self.assertEqual([r["pdf_page"] for r in work.records()], [1]); self.assertTrue((work.readings_dir / "broken" / "p003.json").exists())
+        finally:
+            S.WARN = old
+
+    def test_corrupt_state_is_renamed_and_restarted(self):
+        from yeone_ocr import state as S
+        warns = []; old = S.WARN; S.WARN = warns.append
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+                work.set_status(1, "1차 OCR 완료")
+                work.state_path.write_text('{"file": "a.pdf", "pages": {"1": ', encoding="utf-8")
+                self.assertEqual(work.load_state(), {"file": "a.pdf", "pages": {}})
+                self.assertTrue(work.state_path.with_name("state.json.broken").exists()); self.assertFalse(work.state_path.exists())
+                self.assertEqual(len(warns), 1); self.assertIn("state.json.broken", warns[0])
+                work.set_status(2, "1차 OCR 완료")                                             # 계속 쓸 수 있다
+                self.assertEqual(work.statuses(2), ["1차 OCR 완료"])
+        finally:
+            S.WARN = old
+
+    def test_ensure_pages_and_backup_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+            work.set_status(2, "1차 OCR 완료")
+            work.ensure_pages([1, 2, 3], total_pages=5)
+            st = work.load_state()
+            self.assertEqual(sorted(st["pages"]), ["1", "2", "3"]); self.assertEqual(st["total_pages"], 5)
+            self.assertEqual(st["pages"]["2"]["statuses"], ["1차 OCR 완료"])                 # 있던 것은 그대로
+            self.assertIsNone(work.backup_record(1))                                           # 기록이 없으면 None
+            work.save_record(1, {"pdf_page": 1, "merged": "손으로 고침"})
+            self.assertEqual(work.backup_record(1), work.readings_dir / "prev" / "p001.json")
+            work.save_record(1, {"pdf_page": 1, "merged": "다시 계산"})
+            second = work.backup_record(1)                                                     # 내용이 다르면 앞의 사본을 덮지 않고 하나 더
+            self.assertNotEqual(second.name, "p001.json"); self.assertEqual(json.loads(second.read_text(encoding="utf-8"))["merged"], "다시 계산")
+            self.assertEqual(json.loads((work.readings_dir / "prev" / "p001.json").read_text(encoding="utf-8"))["merged"], "손으로 고침")
+            self.assertEqual([r["pdf_page"] for r in work.records()], [1])                      # prev/·broken/ 은 기록으로 세지 않는다
+
+
+class FailedPages(unittest.TestCase):
+    """일시 오류로 실패한 쪽이 있으면 read 는 3, run 은 문서까지 만들되 3 을 돌려준다(창이 '완료' 로 보이지 않게). 다시 실행하면 그 쪽만 다시."""
+    def test_read_and_run_return_3_when_a_page_fails(self):
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(3); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close()
+            with patched_mock_reader(fail_pages={2}):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", os.path.join(td, "w"), "--reader", "mock"])
+                self.assertEqual(rc, 3)
+                work = Work(pdf, os.path.join(td, "w"))
+                self.assertEqual([r["pdf_page"] for r in work.records()], [1, 3]); self.assertIn("판독 확인 필요", work.statuses(2))
+                self.assertTrue(any(l.startswith("오류: 판독에 실패한 쪽 1개: 2") for l in buf.getvalue().splitlines()), buf.getvalue())
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["run", pdf, "--work", os.path.join(td, "w2"), "--reader", "mock", "--checkpoint", "0"])
+                _join_prepare_ahead()
+                self.assertEqual(rc, 3)                                                        # 문서·검수 화면·보고는 만들고
+                self.assertEqual([p.name for p in Path(td, "w2", "out").glob("*.hwpx")], ["v_p001-003.hwpx"]); self.assertTrue(os.path.exists(os.path.join(td, "w2", "review.html")))   # 기록 있는 쪽만 문서에
+                self.assertIn("오류: 판독에 실패한 쪽 1개: 2", buf.getvalue()); self.assertIn("실패한 쪽이 있습니다", buf.getvalue())
+            with patched_mock_reader() as made:                                                # 다시 실행: 실패한 쪽만 다시 → 0
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.main(["run", pdf, "--work", os.path.join(td, "w2"), "--reader", "mock", "--checkpoint", "0"])
+                _join_prepare_ahead()
+            self.assertEqual(rc, 0); self.assertEqual(made[0].calls["read_page"], 1)
+            self.assertEqual([r["pdf_page"] for r in Work(pdf, os.path.join(td, "w2")).records()], [1, 2, 3])
+
+
+class PrepareAhead(unittest.TestCase):
+    """한 번에 인식은 쪽 파일을 전부 꺼낸 뒤가 아니라 판독과 나란히 미리 만든다. 끝나면 모든 쪽의 이미지·글자층 파일과 기록이 있고 임시 파일은 없다."""
+    def test_run_prepares_all_pages_alongside_reading(self):
+        from yeone_ocr import cli
+        events = []
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(4); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close()
+            w = os.path.join(td, "w")
+            cli.PROGRESS = lambda st, d, t: events.append((st, d, t))
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0"])
+            finally:
+                cli.PROGRESS = None
+            _join_prepare_ahead()
+            self.assertEqual(rc, 0)
+            work = Work(pdf, w)
+            self.assertEqual([r["pdf_page"] for r in work.records()], [1, 2, 3, 4])
+            for n in range(1, 5):
+                self.assertTrue(work.page_image_path(n).exists(), n); self.assertTrue(work.textlayer_path(n).exists(), n)
+            self.assertEqual(sorted(p.name for p in work.pages_dir.iterdir()), sorted(f"p{n:03d}.{e}" for n in range(1, 5) for e in ("png", "src.txt")))
+            self.assertEqual(sorted(p.name for p in work.textlayer_dir.iterdir()), [f"p{n:03d}.json" for n in range(1, 5)])
+            self.assertEqual([e for e in events if e[0] == "prepare"], [("prepare", 0, 0)])    # 기록 없는 쪽은 앞서 꺼내지 않는다(미리 준비 스레드는 알리지 않음)
+            st = work.load_state(); self.assertEqual(st["total_pages"], 4); self.assertEqual(sorted(st["pages"]), ["1", "2", "3", "4"])
+            events.clear(); cli.PROGRESS = lambda st, d, t: events.append((st, d, t))        # 기록 있는 쪽은 앞서(동기) 준비한다 — 이전 판 기록 갱신에 글자층이 필요
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0", "--pages", "1-2"])
+            finally:
+                cli.PROGRESS = None
+            _join_prepare_ahead()
+            self.assertEqual(rc, 0); self.assertEqual([e for e in events if e[0] == "prepare"], [("prepare", 0, 2), ("prepare", 1, 2), ("prepare", 2, 2)])
+
+    def test_quiet_prepare_is_silent_and_stops_on_request(self):
+        import threading
+        from yeone_ocr import cli
+        events = []
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(4); pdf = os.path.join(td, "v.pdf"); doc.save(pdf)
+            work = Work(pdf, os.path.join(td, "w")); args = Namespace(pdf=pdf, work=None, pages=None, dpi=72, force=False)
+            cli.PROGRESS = lambda st, d, t: events.append((st, d, t))
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    cli.cmd_prepare(args, work, doc, pages=[1, 2], quiet=True)
+            finally:
+                cli.PROGRESS = None
+            self.assertEqual(events, []); self.assertEqual(buf.getvalue(), "")
+            self.assertTrue(work.page_image_path(2).exists()); self.assertFalse(work.page_image_path(3).exists())
+            stop = threading.Event(); stop.set()
+            cli.cmd_prepare(args, work, doc, pages=[3, 4], quiet=True, stop=stop)
+            self.assertFalse(work.page_image_path(3).exists())
+            self.assertEqual(sorted(work.load_state()["pages"]), ["1", "2", "3", "4"])      # 등록은 한다
+            cli.PROGRESS = lambda st, d, t: events.append((st, d, t))                      # 단독 prepare 는 전처럼 알린다
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cli.cmd_prepare(args, work, doc, pages=[3])
+            finally:
+                cli.PROGRESS = None
+            self.assertEqual(events, [("prepare", 0, 1), ("prepare", 1, 1)]); self.assertTrue(work.page_image_path(3).exists())
+            self.assertTrue((work.pages_dir / "p003.src.txt").read_text(encoding="utf-8").startswith("렌더"))
+            doc.close()
+
+
+def _pdf_with_figure(n: int, path: str):
+    """세로쓰기 글자층 + 1쪽에 큰 사각 도형(mock 판독기가 도판으로 잡는다)."""
+    doc = vertical_pdf(n)
+    doc[0].draw_rect(pymupdf.Rect(80, 250, 380, 650), color=(0, 0, 0), width=5)
+    doc.save(path); doc.close()
+
+
+class InterimCheckpoint(unittest.TestCase):
+    """중간 저장(interim)은 도판은 잘라도 기록 파일은 손대지 않는다 — 다시 읽는 중인 쪽의 새 기록을 옛 기록으로 덮지 않게."""
+    def test_interim_build_leaves_records_byte_identical(self):
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, "v.pdf"); _pdf_with_figure(2, pdf); w = os.path.join(td, "w")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0"]), 0)
+            _join_prepare_ahead()
+            work = Work(pdf, w); rec = work.load_record(1)
+            self.assertTrue(rec["crops"], "1쪽의 도형이 도판으로 잡혀야 한다")
+            for c in rec["crops"].values():
+                os.remove(c["path"])
+            rec["crops"] = {}; work.save_record(1, rec); before = work.record_path(1).read_bytes()
+            args = cli.build_parser().parse_args(["run", pdf, "--work", w, "--reader", "mock"]); doc = pymupdf.open(pdf)
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.build_outputs(work, doc, work.records([1]), args, interim=True)
+            self.assertEqual(work.record_path(1).read_bytes(), before)                       # 기록은 그대로
+            self.assertTrue(list(work.crops_dir.glob("p001_*.jpg"))); self.assertTrue((work.out_dir / "v_진행중.hwpx").exists())   # 도판·진행중 문서는 만든다
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.build_outputs(work, doc, work.records([1]), args, interim=False)
+            self.assertTrue(work.load_record(1)["crops"])                                     # 최종 문서 때 적는다
+            doc.close()
+
+
+class PrevBackup(unittest.TestCase):
+    """이전 판 기록을 다시 비교하기 전에 readings/prev/ 에 한 번 복사해 둔다 — 손으로 고친 merged 가 사라지지 않게."""
+    def test_refresh_backs_up_before_rewriting(self):
+        from yeone_ocr.cli import refresh_stale_records
+        p1 = PageReading(pdf_page=4, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="剋하니 冲和가 되고")])])])
+        rec = {"pdf_page": 4, "version": "0.5.11", "pass1": p1.model_dump(), "pass2": {}, "merged": {**p1.model_dump(), "page_note": "손으로 고침"}}
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+            work.save_record(4, rec); before = work.record_path(4).read_bytes()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(refresh_stale_records(work, None, [4]), 1)
+            self.assertEqual((work.readings_dir / "prev" / "p004.json").read_bytes(), before)
+            self.assertIn("readings/prev/", buf.getvalue()); self.assertIn("1쪽 복사", buf.getvalue())
+            self.assertNotEqual(work.load_record(4)["merged"].get("page_note"), "손으로 고침")   # merged 는 다시 계산된다(그래서 사본이 필요)
+
+
+class PartialRecord(unittest.TestCase):
+    """2차 판독 도중 오류가 나도 이미 산 1차 결과는 readings/partial/ 에 남고, 다음 실행은 1차를 다시 사지 않는다. 조각 하나의 일시 오류는 그 영역만 2차 없이."""
+    def test_pass1_is_reused_after_pass2_failure(self):
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(3); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            work = Work(pdf, w); pp = work.readings_dir / "partial" / "p002.json"
+            with patched_mock_reader(pass2_fail_once={2: RuntimeError("2차 중 예외")}) as made:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock"])
+            self.assertEqual(rc, 3); self.assertIsNone(work.load_record(2)); self.assertEqual(made[0].calls["read_page"], 3)
+            self.assertTrue(pp.exists()); part = json.loads(pp.read_text(encoding="utf-8"))
+            self.assertEqual((part["pdf_page"], part["model"], part["mode"]), (2, "textlayer+cv", "vertical")); self.assertTrue(part["pass1"]["regions"])
+            self.assertIn("readings/partial/", buf.getvalue())
+            with patched_mock_reader() as made:                                              # 다음 실행: 2쪽의 1차는 다시 사지 않는다
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock"])
+            self.assertEqual(rc, 0); self.assertEqual(made[0].calls["read_page"], 0); self.assertGreater(made[0].calls["reread_region"], 0)
+            rec = work.load_record(2); self.assertTrue(rec["pass1"]["regions"]); self.assertIn("pass1_reused_from", rec)
+            self.assertFalse(pp.exists()); self.assertIn("2쪽: 이전 실행의 1차 판독을 재사용(2차만 다시)", buf.getvalue())
+            # 모델·판·모드가 다른 부분 기록은 쓰지 않는다
+            os.remove(work.record_path(2)); pp.parent.mkdir(exist_ok=True)
+            pp.write_text(json.dumps({**part, "model": "다른 모델"}), encoding="utf-8")
+            with patched_mock_reader() as made:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["read", pdf, "--work", w, "--reader", "mock"]), 0)
+            self.assertEqual(made[0].calls["read_page"], 1)
+
+    def test_every_region_failing_fails_the_page_and_keeps_pass1(self):
+        """mock 의 쪽은 문자 영역이 b1 하나 — 그 조각의 일시 오류는 '모든 영역 2차 실패' 다. 1차만인 쪽을 완료로 저장하지 않고 실패로 세며(3),
+        1차는 partial/ 에 남아 다음 실행이 2차만 다시 한다(0.6.7 처럼 다시 시도되되 1차는 다시 사지 않음)."""
+        from yeone_ocr import cli
+        from yeone_ocr.reader_gemini import ReaderError
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(2); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            with patched_mock_reader(pass2_fail_once={2: ReaderError("5회 시도 뒤에도 실패: 서버 오류(503)", fatal=False)}):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock"])
+            self.assertEqual(rc, 3)
+            work = Work(pdf, w); self.assertIsNone(work.load_record(2)); self.assertIn("판독 확인 필요", work.statuses(2))
+            self.assertIn("2쪽: b1 2차 판독 실패", buf.getvalue()); self.assertTrue((work.readings_dir / "partial" / "p002.json").exists())
+            self.assertTrue(any(l.startswith("오류: 판독에 실패한 쪽 1개: 2") for l in buf.getvalue().splitlines()), buf.getvalue())
+            with patched_mock_reader() as made:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock"])
+            self.assertEqual(rc, 0); self.assertEqual(made[0].calls["read_page"], 0); self.assertGreater(made[0].calls["reread_region"], 0)
+            self.assertIn("pass1_reused_from", work.load_record(2)); self.assertFalse((work.readings_dir / "partial" / "p002.json").exists())
+            with patched_mock_reader(pass2_fail_once={1: ReaderError("하루 한도", fatal=True)}):     # 치명 오류는 전체를 멈추되 1차는 남긴다
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock", "--force", "--pages", "1"])
+            self.assertEqual(rc, 1); self.assertTrue((work.readings_dir / "partial" / "p001.json").exists())
+
+
+class Batching(unittest.TestCase):
+    """2차 조각은 ⌈n/per⌉ 묶음으로 고르게 나누고, 묶음이 일시 오류면 두 반으로 한 번 더 묻고 빠진 조각만 낱개로 간다."""
+    def test_even_batches(self):
+        from yeone_ocr.cli import _batches
+        f = lambda n, per: [len(b) for b in _batches(list(range(n)), per)]
+        self.assertEqual(f(9, 8), [5, 4]); self.assertEqual(f(17, 8), [6, 6, 5]); self.assertEqual(f(8, 8), [8]); self.assertEqual(f(2, 8), [2])
+        self.assertEqual(f(3, 2), [2, 1]); self.assertEqual(f(0, 8), []); self.assertEqual(f(4, 1), [1, 1, 1, 1]); self.assertEqual(f(16, 8), [8, 8])
+        self.assertEqual(_batches(list(range(9)), 8), [[0, 1, 2, 3, 4], [5, 6, 7, 8]])        # 순서 유지
+
+    def _page(self):
+        from PIL import ImageDraw
+        im = Image.new("L", (1000, 1400), 255); d = ImageDraw.Draw(im); regs = []
+        for k, y in enumerate((0.10, 0.20, 0.30, 0.40, 0.50), 1):
+            d.rectangle([100, int(y * 1400), 880, int((y + 0.022) * 1400)], fill=0)
+            regs.append(Region(id=f"r{k}", kind="본문", bbox=[int(y * 1000) - 11, 77, int(y * 1000) + 33, 889],
+                               paragraphs=[Paragraph(columns=[Column(col_from_right=1, text=f"{k}.《本草汇言》：艾叶暖血温经，行气开郁之药也。治妇人经血不调第{k}条")])]))
+        return im, PageReading(pdf_page=1, regions=regs)
+
+    def test_batch_failure_halves_then_singles(self):
+        from yeone_ocr import prompts
+        from yeone_ocr.cli import _second_pass
+        from yeone_ocr.reader_gemini import ReaderError
+        im, p1 = self._page()
+        texts = {r.id: r.paragraphs[0].columns[0].text for r in p1.regions}
+        class Fake:
+            def __init__(self, limit, fatal=False): self.limit = limit; self.fatal = fatal; self.batches = []; self.single = []
+            def reread_regions(self, items, n):
+                self.batches.append([rid for rid, _, _ in items])
+                if len(items) > self.limit:
+                    raise ReaderError("묶음 실패", fatal=self.fatal)
+                return {rid: RegionReread(columns=[Column(col_from_right=1, text=texts[rid])]) for rid, _, _ in items}
+            def reread_region(self, im, kind, rid, n):
+                self.single.append(rid); return RegionReread(columns=[Column(col_from_right=1, text=texts[rid])])
+        prompts.set_mode("horizontal_zh")
+        try:
+            fake = Fake(2); buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rr, meta = _second_pass(fake, im, p1, 1, Namespace(chunk_lines=8, second_mode="batch", batch_crops=8))
+            self.assertEqual([len(b) for b in fake.batches], [5, 3, 2])                     # 5장 실패 → 3+2 로 한 번 더 → 3장만 실패
+            self.assertEqual(fake.single, ["r1", "r2", "r3"]); self.assertEqual(set(rr), {"r1", "r2", "r3", "r4", "r5"})
+            self.assertIn("반으로 나눠 다시", buf.getvalue())
+            fake2 = Fake(1)                                                                  # 두 장짜리 묶음은 반으로 나누지 않고 바로 낱개
+            with contextlib.redirect_stdout(io.StringIO()):
+                _second_pass(fake2, im, p1, 1, Namespace(chunk_lines=8, second_mode="batch", batch_crops=2))
+            self.assertEqual([len(b) for b in fake2.batches], [2, 2]); self.assertEqual(fake2.single, ["r1", "r2", "r3", "r4", "r5"])
+            with self.assertRaises(ReaderError):                                             # 치명 오류는 그대로 올라간다
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _second_pass(Fake(2, fatal=True), im, p1, 1, Namespace(chunk_lines=8, second_mode="batch", batch_crops=8))
+        finally:
+            prompts.set_mode("vertical")
+
+    def test_single_failure_is_noted_not_raised(self):
+        from yeone_ocr import prompts
+        from yeone_ocr.cli import _second_pass
+        from yeone_ocr.reader_gemini import ReaderError
+        im, p1 = self._page()
+        class Fake:
+            def reread_region(self, im, kind, rid, n):
+                if rid == "r3": raise ReaderError("3회 시도 뒤에도 실패: 형식", fatal=False)
+                return RegionReread(columns=[Column(col_from_right=1, text="x")])
+        prompts.set_mode("horizontal_zh")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rr, meta = _second_pass(Fake(), im, p1, 1, Namespace(chunk_lines=8, second_mode="each"))
+        finally:
+            prompts.set_mode("vertical")
+        self.assertEqual(set(rr), {"r1", "r2", "r4", "r5"}); self.assertTrue(meta["r3"]["pass2_failed"].startswith("3회 시도"))
+
+
+class AdaptiveClean(unittest.TestCase):
+    """동시 쪽 수 자동 조절은 성공한 쪽만 '깨끗한' 것으로 센다 — 실패만 이어지는 동안 동시 쪽 수가 늘지 않게."""
+    def test_failures_do_not_count_as_clean(self):
+        from yeone_ocr import cli
+        class R: n_429 = 0
+        def run(ok):
+            def fn(item):
+                if not ok: raise RuntimeError("실패")
+                return item
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli.run_adaptive(list(range(12)), fn, [R()], ceiling=2, start=1, on_result=lambda i, r: None, on_error=lambda i, e: False, pause=0.1)
+            cli.CANCEL.clear()
+            return buf.getvalue()
+        self.assertNotIn("안정적", run(False))
+        self.assertIn("안정적 → 동시 2쪽", run(True))
+
+
+class PageUpscale(unittest.TestCase):
+    """Gemini 3 계열은 이미지 토큰 예산이 고정이라 쪽 전체를 2배로 키우지 않는다(CPU·전송만 듦). 2.5 세대·mock 은 전처럼."""
+    def test_gemini3_skips_whole_page_upscale(self):
+        from yeone_ocr.cli import page_upscale, read_one
+        class Fake:
+            name = "fake"
+            def __init__(self, model): self.model = model; self.sizes = []
+            def read_page(self, img, file_name, pdf_page, total, extra=""):
+                self.sizes.append(img.size); return PageReading(pdf_page=pdf_page, regions=[])
+        self.assertEqual(page_upscale(Fake("gemini-3-pro"), 2.0, (500, 800)), 1.0)
+        self.assertEqual(page_upscale(Fake("gemini-3.1-pro-preview"), 2.0, (500, 800)), 1.0)
+        self.assertEqual(page_upscale(Fake("gemini-2.5-pro"), 2.0, (500, 800)), 2.0)
+        self.assertEqual(page_upscale(Fake("gemini-2.5-pro"), 2.0, (3000, 800)), 1.0)         # 4200px 을 넘으면 전처럼 키우지 않는다
+        self.assertEqual(page_upscale(Fake("textlayer+cv"), 2.0, (500, 800)), 2.0)
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(1); pdf = os.path.join(td, "v.pdf"); doc.save(pdf)
+            work = Work(pdf, os.path.join(td, "w"))
+            args = Namespace(pdf=pdf, dpi=72, upscale=2.0, no_second_pass=True, print_offset=None, mode="vertical")
+            for model, factor in (("gemini-3-pro", 1), ("gemini-2.5-pro", 2)):
+                f = Fake(model)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rec = read_one(work, doc, f, f, 1, args)
+                self.assertEqual(f.sizes[-1], (500 * factor, 800 * factor), model); self.assertEqual(rec["upscale"], float(factor))
+            doc.close()
+
+
+# ---------------- 0.6.8 검토 고침: 2차 덜 된 쪽 · 사본 · 깨진 파일 · 3차 못 마침 · 부분 기록 사용량 ----------------
+class _TwoRegionReader:
+    """문자 영역 둘(b1·b2)을 돌려주는 가짜 판독기. fail 에 든 영역은 2차(reread_region)가 일시 오류, fail_all 은 (fail_pages 쪽의, 없으면 모든 쪽의)
+    2차 호출마다 던질 예외. usage_* 는 쓰레드별 사용량."""
+    name = "fake"
+
+    def __init__(self, model="fake-pro", fail=(), fail_all=None, fail_pages=None):
+        import threading
+        self.model = model; self.fail = set(fail); self.fail_all = fail_all; self.fail_pages = fail_pages; self._tls = threading.local()
+        self.calls = {"read_page": 0, "reread_region": 0}
+
+    def usage_begin(self):
+        self._tls.page = {}
+
+    def usage_end(self):
+        d = getattr(self._tls, "page", None) or {}; self._tls.page = None; return d
+
+    def _bill(self, i, o):
+        p = getattr(self._tls, "page", None)
+        if p is not None:
+            p["calls"] = p.get("calls", 0) + 1; p["prompt_tokens"] = p.get("prompt_tokens", 0) + i; p["output_tokens"] = p.get("output_tokens", 0) + o
+
+    def read_page(self, img, file_name, pdf_page, total, extra=""):
+        self.calls["read_page"] += 1; self._bill(5000, 3000)
+        col = lambda: [Paragraph(columns=[Column(col_from_right=1, text="天地玄黃宇宙洪荒")])]
+        return PageReading(pdf_page=pdf_page, regions=[Region(id="b1", kind="본문", bbox=[50, 830, 700, 950], reading_direction="세로(우→좌)", paragraphs=col()),
+                                                       Region(id="b2", kind="본문", bbox=[50, 740, 700, 820], reading_direction="세로(우→좌)", paragraphs=col())])
+
+    def reread_region(self, crop, kind, region_id, pdf_page):
+        from yeone_ocr.reader_gemini import ReaderError
+        self.calls["reread_region"] += 1; self._bill(800, 100)
+        if self.fail_all is not None and (self.fail_pages is None or pdf_page in self.fail_pages):
+            raise self.fail_all
+        if region_id.split("#")[0] in self.fail:
+            raise ReaderError("5회 시도 뒤에도 실패: Gemini 서버 오류(503)", fatal=False)
+        return RegionReread(columns=[Column(col_from_right=1, text="天地玄黃宇宙洪荒")])
+
+
+@contextlib.contextmanager
+def _use_reader(r):
+    """cmd_read 가 r 을 판독기로 쓰게(읽기 방향 판정은 그대로)."""
+    from yeone_ocr import cli
+    orig = cli.make_reader
+    cli.make_reader = lambda args, doc, work: (cli.resolve_mode(args, doc, work), r)[1]
+    try:
+        yield r
+    finally:
+        cli.make_reader = orig
+
+
+class Pass2Incomplete(unittest.TestCase):
+    """2차가 일부 영역에서 실패한 쪽은 1차로 살리되 끝나지 않은 쪽으로 센다(오류: 줄·3). 다음 실행은 기록의 1차로 2차만 다시 묻는다."""
+    def test_some_regions_failing_keeps_page_counts_it_and_retries_pass2_only(self):
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(2); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            with _use_reader(_TwoRegionReader(fail={"b2"})) as r:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock", "--pages", "1", "--second-mode", "each"])
+            self.assertEqual(rc, 3, buf.getvalue())
+            work = Work(pdf, w); rec = work.load_record(1)
+            self.assertEqual(rec["pass2_failed"], ["b2"]); self.assertEqual([x["id"] for x in rec["pass1_raw"]["regions"]], ["b1", "b2"])
+            self.assertIn("b1", rec["pass2"]); self.assertNotIn("b2", rec["pass2"])
+            self.assertTrue(any(u["context"].startswith("2차 판독 실패(") and u["region_id"] == "b2" for u in rec["merged"]["uncertain"]))
+            self.assertTrue(any(l.startswith("오류: 2차 판독이 일부 영역에서 실패한 쪽 1개: 1") for l in buf.getvalue().splitlines()), buf.getvalue())
+            self.assertIn("판독 확인 필요", work.statuses(1)); self.assertNotIn("2차 독립 판독 비교 완료", work.statuses(1))   # 덜 된 2차에 '완료' 를 붙이지 않는다
+            with _use_reader(_TwoRegionReader()) as r:                                       # 다음 실행: 1차는 다시 사지 않고 2차만
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["read", pdf, "--work", w, "--reader", "mock", "--pages", "1", "--second-mode", "each"])
+            self.assertEqual(rc, 0, buf.getvalue()); self.assertEqual(r.calls["read_page"], 0); self.assertEqual(r.calls["reread_region"], 1)   # 덜 된 b2 만
+            self.assertIn("2차만 다시 묻습니다", buf.getvalue()); self.assertIn("1쪽: 이전 실행의 1차 판독을 재사용(2차만 다시)", buf.getvalue())
+            rec = work.load_record(1)
+            self.assertNotIn("pass2_failed", rec); self.assertNotIn("pass1_raw", rec); self.assertEqual(sorted(rec["pass2"]), ["b1", "b2"]); self.assertIn("pass1_reused_from", rec)
+            self.assertFalse(any(u["context"].startswith("2차 판독 실패(") for u in rec["merged"]["uncertain"]))
+            self.assertIn("2차 독립 판독 비교 완료", work.statuses(1))
+            self.assertEqual(rec["usage"]["calls"], 1 + 2 + 1)                                # 첫 실행(1차 1·2차 2)도 이 쪽의 비용으로 이어받는다
+            with _use_reader(_TwoRegionReader()) as r:                                       # 다 끝난 쪽은 다시 묻지 않는다
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["read", pdf, "--work", w, "--reader", "mock", "--pages", "1"]), 0)
+            self.assertEqual(r.calls, {"read_page": 0, "reread_region": 0})
+
+    def test_no_second_pass_and_force_leave_or_reread_incomplete_pages(self):
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(1); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            with _use_reader(_TwoRegionReader(fail={"b1"})):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["read", pdf, "--work", w, "--reader", "mock", "--second-mode", "each"]), 3)
+            before = Work(pdf, w).record_path(1).read_bytes()
+            with _use_reader(_TwoRegionReader()) as r:                                       # 2차를 끈 실행은 덜 된 쪽의 2차 결과를 버리지 않는다(건너뜀)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["read", pdf, "--work", w, "--reader", "mock", "--no-second-pass"]), 0)
+            self.assertEqual(r.calls, {"read_page": 0, "reread_region": 0}); self.assertEqual(Work(pdf, w).record_path(1).read_bytes(), before)
+            with _use_reader(_TwoRegionReader()) as r:                                       # --force 는 처음부터 다시(1차도)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["read", pdf, "--work", w, "--reader", "mock", "--force", "--second-mode", "each"]), 0)
+            self.assertEqual(r.calls["read_page"], 1)
+
+    def test_every_region_failing_in_run_is_a_failed_page_retried_with_pass1(self):
+        """검토 재현(r1): 2차가 모든 조각에서 실패하면 0.6.7 처럼 그 쪽은 실패(3)이고 다음 실행에서 다시 — 다만 1차는 다시 사지 않는다."""
+        from yeone_ocr import cli
+        from yeone_ocr.reader_gemini import ReaderError
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(3); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            with _use_reader(_TwoRegionReader(fail_all=ReaderError("5회 시도 뒤에도 실패: Gemini 서버 오류(503)", fatal=False), fail_pages={1, 2})):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0", "--second-mode", "each"])
+                _join_prepare_ahead()
+            self.assertEqual(rc, 3, buf.getvalue()); self.assertIn("실패한 쪽이 있습니다", buf.getvalue())
+            work = Work(pdf, w); self.assertEqual([x["pdf_page"] for x in work.records()], [3])        # 1차만인 쪽을 기록(완료)으로 남기지 않는다
+            self.assertTrue(any(l.startswith("오류: 판독에 실패한 쪽 2개: 1, 2") for l in buf.getvalue().splitlines()), buf.getvalue())
+            part = json.loads((work.readings_dir / "partial" / "p001.json").read_text(encoding="utf-8"))
+            self.assertIn("문자 영역 2개 모두에서 실패", part["error"])
+            with _use_reader(_TwoRegionReader()) as r:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0", "--second-mode", "each"])
+                _join_prepare_ahead()
+            self.assertEqual(rc, 0); self.assertEqual(r.calls["read_page"], 0); self.assertEqual(r.calls["reread_region"], 4)
+            self.assertEqual([x["pdf_page"] for x in work.records()], [1, 2, 3]); self.assertIn("2차 독립 판독 비교 완료", work.statuses(2))
+
+
+class PartialUsageByModel(unittest.TestCase):
+    """부분 기록을 재사용한 쪽도 모델별 사용량(by_model)에 1차(pro) 토큰이 남아 비용 어림이 1차를 빼먹지 않는다."""
+    def test_reused_partial_keeps_pass1_model(self):
+        from yeone_ocr import cli
+        from yeone_ocr.estimate import estimate
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(1); pdf = os.path.join(td, "v.pdf"); doc.save(pdf)
+            work = Work(pdf, os.path.join(td, "w"))
+            args = Namespace(pdf=pdf, dpi=72, upscale=1.0, no_second_pass=False, print_offset=None, mode="vertical", chunk_lines=0, second_mode="each")
+            pro = _TwoRegionReader("gemini-3-pro"); flash = _TwoRegionReader("gemini-3-flash", fail_all=RuntimeError("2차 중 예외"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    cli.read_one(work, doc, pro, flash, 1, args)
+                flash.fail_all = None
+                rec = cli.read_one(work, doc, pro, flash, 1, args)
+            u = rec["usage"]; bm = u["by_model"]
+            self.assertEqual((u["calls"], u["prompt_tokens"], u["output_tokens"]), (4, 5000 + 3 * 800, 3000 + 3 * 100))
+            self.assertEqual(bm["gemini-3-pro"], {"calls": 1, "prompt_tokens": 5000, "output_tokens": 3000})
+            self.assertEqual(bm["gemini-3-flash"], {"calls": 3, "prompt_tokens": 2400, "output_tokens": 300})
+            e = estimate(pdf, [1], records=[rec], model="gemini-3-pro", second_model="gemini-3-flash",
+                         prices={"gemini-3-pro": {"in": 2.0, "out": 12.0}, "gemini-3-flash": {"in": 0.5, "out": 3.0}})
+            self.assertEqual(sorted((r["model"], r["label"]) for r in e["rows"]), [("gemini-3-flash", "2차 · 확대 조각 확인"), ("gemini-3-pro", "1차 · 쪽 전체 판독")])
+            p1 = _TwoRegionReader("gemini-3-pro"); p2 = _TwoRegionReader("gemini-3-pro")     # 2차가 1차와 같은 모델(다른 설정의 판독기)이면 모델별 값을 덮지 않고 더한다
+            with contextlib.redirect_stdout(io.StringIO()):
+                rec = cli.read_one(work, doc, p1, p2, 1, args)
+            self.assertEqual(rec["usage"]["by_model"]["gemini-3-pro"]["calls"], 3)
+            doc.close()
+
+
+class PrevCopies(unittest.TestCase):
+    """readings/prev/ 사본은 처음 한 번만이 아니다 — 첫 사본 뒤에 손으로 고친 글도 다음 다시 비교 전에 따로 남는다(앞의 사본은 덮지 않음)."""
+    def test_second_upgrade_keeps_edit_made_after_first_copy(self):
+        from unittest import mock
+        from yeone_ocr import cli
+        p1 = PageReading(pdf_page=4, regions=[Region(id="b", kind="본문", paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="剋하니 冲和가 되고")])])])
+        with tempfile.TemporaryDirectory() as td:
+            work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w")); prev = work.readings_dir / "prev"
+            work.save_record(4, {"pdf_page": 4, "version": "0.6.6", "pass1": p1.model_dump(), "pass2": {}, "merged": {**p1.model_dump(), "page_note": "EDIT-1"}})
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.refresh_stale_records(work, None, [4])
+            rec = work.load_record(4); rec["merged"]["page_note"] = "EDIT-2"; work.save_record(4, rec)       # 첫 갱신 뒤 손으로 고침
+            buf = io.StringIO()
+            with mock.patch.object(cli, "__version__", "0.6.9"), contextlib.redirect_stdout(buf):            # 다음 판으로 올림
+                self.assertEqual(cli.refresh_stale_records(work, None, [4]), 1)
+            notes = {f.name: json.loads(f.read_text(encoding="utf-8"))["merged"].get("page_note") for f in prev.iterdir()}
+            self.assertEqual(notes.pop("p004.json"), "EDIT-1"); self.assertEqual(list(notes.values()), ["EDIT-2"])
+            self.assertIn(f"1쪽 복사: {next(iter(notes))}", buf.getvalue())                     # 이번에 쓴 사본 이름을 알린다
+            work.save_record(4, rec); self.assertIsNone(work.backup_record(4))                    # 이미 남긴 것과 같은 내용이면 또 만들지 않는다
+            self.assertEqual(len(list(prev.iterdir())), 2)
+            work.save_record(4, {"pdf_page": 4, "merged": "다른 내용 1"}); a = work.backup_record(4)
+            work.save_record(4, {"pdf_page": 4, "merged": "다른 내용 2"}); b = work.backup_record(4)
+            self.assertEqual(len(set(prev.iterdir())), 4); self.assertNotEqual(a, b)              # 같은 초에도 이름이 겹치지 않는다
+            self.assertTrue(a.name.startswith("p004.") and b.name.endswith(".json"))
+
+
+class BrokenFiles(unittest.TestCase):
+    """깨진 파일: BOM 이 붙은 손 고침은 깨진 것이 아니고, 치운 파일은 앞서 치운 것을 덮지 않는다. 쓰다 만 쪽 이미지·글자층은 쓸 때 다시 꺼낸다."""
+    def test_bom_hand_edit_is_not_broken(self):
+        from yeone_ocr import state as S
+        warns = []; old = S.WARN; S.WARN = warns.append
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+                work.record_path(5).write_text("﻿" + json.dumps({"pdf_page": 5, "merged": "HAND-EDIT-1"}), encoding="utf-8")   # 메모장 저장
+                self.assertEqual([r["merged"] for r in work.records()], ["HAND-EDIT-1"]); self.assertEqual(warns, [])
+                self.assertFalse((work.readings_dir / "broken").exists()); self.assertTrue(work.record_path(5).exists())
+                work.state_path.write_text("﻿" + json.dumps({"file": "a.pdf", "pages": {"1": {"statuses": ["1차 OCR 완료"], "notes": []}}}), encoding="utf-8")
+                self.assertEqual(work.statuses(1), ["1차 OCR 완료"]); self.assertEqual(warns, [])
+        finally:
+            S.WARN = old
+
+    def test_quarantine_keeps_every_copy(self):
+        from yeone_ocr import state as S
+        warns = []; old = S.WARN; S.WARN = warns.append
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w")); bd = work.readings_dir / "broken"
+                work.record_path(5).write_text('{"pdf_page": 5, "merged": "HAND-EDIT-2",}', encoding="utf-8")
+                self.assertIsNone(work.load_record(5))
+                work.record_path(5).write_text('{"pdf_page": 5, "merged": "HAND-EDIT-3",}', encoding="utf-8")
+                self.assertEqual(work.records(), [])
+                kept = "".join(f.read_text(encoding="utf-8") for f in bd.iterdir())
+                self.assertEqual(len(list(bd.iterdir())), 2); self.assertIn("HAND-EDIT-2", kept); self.assertIn("HAND-EDIT-3", kept)
+                self.assertIn("readings/broken/p005.json", warns[0]); self.assertNotIn("readings/broken/p005.json", warns[1])   # 알림이 실제 이름을 댄다
+                for k in range(2):
+                    work.state_path.write_text('{"file": "a.pdf", "pages": {' + str(k), encoding="utf-8"); work.load_state()
+                self.assertEqual(len([f for f in work.dir.iterdir() if f.name.startswith("state.json.")]), 2)
+        finally:
+            S.WARN = old
+
+    def test_torn_page_image_and_textlayer_are_rebuilt(self):
+        """검토 재현(r7): 쓰다 만 pNNN.png·글자층 JSON 은 run 이든 run --force 든 매번 그 쪽을 실패시켰다(prepare 는 있는지만 봄)."""
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(3); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["prepare", pdf, "--work", w, "--dpi", "72"]), 0)
+            work = Work(pdf, w); ip = work.page_image_path(2); tp = work.textlayer_path(3)
+            ip.write_bytes(ip.read_bytes()[: ip.stat().st_size // 3]); tp.write_text(tp.read_text(encoding="utf-8")[:40], encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0", "--dpi", "72"])
+            _join_prepare_ahead()
+            self.assertEqual(rc, 0, buf.getvalue()); self.assertEqual([r["pdf_page"] for r in work.records()], [1, 2, 3])
+            lines = buf.getvalue().splitlines()
+            self.assertTrue(any(l.startswith("주의: 쪽 이미지 pages/p002.png") for l in lines), buf.getvalue())
+            self.assertTrue(any(l.startswith("주의: 글자층 파일 textlayer/p003.json") for l in lines), buf.getvalue())
+            Image.open(ip).load(); self.assertEqual(json.loads(tp.read_text(encoding="utf-8"))["page_height"], 800)   # 고쳐 써 둔다
+
+
+class AdjudicateUnfinished(unittest.TestCase):
+    """3차 판별을 못 마친 것(〔a/b〕 남음)은 실패한 쪽과 다르다 — 다른 말, 끝 코드 4. 실패한 쪽도 있으면 3 이 앞선다."""
+    def _run(self, td, adj, fail_pages=()):
+        from unittest import mock
+        from yeone_ocr import cli
+        from yeone_ocr.reader_mock import MockReader
+        doc = vertical_pdf(2); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close()
+        def mk(args, d, work):
+            cli.resolve_mode(args, d, work); r = MockReader({}); r.fail_pages = set(fail_pages); return r
+        buf = io.StringIO()
+        with mock.patch.object(cli, "make_reader", mk), mock.patch.object(cli, "cmd_adjudicate", adj), contextlib.redirect_stdout(buf):
+            rc = cli.main(["run", pdf, "--work", os.path.join(td, "w" + str(len(os.listdir(td)))), "--reader", "gemini", "--second-model", "",
+                           "--second-thinking", "full", "--media-resolution", "default", "--checkpoint", "0"])
+        _join_prepare_ahead()
+        return rc, buf.getvalue()
+
+    def test_adjudicate_error_is_not_reported_as_failed_pages(self):
+        def adj_rc1(*a, **k):
+            print("오류: 3차 판별 실패 — 모델 'gemini-3-pro' 의 하루 요청 한도를 다 썼습니다."); return 1
+        def adj_raises(*a, **k):
+            raise RuntimeError("조각을 만들지 못함")
+        with tempfile.TemporaryDirectory() as td:
+            for adj in (adj_rc1, adj_raises):
+                rc, out = self._run(td, adj)
+                self.assertEqual(rc, 4, out); self.assertNotIn("실패한 쪽이 있습니다", out)
+                self.assertIn("3차 글자 판별을 마치지 못해 〔a/b〕 표시가 남았습니다", out); self.assertIn("3차 판별을 이어서 합니다", out)
+            rc, out = self._run(td, adj_rc1, fail_pages={2})                                 # 실패한 쪽까지 있으면 3, 두 말 모두
+            self.assertEqual(rc, 3); self.assertIn("실패한 쪽이 있습니다", out); self.assertIn("3차 글자 판별을 마치지 못해", out)
+            rc, out = self._run(td, lambda *a, **k: 0)
+            self.assertEqual(rc, 0); self.assertNotIn("3차 글자 판별을 마치지 못해", out)
+
+
+class Pass2Retry068(unittest.TestCase):
+    """0.6.8 검토 2 — 2차가 덜 된 쪽: 책갈피 교정도 다시 묻고, 다시 물을 때는 덜 된 영역만(다른 영역의 글·3차 기록은 그대로, 바꾸기 전 사본),
+    1차의 모델·설정이 바뀌었으면 1차부터라고 말한다. 2차 도중 멈춘 쪽의 1차는 1차 설정이 같을 때만 다시 쓴다. 3차 판별은 호출 상한에서 멈춘다."""
+    def test_collate_retries_incomplete_pages_and_keeps_finished_regions(self):
+        """검토 재현(INT-1·INT-2): 책갈피 교정은 2차가 덜 된 쪽을 기록이 있다고 건너뛰었고('이전 판독 기록으로 대조' 라는 틀린 말까지),
+        [▶] 로 다시 물으면 모든 영역을 다시 사서 기록을 통째로 바꿔 손 고침·3차 판별·합의 의심 기록이 사라졌다(prev/ 사본도 없음)."""
+        from yeone_ocr import cli
+        from yeone_ocr.collate import run as R
+        from yeone_ocr.pdfio import open_pdf
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(2); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            args = cli.build_parser().parse_args(["collate", pdf, "--work", w, "--hwpx", "x.hwpx", "--reader", "mock", "--second-mode", "each"])
+            work = Work(pdf, w); d = open_pdf(pdf)
+            try:
+                with _use_reader(_TwoRegionReader(fail={"b2"})):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        self.assertTrue(R.ensure_pages_read(args, work, d, (1, 1)))                      # 2차 일부 실패(3)
+                rec = work.load_record(1); self.assertEqual(rec["pass2_failed"], ["b2"])
+                self.assertNotIn("이전 판독 기록으로 대조", buf.getvalue())                             # 새로 만든 기록을 '이전 기록' 이라 하지 않는다
+                rec["merged"]["regions"][0]["paragraphs"][0]["columns"][0]["text"] = "天地玄黃宇宙洪荒(손)"   # 2차가 된 b1 을 손으로 고침
+                rec["adjudications"] = [{"region_id": "b1", "choice": "天", "a": "天", "b": "夫", "col_index": 0, "char_index": 0}]
+                rec["suspects"] = [{"region_id": "b1", "outcome": "confirmed", "consensus": "天", "layer": "夫"}]
+                work.save_record(1, rec)
+                with _use_reader(_TwoRegionReader()) as r:
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        self.assertFalse(R.ensure_pages_read(args, work, d, (1, 1)))                     # 기록이 있어도 2차가 덜 된 쪽은 다시 묻는다
+                self.assertEqual(r.calls, {"read_page": 0, "reread_region": 1}, buf.getvalue())         # 덜 된 b2 만
+                rec = work.load_record(1)
+                self.assertNotIn("pass2_failed", rec); self.assertEqual(sorted(rec["pass2"]), ["b1", "b2"])
+                self.assertEqual(rec["merged"]["regions"][0]["paragraphs"][0]["columns"][0]["text"], "天地玄黃宇宙洪荒(손)")
+                self.assertEqual((len(rec["adjudications"]), len(rec["suspects"])), (1, 1))
+                self.assertFalse(any(u["context"].startswith("2차 판독 실패(") for u in rec["merged"]["uncertain"]))
+                self.assertIn("2차가 덜 된 영역 b2 만 다시 물음", buf.getvalue())
+                self.assertFalse([l for l in buf.getvalue().splitlines() if l.startswith("주의:")], buf.getvalue())   # 잃은 글이 없으니 주의 없음
+                self.assertIn("(손)", (work.readings_dir / "prev" / "p001.json").read_text(encoding="utf-8"))   # 그래도 바꾸기 전 사본
+                with _use_reader(_TwoRegionReader()) as r:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertFalse(R.ensure_pages_read(args, work, d, (1, 1)))
+                self.assertEqual(r.calls, {"read_page": 0, "reread_region": 0})
+            finally:
+                d.close()
+
+    def test_hand_edit_in_retried_region_is_backed_up_and_announced(self):
+        """다시 물은 영역(2차 실패했던 영역) 자체를 손으로 고쳤으면 그 글은 새 비교로 바뀐다 — prev/ 사본을 남기고 '주의:' 로 그 경로를 알린다."""
+        from yeone_ocr import cli
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(1); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            cmd = ["read", pdf, "--work", w, "--reader", "mock", "--second-mode", "each"]
+            with _use_reader(_TwoRegionReader(fail={"b2"})), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(cmd), 3)
+            work = Work(pdf, w); rec = work.load_record(1)
+            rec["merged"]["regions"][1]["paragraphs"][0]["columns"][0]["text"] = "天地玄黃宇宙洪荒(손)"; work.save_record(1, rec)
+            with _use_reader(_TwoRegionReader()):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.main(cmd), 0)
+            warn = [l for l in buf.getvalue().splitlines() if l.startswith("주의:")]
+            self.assertEqual(len(warn), 1, buf.getvalue()); self.assertIn("영역 b2", warn[0]); self.assertIn("readings/prev/p001.json", warn[0])
+            self.assertIn("(손)", (work.readings_dir / "prev" / "p001.json").read_text(encoding="utf-8"))
+            self.assertNotIn("(손)", work.record_path(1).read_text(encoding="utf-8"))
+
+    def test_changed_model_or_pass1_settings_reread_pass1_and_say_so(self):
+        """검토 재현(INT-4·ops-3): 모델이 바뀐 쪽도 '1차를 다시 사지 않고 2차만' 이라 알리고 1차를 다시 샀다. 2차 도중 멈춘 쪽의 1차(partial/)는
+        1차 생각 수준이 달라도 다시 써서 머리줄(1차 생각 high)과 실제 판독(low)이 달랐다 — 기록에 1차 설정(pass1_cfg)을 남기고 맞을 때만 다시 쓴다."""
+        from yeone_ocr import cli
+        from yeone_ocr.reader_gemini import ReaderError
+        with tempfile.TemporaryDirectory() as td:
+            doc = vertical_pdf(1); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
+            cmd = ["read", pdf, "--work", w, "--reader", "mock", "--second-mode", "each"]
+            with _use_reader(_TwoRegionReader(fail={"b2"})), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(cmd), 3)
+            work = Work(pdf, w); self.assertEqual(work.load_record(1)["pass1_cfg"], ["auto", "auto", None])
+            with _use_reader(_TwoRegionReader(model="other-pro")) as r:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.main(cmd), 0)
+            out = buf.getvalue()
+            self.assertEqual(r.calls["read_page"], 1); self.assertNotIn("2차만 다시 묻습니다", out); self.assertIn("1차부터 다시 읽습니다", out)
+            self.assertTrue(any(l.startswith("주의: 1쪽의 이전 기록을") and "readings/prev/" in l for l in out.splitlines()), out)
+            stop = ReaderError("모델 호출 상한 1회에 닿아 멈춤", fatal=True)
+            for think, reused in (("high", False), ("low", True)):
+                with _use_reader(_TwoRegionReader(fail_all=stop)), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(cmd + ["--force", "--page-thinking", "low"]), 1)                 # 2차 도중 멈춤 → 1차는 partial/
+                part = json.loads((work.readings_dir / "partial" / "p001.json").read_text(encoding="utf-8")); self.assertEqual(part["pass1_cfg"], ["low", "auto", None])
+                with _use_reader(_TwoRegionReader()) as r, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(cmd + ["--force", "--page-thinking", think]), 0)
+                self.assertEqual(r.calls["read_page"], 0 if reused else 1, think)
+                self.assertEqual(work.load_record(1)["pass1_cfg"], [think, "auto", None])
+
+    def test_glyph_items_stop_at_call_cap(self):
+        """검토 재현(ops-2): 책갈피 교정의 3차 판별이 호출 상한(치명 오류)을 삼켜 남은 자리마다 '판별 실패' 로 적고 '3곳 물음' 이라 셌다.
+        상한에 닿으면 남은 자리는 묻지 않고(표시 그대로) 멈춘 사유를 돌려주며, 실제로 부른 자리만 센다."""
+        from yeone_ocr import reader_gemini as rg
+        from yeone_ocr.schema import GlyphChoice
+        from yeone_ocr.collate.collate import Item
+        from yeone_ocr.collate.run import adjudicate_items
+        items = [Item("B1", "mark", 3, 5, 6, "人", "入", "", pdf_page=430, note="자형 편향 쌍(入/人) — 표시만", oc_ctx="肠，能「入」阴分，治", hw_ctx="腸，能「人」陰分，治"),
+                 Item("B1", "mark", 4, 2, 3, "日", "曰", "", pdf_page=430, note="헷갈리기 쉬운 글자(曰/日) — 표시만", oc_ctx="唐容川「曰」：物下", hw_ctx="唐容川「日」：物下"),
+                 Item("B1", "mark", 3, 9, 10, "人", "入", "", pdf_page=430, note="자형 편향 쌍(入/人) — 표시만", oc_ctx="色赤「入」心，性", hw_ctx="色赤「人」心，性")]
+        class Fake:
+            def adjudicate(self, crop, ask, h, p):
+                rg.CALL_CAP.take(); return GlyphChoice(choice="", evidence="획이 뭉개짐")
+        rg.set_call_cap(1)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                work = Work(os.path.join(td, "a.pdf"), os.path.join(td, "w"))
+                work.save_record(430, _page_rec()); Image.new("L", (900, 1300), 255).save(work.page_image_path(430))
+                st = adjudicate_items(items, work=work, doc=None, reader=Fake(), horizontal=True, policy="all")
+        finally:
+            rg.set_call_cap(0)
+        self.assertEqual((st["asked"], st["undecided"], st.get("skipped")), (1, 1, 2)); self.assertIn("호출 상한", st.get("stopped", ""))
+        self.assertEqual([(it.kind, it.action) for it in items], [("B1", "mark")] * 3)
+        self.assertTrue(all("멈춤으로 묻지 못함" in it.note and "판별 실패" not in it.note for it in items[1:]), [it.note for it in items])

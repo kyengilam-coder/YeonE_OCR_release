@@ -38,9 +38,64 @@ def _line_count(reg: Region) -> int:
     return n if n else (1 if (reg.title_text or reg.kind in ("제목", "쪽번호", "머리글", "꼬리글")) else 0)
 
 
+def span_slack(n: int) -> int:
+    """영역 줄 수 n 과 글자층에서 맞춘 줄 수의 차이로 봐주는 줄 수: 2줄, 짧은 영역은 절반(1~3줄 영역은 1줄).
+    모델이 줄을 붙이거나 글자층이 줄을 쪼갠 한두 줄은 봐주되, 이웃 영역의 줄까지 덮은 짝은 거른다."""
+    return min(2, max(1, n // 2))
+
+
+def _last_line(keys: list[str], i: int, n: int, last: str) -> tuple[int, bool]:
+    """첫 줄 i 에서 시작하는 영역의 끝 줄 번호와 그 줄을 글로 찾았는지: 줄 수 +3 안에서 끝 줄 글과 가장 닮은 줄,
+    못 찾으면 줄 수로 짐작(False — 짐작한 줄 수는 늘 영역 줄 수와 맞으니 줄 수 검사의 증거가 못 된다)."""
+    if n == 1:
+        return i, True
+    best_j, best_s = i, 0.0
+    for j in range(i, min(len(keys), i + n + 3)):
+        s = _ratio(last, keys[j][-12:])
+        if s > best_s:
+            best_j, best_s = j, s
+    return (best_j, True) if best_s >= MIN_RATIO else (min(len(keys) - 1, i + n - 1), False)
+
+
 # ---------- 1) 글자층으로 ----------
+def _choose(rows: list[tuple[float, float, list[tuple]]]) -> dict[int, int]:
+    """영역마다 쓸 짝을 쪽 전체로 정한다. rows[k] = (모델 좌표의 첫 줄 가운데, 끝 줄 가운데, 짝 [(첫 줄, 끝 줄, 첫 줄 가운데, 끝 줄 가운데, 점수)]).
+    돌려주는 사전: {영역 번호 k: 짝 번호}. 영역 순서대로·겹치지 않게(앞 영역의 끝 줄 < 다음 영역의 첫 줄) 고르되 점수 합이 가장 큰 배정 —
+    맞춘 영역 수 → 끝 줄을 글로 찾은 수 → 첫 줄 → 둘째 줄 → 자리 차례로 견준다. 자리는 바로 앞에 맞춘 영역의 끝 줄에서 잰 거리를 모델 좌표의
+    같은 거리와 견준다: 모델 좌표의 밀림은 쪽 아래로 갈수록 쌓이지만(실측 7.5%) 이웃 영역 사이에서는 거의 같다. 모델 좌표 그대로에 가까운 줄을
+    고르면 밀림이 줄 간격의 절반을 넘을 때 다음 약재의 같은 줄을 고르고, 영역을 하나씩 차례로 맞추면 한 영역이 다음 영역의 줄을 가져가
+    뒤 영역이 줄줄이 어긋난다(맞춘 영역 수를 먼저 견주는 까닭)."""
+    best: list[list[tuple]] = []; most: list[int] = []                    # best[k][c] = (점수 합, 앞 짝 (k, c) 또는 None), most[k] = 영역 k 까지 맞춘 수의 최대
+    for k, (at, _, cands) in enumerate(rows):
+        row = []
+        for i, _, mi, _, sc in cands:
+            opt = ((*sc, -abs(mi - at)), None)                           # 앞에 맞춘 영역이 없음: 모델 좌표 그대로와의 거리
+            for k2 in range(k - 1, -1, -1):
+                if most[k2] + 1 < opt[0][0]:
+                    break                                                # 더 앞 영역에서 이어서는 맞춘 영역 수가 모자란다
+                end2 = rows[k2][1]
+                for c2, (_, j2, _, mj2, _) in enumerate(rows[k2][2]):
+                    if j2 < i:
+                        acc = best[k2][c2][0]
+                        v = tuple(x + y for x, y in zip(acc[:-1], sc)) + (acc[-1] - abs((mi - mj2) - (at - end2)),)
+                        if v > opt[0]:
+                            opt = (v, (k2, c2))
+            row.append(opt)
+        best.append(row); most.append(max([v[0] for v, _ in row] + most[-1:] + [0]))
+    ends = [(best[k][c][0], (k, c)) for k in range(len(rows)) for c in range(len(rows[k][2]))]
+    pick: dict[int, int] = {}; node = max(ends)[1] if ends else None
+    while node is not None:
+        pick[node[0]] = node[1]; node = best[node[0]][node[1]][1]
+    return pick
+
+
 def refit_by_layer(p1: PageReading, layer: dict, horizontal: bool) -> dict[str, dict]:
-    """글자층(기존 OCR) 줄의 정확한 좌표로 영역 상자를 다시 잡는다. 돌려주는 사전: {region_id: {"from", "to", "how", "move"}}."""
+    """글자층(기존 OCR) 줄의 정확한 좌표로 영역 상자를 다시 잡는다. 돌려주는 사전: {region_id: {"from", "to", "how", "move", "lines"}}.
+    첫 줄이 되풀이되는 쪽(약재마다 「【性味】…」로 시작)에서 1차가 가운데 영역을 빠뜨리면 다음 영역의 첫 줄이 앞 영역의 같은 줄에
+    붙어 상자가 빠진 영역까지 넓어지고, 2차 조각이 그 글을 읽어 '2차에만 있음' 으로 쏟아진다. 그래서 영역마다 첫 줄 후보를 모두 모아
+    맞춘 줄 수가 영역 줄 수와 맞는(span_slack) 짝만 남기고, 쪽 전체에서 영역 순서대로·겹치지 않게 짝을 고른다(_choose).
+    맞는 짝이 없거나 고른 배정에 들지 못한 영역은 손대지 않고 {"fixed": False, "why": …} 로 남긴다.
+    자리는 줄 가운데로 잰다(세로쓰기 영역의 첫 열은 오른쪽 끝 열 — 영역 왼쪽 가장자리는 마지막 열이다)."""
     W = float(layer.get("page_width") or 0); H = float(layer.get("page_height") or 0)
     if not W or not H:
         return {}
@@ -59,8 +114,10 @@ def refit_by_layer(p1: PageReading, layer: dict, horizontal: bool) -> dict[str, 
     keys = [_key(l["text"]) for l in lines]
     if len(keys) < 2:
         return {}
+    lo, hi = (lambda b: b[1], lambda b: b[3]) if horizontal else (lambda b: -b[2], lambda b: -b[0])   # 읽기 방향 앞·뒤 가장자리(세로쓰기는 오른쪽이 앞)
+    mids = [(lo(b) + hi(b)) / 2 for b in boxes]                         # 줄 가운데(글자층 상자와 모델 상자는 너비가 달라 가장자리끼리는 어긋난다)
     fixes: dict[str, dict] = {}
-    pos = 0
+    regs = []; rows = []                                                 # regs[k] = (영역, 줄 수, 모델 상자, 짝, 줄 수가 안 맞은 짝의 줄 수)
     for reg in p1.regions:
         if reg.kind in IMAGE_KINDS:
             continue
@@ -68,41 +125,52 @@ def refit_by_layer(p1: PageReading, layer: dict, horizontal: bool) -> dict[str, 
         if not rl:
             continue
         first, last = _key(rl[0])[:12], _key(rl[-1])[-12:]
-        old = bbox_frac(reg.bbox)
-        # 첫 줄: 앞서 맞춘 자리 다음부터 찾되, 모델 좌표에서 MAX_MOVE 안에 있는 줄만
-        best_i, best_s = None, 0.0
-        for i in range(pos, len(keys)):
-            b = boxes[i]
-            if abs((b[1] if horizontal else -b[0]) - (old[1] if horizontal else -old[0])) > MAX_MOVE:
-                continue
-            s = _ratio(first, keys[i][:12])
-            if s > best_s:
-                best_i, best_s = i, s
-        if best_i is None or best_s < MIN_RATIO:
+        second = _key(rl[1])[:12] if len(rl) > 1 else ""
+        old = bbox_frac(reg.bbox); n = max(1, len(rl))
+        hl = (hi(old) - lo(old)) / n / 2; at, end = lo(old) + hl, hi(old) - hl           # 모델 좌표의 첫·끝 줄 가운데(hl = 줄 반 칸)
+        # 첫 줄 후보: 모델 좌표에서 MAX_MOVE 안에 있고 첫 줄 글과 닮은(MIN_RATIO 이상) 줄 모두
+        firsts = [(i, _ratio(first, keys[i][:12])) for i in range(len(keys)) if abs(mids[i] - at) <= MAX_MOVE]
+        firsts = [(i, r) for i, r in firsts if r >= MIN_RATIO]
+        if not firsts:
             continue
-        n = max(1, len(rl))
-        best_j, best_sj = best_i, (1.0 if n == 1 else 0.0)
-        if n > 1:
-            for j in range(best_i, min(len(keys), best_i + n + 3)):
-                s = _ratio(last, keys[j][-12:])
-                if s > best_sj:
-                    best_j, best_sj = j, s
-            if best_sj < MIN_RATIO:
-                best_j = min(len(keys) - 1, best_i + n - 1)             # 끝 줄을 못 찾으면 줄 수로 짐작
-        span = boxes[best_i:best_j + 1]
-        new = (min(b[0] for b in span), min(b[1] for b in span), max(b[2] for b in span), max(b[3] for b in span))
-        pad = 0.003
-        new = (max(0.0, new[0] - pad), max(0.0, new[1] - pad), min(1.0, new[2] + pad), min(1.0, new[3] + pad))
-        move = max(abs(a - b) for a, b in zip(old, new))
+        top = max(r for _, r in firsts); cands = []; bad = []
+        for i, r in firsts:
+            j, found = _last_line(keys, i, n, last)
+            if abs((j - i + 1) - n) > span_slack(n):
+                bad.append(j - i + 1); continue
+            span = boxes[i:j + 1]
+            new = (min(b[0] for b in span), min(b[1] for b in span), max(b[2] for b in span), max(b[3] for b in span))
+            pad = 0.003
+            new = (max(0.0, new[0] - pad), max(0.0, new[1] - pad), min(1.0, new[2] + pad), min(1.0, new[3] + pad))
+            move = max(abs(x - y) for x, y in zip(old, new))
+            if move > MAX_MOVE:
+                continue
+            r2 = _ratio(second, keys[i + 1][:12]) if second and i + 1 < len(keys) else 0.0
+            # 점수(클수록 좋음): 맞춤, 끝 줄을 글로 찾음(짐작한 끝 줄은 줄 수가 늘 맞으니 증거가 못 된다), 첫 줄이 가장 닮은 축(0.05 안), 둘째 줄
+            cands.append((i, j, new, move, (1, int(found), -int(r < top - 0.05), r2)))
+        regs.append((reg, n, old, cands, bad)); rows.append((at, end, [(i, j, mids[i], mids[j], sc) for i, j, _, _, sc in cands]))
+    pick = _choose(rows)
+    for k, (reg, n, old, cands, bad) in enumerate(regs):
+        if k not in pick:
+            if cands:
+                fixes[reg.id] = {"from": reg.bbox, "how": "layer", "fixed": False,
+                                 "why": "글자층에서 맞는 줄이 앞뒤 영역이 차지한 줄과 겹침 — 영역 순서나 줄 수가 틀렸을 수 있어 손대지 않음"}
+            elif bad:
+                fixes[reg.id] = {"from": reg.bbox, "how": "layer", "fixed": False,
+                                 "why": f"글자층에서 맞춘 줄 수({'·'.join(map(str, bad))})가 영역 줄 수({n})와 안 맞음 — 되풀이되는 첫 줄이나 빠진 영역일 수 있어 손대지 않음"}
+            continue
+        i, j, new, move, _ = cands[pick[k]]
         shift = max(abs(old[1] - new[1]), abs(old[3] - new[3])) if horizontal else max(abs(old[0] - new[0]), abs(old[2] - new[2]))
         if not any(pp.columns for pp in reg.paragraphs):
             shift = 0.0                                                  # 제목 상자는 글자층 글꼴 상자가 커서 밀림의 증거가 못 된다
-        if move > MAX_MOVE:
-            continue
         reg.bbox = frac_bbox(new)
-        fixes[reg.id] = {"from": frac_bbox(old), "to": reg.bbox, "how": "layer", "move": round(move, 4), "shift": round(shift, 4), "lines": [best_i, best_j]}
-        pos = best_j + 1
+        fixes[reg.id] = {"from": frac_bbox(old), "to": reg.bbox, "how": "layer", "move": round(move, 4), "shift": round(shift, 4), "lines": [i, j]}
     return fixes
+
+
+def is_fixed(f: dict) -> bool:
+    """좌표를 실제로 고친 항목인지(확신이 없어 손대지 않은 항목은 fixed=False 로 남긴다)."""
+    return bool(f.get("fixed", True))
 
 
 # ---------- 2) 먹 띠로 ----------
@@ -224,12 +292,13 @@ def refit_regions(img: Image.Image | None, p1: PageReading, horizontal: bool, la
             pass
     if img is not None:
         try:
-            fixes.update(refit_by_ink(img, p1, horizontal, skip=set(fixes)))
+            fixes.update(refit_by_ink(img, p1, horizontal, skip={k for k, f in fixes.items() if is_fixed(f)}))
         except Exception:
             pass
-    hows = sorted({f["how"] for f in fixes.values()})
-    return {"fixed": len(fixes), "max_move": max((f["move"] for f in fixes.values()), default=0.0),
-            "max_shift": max((f.get("shift", 0.0) for f in fixes.values()), default=0.0), "how": "+".join(hows), "regions": fixes}
+    done = [f for f in fixes.values() if is_fixed(f)]                    # 손대지 않은 항목(fixed=False, 사유만)은 세지 않는다
+    hows = sorted({f["how"] for f in done})
+    return {"fixed": len(done), "max_move": max((f["move"] for f in done), default=0.0),
+            "max_shift": max((f.get("shift", 0.0) for f in done), default=0.0), "how": "+".join(hows), "regions": fixes}
 
 
 def describe(fix: dict) -> str:
