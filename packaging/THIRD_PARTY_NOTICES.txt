@@ -300,8 +300,6 @@ packaging 26.3
   License/notice file: third_party_licenses/packaging-26.3/packaging-26.3.dist-info/licenses/LICENSE.APACHE
   License/notice file: third_party_licenses/packaging-26.3/packaging-26.3.dist-info/licenses/LICENSE.BSD
   License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/__init__.py
-  License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/__pycache__/__init__.cpython-314.pyc
-  License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/__pycache__/_spdx.cpython-314.pyc
   License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/_spdx.py
 
 pillow 12.3.0
