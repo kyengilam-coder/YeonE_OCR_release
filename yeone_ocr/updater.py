@@ -499,7 +499,7 @@ def install_update(downloaded: Path, target_exe: Path, current_pid: int) -> None
                                    "-File", str(script), "-ConfigPath", str(config)],
                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                   creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-                                  close_fds=True, cwd=str(job), env=environment)
+                                  close_fds=True, cwd=str(root), env=environment)
         deadline = time.monotonic() + HELPER_READY_TIMEOUT
         while time.monotonic() < deadline:
             if helper.poll() is not None:

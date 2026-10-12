@@ -199,6 +199,8 @@ class DownloadAndInstall(unittest.TestCase):
         self.assertNotIn(str(target), seen["script"])
         self.assertEqual(seen["command"][seen["command"].index("-WindowStyle") + 1], "Hidden")
         self.assertTrue(seen["kwargs"]["creationflags"] & 0x08000000)
+        self.assertEqual(Path(seen["kwargs"]["cwd"]), source.parent.parent,
+                         "The helper must not lock its own job directory as its working directory")
         self.assertEqual(seen["kwargs"]["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
         self.assertNotIn("GEMINI_API_KEY", seen["kwargs"]["env"])
         self.assertNotIn("GOOGLE_API_KEY", seen["kwargs"]["env"])
@@ -280,6 +282,16 @@ File.Move(path + ".tmp", path); return 0;
                 for process in (parent, helper):
                     if process is not None and process.poll() is None:
                         process.terminate(); process.wait(timeout=10)
+                # The rollback intentionally restarts the old whoami fixture asynchronously.
+                # Wait for that exact temporary executable's image lock to disappear before cleanup.
+                deadline = time.monotonic() + 5
+                while target.exists():
+                    try:
+                        target.unlink()
+                    except PermissionError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
 
     def test_helper_waits_for_actual_process_then_replaces_and_restarts(self):
         self.run_helper()
