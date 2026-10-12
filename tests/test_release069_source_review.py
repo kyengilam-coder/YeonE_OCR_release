@@ -70,8 +70,11 @@ class SourceReview(unittest.TestCase):
             manifest = (work.dir / "source.json").read_bytes()
             source.write_bytes(b"original B")
             replace = os.replace
+            # Windows runners may provide a short-name TEMP path (RUNNER~1),
+            # while Work archives through its resolved absolute path.
+            locked_directory = work.readings_dir.resolve()
             def locked(src, dst):
-                if Path(src) == work.readings_dir:
+                if Path(src).resolve() == locked_directory:
                     raise PermissionError("simulated Windows directory lock")
                 return replace(src, dst)
             with patch("yeone_ocr.state.os.replace", side_effect=locked), self.assertRaises(PermissionError):
