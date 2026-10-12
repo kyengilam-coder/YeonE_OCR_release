@@ -28,6 +28,7 @@ from . import __version__
 from .state import Work, HUMAN_ONLY, STATUSES, legacy_work_dir, write_atomic, write_atomic_with
 from .pdfio import open_pdf, parse_pages, page_image, text_layer
 from .reader_gemini import ReaderError
+from .readers import PROVIDERS, create_reader
 from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac
 from .layout import upscale, crop_frac, fit_figure_bbox, grow_to_components, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered, snap_to_gaps, split_bands
 from .merge import merge_passes, compare_textlayer
@@ -52,9 +53,12 @@ def _document_command(fn):
         bound = signature.bind(*args, **kwargs)
         if bound.arguments.get("doc") is not None:
             return fn(*args, **kwargs)
-        with open_pdf(bound.arguments["args"].pdf) as doc:
+        doc = open_pdf(bound.arguments["args"].pdf)
+        try:
             bound.arguments["doc"] = doc
             return fn(*bound.args, **bound.kwargs)
+        finally:
+            doc.close()
     return wrapped
 
 
@@ -342,10 +346,9 @@ def make_reader(args, doc, work):
             for n in range(1, len(doc) + 1):
                 tls[n] = text_layer(doc, n)
         return MockReader(tls)
-    from .reader_gemini import GeminiReader
     think = getattr(args, "page_thinking", "auto") or "auto"; mres = getattr(args, "page_media_resolution", "auto") or "auto"
     # 1차(쪽 전체) 측정용 손잡이: auto 는 지금까지와 같다(모델 기본 생각·해상도 설정 없음). ultra_high 는 조각(Part)마다 붙는다(image_part)
-    return GeminiReader(model=args.model, thinking_budget=(args.thinking_budget if think == "auto" else None), use_cache=not getattr(args, "no_cache", False),
+    return create_reader(args.reader, model=args.model, thinking_budget=(args.thinking_budget if think == "auto" else None), use_cache=not getattr(args, "no_cache", False),
                         thinking=None if think == "auto" else think, media_resolution=None if mres == "auto" else mres)
 
 
@@ -863,6 +866,28 @@ def _same_pass1(d: dict, reader, args) -> bool:
             and list(d.get("pass1_cfg") or PASS1_CFG0) == _pass1_cfg(args))
 
 
+def _record_provider(d: dict) -> str:
+    """옛 부분 기록에는 reader 필드가 없으므로 모델 이름으로 제공사를 복원한다."""
+    if d.get("reader"):
+        return d["reader"]
+    model = d.get("model", "")
+    return "gemini" if model.startswith("gemini") else ("anthropic" if model.startswith("claude") else ("openai" if model.startswith(("gpt", "o1", "o3", "o4")) else ""))
+
+
+def _can_resume_pass1(d: dict, reader, args) -> bool:
+    """제공사를 바꿔도 읽기 방향이 같은 유효 1차 결과를 이어 쓴다. 강제 판독은 별도로 처리한다."""
+    if _same_pass1(d, reader, args):
+        return True
+    previous = _record_provider(d)
+    return (previous in PROVIDERS and previous != getattr(reader, "name", "") and previous != "mock"
+            and getattr(reader, "name", "") != "mock" and d.get("mode") == getattr(args, "mode", ""))
+
+
+def _pass1_origin(d: dict) -> dict:
+    return (d.get("provenance") or {}).get("pass1") or {"provider": _record_provider(d), "model": d.get("model", ""),
+                                                       "config": list(d.get("pass1_cfg") or PASS1_CFG0)}
+
+
 def _p2_failed_ids(rec: dict) -> list[str]:
     """2차가 덜 된 영역 id: pass2_failed([id] 또는 {id: 사유})와 조각 일부만 읽힌 영역(pass2[id]['pass2_failed'])."""
     return list(dict.fromkeys([*(rec.get("pass2_failed") or []), *(k for k, v in (rec.get("pass2") or {}).items() if isinstance(v, dict) and v.get("pass2_failed"))]))
@@ -879,13 +904,20 @@ def _reusable_pass1(work: Work, n: int, reader, args, old: dict | None = None) -
             part = json.loads(pp.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             part = None
-        if not (part and part.get("version") == __version__ and _same_pass1(part, reader, args) and part.get("pass1")):
+        if not (part and _can_resume_pass1(part, reader, args) and part.get("pass1")):
             part = None
+        if part:
+            try:
+                PageReading.model_validate(part["pass1"])
+            except ValueError:
+                part = None
     if getattr(args, "force", False):
-        return part
+        return part if part and _same_pass1(part, reader, args) else None
     old = old if old is not None else work.load_record(n)
-    if old and old.get("pass2_failed") and old.get("pass1_raw") and _same_pass1(old, reader, args) and (part is None or part["pass1"] == old["pass1_raw"]):
-        return {"pass1": old["pass1_raw"], "image_source": old.get("image_source"), "upscale": old.get("upscale"),
+    if old and old.get("pass2_failed") and old.get("pass1_raw") and _can_resume_pass1(old, reader, args) and (part is None or part["pass1"] == old["pass1_raw"]):
+        return {"pass1": old["pass1_raw"], "reader": _record_provider(old), "model": old.get("model", ""),
+                "pass1_cfg": old.get("pass1_cfg") or PASS1_CFG0, "provenance": old.get("provenance") or {},
+                "image_source": old.get("image_source"), "upscale": old.get("upscale"),
                 "usage": (part or old).get("usage") or {}, "saved_at": old.get("read_at", ""), "record": old}   # 그 기록의 사용량(1차·실패한 2차·3차)은 새 기록이 이어받는다
     return part
 
@@ -951,6 +983,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     # 이전 실행이 2차 도중(또는 일부 영역에서) 실패해 남긴 1차 결과는 다시 사지 않는다(1차 pro 호출이 쪽 비용의 대부분)
     old = None if getattr(args, "force", False) else work.load_record(n)       # 덮어쓸 기록(2차가 덜 된 채 저장된 쪽) — 바꾸기 전에 prev/ 에 남긴다
     pp = partial_path(work, n); partial = _reusable_pass1(work, n, reader, args, old)
+    origin = _pass1_origin(partial) if partial else {"provider": reader.name, "model": getattr(reader, "model", ""), "config": _pass1_cfg(args)}
     keep = None if args.no_second_pass else (partial or {}).get("record")      # ② 그 기록의 1차: 2차가 된 영역은 그 기록의 2차·글을 그대로, 덜 된 영역만 다시 묻는다
     redo = set(_p2_failed_ids(keep)) if keep else set()
     if partial:
@@ -992,10 +1025,10 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
             pp.parent.mkdir(exist_ok=True)
             timings["postprocess"] = time.perf_counter() - stage_start
             timings["total"] = time.perf_counter() - t0
-            write_atomic(pp, json.dumps({"file": Path(args.pdf).name, "pdf_page": n, "model": getattr(reader, "model", ""), "version": __version__,
-                                         "mode": getattr(args, "mode", ""), "pass1_cfg": _pass1_cfg(args), "image_source": src, "upscale": up, "pass1": p1_raw, "bbox_fix": bbox_fix,
-                                         "coverage_notes": coverage_notes, "usage": usage0, "timings": timings, "pass1_reused": bool(partial),
-                                         "error": f"{type(e).__name__}: {str(e)[:200]}",
+            write_atomic(pp, json.dumps({"file": Path(args.pdf).name, "pdf_page": n, "reader": origin["provider"], "model": origin["model"], "version": __version__,
+                                         "mode": getattr(args, "mode", ""), "pass1_cfg": origin["config"], "provenance": {"pass1": origin},
+                                         "image_source": src, "upscale": up, "pass1": p1_raw, "bbox_fix": bbox_fix,
+                                         "coverage_notes": coverage_notes, "usage": usage0, "timings": timings, "pass1_reused": bool(partial), "error": f"{type(e).__name__}: {str(e)[:200]}",
                                          "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=1))
             log(f"  {n}쪽: 2차 판독 중 오류 — 1차 결과는 readings/partial/ 에 남겨 다음 실행에서 재사용합니다")
             raise
@@ -1035,10 +1068,12 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     for k, v in rereads.items():
         if k in kept2:
             pass2[k] = kept2[k]; continue
-        d = v.model_dump(); d.update(meta.get(k, {})); pass2[k] = d
-    rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": reader.name, "model": getattr(reader, "model", ""), "version": __version__, "mode": getattr(args, "mode", ""),
-           "pass1_cfg": _pass1_cfg(args),
-           "second_model": getattr(reader2, "model", "") if reader2 is not reader else "",
+        d = v.model_dump(); d.update(meta.get(k, {})); d["provider"] = reader2.name; d["model"] = getattr(reader2, "model", ""); pass2[k] = d
+    rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": origin["provider"], "model": origin["model"], "version": __version__, "mode": getattr(args, "mode", ""),
+           "pass1_cfg": origin["config"], "active_reader": reader.name, "active_model": getattr(reader, "model", ""),
+           "provenance": {"pass1": origin, "pass2": {k: {"provider": v.get("provider", _record_provider(keep or {})),
+                         "model": v.get("model", (keep or {}).get("second_model") or (keep or {}).get("model", ""))} for k, v in pass2.items()}},
+           "second_reader": reader2.name, "second_model": getattr(reader2, "model", "") if reader2 is not reader or partial else "",
            "image_source": src, "upscale": up, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": 0.0,
            "timings": timings, "pass1_reused": bool(partial),
            "usage": usage, "coverage_notes": coverage_notes, "bbox_fix": bbox_fix,
@@ -1096,20 +1131,20 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     try:
         reader = make_reader(args, doc, work)
         reader2 = reader
-        if args.reader == "gemini" and not args.no_second_pass:
-            from .reader_gemini import GeminiReader, list_models, pick_second_model
+        if args.reader != "mock" and not args.no_second_pass:
+            from .reader_gemini import list_models, pick_second_model
             want = (args.second_model or "").strip()
             if want.lower() == "auto":
                 try:
-                    want = pick_second_model(list_models(reader.key, reader.vertexai), reader.model)
-                    log(f"  2차 판독 모델 자동 선택: {want}" + ("" if want != reader.model else " (같은 세대 flash 가 없어 1차와 같은 모델)"))
+                    want = pick_second_model(list_models(reader.key, reader.vertexai), reader.model) if args.reader == "gemini" else reader.model
+                    log(f"  2차 판독 모델 자동 선택: {want}" + ("" if want != reader.model else " (1차와 같은 모델)"))
                 except Exception as e:
                     want = ""; log(f"  2차 모델 자동 선택 실패({str(e)[:60]}) → 1차와 같은 모델")
             think2 = "low" if args.second_thinking == "low" else None
             mres = getattr(args, "media_resolution", "auto") or "auto"
             mres = "high" if mres == "auto" else (None if mres == "default" else mres)      # auto = 2차 조각은 high(글자당 토큰을 늘린다)
             if (want and want != reader.model) or think2 or mres or getattr(reader, "thinking", None) or getattr(reader, "media_resolution", None):     # 1차 생각·해상도 설정이 2차로 새지 않게
-                reader2 = GeminiReader(model=want or reader.model, thinking_budget=args.thinking_budget, use_cache=not args.no_cache, thinking=think2, media_resolution=mres)
+                reader2 = create_reader(args.reader, model=want or reader.model, thinking_budget=args.thinking_budget, use_cache=not args.no_cache, thinking=think2, media_resolution=mres)
     except Exception as e:
         log(f"오류: {e}"); return 1
     todo: list[int] = []; redo2: list[int] = []; redo1: list[int] = []
@@ -1121,7 +1156,7 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
             todo.append(n)
         elif old.get("pass2_failed") and not args.no_second_pass:      # 2차가 일부 영역에서 실패한 채 저장된 쪽 — 1차는 기록의 것을 쓰고 덜 된 영역의 2차만 다시
             todo.append(n)
-            (redo2 if old.get("pass1_raw") and _same_pass1(old, reader, args) else redo1).append(n)     # 모델·읽기 방향·1차 설정이 바뀌었으면 1차부터(_reusable_pass1)
+            (redo2 if old.get("pass1_raw") and _can_resume_pass1(old, reader, args) else redo1).append(n)
     skipped = len(pages) - len(todo)
     ceiling = max(1, int(args.workers or 1))
     cur = max(1, min(ceiling, int(args.workers_start or ceiling)))     # 동시 쪽 수: 여기서 시작해 한도(429)가 나면 줄이고, 안정되면 늘린다
@@ -1284,12 +1319,84 @@ def context_snapshots(work: Work, records: list[dict], write: bool = True) -> di
         return {}
 
 
+def _normalization_resolver(work: Work, args):
+    """실제로 문맥 후보가 있을 때만 모델을 만들고, 같은 근거의 확정 답은 재사용한다."""
+    import hashlib
+    from .normalization import RULE_FILE
+    from .readers import default_model
+    provider = getattr(args, "reader", "gemini") or "gemini"
+    model = getattr(args, "model", None) or default_model(provider)
+    meta = {"provider": provider, "model": model, "cache_hits": 0, "usage": {}}
+    if provider == "mock":
+        return None, meta
+    rules_hash = hashlib.sha256(RULE_FILE.read_bytes()).hexdigest()
+    cache_path = work.dir / "normalization_cache.json"
+    try:
+        saved = json.loads(cache_path.read_text(encoding="utf-8"))
+        cache = saved.get("choices", {}) if saved.get("schema_version") == 1 else {}
+        if not isinstance(cache, dict):
+            cache = {}
+    except (OSError, ValueError, AttributeError):
+        cache = {}
+    active = None
+    failure = None
+
+    def resolve(items):
+        nonlocal active, failure
+        answers = {}; pending = []; keys = {}
+        for item in items:
+            payload = {k: value for k, value in item.items() if k != "id"}
+            payload.update(provider=provider, model=model, rules=rules_hash, version=__version__)
+            key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+            keys[item["id"]] = key
+            if (cache.get(key) in (item.get("candidates") or []) and
+                    (item.get("source_is_valid_traditional", True) or cache[key] != item.get("source"))):
+                answers[item["id"]] = cache[key]; meta["cache_hits"] += 1
+            else:
+                pending.append(item)
+        if not pending:
+            return answers
+        if CANCEL.is_set():
+            meta["cancelled"] = True
+            return answers
+        if failure:
+            return answers
+        try:
+            if active is None:
+                active = create_reader(provider, model=model, use_cache=False)
+                log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} — 한자 치환 후보와 云/雲을 문맥으로 확인")
+            chosen = active.resolve_text_choices(pending)
+            meta["usage"] = dict(getattr(active, "usage", {}) or {})
+            changed = False
+            for item in pending:
+                choice = chosen.get(item["id"])
+                if (choice and choice in item["candidates"] and
+                        (item.get("source_is_valid_traditional", True) or choice != item.get("source"))):
+                    answers[item["id"]] = choice
+                    cache[keys[item["id"]]] = choice; changed = True
+            if changed:
+                try:
+                    write_atomic(cache_path, json.dumps({"schema_version": 1, "choices": cache}, ensure_ascii=False, indent=1))
+                except OSError:
+                    meta["cache_error"] = "문맥 판단 재사용 기록을 저장하지 못했습니다. 이번 판단은 문서와 변환 보고에 반영합니다."
+                    log("주의: " + meta["cache_error"])
+        except Exception as exc:
+            failure = str(exc) if isinstance(exc, ReaderError) else f"{type(exc).__name__}: 문맥 교정 모델을 사용할 수 없습니다."
+            meta["error"] = failure
+            meta["usage"] = dict(getattr(active, "usage", {}) or {})
+            log(f"주의: {failure} 해당 후보는 바꾸지 않고 변환 보고에 남깁니다.")
+        return answers
+
+    return resolve, meta
+
+
 def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False) -> bool:
     """판독 기록들로 HWPX(+DOCX)를 만든다. interim=True 면 '<이름>_진행중.hwpx' 한 파일만 조용히 만든다(중간 저장)."""
     from .hwpx_builder import build_hwpx
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
         progress("build", 0, steps)
+        args._normalization_incomplete = False
     for k, rec in enumerate(records, 1):
         n = rec["pdf_page"]
         if not interim:
@@ -1320,6 +1427,11 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             log(f"build: 판독 기록이 있는 {len(records)}쪽만 문서에 넣음 (PDF 전체 {len(doc)}쪽). 전체를 만들려면 쪽 범위를 비우고 [▶ 한 번에 인식] 을 다시 누르십시오.")
         chunks = [records[i:i + args.split] for i in range(0, len(records), args.split)] if getattr(args, "split", 0) and args.split > 0 else [records]
     ok = True
+    normalize = not interim and not getattr(args, "no_normalize", False)
+    resolver = resolver_meta = None
+    if normalize:
+        from .normalization import normalize_blocks
+        resolver, resolver_meta = _normalization_resolver(work, args)
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
@@ -1337,6 +1449,18 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             stem = f"{Path(args.pdf).stem}_p{chunk[0]['pdf_page']:03d}-{chunk[-1]['pdf_page']:03d}"
         out_h = work.out_dir / f"{stem}.hwpx"
         t0 = time.time()
+        norm_report = None
+        if normalize:
+            blocks, norm_report = normalize_blocks(blocks, resolver=resolver)
+            norm_report["enabled"] = True
+            norm_report["reader"] = dict(resolver_meta)
+            norm_report["output"] = out_h.name
+            if resolver_meta.get("error") or resolver_meta.get("cancelled"):
+                norm_report["complete"] = False
+            args._normalization_incomplete |= not norm_report.get("complete", True)
+        elif not interim:
+            norm_report = {"schema_version": 1, "enabled": False, "complete": True,
+                           "output": out_h.name, "summary": {"changes": 0, "review": 0}}
         st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
                         highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
         fissues = check_hwpx_file(str(out_h))
@@ -1348,6 +1472,18 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             log(f"  중간 저장: {out_h.name} ({len(chunk)}쪽, {size_mb:.1f}MB, {time.time() - t0:.0f}초)")
             continue
         log(f"build: HWPX {out_h} ({size_mb:.1f}MB, {time.time() - t0:.0f}초) · 쪽 {len(chunk)} · 문단 {st['paragraphs']} 제목 {st['headings']} 표 {st['tables']} 그림 {st['images']}(파일 안 {st['images_in_file']}) · 의심 표시 {st['marks']}곳 · 쪽 나누기 {st['page_breaks']} · 구조 검사 {'이상 없음' if this_ok else fissues}")
+        if norm_report is not None:
+            from .normalization_report import render_normalization_report
+            report_path = out_h.with_name(f"{stem}_normalization.json")
+            write_atomic(report_path, json.dumps(norm_report, ensure_ascii=False, indent=2))
+            report_html = report_path.with_suffix(".html")
+            write_atomic(report_html, render_normalization_report(norm_report))
+            summary = norm_report.get("summary", {})
+            log((f"번체·문맥 교정: 변경 {summary.get('changes', 0)}건 · 확인 필요 {summary.get('review', 0)}건 · 보고 {report_html}"
+                 + (" — 미확정 후보는 원문을 유지했습니다." if not norm_report.get("complete", True) else ""))
+                if norm_report.get("enabled") else "번체·문맥 교정: --no-normalize 설정으로 생략")
+            if not norm_report.get("complete", True):
+                log(f"주의: 문맥으로 확정하지 못한 글자는 원문을 유지했습니다. 교정 보고에서 확인하십시오: {report_html}")
         if args.docx:
             from .docx_builder import build_docx
             out_d = work.out_dir / f"{stem}.docx"
@@ -1360,7 +1496,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             + (f" · 3차 확정 위치 못 찾음 {gstats['unmapped']}" if gstats.get("unmapped") else "")
             + (f" · 3차와 다른 대목 어긋남 {gstats['conflict']}" if gstats.get("conflict") else "")
             + (f" · 문맥 바탕 {anyc.get('corpus_chars', 0):,}자/{anyc.get('corpus_pages', 0)}쪽(1차·2차 일치 글)" if ctx else " · 문맥 추정 끔")
-            + " — 글은 바꾸지 않음(색·밑줄·메모만)")
+            + " — 등급 표시는 색·밑줄·메모에 반영, 번체·문맥 교정 내역은 별도 변환 보고")
     if not interim:
         for rec in records:
             work.set_status(rec["pdf_page"], "문서 반영 완료")
@@ -1384,7 +1520,9 @@ def cmd_build(args, work: Work | None = None, doc=None):
     if ok and interim.exists():
         try: interim.unlink(); log("  진행중 파일을 지움(최종 문서가 만들어짐)")
         except OSError: pass
-    return 0 if ok else 1
+    if CANCEL.is_set():
+        return 130
+    return (5 if getattr(args, "_normalization_incomplete", False) else 0) if ok else 1
 
 
 # ---------- adjudicate / ledger ----------
@@ -1437,18 +1575,20 @@ def make_glyph_readers(args) -> tuple:
     """3차 글자 판별 판독기 (주 판독기, 보완 판독기 또는 None).
     --adjudicate-model: 비우면 1차 모델, 이름을 주면 그 모델, auto 면 같은 세대 flash 로 먼저 묻고 못 가린 자리만 1차 모델로.
     생각 수준은 기본 LOW(객관식 자형 질문이라 깊은 생각이 필요 없음), 조각 해상도 high."""
-    from .reader_gemini import GeminiReader, list_models, pick_second_model
+    from .reader_gemini import list_models, pick_second_model
     from .prompts import glyph_system_prompt
     think = None if getattr(args, "adjudicate_thinking", "low") == "full" else "low"
     system = glyph_system_prompt()                      # 눈가림: 지침 전문(문맥 단서 포함) 대신 자형 전용 지시. 짧아서 캐시는 쓰지 않는다
     def make(model):
-        return GeminiReader(model=model, thinking_budget=(getattr(args, "thinking_budget", None) if think is None else None), use_cache=False,
+        return create_reader(getattr(args, "reader", "gemini"), model=model, thinking_budget=(getattr(args, "thinking_budget", None) if think is None else None), use_cache=False,
                             media_resolution="high", thinking=think, system=system)
     want = (getattr(args, "adjudicate_model", "") or "").strip()
     if not want:
         return make(args.model), None
     if want.lower() == "auto":
         primary = make(args.model)
+        if getattr(args, "reader", "gemini") != "gemini":
+            return primary, None
         try:
             flash = pick_second_model(list_models(primary.key, primary.vertexai), primary.model)
         except Exception as e:
@@ -1532,6 +1672,9 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
                 if more and hasattr(r, "usage_begin"): r.usage_begin()
                 if u.get("calls"):
                     used = True
+                    rec.setdefault("provenance", {}).setdefault("adjudicate", []).append(
+                        {"provider": getattr(r, "name", getattr(args, "reader", "gemini")), "model": r.model,
+                         "calls": u["calls"], "read_at": time.strftime("%Y-%m-%d %H:%M:%S")})
                     for k, v in u.items():
                         usage[k] = usage.get(k, 0) + v
                     key = r.model + (" (3차)" if i == 0 else " (3차 보완)")
@@ -1666,7 +1809,7 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
     prices = {}
     if getattr(args, "price_in", None) or getattr(args, "price_out", None):
         prices[args.model or ""] = {"in": args.price_in or 0, "out": args.price_out or 0}
-    e = estimate(args.pdf, pages, upscale=args.upscale, second_pass=not args.no_second_pass, model=args.model or "",
+    e = estimate(args.pdf, pages, upscale=args.upscale, second_pass=not args.no_second_pass, model=args.model or "", reader=getattr(args, "reader", "gemini"),
                  second_model=getattr(args, "second_model", "") or "", use_cache=not getattr(args, "no_cache", False),
                  prices=prices, fx_krw=getattr(args, "fx", None),
                  records=work.records(pages, repair=False) if same_source and not getattr(args, "force", False) else [])
@@ -1677,10 +1820,11 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
 
 
 @_document_command
-def cmd_run(args, doc=None):
+def cmd_run(args, work: Work | None = None, doc=None):
     """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
     사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
-    work = Work(args.pdf, args.work)
+    doc = doc or open_pdf(args.pdf)
+    work = work or Work(args.pdf, args.work)
     work.ensure_source(args.dpi)
     log(f"▶ 한 번에 인식: {Path(args.pdf).name} ({len(doc)}쪽) → {work.dir}")
     pages = parse_pages(args.pages, len(doc))
@@ -1717,7 +1861,9 @@ def cmd_run(args, doc=None):
                 log(f"인쇄 쪽수 = PDF 쪽수 + {off} (글자층의 쪽번호 표기로 자동 판정)")
             else:
                 log("인쇄 쪽수 차이는 글자층으로 알 수 없어, 판독한 쪽번호가 모이면 판정합니다.")
-    refresh_stale_records(work, doc, pages)
+    # 다른 제공사로 이어갈 때는 완료 기록(손 고침 포함)을 버전 변경 때문에 다시 비교하거나 재판독하지 않는다.
+    switched = {r["pdf_page"] for r in work.records(pages) if _record_provider(r) and _record_provider(r) != args.reader}
+    refresh_stale_records(work, doc, [n for n in pages if n not in switched])
 
     def checkpoint(reason: str):
         recs = work.records(pages)
@@ -1741,7 +1887,7 @@ def cmd_run(args, doc=None):
             args.print_offset = off; st = work.load_state(); st["print_offset"] = off; work.save_state(st)
             flagged = flag_print_mismatch(work, recs, off)
             log(f"인쇄 쪽수 = PDF 쪽수 + {off} (판독한 쪽번호로 판정)" + (f" · 어긋난 쪽 {flagged}개를 확인 항목으로" if flagged else ""))
-    if args.reader == "gemini" and not getattr(args, "no_adjudicate", False):
+    if args.reader != "mock" and not getattr(args, "no_adjudicate", False):
         try:
             rc_a = cmd_adjudicate(args, work, doc, standalone=False)
             if rc_a not in (0, None, 130):
@@ -1777,8 +1923,8 @@ def build_parser():
         p.add_argument("--dpi", type=int, default=300, help="내장 스캔이 없을 때 렌더 해상도")
 
     def read_opts(p):
-        p.add_argument("--reader", choices=["gemini", "mock"], default="gemini")
-        p.add_argument("--model", help="Gemini 모델 이름(기본 GEMINI_MODEL 환경 변수 또는 gemini-2.5-pro)")
+        p.add_argument("--reader", choices=PROVIDERS, default="gemini", help="판독 제공사: Gemini / ChatGPT(OpenAI) / Claude(Anthropic) / mock")
+        p.add_argument("--model", help="선택한 제공사의 이미지 판독 모델(기본은 제공사별 MODEL 환경 변수 또는 기본 모델)")
         p.add_argument("--thinking-budget", type=int, default=None, help="Gemini 생각 토큰 예산(모델이 지원할 때)")
         p.add_argument("--upscale", type=float, default=2.0, help="모델에 보낼 쪽 이미지 확대 배율")
         p.add_argument("--no-second-pass", action="store_true", help="영역 확대 재판독·비교를 생략")
@@ -1788,7 +1934,7 @@ def build_parser():
         p.add_argument("--workers", type=int, default=8, help="동시에 판독할 쪽 수의 최대(기본 8). 한도(429)가 나면 자동으로 줄인다")
         p.add_argument("--workers-start", type=int, default=4, help="시작 동시 쪽 수(기본 4). 10쪽 연속 문제없으면 하나씩 늘린다")
         p.add_argument("--second-mode", choices=["batch", "each"], default="batch", help="2차 판독을 조각 묶음 한 호출(batch, 기본)로 할지 영역별 호출(each)로 할지")
-        p.add_argument("--second-model", default="auto", help="2차 판독 모델. auto(기본)=1차와 같은 세대의 flash 자동 선택, 비우면 1차와 같음")
+        p.add_argument("--second-model", default="auto", help="같은 제공사의 2차 모델. auto=Gemini 는 flash 자동 선택, OpenAI·Anthropic 은 1차와 같은 모델")
         p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
         p.add_argument("--chunk-lines", type=int, default=8, help="2차 조각 한 장에 넣을 글줄(세로쓰기는 열) 수. 넘으면 나눠 보낸다(0=안 나눔). 글자당 픽셀을 늘려 획 하나 차이를 가린다")
@@ -1847,6 +1993,7 @@ def build_parser():
         p.add_argument("--check-list", choices=["none", "extra", "all"], default="none",
                        help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
+        p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
@@ -1854,13 +2001,16 @@ def build_parser():
     p = sub.add_parser("estimate", help="판독 전 호출·토큰·비용 어림"); common(p); read_opts(p)
     p.add_argument("--price-in", type=float, help="입력 토큰 100만 개당 USD"); p.add_argument("--price-out", type=float, help="출력 토큰 100만 개당 USD")
     p.add_argument("--fx", type=float, help="원/달러 환율(원화 표시)"); p.set_defaults(fn=cmd_estimate)
-    p = sub.add_parser("build"); common(p); build_opts(p); p.set_defaults(fn=cmd_build)
+    p = sub.add_parser("build"); common(p); build_opts(p)
+    p.add_argument("--reader", choices=PROVIDERS, default="gemini", help="한자 치환 후보의 문맥을 판단할 제공사")
+    p.add_argument("--model", help="문맥 판단 모델(기본은 선택한 제공사 기본 모델)")
+    max_calls_opt(p); p.set_defaults(fn=cmd_build)
     p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p)
     p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto", help="읽기 모드(auto=결과 폴더에 적힌 값·글자층 판정)")
     p.set_defaults(fn=cmd_remerge)
     p = sub.add_parser("adjudicate", help="3차 글자 판별: 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 모델에 자형만으로 묻는다"); common(p)
-    p.add_argument("--reader", choices=["gemini", "mock"], default="gemini")
-    p.add_argument("--model", help="판별에 쓸 모델(기본 GEMINI_MODEL 또는 gemini-2.5-pro). 1차와 같은 pro 계열을 권함")
+    p.add_argument("--reader", choices=PROVIDERS, default="gemini")
+    p.add_argument("--model", help="선택한 제공사의 이미지 판별 모델(비우면 제공사 기본 모델)")
     p.add_argument("--thinking-budget", type=int, default=None)
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--max-sites", type=int, default=0, help="쪽당 판별할 자리 수 상한(0=전부)")

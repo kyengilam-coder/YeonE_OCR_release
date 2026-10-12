@@ -34,7 +34,7 @@ def gui_preview(source, folder):
     value = lambda x: types.SimpleNamespace(get=lambda: x)
     app = types.SimpleNamespace(pdf=lambda: str(source), work=lambda: folder, fx_setting=lambda: (1300, "fixture"), cfg={},
                                 v_pages=value(""), v_up=value("1"), v_second=value(False), v_model=value("gemini-2.5-pro"),
-                                v_model2=value(""), v_cache=value(False), v_force=value(False))
+                                v_model2=value(""), v_cache=value(False), v_force=value(False), v_reader=value("gemini"))
     return gui.App.estimate_data(app)
 
 

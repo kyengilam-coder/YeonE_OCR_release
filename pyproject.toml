@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yeone-ocr"
-version = "0.7.0"
-description = "YeonE_OCR · 연어OCR · 세로쓰기 한자·한글 혼용 문헌 OCR·교정 처리기 (Gemini 판독, HWPX 출력)"
+version = "0.7.1"
+description = "YeonE_OCR · 연어OCR · 한자·한글 혼용 문헌 OCR·교정 처리기 (Gemini·ChatGPT·Claude 판독, HWPX 출력)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,6 +15,8 @@ dependencies = [
   "opencv-python-headless>=4.9",
   "pydantic>=2.6",
   "google-genai>=1.0",
+  "openai>=1.66.0",
+  "anthropic>=0.49.0",
   "python-hwpx>=6.0",
   "opencc-python-reimplemented>=0.1.7",
   "hanja>=0.15",
@@ -31,4 +33,4 @@ yeone-ocr-gui = "yeone_ocr.gui:main"
 packages = ["yeone_ocr", "yeone_ocr.collate"]
 
 [tool.setuptools.package-data]
-yeone_ocr = ["지침.md"]
+yeone_ocr = ["지침.md", "data/*.json", "assets/*.ico", "assets/*.png", "assets/*.svg"]

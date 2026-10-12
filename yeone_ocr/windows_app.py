@@ -26,6 +26,7 @@ def redact_log(text: str, secrets=()) -> str:
         if secret:
             text = text.replace(str(secret), "[REDACTED]")
     text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[REDACTED]", text)
+    text = re.sub(r"sk-[0-9A-Za-z_-]{12,}", "[REDACTED]", text)
     text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+", r"\1[REDACTED]", text)
     return re.sub(r"(?i)((?:api[_-]?key|x-goog-api-key|[?&]key)\s*[=:]\s*)[^\s&,;]+", r"\1[REDACTED]", text)
 
@@ -37,7 +38,7 @@ class SafeLog(io.TextIOBase):
         self._file = path.open("a", encoding="utf-8", buffering=1)
         self._pending = ""
         self._lock = threading.RLock()
-        self._secrets = tuple(os.environ.get(k, "") for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY"))
+        self._secrets = tuple(os.environ.get(k, "") for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"))
 
     @property
     def encoding(self):
@@ -161,6 +162,8 @@ def _acknowledge_update_ready(path: str | None, token: str | None) -> bool:
 
 def _normal_gui() -> int:
     stream = None
+    original_streams = (sys.stdin, sys.stdout, sys.stderr)
+    null_input = None
     # Consume before GUI/SDK workers can inherit this single-use handshake.
     ready_path = os.environ.pop("YEONE_UPDATE_READY_FILE", None)
     ready_token = os.environ.pop("YEONE_UPDATE_READY_TOKEN", None)
@@ -178,7 +181,7 @@ def _normal_gui() -> int:
             if sys.stderr is None:
                 sys.stderr = stream
         if sys.stdin is None:
-            sys.stdin = open(os.devnull, "r", encoding="utf-8")
+            null_input = sys.stdin = open(os.devnull, "r", encoding="utf-8")
         from .gui import App
         app = App()
         if ready_path and ready_token:
@@ -197,7 +200,11 @@ def _normal_gui() -> int:
         return 1
     finally:
         if stream is not None:
-            stream.finish()
+            sys.stdout, sys.stderr = original_streams[1:]
+            stream.close()
+        if null_input is not None:
+            sys.stdin = original_streams[0]
+            null_input.close()
 
 
 def _self_test(output: Path) -> int:
@@ -238,7 +245,7 @@ def _self_test(output: Path) -> int:
             stack.enter_context(redirect_stderr(log))
             stack.enter_context(patch.dict(os.environ, {"TEMP": str(run_dir / "temp"),
                                                        "TMP": str(run_dir / "temp"),
-                                                       "GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}))
+                                                       "GEMINI_API_KEY": "", "GOOGLE_API_KEY": "", "OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}))
             stack.enter_context(patch.object(tempfile, "tempdir", str(run_dir / "temp")))
             # Block DNS as well as socket connections, including an unexpected
             # SDK/update import side effect. No credentials or payloads recorded.
@@ -301,7 +308,7 @@ def _self_test(output: Path) -> int:
             rc = cli.main(["run", str(sample), "--work", str(work), "--pages", "1-2", "--reader", "mock",
                            "--docx", "--mode", "vertical", "--dpi", "120", "--upscale", "1",
                            "--workers", "2", "--workers-start", "2", "--checkpoint", "0",
-                           "--no-second-pass", "--no-adjudicate", "--no-suspects", "--no-context"])
+                           "--no-second-pass", "--no-adjudicate", "--no-suspects", "--no-context", "--no-normalize"])
             check("pipeline_exit_zero", rc in (0, None))
             hwpx_files = sorted((work / "out").glob("*.hwpx"))
             docx_files = sorted((work / "out").glob("*.docx"))
@@ -338,10 +345,17 @@ def _self_test(output: Path) -> int:
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--cli":
+        from .runtime import ensure_standard_streams
+        ensure_standard_streams()
+        from .cli import main as cli_main
+        return cli_main(argv[1:])
     parser = argparse.ArgumentParser(description="YeonE_OCR Windows application")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--version", action="store_true", help="print the application version and exit")
     mode.add_argument("--self-test", action="store_true", help="run an offline packaging smoke test")
+    mode.add_argument("--smoke-test", type=Path, help="run the current offline packaging test and write a JSON report")
     parser.add_argument("--output", type=Path, help="self-test output directory; required with --self-test")
     args = parser.parse_args(argv)
     if args.self_test != (args.output is not None):
@@ -349,6 +363,11 @@ def main(argv=None) -> int:
     if args.version:
         _console_message("YeonE_OCR " + __version__)
         return 0
+    if args.smoke_test:
+        from .runtime import ensure_standard_streams
+        ensure_standard_streams()
+        from .frozen_smoke import run
+        return run(args.smoke_test)
     if args.self_test:
         return _self_test(args.output)
     return _normal_gui()

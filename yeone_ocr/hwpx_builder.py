@@ -152,17 +152,23 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
             para("〔작업 기록〕", "h2")
             for line in b.text.splitlines():
                 para(line, "chk")
-    doc.save_to_path(out_path)
+    try:
+        doc.save_to_path(out_path)
+    finally:
+        doc.close()
     # 다시 열어 확인
     re_ = HwpxDocument.open(out_path)
     try:
-        imgs = re_.media.images
-        n_img = len(list(imgs() if callable(imgs) else imgs))
-    except Exception:
-        n_img = len(list(re_.list_images()))
-    stats["images_in_file"] = n_img
-    try:
-        rep = re_.validate(); stats["validate_issues"] = len(getattr(rep, "issues", ()) or ())
-    except Exception as e:
-        stats["validate_issues"] = f"검사 불가: {e}"
+        try:
+            imgs = re_.media.images
+            n_img = len(list(imgs() if callable(imgs) else imgs))
+        except Exception:
+            n_img = len(list(re_.list_images()))
+        stats["images_in_file"] = n_img
+        try:
+            rep = re_.validate(); stats["validate_issues"] = len(getattr(rep, "issues", ()) or ())
+        except Exception as e:
+            stats["validate_issues"] = f"검사 불가: {e}"
+    finally:
+        re_.close()       # Windows에서도 이어 만들기 때 같은 출력 파일을 다시 쓸 수 있게
     return stats

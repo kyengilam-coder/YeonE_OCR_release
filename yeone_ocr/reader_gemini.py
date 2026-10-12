@@ -635,6 +635,11 @@ class GeminiReader:
         """이 스레드에서 이어지는 호출들의 토큰을 쪽 단위로 따로 센다(여러 쪽을 동시에 읽어도 섞이지 않게)."""
         self._tls.page = {}
 
+    def resolve_text_choices(self, items: list[dict]) -> dict[str, str]:
+        """간체→번체·MSR 교정의 문맥 후보만 텍스트로 판별한다(이미지 호출 없음)."""
+        from .readers import resolve_text_choices
+        return resolve_text_choices(self, items)
+
     def usage_end(self) -> dict:
         d = getattr(self._tls, "page", None) or {}
         self._tls.page = None

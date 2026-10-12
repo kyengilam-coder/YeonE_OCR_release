@@ -253,24 +253,25 @@ _READER_CACHE: dict = {}
 def _reader_cache_key(args) -> tuple:
     """(모델, 설정, 키 목록의 sha1) — 창에서 API 키를 바꾸면 새 판독기를 만든다(옛 키로 계속 부르지 않게). 키 자체는 들고 있지 않는다."""
     import hashlib
-    from ..reader_gemini import split_keys
-    keys = split_keys(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    return (getattr(args, "model", None) or os.environ.get("GEMINI_MODEL") or "", getattr(args, "adjudicate_thinking", "low"),
+    from ..readers import split_keys, environment_key, default_model
+    provider = getattr(args, "reader", "gemini")
+    keys = split_keys(provider, environment_key(provider))
+    return (provider, getattr(args, "model", None) or default_model(provider), getattr(args, "adjudicate_thinking", "low"),
             hashlib.sha1("\n".join(keys).encode("utf-8")).hexdigest())
 
 
 def glyph_reader(args):
-    """항목 3차 판별용 Gemini 판독기(같은 모델·설정·키면 한 번만 만들어 재사용). 키가 없거나 만들지 못하면 None."""
-    if getattr(args, "no_glyph_check", False) or getattr(args, "reader", "gemini") != "gemini":
+    """항목 3차 판별용 판독기(같은 제공사·모델·설정·키면 한 번만 만들어 재사용)."""
+    if getattr(args, "no_glyph_check", False) or getattr(args, "reader", "gemini") == "mock":
         return None
     key = _reader_cache_key(args)
     if key in _READER_CACHE:
         return _READER_CACHE[key]
     try:
-        from ..reader_gemini import GeminiReader
+        from ..readers import create_reader
         from ..prompts import glyph_system_prompt
         think = None if getattr(args, "adjudicate_thinking", "low") == "full" else "low"
-        r = GeminiReader(model=getattr(args, "model", None), use_cache=False, media_resolution="high", thinking=think, system=glyph_system_prompt())
+        r = create_reader(getattr(args, "reader", "gemini"), model=getattr(args, "model", None), use_cache=False, media_resolution="high", thinking=think, system=glyph_system_prompt())
     except Exception as e:
         log(f"자형 3차 판별은 건너뜁니다({str(e)[:80]}).")
         r = None
@@ -497,6 +498,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                 ed.add_legend_memo()                                   # 범례 메모 하나(이미 있으면 그대로)
             out = getattr(args, "out", None) or corrected_path(book.path)
             try:
+                Path(out).parent.mkdir(parents=True, exist_ok=True)
                 saved = ed.save_copy(out)
             except OSError as e:                                       # 한컴에 열린 교정본 등 — 고친 것이 저장되지 않았다
                 raise SaveFailed(f"교정본 {Path(out).name} 을(를) 저장하지 못했습니다({str(e)[:80]}) — 한컴 등에서 그 파일을 열어 두었으면 닫고 다시 누르십시오") from e
@@ -599,7 +601,8 @@ def corrected_path(hwpx_path: str) -> str:
     """원본 → <이름>_교정.hwpx. 이미 교정본이면 그 자리(같은 이름)."""
     p = Path(hwpx_path)
     stem = p.stem if p.stem.endswith("_교정") else p.stem + "_교정"
-    return str(p.with_name(stem + ".hwpx"))
+    from ..runtime import safe_output_path
+    return str(safe_output_path(p.with_name(stem + ".hwpx"), p))
 
 
 def set_aside(path: Path) -> Path:
@@ -613,18 +616,18 @@ def set_aside(path: Path) -> Path:
 
 def cmd_collate(args):
     """명령줄 진입점. --list 면 색인만, --section 이면 그 구획을 대조(--apply 면 반영·저장)."""
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        return _cmd_collate(args, resources)
+
+
+def _cmd_collate(args, resources):
     from ..pdfio import open_pdf
+    from ..state import Work
     if not getattr(args, "hwpx", None) or not Path(args.hwpx).exists():
         log("--hwpx 파일이 필요합니다."); return 2
-    with ExitStack() as resources:
-        pdf_doc = open_pdf(args.pdf)
-        resources.callback(pdf_doc.close)
-        return _cmd_collate_open(args, pdf_doc, resources)
-
-
-def _cmd_collate_open(args, pdf_doc, resources):
-    """cmd_collate 가 연 파일은 성공·조기 반환·오류 모두에서 닫는다."""
-    from ..state import Work
+    pdf_doc = open_pdf(args.pdf)
+    resources.callback(pdf_doc.close)
     preview = bool(getattr(args, "list", False) or not (getattr(args, "all", False) or
                    getattr(args, "anchor_index", None) or getattr(args, "section", None)))
     styles = [s for s in (getattr(args, "heading_styles", "") or "").split(",") if s.strip()] or None

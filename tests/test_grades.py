@@ -377,6 +377,7 @@ class Documents(unittest.TestCase):
         return assemble_blocks([r], context=ctx, **kw)
 
     def test_hwpx_styles_text_and_memos(self):
+        from contextlib import closing
         from yeone_ocr.hwpx_builder import build_hwpx
         from yeone_ocr.cli import check_hwpx_file
         from hwpx import HwpxDocument
@@ -393,8 +394,8 @@ class Documents(unittest.TestCase):
             self.assertIn('type="BOTTOM" shape="DOT" color="#0B7A3B"', h); self.assertIn('type="BOTTOM" shape="SOLID" color="#C00000"', h)
             self.assertEqual(x.count('type="MEMO"'), 1); self.assertEqual(x.count("[연어OCR 표시 범례"), 1)
             self.assertEqual(check_hwpx_file(out), [])
-            with HwpxDocument.open(out) as doc:
-                texts = [p.text for p in doc.paragraphs]
+            with closing(HwpxDocument.open(out)) as opened:
+                texts = [p.text for p in opened.paragraphs]
             self.assertTrue(any("大黃日一兩又能〔入/人〕肝經主之" in t for t in texts))      # 괄호·두 후보·글 그대로(I1, I4)
             self.assertFalse(any("범례" in t for t in texts))                                   # 메모 글은 본문에 없음
             self.assertIn('height="950"', h)                                                    # 소주(9.5pt) 등급 글자
@@ -405,8 +406,8 @@ class Documents(unittest.TestCase):
             with zipfile.ZipFile(out2) as z:
                 x2 = z.read("Contents/section0.xml").decode(); h2 = z.read("Contents/header.xml").decode()
             self.assertNotIn('textColor="#0B7A3B"', h2); self.assertNotIn("범례", x2)
-            with HwpxDocument.open(out2) as doc:
-                self.assertEqual([p.text for p in doc.paragraphs], texts)
+            with closing(HwpxDocument.open(out2)) as opened:
+                self.assertEqual([p.text for p in opened.paragraphs], texts)
 
     def test_text_invariance_all_modes(self):
         """어떤 선택(등급·문맥·메모 방식·색)에서도 문단 글은 예전과 같다(글 속 〔고지〕 만 예외)."""

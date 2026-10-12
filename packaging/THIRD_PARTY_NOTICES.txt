@@ -1,0 +1,544 @@
+YeonE_OCR - Third-party component notices
+
+Generated from the installed runtime dependency metadata of the build environment.
+This includes declared transitive dependencies that the executable builder may exclude.
+License names and URLs below reproduce package declarations; they are not a legal assessment.
+The referenced license texts and METADATA.txt files are included alongside this notice.
+Package-provided notices can cover additional native libraries within a wheel.
+The PyInstaller bootloader is listed separately from the application's Python dependencies.
+
+Python 3.14.5
+  URL: https://www.python.org/
+  License: See the Python runtime's bundled LICENSE.txt.
+  License/notice file: third_party_licenses/python/LICENSE.txt
+
+Tcl 8.6 / Tk 8.6
+  URL: https://www.tcl-lang.org/
+  License: See bundled Tcl/Tk license text and Python LICENSE.txt.
+  License/notice file: third_party_licenses/tcl-tk/tk8.6/demos/license.terms
+  License/notice file: third_party_licenses/tcl-tk/tk8.6/license.terms
+
+Runtime Python distributions
+============================
+
+annotated-doc 0.0.5
+  Declared license: MIT
+  URL: Homepage, https://github.com/fastapi/annotated-doc
+  URL: Documentation, https://github.com/fastapi/annotated-doc
+  URL: Repository, https://github.com/fastapi/annotated-doc
+  URL: Issues, https://github.com/fastapi/annotated-doc/issues
+  URL: Changelog, https://github.com/fastapi/annotated-doc/release-notes.md
+  Metadata: third_party_licenses/annotated-doc-0.0.5/METADATA.txt
+  License/notice file: third_party_licenses/annotated-doc-0.0.5/annotated_doc-0.0.5.dist-info/licenses/LICENSE
+
+annotated-types 0.8.0
+  Declared license: MIT
+  URL: Homepage, https://github.com/annotated-types/annotated-types
+  URL: Source, https://github.com/annotated-types/annotated-types
+  URL: Changelog, https://github.com/annotated-types/annotated-types/releases
+  Metadata: third_party_licenses/annotated-types-0.8.0/METADATA.txt
+  License/notice file: third_party_licenses/annotated-types-0.8.0/annotated_types-0.8.0.dist-info/licenses/LICENSE
+
+anthropic 1.13.0
+  Declared license: MIT
+  URL: Homepage, https://github.com/anthropics/anthropic-sdk-python
+  URL: Repository, https://github.com/anthropics/anthropic-sdk-python
+  Metadata: third_party_licenses/anthropic-1.13.0/METADATA.txt
+  License/notice file: third_party_licenses/anthropic-1.13.0/anthropic-1.13.0.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/anthropic-1.13.0/anthropic/_vendor/httpx_aiohttp/LICENSE
+  License/notice file: third_party_licenses/anthropic-1.13.0/anthropic/_vendor/httpx_aiohttp/NOTICE.md
+
+anyio 4.15.1
+  Declared license: MIT
+  URL: Documentation, https://anyio.readthedocs.io/en/latest/
+  URL: Changelog, https://anyio.readthedocs.io/en/stable/versionhistory.html
+  URL: Source code, https://github.com/agronholm/anyio
+  URL: Issue tracker, https://github.com/agronholm/anyio/issues
+  Metadata: third_party_licenses/anyio-4.15.1/METADATA.txt
+  License/notice file: third_party_licenses/anyio-4.15.1/anyio-4.15.1.dist-info/licenses/LICENSE
+
+certifi 2026.7.22
+  Declared license: MPL-2.0
+  URL: Source, https://github.com/certifi/python-certifi
+  URL: https://github.com/certifi/python-certifi
+  Metadata: third_party_licenses/certifi-2026.7.22/METADATA.txt
+  License/notice file: third_party_licenses/certifi-2026.7.22/certifi-2026.7.22.dist-info/licenses/LICENSE
+
+cffi 2.1.1
+  Declared license: MIT-0
+  URL: Documentation, https://cffi.readthedocs.io/
+  URL: Changelog, https://cffi.readthedocs.io/en/latest/whatsnew.html
+  URL: Download, https://github.com/python-cffi/cffi/releases
+  URL: Contact, https://groups.google.com/forum/#!forum/python-cffi
+  URL: Source Code, https://github.com/python-cffi/cffi
+  URL: Issue Tracker, https://github.com/python-cffi/cffi/issues
+  Metadata: third_party_licenses/cffi-2.1.1/METADATA.txt
+  License/notice file: third_party_licenses/cffi-2.1.1/cffi-2.1.1.dist-info/licenses/LICENSE
+
+charset-normalizer 3.5.2
+  Declared license: MIT
+  URL: Changelog, https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md
+  URL: Documentation, https://charset-normalizer.readthedocs.io/
+  URL: Code, https://github.com/jawah/charset_normalizer
+  URL: Issue tracker, https://github.com/jawah/charset_normalizer/issues
+  Metadata: third_party_licenses/charset-normalizer-3.5.2/METADATA.txt
+  License/notice file: third_party_licenses/charset-normalizer-3.5.2/charset_normalizer-3.5.2.dist-info/licenses/LICENSE
+
+colorama 0.4.6
+  Declared license: OSI Approved :: BSD License
+  URL: Homepage, https://github.com/tartley/colorama
+  Metadata: third_party_licenses/colorama-0.4.6/METADATA.txt
+  License/notice file: third_party_licenses/colorama-0.4.6/colorama-0.4.6.dist-info/licenses/LICENSE.txt
+
+coverage 7.16.2
+  Declared license: Apache-2.0
+  URL: Documentation, https://coverage.readthedocs.io/en/7.16.2
+  URL: Funding, https://tidelift.com/subscription/pkg/pypi-coverage?utm_source=pypi-coverage&utm_medium=referral&utm_campaign=pypi
+  URL: Issues, https://github.com/coveragepy/coveragepy/issues
+  URL: Mastodon, https://hachyderm.io/@coveragepy
+  URL: Mastodon (nedbat), https://hachyderm.io/@nedbat
+  URL: https://github.com/coveragepy/coveragepy
+  Metadata: third_party_licenses/coverage-7.16.2/METADATA.txt
+  License/notice file: third_party_licenses/coverage-7.16.2/coverage-7.16.2.dist-info/licenses/LICENSE.txt
+  License/notice file: third_party_licenses/coverage-7.16.2/coverage-7.16.2.dist-info/licenses/NOTICE.txt
+
+coveralls 4.1.0
+  Declared license: MIT
+  URL: Changelog, https://github.com/TheKevJames/coveralls-python/blob/master/CHANGELOG.md
+  URL: Docs, https://coveralls-python.rtfd.io/
+  URL: Repository, https://github.com/TheKevJames/coveralls-python
+  Metadata: third_party_licenses/coveralls-4.1.0/METADATA.txt
+  License/notice file: third_party_licenses/coveralls-4.1.0/coveralls-4.1.0.dist-info/licenses/LICENSE.rst
+
+cryptography 50.0.2
+  Declared license: Apache-2.0 OR BSD-3-Clause
+  URL: changelog, https://cryptography.io/en/latest/changelog/
+  URL: documentation, https://cryptography.io/
+  URL: homepage, https://github.com/pyca/cryptography
+  URL: issues, https://github.com/pyca/cryptography/issues
+  URL: source, https://github.com/pyca/cryptography/
+  Metadata: third_party_licenses/cryptography-50.0.2/METADATA.txt
+  License/notice file: third_party_licenses/cryptography-50.0.2/cryptography-50.0.2.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/cryptography-50.0.2/cryptography-50.0.2.dist-info/licenses/LICENSE.APACHE
+  License/notice file: third_party_licenses/cryptography-50.0.2/cryptography-50.0.2.dist-info/licenses/LICENSE.BSD
+
+distro 1.9.0
+  Declared license: Apache License, Version 2.0
+  URL: https://github.com/python-distro/distro
+  Metadata: third_party_licenses/distro-1.9.0/METADATA.txt
+  License/notice file: third_party_licenses/distro-1.9.0/distro-1.9.0.dist-info/LICENSE
+
+docstring_parser 0.18.0
+  Declared license: MIT
+  URL: homepage, https://github.com/rr-/docstring_parser
+  URL: repository, https://github.com/rr-/docstring_parser
+  URL: changelog, https://github.com/rr-/docstring_parser/blob/master/CHANGELOG.md
+  Metadata: third_party_licenses/docstring-parser-0.18.0/METADATA.txt
+  License/notice file: third_party_licenses/docstring-parser-0.18.0/docstring_parser-0.18.0.dist-info/licenses/LICENSE.md
+
+google-auth 2.61.0
+  Declared license: Apache 2.0
+  URL: https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth
+  Metadata: third_party_licenses/google-auth-2.61.0/METADATA.txt
+  License/notice file: third_party_licenses/google-auth-2.61.0/google_auth-2.61.0.dist-info/licenses/LICENSE
+
+google-genai 2.29.0
+  Declared license: Apache-2.0
+  URL: Homepage, https://github.com/googleapis/python-genai
+  Metadata: third_party_licenses/google-genai-2.29.0/METADATA.txt
+  License/notice file: third_party_licenses/google-genai-2.29.0/google_genai-2.29.0.dist-info/licenses/LICENSE
+
+h11 0.16.0
+  Declared license: MIT
+  URL: https://github.com/python-hyper/h11
+  Metadata: third_party_licenses/h11-0.16.0/METADATA.txt
+  License/notice file: third_party_licenses/h11-0.16.0/h11-0.16.0.dist-info/licenses/LICENSE.txt
+
+hanja 0.15.1
+  Declared license: Not specified in installed package metadata.
+  URL: https://github.com/suminb/hanja
+  Metadata: third_party_licenses/hanja-0.15.1/METADATA.txt
+  License/notice file: third_party_licenses/hanja-0.15.1/upstream-supplement/LICENSE.txt
+  License/notice file: third_party_licenses/hanja-0.15.1/upstream-supplement/provenance.txt
+
+httpcore 1.0.9
+  Declared license: BSD-3-Clause
+  URL: Documentation, https://www.encode.io/httpcore
+  URL: Homepage, https://www.encode.io/httpcore/
+  URL: Source, https://github.com/encode/httpcore
+  Metadata: third_party_licenses/httpcore-1.0.9/METADATA.txt
+  License/notice file: third_party_licenses/httpcore-1.0.9/httpcore-1.0.9.dist-info/licenses/LICENSE.md
+
+httpcore2 2.13.1
+  Declared license: BSD-3-Clause
+  URL: Changelog, https://github.com/pydantic/httpx2/blob/main/src/httpcore2/CHANGELOG.md
+  URL: Homepage, https://github.com/pydantic/httpx2
+  URL: Source, https://github.com/pydantic/httpx2/blob/main/src/httpcore2
+  Metadata: third_party_licenses/httpcore2-2.13.1/METADATA.txt
+  License/notice file: third_party_licenses/httpcore2-2.13.1/httpcore2-2.13.1.dist-info/licenses/LICENSE.md
+
+httpx 0.28.1
+  Declared license: BSD-3-Clause
+  URL: Changelog, https://github.com/encode/httpx/blob/master/CHANGELOG.md
+  URL: Documentation, https://www.python-httpx.org
+  URL: Homepage, https://github.com/encode/httpx
+  URL: Source, https://github.com/encode/httpx
+  Metadata: third_party_licenses/httpx-0.28.1/METADATA.txt
+  License/notice file: third_party_licenses/httpx-0.28.1/httpx-0.28.1.dist-info/licenses/LICENSE.md
+
+httpx2 2.13.1
+  Declared license: BSD-3-Clause
+  URL: Changelog, https://github.com/pydantic/httpx2/blob/main/src/httpx2/CHANGELOG.md
+  URL: Homepage, https://github.com/pydantic/httpx2
+  URL: Source, https://github.com/pydantic/httpx2
+  Metadata: third_party_licenses/httpx2-2.13.1/METADATA.txt
+  License/notice file: third_party_licenses/httpx2-2.13.1/httpx2-2.13.1.dist-info/licenses/LICENSE.md
+
+idna 3.20
+  Declared license: BSD-3-Clause
+  URL: Changelog, https://github.com/kjd/idna/blob/master/HISTORY.md
+  URL: Issue tracker, https://github.com/kjd/idna/issues
+  URL: Source, https://github.com/kjd/idna
+  Metadata: third_party_licenses/idna-3.20/METADATA.txt
+  License/notice file: third_party_licenses/idna-3.20/idna-3.20.dist-info/licenses/LICENSE.md
+
+iniconfig 2.3.1
+  Declared license: MIT
+  URL: Homepage, https://github.com/pytest-dev/iniconfig
+  Metadata: third_party_licenses/iniconfig-2.3.1/METADATA.txt
+  License/notice file: third_party_licenses/iniconfig-2.3.1/iniconfig-2.3.1.dist-info/licenses/LICENSE
+
+jiter 0.17.0
+  Declared license: MIT
+  URL: https://github.com/pydantic/jiter/
+  Metadata: third_party_licenses/jiter-0.17.0/METADATA.txt
+  License/notice file: third_party_licenses/jiter-0.17.0/jiter-0.17.0.dist-info/licenses/LICENSE
+
+lxml 6.1.3
+  Declared license: BSD-3-Clause
+  URL: Source, https://github.com/lxml/lxml
+  URL: Bug Tracker, https://bugs.launchpad.net/lxml
+  URL: https://lxml.de/
+  Metadata: third_party_licenses/lxml-6.1.3/METADATA.txt
+  License/notice file: third_party_licenses/lxml-6.1.3/lxml-6.1.3.dist-info/licenses/LICENSE.txt
+  License/notice file: third_party_licenses/lxml-6.1.3/lxml-6.1.3.dist-info/licenses/LICENSES.txt
+
+markdown-it-py 4.2.0
+  Declared license: OSI Approved :: MIT License
+  URL: Documentation, https://markdown-it-py.readthedocs.io
+  URL: Homepage, https://github.com/executablebooks/markdown-it-py
+  Metadata: third_party_licenses/markdown-it-py-4.2.0/METADATA.txt
+  License/notice file: third_party_licenses/markdown-it-py-4.2.0/markdown_it_py-4.2.0.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/markdown-it-py-4.2.0/markdown_it_py-4.2.0.dist-info/licenses/LICENSE.markdown-it
+
+mdurl 0.1.2
+  Declared license: OSI Approved :: MIT License
+  URL: Homepage, https://github.com/executablebooks/mdurl
+  Metadata: third_party_licenses/mdurl-0.1.2/METADATA.txt
+  License/notice file: third_party_licenses/mdurl-0.1.2/mdurl-0.1.2.dist-info/LICENSE
+
+numpy 2.5.4
+  Declared license: BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
+  URL: homepage, https://numpy.org
+  URL: documentation, https://numpy.org/doc/
+  URL: source, https://github.com/numpy/numpy
+  URL: download, https://pypi.org/project/numpy/#files
+  URL: tracker, https://github.com/numpy/numpy/issues
+  URL: release notes, https://numpy.org/doc/stable/release
+  Metadata: third_party_licenses/numpy-2.5.4/METADATA.txt
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/LICENSE.txt
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/_core/include/numpy/libdivide/LICENSE.txt
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/_core/src/common/pythoncapi-compat/COPYING
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/_core/src/highway/LICENSE
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/_core/src/multiarray/dragon4_LICENSE.txt
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/_core/src/npysort/x86-simd-sort/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/_core/src/umath/svml/LICENSE
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/fft/pocketfft/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/linalg/lapack_lite/LICENSE.txt
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/ma/LICENSE
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/src/distributions/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/src/mt19937/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/src/pcg64/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/src/philox/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/src/sfc64/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy-2.5.4.dist-info/licenses/numpy/random/src/splitmix64/LICENSE.md
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy/_core/include/numpy/random/LICENSE.txt
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy/ma/LICENSE
+  License/notice file: third_party_licenses/numpy-2.5.4/numpy/random/LICENSE.md
+
+openai 3.29.0
+  Declared license: Apache-2.0
+  URL: Homepage, https://github.com/openai/openai-python
+  URL: Repository, https://github.com/openai/openai-python
+  Metadata: third_party_licenses/openai-3.29.0/METADATA.txt
+  License/notice file: third_party_licenses/openai-3.29.0/openai-3.29.0.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/openai-3.29.0/openai/_vendor/httpx_aiohttp/LICENSE
+
+opencc-python-reimplemented 0.1.7
+  Declared license: Apache License
+  URL: https://github.com/yichen0831/opencc-python
+  Metadata: third_party_licenses/opencc-python-reimplemented-0.1.7/METADATA.txt
+  License/notice file: third_party_licenses/opencc-python-reimplemented-0.1.7/opencc/NOTICE.txt
+  License/notice file: third_party_licenses/opencc-python-reimplemented-0.1.7/opencc_python_reimplemented-0.1.7.dist-info/LICENSE.txt
+
+opencv-python-headless 5.0.0.93
+  Declared license: Apache 2.0
+  URL: https://github.com/opencv/opencv-python
+  Metadata: third_party_licenses/opencv-python-headless-5.0.0.93/METADATA.txt
+  License/notice file: third_party_licenses/opencv-python-headless-5.0.0.93/cv2/LICENSE-3RD-PARTY.txt
+  License/notice file: third_party_licenses/opencv-python-headless-5.0.0.93/cv2/LICENSE.txt
+  License/notice file: third_party_licenses/opencv-python-headless-5.0.0.93/opencv_python_headless-5.0.0.93.dist-info/LICENSE-3RD-PARTY.txt
+  License/notice file: third_party_licenses/opencv-python-headless-5.0.0.93/opencv_python_headless-5.0.0.93.dist-info/LICENSE.txt
+
+packaging 26.3
+  Declared license: Apache-2.0 OR BSD-2-Clause
+  URL: Documentation, https://packaging.pypa.io/
+  URL: Source, https://github.com/pypa/packaging
+  Metadata: third_party_licenses/packaging-26.3/METADATA.txt
+  License/notice file: third_party_licenses/packaging-26.3/packaging-26.3.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/packaging-26.3/packaging-26.3.dist-info/licenses/LICENSE.APACHE
+  License/notice file: third_party_licenses/packaging-26.3/packaging-26.3.dist-info/licenses/LICENSE.BSD
+  License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/__init__.py
+  License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/__pycache__/__init__.cpython-314.pyc
+  License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/__pycache__/_spdx.cpython-314.pyc
+  License/notice file: third_party_licenses/packaging-26.3/packaging/licenses/_spdx.py
+
+pillow 12.3.0
+  Declared license: MIT-CMU
+  URL: Release notes, https://pillow.readthedocs.io/en/stable/releasenotes/index.html
+  URL: Changelog, https://github.com/python-pillow/Pillow/releases
+  URL: Documentation, https://pillow.readthedocs.io
+  URL: Funding, https://tidelift.com/subscription/pkg/pypi-pillow?utm_source=pypi-pillow&utm_medium=pypi
+  URL: Homepage, https://python-pillow.github.io
+  URL: Mastodon, https://fosstodon.org/@pillow
+  URL: Source, https://github.com/python-pillow/Pillow
+  Metadata: third_party_licenses/pillow-12.3.0/METADATA.txt
+  License/notice file: third_party_licenses/pillow-12.3.0/pillow-12.3.0.dist-info/licenses/LICENSE
+
+pluggy 1.6.0
+  Declared license: MIT
+  URL: Not specified in installed package metadata.
+  Metadata: third_party_licenses/pluggy-1.6.0/METADATA.txt
+  License/notice file: third_party_licenses/pluggy-1.6.0/pluggy-1.6.0.dist-info/licenses/LICENSE
+
+pyasn1 0.6.4
+  Declared license: BSD-2-Clause
+  URL: Homepage, https://github.com/pyasn1/pyasn1
+  URL: Documentation, https://pyasn1.readthedocs.io
+  URL: Source, https://github.com/pyasn1/pyasn1
+  URL: Issues, https://github.com/pyasn1/pyasn1/issues
+  URL: Changelog, https://pyasn1.readthedocs.io/en/latest/changelog.html
+  Metadata: third_party_licenses/pyasn1-0.6.4/METADATA.txt
+  License/notice file: third_party_licenses/pyasn1-0.6.4/pyasn1-0.6.4.dist-info/licenses/LICENSE.rst
+
+pyasn1_modules 0.4.2
+  Declared license: BSD
+  URL: Source, https://github.com/pyasn1/pyasn1-modules
+  URL: Issues, https://github.com/pyasn1/pyasn1-modules/issues
+  URL: Changelog, https://github.com/pyasn1/pyasn1-modules/blob/master/CHANGES.txt
+  URL: https://github.com/pyasn1/pyasn1-modules
+  Metadata: third_party_licenses/pyasn1-modules-0.4.2/METADATA.txt
+  License/notice file: third_party_licenses/pyasn1-modules-0.4.2/pyasn1_modules-0.4.2.dist-info/licenses/LICENSE.txt
+
+pycparser 3.11
+  Declared license: BSD-3-Clause
+  URL: Homepage, https://github.com/eliben/pycparser
+  Metadata: third_party_licenses/pycparser-3.11/METADATA.txt
+  License/notice file: third_party_licenses/pycparser-3.11/pycparser-3.11.dist-info/licenses/LICENSE
+
+pydantic 2.14.1
+  Declared license: MIT
+  URL: Homepage, https://github.com/pydantic/pydantic
+  URL: Documentation, https://pydantic.dev/docs/validation/latest/get-started/
+  URL: Funding, https://github.com/sponsors/samuelcolvin
+  URL: Source, https://github.com/pydantic/pydantic
+  URL: Changelog, https://pydantic.dev/docs/validation/latest/get-started/changelog/
+  Metadata: third_party_licenses/pydantic-2.14.1/METADATA.txt
+  License/notice file: third_party_licenses/pydantic-2.14.1/pydantic-2.14.1.dist-info/licenses/LICENSE
+
+pydantic_core 2.50.1
+  Declared license: MIT
+  URL: Funding, https://github.com/sponsors/samuelcolvin
+  URL: Homepage, https://github.com/pydantic
+  URL: Source, https://github.com/pydantic/pydantic/tree/main/pydantic-core
+  URL: https://github.com/pydantic/pydantic
+  Metadata: third_party_licenses/pydantic-core-2.50.1/METADATA.txt
+  License/notice file: third_party_licenses/pydantic-core-2.50.1/pydantic_core-2.50.1.dist-info/licenses/LICENSE
+
+Pygments 2.21.0
+  Declared license: BSD-2-Clause
+  URL: Homepage, https://pygments.org
+  URL: Documentation, https://pygments.org/docs
+  URL: Source, https://github.com/pygments/pygments
+  URL: Bug Tracker, https://github.com/pygments/pygments/issues
+  URL: Changelog, https://github.com/pygments/pygments/blob/master/CHANGES
+  Metadata: third_party_licenses/pygments-2.21.0/METADATA.txt
+  License/notice file: third_party_licenses/pygments-2.21.0/pygments-2.21.0.dist-info/licenses/AUTHORS
+  License/notice file: third_party_licenses/pygments-2.21.0/pygments-2.21.0.dist-info/licenses/LICENSE
+
+pymupdf 1.28.2
+  Declared license: Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License
+  URL: Documentation, https://pymupdf.readthedocs.io/
+  URL: Source, https://github.com/pymupdf/pymupdf
+  URL: Tracker, https://github.com/pymupdf/PyMuPDF/issues
+  URL: Changelog, https://pymupdf.readthedocs.io/en/latest/changes.html
+  Metadata: third_party_licenses/pymupdf-1.28.2/METADATA.txt
+  License/notice file: third_party_licenses/pymupdf-1.28.2/pymupdf-1.28.2.dist-info/COPYING
+
+pytest 9.1.1
+  Declared license: MIT
+  URL: Changelog, https://docs.pytest.org/en/stable/changelog.html
+  URL: Contact, https://docs.pytest.org/en/stable/contact.html
+  URL: Funding, https://docs.pytest.org/en/stable/sponsor.html
+  URL: Homepage, https://docs.pytest.org/en/latest/
+  URL: Source, https://github.com/pytest-dev/pytest
+  URL: Tracker, https://github.com/pytest-dev/pytest/issues
+  Metadata: third_party_licenses/pytest-9.1.1/METADATA.txt
+  License/notice file: third_party_licenses/pytest-9.1.1/pytest-9.1.1.dist-info/licenses/LICENSE
+
+pytest-cov 7.1.0
+  Declared license: MIT
+  URL: Sources, https://github.com/pytest-dev/pytest-cov
+  URL: Documentation, https://pytest-cov.readthedocs.io/
+  URL: Changelog, https://pytest-cov.readthedocs.io/en/latest/changelog.html
+  URL: Issue Tracker, https://github.com/pytest-dev/pytest-cov/issues
+  Metadata: third_party_licenses/pytest-cov-7.1.0/METADATA.txt
+  License/notice file: third_party_licenses/pytest-cov-7.1.0/pytest_cov-7.1.0.dist-info/licenses/AUTHORS.rst
+  License/notice file: third_party_licenses/pytest-cov-7.1.0/pytest_cov-7.1.0.dist-info/licenses/LICENSE
+
+python-docx 1.2.0
+  Declared license: MIT
+  URL: Changelog, https://github.com/python-openxml/python-docx/blob/master/HISTORY.rst
+  URL: Documentation, https://python-docx.readthedocs.org/en/latest/
+  URL: Homepage, https://github.com/python-openxml/python-docx
+  URL: Repository, https://github.com/python-openxml/python-docx
+  Metadata: third_party_licenses/python-docx-1.2.0/METADATA.txt
+  License/notice file: third_party_licenses/python-docx-1.2.0/python_docx-1.2.0.dist-info/licenses/LICENSE
+
+python-hwpx 6.8.0
+  Declared license: Apache-2.0
+  URL: Homepage, https://github.com/airmang/python-hwpx
+  URL: Documentation, https://airmang.github.io/python-hwpx/
+  URL: Issues, https://github.com/airmang/python-hwpx/issues
+  Metadata: third_party_licenses/python-hwpx-6.8.0/METADATA.txt
+  License/notice file: third_party_licenses/python-hwpx-6.8.0/python_hwpx-6.8.0.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/python-hwpx-6.8.0/python_hwpx-6.8.0.dist-info/licenses/NOTICE
+
+PyYAML 6.0.1
+  Declared license: MIT
+  URL: Bug Tracker, https://github.com/yaml/pyyaml/issues
+  URL: CI, https://github.com/yaml/pyyaml/actions
+  URL: Documentation, https://pyyaml.org/wiki/PyYAMLDocumentation
+  URL: Mailing lists, http://lists.sourceforge.net/lists/listinfo/yaml-core
+  URL: Source Code, https://github.com/yaml/pyyaml
+  URL: https://pyyaml.org/
+  Metadata: third_party_licenses/pyyaml-6.0.1/METADATA.txt
+  License/notice file: third_party_licenses/pyyaml-6.0.1/pyyaml-6.0.1.dist-info/licenses/LICENSE
+
+requests 2.34.2
+  Declared license: Apache-2.0
+  URL: Documentation, https://requests.readthedocs.io
+  URL: Source, https://github.com/psf/requests
+  Metadata: third_party_licenses/requests-2.34.2/METADATA.txt
+  License/notice file: third_party_licenses/requests-2.34.2/requests-2.34.2.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/requests-2.34.2/requests-2.34.2.dist-info/licenses/NOTICE
+
+rich 15.0.0
+  Declared license: MIT
+  URL: Documentation, https://rich.readthedocs.io/en/latest/
+  URL: Homepage, https://github.com/Textualize/rich
+  Metadata: third_party_licenses/rich-15.0.0/METADATA.txt
+  License/notice file: third_party_licenses/rich-15.0.0/rich-15.0.0.dist-info/licenses/LICENSE
+
+shellingham 1.5.4
+  Declared license: ISC License
+  URL: https://github.com/sarugaku/shellingham
+  Metadata: third_party_licenses/shellingham-1.5.4/METADATA.txt
+  License/notice file: third_party_licenses/shellingham-1.5.4/shellingham-1.5.4.dist-info/LICENSE
+
+sniffio 1.3.1
+  Declared license: MIT OR Apache-2.0
+  URL: Homepage, https://github.com/python-trio/sniffio
+  URL: Documentation, https://sniffio.readthedocs.io/
+  URL: Changelog, https://sniffio.readthedocs.io/en/latest/history.html
+  Metadata: third_party_licenses/sniffio-1.3.1/METADATA.txt
+  License/notice file: third_party_licenses/sniffio-1.3.1/sniffio-1.3.1.dist-info/LICENSE
+  License/notice file: third_party_licenses/sniffio-1.3.1/sniffio-1.3.1.dist-info/LICENSE.APACHE2
+  License/notice file: third_party_licenses/sniffio-1.3.1/sniffio-1.3.1.dist-info/LICENSE.MIT
+
+tenacity 9.1.4
+  Declared license: Apache 2.0
+  URL: https://github.com/jd/tenacity
+  Metadata: third_party_licenses/tenacity-9.1.4/METADATA.txt
+  License/notice file: third_party_licenses/tenacity-9.1.4/tenacity-9.1.4.dist-info/licenses/LICENSE
+
+truststore 0.10.4
+  Declared license: MIT
+  URL: Documentation, https://truststore.readthedocs.io
+  URL: Source, https://github.com/sethmlarson/truststore
+  Metadata: third_party_licenses/truststore-0.10.4/METADATA.txt
+  License/notice file: third_party_licenses/truststore-0.10.4/truststore-0.10.4.dist-info/licenses/LICENSE
+
+typer 0.27.3
+  Declared license: MIT
+  URL: Homepage, https://github.com/fastapi/typer
+  URL: Documentation, https://typer.tiangolo.com
+  URL: Repository, https://github.com/fastapi/typer
+  URL: Issues, https://github.com/fastapi/typer/issues
+  URL: Changelog, https://typer.tiangolo.com/release-notes/
+  Metadata: third_party_licenses/typer-0.27.3/METADATA.txt
+  License/notice file: third_party_licenses/typer-0.27.3/typer-0.27.3.dist-info/licenses/LICENSE
+  License/notice file: third_party_licenses/typer-0.27.3/typer/_click/LICENSE.txt
+
+typing_extensions 4.16.0
+  Declared license: PSF-2.0
+  URL: Bug Tracker, https://github.com/python/typing_extensions/issues
+  URL: Changes, https://github.com/python/typing_extensions/blob/main/CHANGELOG.md
+  URL: Documentation, https://typing-extensions.readthedocs.io/
+  URL: Home, https://github.com/python/typing_extensions
+  URL: Q & A, https://github.com/python/typing/discussions
+  URL: Repository, https://github.com/python/typing_extensions
+  Metadata: third_party_licenses/typing-extensions-4.16.0/METADATA.txt
+  License/notice file: third_party_licenses/typing-extensions-4.16.0/typing_extensions-4.16.0.dist-info/licenses/LICENSE
+
+typing-inspection 0.4.4
+  Declared license: MIT
+  URL: Homepage, https://github.com/pydantic/typing-inspection
+  URL: Documentation, https://pydantic.github.io/typing-inspection/dev/
+  URL: Source, https://github.com/pydantic/typing-inspection
+  URL: Changelog, https://github.com/pydantic/typing-inspection/blob/main/HISTORY.md
+  Metadata: third_party_licenses/typing-inspection-0.4.4/METADATA.txt
+  License/notice file: third_party_licenses/typing-inspection-0.4.4/typing_inspection-0.4.4.dist-info/licenses/LICENSE
+
+urllib3 2.8.0
+  Declared license: MIT
+  URL: Changelog, https://github.com/urllib3/urllib3/blob/main/CHANGES.rst
+  URL: Documentation, https://urllib3.readthedocs.io
+  URL: Code, https://github.com/urllib3/urllib3
+  URL: Issue tracker, https://github.com/urllib3/urllib3/issues
+  URL: Security policy, https://urllib3.readthedocs.io/en/latest/security.html
+  Metadata: third_party_licenses/urllib3-2.8.0/METADATA.txt
+  License/notice file: third_party_licenses/urllib3-2.8.0/urllib3-2.8.0.dist-info/licenses/LICENSE.txt
+
+websockets 16.1.1
+  Declared license: BSD-3-Clause
+  URL: Homepage, https://github.com/python-websockets/websockets
+  URL: Changelog, https://websockets.readthedocs.io/en/stable/project/changelog.html
+  URL: Documentation, https://websockets.readthedocs.io/
+  URL: Funding, https://tidelift.com/subscription/pkg/pypi-websockets?utm_source=pypi-websockets&utm_medium=referral&utm_campaign=readme
+  URL: Tracker, https://github.com/python-websockets/websockets/issues
+  Metadata: third_party_licenses/websockets-16.1.1/METADATA.txt
+  License/notice file: third_party_licenses/websockets-16.1.1/websockets-16.1.1.dist-info/licenses/LICENSE
+
+Executable bootloader
+=====================
+
+pyinstaller 6.22.3
+  Declared license: GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)
+  URL: Homepage, https://pyinstaller.org
+  URL: Documentation, https://pyinstaller.org
+  URL: Source Code, https://github.com/pyinstaller/pyinstaller
+  URL: Release Notes, https://pyinstaller.org/en/stable/CHANGES.html
+  Metadata: third_party_licenses/pyinstaller-6.22.3/METADATA.txt
+  License/notice file: third_party_licenses/pyinstaller-6.22.3/pyinstaller-6.22.3.dist-info/licenses/COPYING.txt

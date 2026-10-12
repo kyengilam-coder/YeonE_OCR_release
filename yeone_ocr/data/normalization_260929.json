@@ -1,0 +1,646 @@
+{
+  "source_name": "중문부호-한국부호 변환(2023년식) - 260929.msr",
+  "sha256": "ef5a067482dc042835763e9019e2dd8d121be1a0e1d112834b6418dfd2ba0ca1",
+  "encoding": "utf-16le",
+  "script_offset": 196,
+  "parameter_blocks": 101,
+  "flags": {
+    "MatchCase": 0,
+    "AllWordForms": 0,
+    "SeveralWords": 0,
+    "UseWildCards": 0,
+    "WholeWordOnly": 0,
+    "AutoSpell": 1,
+    "Direction": "FindDir(\"AllDoc\")",
+    "IgnoreFindString": 0,
+    "IgnoreReplaceString": 0,
+    "ReplaceMode": 1,
+    "IgnoreMessage": 1,
+    "HanjaFromHangul": 0,
+    "FindJaso": 0,
+    "FindRegExp": 0,
+    "FindStyle": "",
+    "ReplaceStyle": "",
+    "FindType": 1
+  },
+  "rules": [
+    {
+      "id": 1,
+      "source_block": 1,
+      "find": "，",
+      "replace": ", "
+    },
+    {
+      "id": 2,
+      "source_block": 2,
+      "find": "、",
+      "replace": "·"
+    },
+    {
+      "id": 3,
+      "source_block": 3,
+      "find": "。",
+      "replace": ". "
+    },
+    {
+      "id": 4,
+      "source_block": 4,
+      "find": "：",
+      "replace": " : "
+    },
+    {
+      "id": 5,
+      "source_block": 5,
+      "find": ";",
+      "replace": "; "
+    },
+    {
+      "id": 6,
+      "source_block": 6,
+      "find": "；",
+      "replace": "; "
+    },
+    {
+      "id": 7,
+      "source_block": 7,
+      "find": "《",
+      "replace": "『"
+    },
+    {
+      "id": 8,
+      "source_block": 8,
+      "find": "》",
+      "replace": "』"
+    },
+    {
+      "id": 9,
+      "source_block": 9,
+      "find": "（",
+      "replace": "("
+    },
+    {
+      "id": 10,
+      "source_block": 10,
+      "find": "）",
+      "replace": ")"
+    },
+    {
+      "id": 11,
+      "source_block": 11,
+      "find": "！",
+      "replace": "! "
+    },
+    {
+      "id": 12,
+      "source_block": 12,
+      "find": "？",
+      "replace": "? "
+    },
+    {
+      "id": 13,
+      "source_block": 13,
+      "find": "O",
+      "replace": "."
+    },
+    {
+      "id": 14,
+      "source_block": 14,
+      "find": "•",
+      "replace": "·"
+    },
+    {
+      "id": 15,
+      "source_block": 15,
+      "find": "ニ",
+      "replace": "二"
+    },
+    {
+      "id": 16,
+      "source_block": 16,
+      "find": "飲",
+      "replace": "飮"
+    },
+    {
+      "id": 17,
+      "source_block": 17,
+      "find": "即",
+      "replace": "卽"
+    },
+    {
+      "id": 18,
+      "source_block": 18,
+      "find": "既",
+      "replace": "旣"
+    },
+    {
+      "id": 19,
+      "source_block": 19,
+      "find": "青",
+      "replace": "靑"
+    },
+    {
+      "id": 20,
+      "source_block": 20,
+      "find": "清",
+      "replace": "淸"
+    },
+    {
+      "id": 21,
+      "source_block": 21,
+      "find": "真",
+      "replace": "眞"
+    },
+    {
+      "id": 22,
+      "source_block": 22,
+      "find": "慎",
+      "replace": "愼"
+    },
+    {
+      "id": 23,
+      "source_block": 23,
+      "find": "鎮",
+      "replace": "鎭"
+    },
+    {
+      "id": 24,
+      "source_block": 24,
+      "find": "顛",
+      "replace": "顚"
+    },
+    {
+      "id": 25,
+      "source_block": 25,
+      "find": "巔",
+      "replace": "巓"
+    },
+    {
+      "id": 26,
+      "source_block": 26,
+      "find": "填",
+      "replace": "塡"
+    },
+    {
+      "id": 27,
+      "source_block": 27,
+      "find": "痺",
+      "replace": "痹"
+    },
+    {
+      "id": 28,
+      "source_block": 28,
+      "find": "俞",
+      "replace": "兪"
+    },
+    {
+      "id": 29,
+      "source_block": 29,
+      "find": "榆",
+      "replace": "楡"
+    },
+    {
+      "id": 30,
+      "source_block": 30,
+      "find": "喻",
+      "replace": "喩"
+    },
+    {
+      "id": 31,
+      "source_block": 31,
+      "find": "俞",
+      "replace": "兪"
+    },
+    {
+      "id": 32,
+      "source_block": 32,
+      "find": "舉",
+      "replace": "擧"
+    },
+    {
+      "id": 33,
+      "source_block": 33,
+      "find": "為",
+      "replace": "爲"
+    },
+    {
+      "id": 34,
+      "source_block": 34,
+      "find": "偽",
+      "replace": "僞"
+    },
+    {
+      "id": 35,
+      "source_block": 35,
+      "find": "隂",
+      "replace": "陰"
+    },
+    {
+      "id": 36,
+      "source_block": 36,
+      "find": "髒",
+      "replace": "臟"
+    },
+    {
+      "id": 37,
+      "source_block": 37,
+      "find": "值",
+      "replace": "値"
+    },
+    {
+      "id": 38,
+      "source_block": 38,
+      "find": "黄",
+      "replace": "黃"
+    },
+    {
+      "id": 39,
+      "source_block": 39,
+      "find": "黒",
+      "replace": "黑"
+    },
+    {
+      "id": 40,
+      "source_block": 40,
+      "find": "温",
+      "replace": "溫"
+    },
+    {
+      "id": 41,
+      "source_block": 41,
+      "find": "虚",
+      "replace": "虛"
+    },
+    {
+      "id": 42,
+      "source_block": 42,
+      "find": "脱",
+      "replace": "脫"
+    },
+    {
+      "id": 43,
+      "source_block": 43,
+      "find": "尚",
+      "replace": "尙"
+    },
+    {
+      "id": 44,
+      "source_block": 44,
+      "find": "絕",
+      "replace": "絶"
+    },
+    {
+      "id": 45,
+      "source_block": 45,
+      "find": "半",
+      "replace": "半"
+    },
+    {
+      "id": 46,
+      "source_block": 46,
+      "find": "術",
+      "replace": "朮"
+    },
+    {
+      "id": 47,
+      "source_block": 47,
+      "find": "瘘",
+      "replace": "瘻"
+    },
+    {
+      "id": 48,
+      "source_block": 48,
+      "find": "鬥",
+      "replace": "斗"
+    },
+    {
+      "id": 49,
+      "source_block": 49,
+      "find": "幹",
+      "replace": "乾"
+    },
+    {
+      "id": 50,
+      "source_block": 50,
+      "find": "干",
+      "replace": "乾"
+    },
+    {
+      "id": 51,
+      "source_block": 51,
+      "find": "癫",
+      "replace": "癲"
+    },
+    {
+      "id": 52,
+      "source_block": 52,
+      "find": "贏",
+      "replace": "羸"
+    },
+    {
+      "id": 53,
+      "source_block": 53,
+      "find": "扼",
+      "replace": "梔"
+    },
+    {
+      "id": 54,
+      "source_block": 54,
+      "find": "笞",
+      "replace": "苔"
+    },
+    {
+      "id": 55,
+      "source_block": 55,
+      "find": "ᄉ",
+      "replace": "人"
+    },
+    {
+      "id": 56,
+      "source_block": 56,
+      "find": "고",
+      "replace": "衛"
+    },
+    {
+      "id": 57,
+      "source_block": 57,
+      "find": "ᄎ",
+      "replace": "大"
+    },
+    {
+      "id": 58,
+      "source_block": 58,
+      "find": "胺",
+      "replace": "脘"
+    },
+    {
+      "id": 59,
+      "source_block": 59,
+      "find": "厚樸",
+      "replace": "厚朴"
+    },
+    {
+      "id": 60,
+      "source_block": 60,
+      "find": "白苟",
+      "replace": "白芍"
+    },
+    {
+      "id": 61,
+      "source_block": 61,
+      "find": "赤苟",
+      "replace": "赤芍"
+    },
+    {
+      "id": 62,
+      "source_block": 62,
+      "find": "苟藥",
+      "replace": "芍藥"
+    },
+    {
+      "id": 63,
+      "source_block": 63,
+      "find": "夜苓",
+      "replace": "茯苓"
+    },
+    {
+      "id": 64,
+      "source_block": 64,
+      "find": "積實",
+      "replace": "枳實"
+    },
+    {
+      "id": 65,
+      "source_block": 65,
+      "find": "積殼",
+      "replace": "枳殼"
+    },
+    {
+      "id": 66,
+      "source_block": 66,
+      "find": "獲等",
+      "replace": "茯苓"
+    },
+    {
+      "id": 67,
+      "source_block": 67,
+      "find": "榮고",
+      "replace": "榮衛"
+    },
+    {
+      "id": 68,
+      "source_block": 68,
+      "find": "疲嗽",
+      "replace": "痰嗽"
+    },
+    {
+      "id": 69,
+      "source_block": 69,
+      "find": "景嶽",
+      "replace": "景岳"
+    },
+    {
+      "id": 70,
+      "source_block": 70,
+      "find": "黃苗",
+      "replace": "黃芪"
+    },
+    {
+      "id": 71,
+      "source_block": 71,
+      "find": "萊英",
+      "replace": "茱萸"
+    },
+    {
+      "id": 72,
+      "source_block": 72,
+      "find": "拘祀",
+      "replace": "枸杞"
+    },
+    {
+      "id": 73,
+      "source_block": 73,
+      "find": "金匿",
+      "replace": "金匱"
+    },
+    {
+      "id": 74,
+      "source_block": 74,
+      "find": "強",
+      "replace": "强"
+    },
+    {
+      "id": 75,
+      "source_block": 75,
+      "find": "產",
+      "replace": "産"
+    },
+    {
+      "id": 76,
+      "source_block": 76,
+      "find": "並",
+      "replace": "竝"
+    },
+    {
+      "id": 77,
+      "source_block": 77,
+      "find": "眾",
+      "replace": "衆"
+    },
+    {
+      "id": 78,
+      "source_block": 78,
+      "find": "腳",
+      "replace": "脚"
+    },
+    {
+      "id": 79,
+      "source_block": 79,
+      "find": "教",
+      "replace": "敎"
+    },
+    {
+      "id": 80,
+      "source_block": 80,
+      "find": "卻",
+      "replace": "却"
+    },
+    {
+      "id": 81,
+      "source_block": 81,
+      "find": "澀",
+      "replace": "澁"
+    },
+    {
+      "id": 82,
+      "source_block": 82,
+      "find": "沉",
+      "replace": "沈"
+    },
+    {
+      "id": 83,
+      "source_block": 83,
+      "find": "横",
+      "replace": "橫"
+    },
+    {
+      "id": 84,
+      "source_block": 84,
+      "find": "研",
+      "replace": "硏"
+    },
+    {
+      "id": 85,
+      "source_block": 85,
+      "find": "緒",
+      "replace": "緖"
+    },
+    {
+      "id": 86,
+      "source_block": 86,
+      "find": "⻄",
+      "replace": "西"
+    },
+    {
+      "id": 87,
+      "source_block": 87,
+      "find": "敘",
+      "replace": "敍"
+    },
+    {
+      "id": 88,
+      "source_block": 88,
+      "find": "啟",
+      "replace": "啓"
+    },
+    {
+      "id": 89,
+      "source_block": 89,
+      "find": "⻑",
+      "replace": "長"
+    },
+    {
+      "id": 90,
+      "source_block": 90,
+      "find": "鄉",
+      "replace": "鄕"
+    },
+    {
+      "id": 91,
+      "source_block": 91,
+      "find": "⺠",
+      "replace": "民"
+    },
+    {
+      "id": 92,
+      "source_block": 92,
+      "find": "脅",
+      "replace": "脇"
+    },
+    {
+      "id": 93,
+      "source_block": 93,
+      "find": "涼",
+      "replace": "凉"
+    },
+    {
+      "id": 94,
+      "source_block": 93,
+      "find": "涼",
+      "replace": "凉"
+    },
+    {
+      "id": 95,
+      "source_block": 94,
+      "find": "吞",
+      "replace": "呑"
+    },
+    {
+      "id": 96,
+      "source_block": 94,
+      "find": "吞",
+      "replace": "呑"
+    },
+    {
+      "id": 97,
+      "source_block": 95,
+      "find": "諸",
+      "replace": "諸"
+    },
+    {
+      "id": 98,
+      "source_block": 96,
+      "find": "彥",
+      "replace": "彦"
+    },
+    {
+      "id": 99,
+      "source_block": 97,
+      "find": "顏",
+      "replace": "顔"
+    },
+    {
+      "id": 100,
+      "source_block": 98,
+      "find": "晚",
+      "replace": "晩"
+    },
+    {
+      "id": 101,
+      "source_block": 99,
+      "find": "（",
+      "replace": "("
+    },
+    {
+      "id": 102,
+      "source_block": 100,
+      "find": "）",
+      "replace": ")"
+    },
+    {
+      "id": 103,
+      "source_block": 101,
+      "find": "餅",
+      "replace": "餠"
+    }
+  ]
+}

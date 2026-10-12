@@ -369,9 +369,9 @@ class Command(unittest.TestCase):
 
     def test_suspects_without_marks(self):
         rd = Reader({frozenset("日曰"): ("日", "洪荒日月")})
-        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as resources:
             doc, work = self._work(td); before = body(work.load_record(1))
-            handles.callback(doc.close)
+            resources.callback(doc.close)
             rc, out = self._run(work, doc, rd)
             self.assertEqual(rc, 0, out); self.assertNotIn("판별할 〔a/b〕 자리가 없습니다", out)
             self.assertIn("합의 의심: 1곳 물음 → 자형이 글자층 쪽 1(확인 항목) · 판독 쪽 0 · 못 가림 0", out)
@@ -405,9 +405,9 @@ class Command(unittest.TestCase):
                 rg.CALL_CAP.take(); self.u["calls"] = self.u.get("calls", 0) + 1
                 return super()._ans(ask)
         rd = Paid({frozenset("玄元"): ("玄", "地玄黃"), frozenset("日曰"): ("日", "洪荒日月")})
-        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as resources:
             doc, work = self._mark_work(td)
-            handles.callback(doc.close)
+            resources.callback(doc.close)
             rg.set_call_cap(1)
             try:
                 rc, out = self._run(work, doc, rd)
@@ -432,9 +432,9 @@ class Command(unittest.TestCase):
         class R(Reader):
             def _ans(self, ask):
                 cli.CANCEL.set(); return GlyphChoice(choice="玄", evidence="획", window="地玄黃")
-        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as resources:
             doc, work = self._mark_work(td)
-            handles.callback(doc.close)
+            resources.callback(doc.close)
             try:
                 rc, out = self._run(work, doc, R({}))
             finally:
@@ -473,9 +473,9 @@ class Command(unittest.TestCase):
             self.assertIn("새로 물을 곳이 없습니다", info[0])
 
     def test_no_suspects_and_cap(self):
-        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as resources:
             doc, work = self._work(td)
-            handles.callback(doc.close)
+            resources.callback(doc.close)
             rc, out = self._run(work, doc, Never(), no_suspects=True)
             self.assertEqual(rc, 0); self.assertIn("판별할 〔a/b〕 자리가 없습니다.", out); self.assertNotIn("합의", out)
             rc, out = self._run(work, doc, Never(), suspect_max=0)

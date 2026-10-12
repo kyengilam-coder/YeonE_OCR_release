@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 96 96">
+  <title>연어OCR — 문서 판독</title>
+  <rect x="3" y="3" width="90" height="90" rx="21" fill="#B7382D"/>
+  <path d="M30 19H58L70 31V73Q70 77 66 77H30Q26 77 26 73V23Q26 19 30 19Z" fill="#FFFAEB"/>
+  <path d="M58 19V31H70Z" fill="#FFCF70"/>
+  <path d="M35 43.5H59M35 55.5H59M35 67.5H49" fill="none" stroke="#862B24" stroke-width="5" stroke-linecap="round"/>
+  <path d="M15 28V15H28M68 15H81V28M81 68V81H68M28 81H15V68" fill="none" stroke="#FFCF70" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

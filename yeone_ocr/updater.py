@@ -454,6 +454,9 @@ def install_update(downloaded: Path, target_exe: Path, current_pid: int) -> None
     """검증된 실행 파일의 교체 도우미를 시작한다. 성공 반환 후에만 GUI 를 정상 종료해야 한다."""
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         raise UpdateError("자동 설치는 Windows 실행 파일 배포판에서만 지원합니다.")
+    from .runtime import is_installed_bundle
+    if is_installed_bundle():
+        raise UpdateError("폴더형 설치판은 실행 파일 하나만 교체할 수 없습니다. 릴리스 페이지에서 Setup 설치파일을 내려받아 업데이트하십시오.")
     target = Path(target_exe).resolve()
     if target != Path(sys.executable).resolve() or target.suffix.lower() != ".exe" or current_pid != os.getpid():
         raise UpdateError("현재 실행 중인 프로그램만 업데이트할 수 있습니다.")
@@ -492,7 +495,7 @@ def install_update(downloaded: Path, target_exe: Path, current_pid: int) -> None
                              "sha256": info.sha256, "size": info.size, "original_sha256": original_hash,
                              "ready_token": uuid.uuid4().hex + uuid.uuid4().hex})
         environment = os.environ.copy()
-        for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
             environment.pop(key, None)
         environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         helper = subprocess.Popen([str(_powershell()), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",

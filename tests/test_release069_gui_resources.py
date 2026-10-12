@@ -54,7 +54,7 @@ class GuiResources(unittest.TestCase):
     def test_estimate_closes_pdf_on_success_and_bad_page_spec(self):
         app = SimpleNamespace(pdf=lambda: str(self.pdf), work=lambda: self.root / "result", cfg={}, fx_setting=lambda: (None, ""),
                               v_pages=var("1"), v_up=var("2"), v_second=var(True), v_model=var("x"), v_model2=var("auto"),
-                              v_cache=var(True), v_force=var(False))
+                              v_cache=var(True), v_force=var(False), v_reader=var("gemini"))
         with patch("yeone_ocr.pdfio.open_pdf", side_effect=self.open_pdf), patch("yeone_ocr.estimate.estimate", return_value={"ok": True}):
             self.assertEqual(gui.App.estimate_data(app), {"ok": True})
             self.assert_closed()

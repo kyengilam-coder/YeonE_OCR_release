@@ -994,9 +994,10 @@ class ImageInput(unittest.TestCase):
         from yeone_ocr import cli
         with tempfile.TemporaryDirectory() as td:
             d = os.path.join(td, "scans"); os.makedirs(d); self._imgs(d)
-            with contextlib.redirect_stdout(io.StringIO()):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
                 rc = cli.main(["run", d, "--work", os.path.join(td, "w"), "--reader", "mock", "--checkpoint", "0"])
-            self.assertEqual(rc, 0)
+            self.assertEqual(rc, 0, output.getvalue())
             self.assertTrue(os.path.exists(os.path.join(td, "w", "out", "scans.hwpx")))
             self.assertEqual(len(os.listdir(os.path.join(td, "w", "readings"))), 5)
 

@@ -1,6 +1,0 @@
-The installed hanja 0.15.1 wheel omits the separate upstream license file.
-LICENSE.txt reproduces the license terms from the author's public repository:
-https://raw.githubusercontent.com/suminb/hanja/develop/LICENSE.txt
-Human-readable source:
-https://github.com/suminb/hanja/blob/develop/LICENSE.txt
-Retrieved: 2026-10-12

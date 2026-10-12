@@ -258,6 +258,8 @@ class Edit(unittest.TestCase):
             t3 = bk3.texts()[sec.start + 1]
             self.assertIn("陶云無毒", t3); self.assertNotIn("〔원: 有〕", t3)          # 자동 교정은 색으로만(원래 글자는 보고에)
             self.assertIn("〔확인: 판독", t3)                                            # 고지(폭 없는 표시)만 글 속 〔…〕
+            z.close()
+            for book in (bk, bk2, bk3, bk4): book.doc.close()
 
 
 if __name__ == "__main__":

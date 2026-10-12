@@ -12,13 +12,15 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from . import __version__
 from .progress import Tracker, fmt_duration, fmt_elapsed
+from .providers import DEFAULT_MODELS, PROVIDER_LABELS, ENV_KEYS, KEY_URLS
+from .runtime import is_frozen, is_installed_bundle, can_replace_executable, safe_output_path, external_dll_search
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".jp2", ".j2k", ".jpx")   # pdfio.IMAGE_EXTS 와 같게(창은 pymupdf 없이도 떠야 하므로 따로 둠)
 
 APP_NAME = "YeonE_OCR"
 CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
-            ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
+            ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
@@ -34,7 +36,10 @@ STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 �
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
 한자·한글 혼용 문헌(세로쓰기 스캔 PDF, 가로쓰기 한문 책)을 지침에 따라 OCR·교정해 HWPX 로 만듭니다.
-글자는 Gemini 가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다.
+글자는 선택한 Gemini·ChatGPT(OpenAI)·Claude 가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다.
+제공사별 API 키와 모델을 따로 기억합니다. 채팅 서비스 구독과 별도로 해당 제공사의 API 키가 필요합니다.
+같은 파일·결과 폴더에서 판독기를 바꿔 실행하면 완료한 쪽은 보존하고 남은 작업을 이어 갑니다.
+문서를 만들 때 간체→번체, 제공된 중문부호 규칙, 문맥에 따른 云/雲 교정을 자동 적용하고 변경 내역을 남깁니다.
 맨 위의 [일반 OCR] 은 PDF → HWPX, [책갈피 OCR] 은 이미 입력된 HWPX 를 PDF 와 대조해 고친 사본을 만듭니다.
 
 쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② [PDF·이미지 고르기…] → ③ [▶ 한 번에 인식].
@@ -44,7 +49,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
 차례
  1. Windows 실행 파일에는 패키지가 들어 있습니다. Python 소스로 실행하면 [패키지 설치·점검](고급 안)으로 설치할 수 있습니다.
- 2. API 키를 넣고 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다. (https://aistudio.google.com/apikey)
+ 2. 판독기를 고르고 해당 제공사의 API 키를 넣어 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다.
  3. [PDF·이미지 고르기…] 로 파일을 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)도 됩니다 — 여러 장을 함께 고르면 이름의 숫자 순서로
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
     인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 이미지는 글자층이 없어 세로쓰기로 보므로
@@ -102,7 +107,30 @@ def upgrade_config(cfg: dict) -> dict:
     if cfg.get("media_res") not in MRES_LABELS:
         cfg["media_res"] = DEFAULTS["media_res"]
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
+    reader = cfg.get("reader", "gemini")
+    if reader not in PROVIDER_LABELS:
+        reader = cfg["reader"] = "gemini"
+    profiles = cfg.get("provider_settings")
+    if not isinstance(profiles, dict):
+        profiles = {}
+    cfg["provider_settings"] = profiles
+    if reader not in profiles:
+        remember_provider(cfg, reader, cfg.get("model", DEFAULT_MODELS.get(reader, "")),
+                          cfg.get("api_key", ""), cfg.get("second_model", "auto"))
+    cfg.update(provider_profile(cfg, reader))
     return cfg
+
+
+def provider_profile(cfg: dict, reader: str) -> dict:
+    """키·모델을 제공사별로 분리한다. 다른 제공사의 키를 기본값으로 가져오지 않는다."""
+    saved = (cfg.get("provider_settings") or {}).get(reader) or {}
+    if not isinstance(saved, dict): saved = {}
+    return {"model": saved.get("model", DEFAULT_MODELS.get(reader, "")),
+            "api_key": saved.get("api_key", ""), "second_model": saved.get("second_model", "auto")}
+
+
+def remember_provider(cfg: dict, reader: str, model: str, key: str, second_model: str) -> None:
+    cfg.setdefault("provider_settings", {})[reader] = {"model": model, "api_key": key, "second_model": second_model}
 
 
 def load_config() -> dict:
@@ -142,6 +170,8 @@ def finish_words(rc, problems: list[str] | None = None) -> tuple[str, str, str]:
         return "partial", "끝 (실패한 쪽 있음 — 진행 기록 확인)", "100% · 완료(실패 쪽 있음)"
     if rc == 4:
         return "partial", "끝 (3차 글자 판별 못 마침 — 〔a/b〕 남음)", "100% · 완료(3차 판별 못 마침)"
+    if rc == 5:
+        return "partial", "끝 (문맥 교정 확인 필요 — 교정 기록 확인)", "100% · 완료(문맥 교정 확인 필요)"
     if rc == 130:
         return "stopped", "중지됨", "중지됨"
     return "error", "오류 (진행 기록 확인)", "멈춤(오류)"
@@ -161,6 +191,8 @@ def finish_alert(rc, label: str, problems: list[str]) -> tuple[str, str] | None:
         return "error", f"{label} 이(가) 중단되었습니다.\n\n" + "\n".join(ps[-3:])
     if rc == 4:
         head = f"{label} 이(가) 끝났지만 3차 글자 판별을 마치지 못해 〔a/b〕 표시가 남았습니다. 다시 실행하면 3차 판별을 이어서 합니다."
+    elif rc == 5:
+        head = f"{label} 이(가) 끝났지만 문맥으로 확정하지 못한 글자가 있습니다. 원래 글자는 보존했으며 출력 폴더의 교정 기록에서 원문·후보·문맥을 확인할 수 있습니다."
     elif kind == "partial" and _pages_failed(ps):
         head = f"{label} 이(가) 끝났지만 실패한 쪽이 있습니다. 다시 실행하면 그 쪽만 다시 시도합니다."
     else:
@@ -189,13 +221,15 @@ def work_dir_for(pdf: str) -> Path:
     (같은 이름의 PDF·이미지·폴더가 한곳에 있어도 판독 기록이 섞이지 않게)."""
     p = Path(pdf)
     if p.is_dir():
-        return p.with_name(p.name + "_이미지_YeonE_OCR")
-    if p.suffix.lower() not in ("", ".pdf"):
-        return p.with_name(f"{p.stem}_{p.suffix.lower().lstrip('.')}_YeonE_OCR")
-    return p.with_name(p.stem + "_YeonE_OCR")
+        out = p.with_name(p.name + "_이미지_YeonE_OCR")
+    elif p.suffix.lower() not in ("", ".pdf"):
+        out = p.with_name(f"{p.stem}_{p.suffix.lower().lstrip('.')}_YeonE_OCR")
+    else:
+        out = p.with_name(p.stem + "_YeonE_OCR")
+    return safe_output_path(out, p)
 
 
-SECRET_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+SECRET_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 
 
 def child_env() -> dict:
@@ -206,7 +240,8 @@ def child_env() -> dict:
 def open_path(path: str | Path) -> None:
     path = str(path)
     if sys.platform.startswith("win"):
-        os.startfile(path)                      # type: ignore[attr-defined]   (ShellExecute 는 환경을 따로 받지 않는다)
+        with external_dll_search():
+            os.startfile(path)                  # type: ignore[attr-defined]   (ShellExecute 는 환경을 따로 받지 않는다)
     elif sys.platform == "darwin":
         subprocess.Popen(["open", path], env=child_env())
     else:
@@ -332,7 +367,8 @@ class ModelDialog(tk.Toplevel):
         cur = app.v_model.get().strip(); probe = probe or {}
         head = f"키 확인됨. 모델 {len(models)}개 중 고르십시오."
         if cur:
-            head += f"\n지금 '{cur}': " + ("호출 확인됨" if probe.get(cur) == "호출 확인됨" else ("목록에 있지만 호출 거부됨 — " + probe.get(cur, "") if cur in models else "목록에 없음"))
+            head += f"\n지금 '{cur}': " + ("호출 확인됨" if probe.get(cur) == "호출 확인됨" else
+                                      (probe[cur] if cur in probe else ("목록 확인됨 · 호출 전" if cur in models else "목록에 없음")))
         if working and working != cur:
             head += f"\n→ 호출 확인된 모델 '{working}' 을 미리 골라 두었습니다."
         P = app.px
@@ -343,7 +379,7 @@ class ModelDialog(tk.Toplevel):
         pick = working if working in models else (cur if cur in models else (models[0] if models else ""))
         if pick: self.cb.current(models.index(pick))
         self.cb.grid(row=1, column=0, columnspan=2, sticky="w", pady=P(8))
-        ttk.Label(f, style="Panel.TLabel", text="위쪽이 최신입니다. 판독 품질은 pro 계열이 낫고, flash 계열은 빠르고 쌉니다. preview·exp 는 시험판입니다.").grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Label(f, style="Panel.TLabel", text="이미지 입력을 지원하는 모델을 고르십시오. 모델별 품질·속도·API 요금이 다릅니다.").grid(row=2, column=0, columnspan=2, sticky="w")
         b = ttk.Frame(f, style="Dialog.TFrame"); b.grid(row=3, column=0, columnspan=2, pady=(P(12), 0))
         ttk.Button(b, text="이 모델로", command=self.ok, style="Accent.TButton").pack(side="left", padx=P(4))
         ttk.Button(b, text="닫기", command=self.destroy).pack(side="left", padx=P(4))
@@ -426,7 +462,7 @@ class EstimateDialog(tk.Toplevel):
         ttk.Label(self.adj, style="Panel.TLabel", text="원/달러").grid(row=0, column=5, sticky="e", padx=(10, 2)); self.e_fx.grid(row=0, column=6)
         ttk.Button(self.adj, text="이 값으로 다시 계산", command=self.save).grid(row=0, column=7, padx=(12, 4))
         ttk.Button(self.adj, text="자동값으로", command=self.reset).grid(row=0, column=8)
-        ttk.Label(self.adj, text="100만 토큰당 미국 달러. 요금표 https://ai.google.dev/pricing 과 다를 때만 고치십시오. 고친 값은 이 모델에 저장됩니다.",
+        ttk.Label(self.adj, text="100만 토큰당 미국 달러. 선택한 제공사의 API 요금표를 확인해 입력하십시오. 고친 값은 이 모델에 저장됩니다.",
                   style="Hint.TLabel").grid(row=1, column=0, columnspan=9, sticky="w", pady=(4, 0))
         self.adj_shown = False
         # 단추
@@ -457,13 +493,15 @@ class EstimateDialog(tk.Toplevel):
         self.tv.configure(height=max(1, len(e.get("rows") or [1]) + (1 if e.get("rows") else 0)))   # 단계 줄 + 합계 줄이 다 보이게
         tot = {"calls": 0, "in_low": 0, "in_high": 0, "out_low": 0, "out_high": 0, "usd_low": 0.0, "usd_high": 0.0}
         for r in e.get("rows") or []:
+            cost = f"${r['usd_low']:.2f}~{r['usd_high']:.2f}" if r.get("usd_low") is not None and r.get("usd_high") is not None else "단가 미입력"
             self.tv.insert("", "end", values=(r["label"], r["model"], f"{r['calls']:,}", f"{fmt_tokens(r['in_low'])}~{fmt_tokens(r['in_high'])}",
-                                              f"{fmt_tokens(r['out_low'])}~{fmt_tokens(r['out_high'])}", f"${r['usd_low']:.2f}~{r['usd_high']:.2f}"))
+                                              f"{fmt_tokens(r['out_low'])}~{fmt_tokens(r['out_high'])}", cost))
             for k in tot:
-                tot[k] += r.get(k, 0)
+                tot[k] = None if tot[k] is None or r.get(k, 0) is None else tot[k] + r.get(k, 0)
         if e.get("rows"):
+            cost = f"${tot['usd_low']:.2f}~{tot['usd_high']:.2f}" if tot["usd_low"] is not None and tot["usd_high"] is not None else "단가 미입력"
             self.tv.insert("", "end", tags=("sum",), values=("합계", "", f"{tot['calls']:,}", f"{fmt_tokens(tot['in_low'])}~{fmt_tokens(tot['in_high'])}",
-                                                             f"{fmt_tokens(tot['out_low'])}~{fmt_tokens(tot['out_high'])}", f"${tot['usd_low']:.2f}~{tot['usd_high']:.2f}"))
+                                                             f"{fmt_tokens(tot['out_low'])}~{fmt_tokens(tot['out_high'])}", cost))
         else:
             self.tv.insert("", "end", values=("전체", e["model"], f"{e['calls']:,}", f"{fmt_tokens(e['in_low'])}~{fmt_tokens(e['in_high'])}",
                                               f"{fmt_tokens(e['out_low'])}~{fmt_tokens(e['out_high'])}", "-"))
@@ -477,7 +515,7 @@ class EstimateDialog(tk.Toplevel):
         if e.get("page_px"):
             info.append(f"쪽 이미지 {e['page_px'][0]}×{e['page_px'][1]} · 확대 {e.get('upscale', 2)}배")
         self.v_info.set(" · ".join(info))
-        self.v_note.set("추정치입니다. 출력 토큰에는 생각(thinking) 토큰이 들어가며, 캐시 보관료(시간당 몇 센트)는 넣지 않았습니다.")
+        self.v_note.set(e.get("note") or "추정치입니다. 실제 요금은 제공사의 사용량 기록을 확인하십시오.")
         model = self.app.v_model.get().strip(); pr = resolve_price(model, self.app.cfg.get("prices") or {}) or {}
         fx, _ = self.app.fx_setting()
         self.l_model.configure(text=f"'{model}' 단가")
@@ -540,7 +578,8 @@ class UpdateDialog(tk.Toplevel):
         ttk.Label(body, text=f"새 버전 {info.version}을 사용할 수 있습니다.", style="Section.TLabel").pack(anchor="w")
         ttk.Label(body, text=f"현재 버전 {__version__}", style="PageHint.TLabel").pack(anchor="w", pady=(P(4), P(12)))
         explanation = ("실행 파일을 내려받아 확인한 뒤 프로그램을 다시 시작합니다.\nAPI 키·설정·판독 기록은 그대로 유지됩니다."
-                       if can_install else "Python 소스로 실행 중입니다. 릴리스 페이지에서 Windows 실행 파일을\n내려받을 수 있습니다. 현재 소스 파일은 자동으로 교체하지 않습니다.")
+                       if can_install else ("설치판은 릴리스 페이지의 Setup 설치파일로 업데이트하십시오.\nAPI 키·설정·판독 기록은 그대로 유지됩니다." if is_installed_bundle() else
+                       "Python 소스로 실행 중입니다. 릴리스 페이지에서 Windows 실행 파일을\n내려받을 수 있습니다. 현재 소스 파일은 자동으로 교체하지 않습니다."))
         ttk.Label(body, text=explanation, wraplength=P(530), justify="left").pack(anchor="w")
         if info.notes:
             notes = tk.Text(body, height=9, width=64, wrap="word", font=app.font_small)
@@ -601,7 +640,10 @@ TAB_HINTS = ("스캔 PDF·이미지를 지침대로 판독해 HWPX 문서로 만
 
 class App(tk.Tk):
     def __init__(self):
+        from .app_icon import apply_window_icon, set_windows_app_id
+        set_windows_app_id()
         super().__init__()
+        apply_window_icon(self)
         self.title(f"{APP_NAME} · 연어OCR {__version__}")
         self.cfg = load_config()
         self._style()
@@ -960,6 +1002,8 @@ class App(tk.Tk):
         c3 = self._card(mid, "문서"); c3.grid(row=0, column=1, sticky="nsew")
         self.v_up = tk.StringVar(value=self.cfg["upscale"]); self.v_reader = tk.StringVar(value=self.cfg["reader"])
         self.v_model = tk.StringVar(value=self.cfg["model"]); self.v_key = tk.StringVar(value=self.cfg["api_key"])
+        self._active_reader = self.v_reader.get()
+        self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
@@ -976,19 +1020,21 @@ class App(tk.Tk):
         b = c2.body; b.columnconfigure(1, weight=1)
         self._field_label(b, "판독기", 0)
         rr = ttk.Frame(b, style="Panel.TFrame"); rr.grid(row=0, column=1, columnspan=2, sticky="w", pady=P(3))
-        ttk.Radiobutton(rr, text="Gemini (원본 이미지 판독)", variable=self.v_reader, value="gemini", command=self._reader_changed).pack(side="left", padx=(0, P(16)))
-        ttk.Radiobutton(rr, text="기존 텍스트 레이어만 (API 없이 시험)", variable=self.v_reader, value="mock", command=self._reader_changed).pack(side="left")
+        self.cb_provider = ttk.Combobox(rr, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=30)
+        self.cb_provider.pack(side="left")
+        self.cb_provider.bind("<<ComboboxSelected>>", self._select_provider)
+        Tip(self.cb_provider, "제공사를 바꿔도 같은 결과 폴더의 완료 기록을 이어 씁니다. '기록 있는 쪽도 다시 판독'은 꺼 두십시오. 제공사마다 API 키가 필요합니다.", self)
         self._field_label(b, "읽기 방향", 1)
         cb = ttk.Combobox(b, textvariable=self.v_mode, values=list(MODE_LABELS.values()), state="readonly", width=self._cw(MODE_LABELS.values()))
         cb.grid(row=1, column=1, sticky="w", pady=P(3))
         Tip(cb, "자동 판정이면 PDF 글자층의 세로 열·가로 줄 글자 수로 세로쓰기 한자·한글 / 가로쓰기 한문(간체)을 고르고 결과 폴더에 적어 둡니다.", self)
         self._field_label(b, "모델", 2)
         self.e_model = ttk.Entry(b, textvariable=self.v_model); self.e_model.grid(row=2, column=1, sticky="ew", pady=P(3))
-        self._btn(b, "키 확인·모델 고르기", self.check_key, tip="키가 맞는지 Gemini 에 확인하고, 실제로 호출되는 모델 목록에서 고릅니다.").grid(row=2, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
+        self._btn(b, "키 확인·모델 고르기", self.check_key, tip="선택한 제공사에 키를 확인하고 모델 목록에서 고릅니다.").grid(row=2, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         self._field_label(b, "API 키", 3)
         self.e_key = ttk.Entry(b, textvariable=self.v_key, show="•"); self.e_key.grid(row=3, column=1, sticky="ew", pady=P(3))
-        Tip(self.e_key, "API 키. 다른 프로젝트의 키를 쉼표로 이어 여러 개 넣을 수 있습니다(예: AIza…, AIza…). 한 키가 하루 한도에 걸리면 다음 키로 넘어가 이어서 읽습니다.", self)
-        self._btn(b, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC 의 설정 파일에만 저장됩니다. 다른 프로젝트의 키를 쉼표로 더 넣으면 하루 한도에 걸릴 때 다음 키로 넘어갑니다.").grid(row=3, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
+        Tip(self.e_key, "선택한 제공사의 API 키를 넣으십시오. 키·모델은 제공사별로 따로 저장됩니다. Gemini는 쉼표로 여러 프로젝트의 키를 넣을 수 있습니다.", self)
+        self._btn(b, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC의 설정 파일에 제공사별로 저장됩니다.").grid(row=3, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
         ttk.Checkbutton(foot, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
         self.v_details = tk.BooleanVar(value=bool(self.cfg.get("details_open", False)))
@@ -999,7 +1045,7 @@ class App(tk.Tk):
         self._field_label(d, "2차 판독 모델", 1)
         r2 = ttk.Frame(d, style="Panel.TFrame"); r2.grid(row=1, column=1, columnspan=2, sticky="ew", pady=P(3))
         self.e_model2 = ttk.Entry(r2, textvariable=self.v_model2, width=24); self.e_model2.pack(side="left")
-        ttk.Label(r2, text="auto = 같은 세대 flash 자동 · 비우면 1차와 같음", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        ttk.Label(r2, text="auto = Gemini는 flash · 그 밖은 1차와 같음", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
         self._field_label(d, "속도", 2)
         sp = ttk.Frame(d, style="Panel.TFrame"); sp.grid(row=2, column=1, columnspan=2, sticky="w", pady=P(3))
         ttk.Label(sp, text="동시 최대", style="Field.TLabel").pack(side="left", padx=(0, P(4)))
@@ -1022,8 +1068,8 @@ class App(tk.Tk):
         self._field_label(d, "판독 단계", 4)
         ck = ttk.Frame(d, style="Panel.TFrame"); ck.grid(row=4, column=1, columnspan=2, sticky="w", pady=P(3))
         ttk.Checkbutton(ck, text="영역 확대 2차 독립 판독·비교", variable=self.v_second).pack(side="left", padx=(0, P(14)))
-        ttk.Checkbutton(ck, text="지침 캐시", variable=self.v_cache).pack(side="left", padx=(0, P(14)))
-        ttk.Checkbutton(ck, text="2차 생각 줄이기", variable=self.v_think2).pack(side="left")
+        self.ck_cache = ttk.Checkbutton(ck, text="지침 캐시 (Gemini)", variable=self.v_cache); self.ck_cache.pack(side="left", padx=(0, P(14)))
+        self.ck_think2 = ttk.Checkbutton(ck, text="2차 생각 줄이기 (Gemini)", variable=self.v_think2); self.ck_think2.pack(side="left")
         self._field_label(d, "3차 판별", 5)
         bl = ttk.Frame(d, style="Panel.TFrame"); bl.grid(row=5, column=1, columnspan=2, sticky="w", pady=P(3))
         cb = ttk.Checkbutton(bl, text="후보 없이 한 번 더 읽어 같을 때만 확정", variable=self.v_blind); cb.pack(side="left")
@@ -1052,6 +1098,7 @@ class App(tk.Tk):
         ttk.Label(p1, text="· 쪽 해상도", style="Field.TLabel").pack(side="left", padx=(P(6), P(4)))
         m1 = ttk.Combobox(p1, textvariable=self.v_mres1, values=list(PAGE_MRES_LABELS.values()), state="readonly", width=self._cw(PAGE_MRES_LABELS.values()))
         m1.pack(side="left")
+        self._gemini_widgets = ((mr, "readonly"), (t1, "readonly"), (m1, "readonly"), (self.ck_cache, "normal"), (self.ck_think2, "normal"))
         Tip(t1, "1차 생각 수준: 쪽 전체 판독(영역 나누기·1차 글)의 생각 수준. 자동 = 모델 기본(지금까지와 같음). 낮추면 빠르고 싸지만 정확도가 달라질 수 있으니 "
                 "같은 표본 쪽을 결과 폴더만 바꿔 측정(yeone-ocr eval)으로 비교한 뒤 바꾸십시오. Gemini 3 은 생각 수준, 2.5 는 생각 예산(낮음 512 · 중간 4096 · 높음 24576, 2.5 Pro 32768). "
                 "모델이 받지 않으면 저절로 모델 기본으로 계속합니다.", self)
@@ -1087,6 +1134,7 @@ class App(tk.Tk):
         cc.grid(row=1, column=1, sticky="w")
         Tip(cc, "문서 끝에 확인 목록을 넣을지. 기본은 넣지 않으며(문서에는 OCR 본문만), 전체 목록은 검수 화면에 있습니다.", self)
         self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
+        self._hint(b, "자동 교정: 간체→번체 · 중문부호 규칙 · 云/雲 문맥 판별. 변경 내역은 출력 폴더의 교정 기록에 저장됩니다.").grid(row=8, column=0, sticky="ew", pady=(P(8), 0))
         self._btn(b, "설정 저장", self.save_settings, tip="지금 설정을 저장합니다(실행할 때와 창을 닫을 때도 저절로 저장).").grid(row=7, column=0, sticky="e", pady=(P(8), 0))
 
         # ---- 고급(접힘) ----
@@ -1106,7 +1154,8 @@ class App(tk.Tk):
                  ("혼동 장부", self.do_ledger, "어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(모델 호출 없음)"),
                  ("비교 다시 계산", self.do_remerge, "저장된 1차·2차 판독으로 확인 표시만 다시 계산합니다(모델 호출 없음). 프로그램을 새 판으로 바꾼 뒤에"),
                  ("검수 결과 기록…", self.do_mark, "사람이 원본 대조를 마친 쪽에 '원본 대조 완료(사람)' 를 남깁니다"),
-                 ("패키지 설치·점검", self.install_packages, "필요한 파이썬 패키지를 설치하거나 새 판으로 올립니다"),
+                 ("구성요소 점검" if is_frozen() else "패키지 설치·점검", self.install_packages,
+                  "설치판에 포함된 구성요소를 점검합니다" if is_frozen() else "필요한 파이썬 패키지를 설치하거나 새 판으로 올립니다"),
                  ("도움말", self.show_help, "쓰는 법을 간단히 보여 줍니다")]
         for r_, (head, items) in enumerate((("단계", steps), ("도구", tools))):
             ttk.Label(g, text=head, style="Section.TLabel").grid(row=r_, column=0, sticky="w", padx=(0, P(12)))
@@ -1115,8 +1164,6 @@ class App(tk.Tk):
                 button.grid(row=r_, column=i + 1, sticky="ew", padx=P(3), pady=P(3))
                 if c == self.install_packages:
                     self.b_packages = button
-                    if getattr(sys, "frozen", False):
-                        button.configure(text="패키지 내장", state="disabled")
         for i in range(1, 7):
             g.columnconfigure(i, weight=1, uniform="tools")
         self._hint(g, "단추에 마우스를 올리면 하는 일이 나옵니다. 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산], 사람이 확인한 쪽은 [검수 결과 기록…].").grid(
@@ -1574,7 +1621,9 @@ class App(tk.Tk):
     def open_collated(self):
         h = self.v_hwpx.get().strip()
         if not h: return
-        out = Path(h).with_name(Path(h).stem.replace("_교정", "") + "_교정.hwpx")
+        original = Path(h)
+        stem = original.stem if original.stem.endswith("_교정") else original.stem + "_교정"
+        out = safe_output_path(original.with_name(stem + ".hwpx"), original)
         if out.exists(): open_path(out)
         else: messagebox.showinfo(APP_NAME, f"교정본이 아직 없습니다: {out.name}")
 
@@ -1632,7 +1681,7 @@ class App(tk.Tk):
 
     def _read_opts(self, print_offset: bool = True, force: bool | None = None) -> list[str]:
         o = ["--reader", self.v_reader.get(), "--upscale", self.v_up.get().strip() or "2"]
-        if self.v_reader.get() == "gemini" and self.v_model.get().strip():
+        if self.v_reader.get() != "mock" and self.v_model.get().strip():
             o += ["--model", self.v_model.get().strip()]
         if not self.v_second.get():
             o.append("--no-second-pass")
@@ -1724,18 +1773,21 @@ class App(tk.Tk):
             self.after_idle(self._fit_sash)
 
     def _prepare_env(self) -> bool:
-        if self.v_reader.get() == "gemini":
-            from .reader_gemini import split_keys, join_keys, key_shape_warning
-            keys = split_keys(self.v_key.get())
-            key = join_keys(keys)
+        reader = self.v_reader.get()
+        if reader != "mock":
+            from .readers import split_keys, normalize_key, key_shape_warning
+            env_keys = ENV_KEYS[reader]
+            raw = self.v_key.get().strip() or next((os.environ[n] for n in env_keys if os.environ.get(n)), "")
+            key = normalize_key(reader, raw)
+            keys = split_keys(reader, key)
             if key != self.v_key.get():
                 self.v_key.set(key)                  # 공백·따옴표 등을 걷어 낸 값으로 바꿔 보여 준다(키가 여러 개면 쉼표로)
             if not keys:
-                messagebox.showwarning(APP_NAME, "Gemini API 키가 없습니다. 설정에 키를 넣거나 판독기를 '기존 텍스트 레이어만' 으로 바꾸십시오."); return False
-            warn = "\n".join((f"키 {i}: " if len(keys) > 1 else "") + w for i, w in ((i, key_shape_warning(k)) for i, k in enumerate(keys, 1)) if w)
+                messagebox.showwarning(APP_NAME, f"{PROVIDER_LABELS[reader]} API 키가 없습니다.\n선택한 제공사의 키를 넣으십시오.\n{KEY_URLS[reader]}"); return False
+            warn = "\n".join((f"키 {i}: " if len(keys) > 1 else "") + w for i, w in ((i, key_shape_warning(reader, k)) for i, k in enumerate(keys, 1)) if w)
             if warn and not messagebox.askyesno(APP_NAME, warn + "\n\n그래도 이 키로 진행할까요?"):
                 return False
-            os.environ["GEMINI_API_KEY"] = key
+            os.environ[env_keys[0]] = key
         if max_calls_value(self.v_maxcalls.get()) is None:
             messagebox.showwarning(APP_NAME, f"호출 상한은 0 이상의 정수여야 합니다(0 = 상한 없음). 지금 값: {self.v_maxcalls.get()!r}"); return False
         self.save_settings(quiet=True)
@@ -1758,8 +1810,7 @@ class App(tk.Tk):
         self.running = on
         for b in self.buttons:
             b.configure(state="disabled" if on else "normal")
-        if getattr(sys, "frozen", False) and getattr(self, "b_packages", None) is not None:
-            self.b_packages.configure(state="disabled")
+        self._reader_changed()
         for b in (self.b_stop, getattr(self, "b_stop2", None)):
             if b is not None:
                 b.configure(state="normal" if on and command != "update" else "disabled")
@@ -1921,7 +1972,8 @@ class App(tk.Tk):
                         f.seek(at); d.update(f.read(65536))
             h.update(f"{s.name}|{n}|{d.hexdigest()}\n".encode("utf-8"))
             if progress: progress(i, len(srcs))
-        return srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+        out = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+        return safe_output_path(out, srcs[0])
 
     def _bundle_images(self, paths: list[str]) -> None:
         """이미지 여러 장 → 이름의 숫자 순서로 한 PDF 로 묶어 첫 이미지 옆에 저장(무손실: JPEG 는 그대로, 나머지는 PNG).
@@ -1945,6 +1997,7 @@ class App(tk.Tk):
                 if out.exists():
                     err = None; log = f"같은 이미지 {len(srcs)}장으로 묶은 파일을 다시 씀: {out.name}\n  {names}\n"; return
                 old = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장).pdf")       # 0.6.4 전 이름(지문 없음)
+                out.parent.mkdir(parents=True, exist_ok=True)
                 part = out.with_name(out.name + ".part")                       # 다 쓴 뒤에만 이름을 붙인다(끊긴 묶음을 다시 쓰지 않게)
                 from .pdfio import save_images_as_pdf
                 save_images_as_pdf(srcs, part, progress=lambda d, n: self.q.put(("bundle", "prog", d, n)))
@@ -1980,21 +2033,30 @@ class App(tk.Tk):
         self.e_key.configure(show="" if self.e_key.cget("show") else "•")
 
     def check_key(self):
-        """키가 쓸 수 있는지 Gemini 에 물어보고, 쓸 수 있는 모델 목록에서 고르게 한다."""
+        """선택한 제공사에 키를 확인하고, 모델 목록에서 고르게 한다."""
         if self.running: return
-        from .reader_gemini import split_keys, join_keys
-        keys = split_keys(self.v_key.get()); self.v_key.set(join_keys(keys))
+        reader = self.v_reader.get()
+        if reader == "mock":
+            messagebox.showinfo(APP_NAME, "텍스트 레이어 시험은 API 키가 필요하지 않습니다."); return
+        from .readers import split_keys, normalize_key
+        raw = self.v_key.get().strip() or next((os.environ[n] for n in ENV_KEYS[reader] if os.environ.get(n)), "")
+        key = normalize_key(reader, raw)
+        keys = split_keys(reader, key); self.v_key.set(key)
         model = self.v_model.get().strip()
-        self._set_running(True); self.v_status.set("키 확인 중… (모델을 실제로 짧게 호출해 봅니다)")
+        self._set_running(True); self.v_status.set(f"{PROVIDER_LABELS[reader]} 키·모델 확인 중…")
         def t():
             try:
-                from .reader_gemini import check_key
-                res = check_key(keys[0] if keys else "", model)
+                from .readers import check_key
+                res = check_key(reader, keys[0] if keys else "", model)
                 if res.get("ok") and len(keys) > 1:      # 나머지 키는 쓸 수 있는지만(모델 목록 조회) 본다
-                    bad = [f"키 {i}(…{k[-4:]})" for i, k in enumerate(keys[1:], 2) if not check_key(k, model, probe=False).get("ok")]
+                    bad = [f"키 {i}(…{k[-4:]})" for i, k in enumerate(keys[1:], 2) if not check_key(reader, k, model, probe=False).get("ok")]
                     res["message"] += f" · 키 {len(keys)}개" + (f" — 쓸 수 없는 키: {', '.join(bad)}" if bad else " 모두 쓸 수 있음(하루 한도에 걸리면 다음 키로 넘어감)")
             except Exception as e:
-                res = {"ok": False, "message": f"확인 실패: {e}", "models": [], "shape_warning": ""}
+                # 예상치 못한 SDK 오류에도 인증 문자열이 진행 기록에 남지 않게 한다.
+                msg = str(e)
+                for secret in keys:
+                    if secret: msg = msg.replace(secret, "[API 키]")
+                res = {"ok": False, "message": f"확인 실패: {msg}", "models": [], "shape_warning": ""}
             self.q.put(("keycheck", res))
         threading.Thread(target=t, daemon=True).start()
 
@@ -2009,11 +2071,28 @@ class App(tk.Tk):
         self.save_settings(quiet=True)
         ModelDialog(self, res["models"], res.get("probe"), res.get("working_model", ""))
 
+    def _select_provider(self, event=None):
+        self.v_reader.set(next(k for k, v in PROVIDER_LABELS.items() if v == self.v_provider.get()))
+        self._reader_changed()
+
     def _reader_changed(self):
-        st = "normal" if self.v_reader.get() == "gemini" else "disabled"
+        reader = self.v_reader.get()
+        previous = self._active_reader
+        if previous != reader:
+            remember_provider(self.cfg, previous, self.v_model.get(), self.v_key.get(), self.v_model2.get())
+            profile = provider_profile(self.cfg, reader)
+            self.v_model.set(profile["model"]); self.v_key.set(profile["api_key"]); self.v_model2.set(profile["second_model"])
+            self._active_reader = reader
+            self.save_settings(quiet=True)
+        self.v_provider.set(PROVIDER_LABELS[reader])
+        self.cb_provider.configure(state="disabled" if self.running else "readonly")
+        st = "normal" if reader != "mock" and not self.running else "disabled"
         self.e_model.configure(state=st); self.e_key.configure(state=st); self.e_model2.configure(state=st)
+        for widget, enabled in self._gemini_widgets:
+            widget.configure(state=enabled if reader == "gemini" and not self.running else "disabled")
 
     def save_settings(self, quiet=False):
+        remember_provider(self.cfg, self.v_reader.get(), self.v_model.get(), self.v_key.get(), self.v_model2.get().strip())
         self.cfg.update({"pages": self.v_pages.get(), "print_offset": self.v_off.get(), "upscale": self.v_up.get(), "reader": self.v_reader.get(),
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
@@ -2068,7 +2147,7 @@ class App(tk.Tk):
         e = estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
                         second_model=self.v_model2.get().strip(), use_cache=self.v_cache.get(),
                         prices=self.cfg.get("prices") or {}, fx_krw=fx, fx_source=fx_src,
-                        records=w.records(pages, repair=False) if same_source and not self.v_force.get() else [])
+                        records=w.records(pages, repair=False) if same_source and not self.v_force.get() else [], reader=self.v_reader.get())
         if not same_source and any(w.readings_dir.glob("p*.json")):
             e["notes"].append("원본·영상 설정이 바뀌었거나 기존 기록의 원본을 확인할 수 없어 선택한 쪽을 모두 새로 판독하는 비용입니다. 실행할 때 이전 결과는 보관됩니다.")
         return e
@@ -2093,8 +2172,8 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, f"비용 계산 실패: {e}")
 
     def _confirm_cost(self) -> bool:
-        """Gemini 판독 전에 어림을 보여 주고 계속할지 묻는다. 읽을 쪽이 없으면 묻지 않는다."""
-        if self.v_reader.get() != "gemini":
+        """모델 판독 전에 어림을 보여 주고 계속할지 묻는다. 읽을 쪽이 없으면 묻지 않는다."""
+        if self.v_reader.get() == "mock":
             return True
         try:
             e = self.estimate_data()
@@ -2116,7 +2195,10 @@ class App(tk.Tk):
             self.start(["read", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts(), "③ 판독")
 
     def do_build(self):
-        if self._need_pdf(): self.start(["build", self.pdf(), "--work", str(self.work())] + self._pages() + self._build_opts(), "④ 문서 만들기")
+        if self._need_pdf() and self._prepare_env():
+            opts = ["--reader", self.v_reader.get()]
+            if self.v_model.get().strip(): opts += ["--model", self.v_model.get().strip()]
+            self.start(["build", self.pdf(), "--work", str(self.work())] + self._pages() + self._build_opts() + opts + self._cap_opts(), "④ 문서 만들기·문맥 교정")
 
     def do_review(self):
         if not self._need_records("검수 화면"): return
@@ -2156,8 +2238,8 @@ class App(tk.Tk):
         """3차 글자 판별: 〔a/b〕 자리마다 글자 조각을 모델에 묻는다. 자리 수를 먼저 세어 보여 주고 묻는다."""
         if not self._need_records("3차 글자 판별") or not self._prepare_env():
             return
-        if self.v_reader.get() != "gemini":
-            messagebox.showinfo(APP_NAME, "3차 판별은 자형을 보는 모델이 필요합니다. 판독기를 Gemini 로 바꾸십시오."); return
+        if self.v_reader.get() == "mock":
+            messagebox.showinfo(APP_NAME, "3차 판별은 자형을 보는 모델이 필요합니다. Gemini·ChatGPT·Claude 중에서 고르십시오."); return
         sus = bool(self.v_suspects.get()); n_sus = sus_calls = None
         try:
             from .state import Work
@@ -2198,7 +2280,7 @@ class App(tk.Tk):
                                              f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. " + (sus_note if sus else "") + "계속할까요?"):
             return
         self.nb.select(0)
-        argv = ["adjudicate", self.pdf(), "--work", str(self.work())] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
+        argv = ["adjudicate", self.pdf(), "--work", str(self.work()), "--reader", self.v_reader.get()] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
         argv += ["--workers", (self.v_workers.get().strip() or "8")] + self._glyph_opts(suspects=True) + self._cap_opts()
         self.start(argv, "3차 글자 판별")
 
@@ -2278,7 +2360,7 @@ class App(tk.Tk):
         info, self._update_pending = self._update_pending, None
         self._update_prompt_open = True
         try:
-            dialog = UpdateDialog(self, info, bool(getattr(sys, "frozen", False)) and sys.platform == "win32")
+            dialog = UpdateDialog(self, info, can_replace_executable())
             self.wait_window(dialog)
             if dialog.install:
                 self._start_update(info)
@@ -2291,7 +2373,10 @@ class App(tk.Tk):
                 or (worker is not None and worker.is_alive())):
             self._update_pending = info
             return
-        if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        if is_installed_bundle():
+            messagebox.showinfo(APP_NAME, "설치판은 릴리스 페이지에서 Setup 설치파일을 내려받아 업데이트하십시오.\n\n" + info.url)
+            return
+        if not can_replace_executable():
             messagebox.showinfo(APP_NAME, "소스 실행 환경에서는 자동 설치하지 않습니다. 릴리스 페이지에서 실행 파일을 내려받으십시오.\n\n" + info.url)
             return
         try:
@@ -2343,10 +2428,16 @@ class App(tk.Tk):
         threading.Thread(target=t, daemon=True).start()
 
     def _pkg_result(self, missing: list[str]):
-        if getattr(sys, "frozen", False):
-            self.v_pkg.set("내장 패키지 확인 필요" if missing else "패키지 내장 · 준비됨")
+        if is_frozen():
             if missing:
-                self._append("배포 파일에서 패키지를 불러오지 못했습니다: " + ", ".join(missing) + "\n공식 릴리스 실행 파일을 다시 내려받으십시오.\n")
+                self.v_pkg.set(f"설치 구성요소 오류 {len(missing)}개 → 설치파일로 다시 설치")
+                self._append("불러오지 못한 구성요소: " + ", ".join(missing) + "\n")
+                if not getattr(self, "_asked_install", False) and not self.running:
+                    self._asked_install = True
+                    messagebox.showerror(APP_NAME, "설치판 구성요소를 불러오지 못했습니다:\n  " + ", ".join(missing)
+                                         + "\n\nYeonE_OCR 설치파일로 다시 설치하십시오. Python이나 패키지를 따로 설치할 필요는 없습니다.")
+            else:
+                self.v_pkg.set("설치 구성요소 모두 있음")
             return
         if missing:
             self.v_pkg.set(f"빠진 패키지 {len(missing)}개 → ▸ 고급의 [패키지 설치·점검]")       # 긴 목록은 머리띠를 밀어내므로 기록에
@@ -2359,10 +2450,10 @@ class App(tk.Tk):
             self.v_pkg.set("패키지 모두 있음")
 
     def install_packages(self):
-        if getattr(sys, "frozen", False):
-            messagebox.showinfo(APP_NAME, "Windows 실행 파일에는 필요한 패키지가 포함되어 있습니다.\n[업데이트 확인]에서 새 실행 파일을 설치할 수 있습니다.")
-            return
         if self.running: return
+        if is_frozen():
+            self.check_packages()
+            return
         req = Path(__file__).resolve().parent.parent / "requirements.txt"
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + (["-r", str(req)] if req.exists() else [p for _, p in PACKAGES])
         self._set_running(True, "install"); self.v_status.set("패키지 설치 중… (몇 분 걸릴 수 있음)"); self.nb.select(0)
@@ -2371,7 +2462,8 @@ class App(tk.Tk):
         def t():
             rc = 1; seen: set[str] = set(); n_get = got = 0
             try:
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=child_env())   # 설치 스크립트가 API 키를 물려받지 않게
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=child_env(),
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))   # 설치 스크립트가 API 키를 물려받지 않게
                 for line in p.stdout:
                     self.q.put(("log", line))
                     # pip 출력의 세 마디: 패키지 확인(Collecting·Requirement already satisfied) → 내려받기(Downloading·Using cached) → 설치

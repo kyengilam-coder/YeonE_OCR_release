@@ -23,6 +23,7 @@ def app_state():
                           _update_checking=False, _update_installing=False, _update_pending=None,
                           _update_prompt_open=False, _update_manual=False, q=queue.Queue(),
                           _append=Mock(), save_settings=Mock(), destroy=Mock(), wait_window=Mock(),
+                          check_packages=Mock(),
                           v_status=SimpleNamespace(set=Mock()), v_pkg=SimpleNamespace(set=Mock()))
 
     def set_running(on, command=""):
@@ -173,13 +174,14 @@ class GuiUpdates(unittest.TestCase):
             gui.App._pkg_result(self.app, ["pymupdf"])
             popen.assert_not_called()
             ask.assert_not_called()
-        self.app.v_pkg.set.assert_called_with("내장 패키지 확인 필요")
+        self.app.check_packages.assert_called_once_with()
+        self.assertIn("설치 구성요소 오류", self.app.v_pkg.set.call_args.args[0])
 
-    def test_frozen_package_button_stays_disabled_when_other_work_finishes(self):
+    def test_frozen_component_check_becomes_available_when_other_work_finishes(self):
         package = Mock()
-        app = SimpleNamespace(buttons=[package], b_packages=package, b_stop=Mock())
+        app = SimpleNamespace(buttons=[package], b_packages=package, b_stop=Mock(), _reader_changed=Mock())
         gui.App._set_running(app, False)
-        package.configure.assert_called_with(state="disabled")
+        package.configure.assert_called_with(state="normal")
 
     def test_update_preference_does_not_replace_other_settings(self):
         self.app.v_auto_update = SimpleNamespace(get=lambda: False)
