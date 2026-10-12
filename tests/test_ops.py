@@ -641,6 +641,7 @@ class GuiOps(unittest.TestCase):
                         v_chk=gui.CHECK_LIST_LABELS["none"], v_blind=False, v_pdf="")
             for k, v in vals.items():
                 setattr(s, k, V(v))
+            s._mode_vars = {0: s.v_mode, 2: V(gui.MODE_LABELS["auto"])}
             o = s._read_opts()
             self.assertEqual((o[o.index("--page-thinking") + 1], o[o.index("--page-media-resolution") + 1], o[o.index("--max-calls") + 1]), ("medium", "ultra_high", "250"))
             from yeone_ocr.cli import build_parser

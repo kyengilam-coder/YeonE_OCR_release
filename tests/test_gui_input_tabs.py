@@ -2,6 +2,7 @@
 import contextlib
 import copy
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -14,12 +15,18 @@ from test_ops import gui_module
 class Var:
     def __init__(self, value):
         self.value = value
+        self.callbacks = []
 
     def get(self):
         return self.value
 
     def set(self, value):
         self.value = value
+        for callback in self.callbacks:
+            callback("", "", "write")
+
+    def trace_add(self, _mode, callback):
+        self.callbacks.append(callback)
 
 
 class Frame:
@@ -55,6 +62,7 @@ class InputTabs(unittest.TestCase):
         states = {0: {"pdf": "book.pdf", "pages": "10-20", "print_offset": "29"},
                   2: {"pdf": "image.png", "pages": "2", "print_offset": "-1"}}
         variables = {tab: {key: Var(value) for key, value in state.items()} for tab, state in states.items()}
+        modes = {0: Var(self.gui.MODE_LABELS["horizontal_zh"]), 2: Var(self.gui.MODE_LABELS["auto"])}
         layout = []; actions = []
         frames = [Frame(layout) for _ in range(4)]
         common = frames[3]; cards = [Frame(actions) for _ in range(3)]
@@ -63,12 +71,13 @@ class InputTabs(unittest.TestCase):
             _selected_tab=0, _active_input=0, _last_ocr_tab=0, _inputs_ready=True, _input_vars=variables, _input_force={0: True, 2: False},
             v_pdf=variables[0]["pdf"], v_pages=variables[0]["pages"], v_off=variables[0]["print_offset"], v_force=Var(True),
             v_tab=Var(0), v_tabhint=Var(""), v_pdf2=Var(""),
+            _mode_vars=modes, v_mode=modes[0], cb_mode=mock.Mock(),
             v_reader=Var("anthropic"), v_model=Var("claude-test"), v_key=Var("synthetic-test-key"),
             cfg={"last_pdf": "book.pdf", "reader": "anthropic", "model": "claude-test", "api_key": "synthetic-test-key"},
             tab_frames=frames, _common_frame=common, act_cards=cards, layout=layout, actions=actions,
             _sync_output_location=mock.Mock(), _sync_settings_summary=mock.Mock(), refresh_table=mock.Mock(), _append=mock.Mock(),
-            _bundle_images=mock.Mock(), mode_key=lambda: "horizontal_zh")
-        for name in ("select_tab", "return_to_ocr", "_remember_inputs", "_reset_screenshot_pages", "pdf", "pdf2"):
+            _bundle_images=mock.Mock())
+        for name in ("select_tab", "return_to_ocr", "_remember_inputs", "_reset_screenshot_pages", "pdf", "pdf2", "mode_key"):
             setattr(app, name, getattr(self.gui.App, name).__get__(app))
         app.work = lambda: self.gui.work_dir_for(app.pdf())
         app._use_pdf = mock.Mock(wraps=self.gui.App._use_pdf.__get__(app))
@@ -105,6 +114,49 @@ class InputTabs(unittest.TestCase):
             with self.subTest(saved=saved):
                 states, initial = self.gui.ocr_input_config({"last_pdf": "capture.png", "input_tab": 1, "ocr_inputs": saved})
                 self.assertEqual((initial, states[2]["pdf"], states[0]["pdf"]), (2, "capture.png", ""))
+
+    def test_image_direction_migrates_to_auto_without_changing_pdf_preference(self):
+        for pdf_mode in self.gui.MODE_LABELS:
+            with self.subTest(pdf_mode=pdf_mode):
+                cfg = {"mode": pdf_mode, "last_pdf": "legacy-image.png"}
+                before = copy.deepcopy(cfg)
+                self.assertEqual(self.gui.ocr_mode_config(cfg), {0: pdf_mode, 2: "auto"})
+                self.assertEqual(cfg, before)
+        self.assertEqual(self.gui.ocr_mode_config({"mode": "unknown", "image_mode": None}), {0: "auto", 2: "auto"})
+        self.assertEqual(self.gui.ocr_mode_config({"mode": "horizontal_zh", "image_mode": "vertical"}),
+                         {0: "horizontal_zh", 2: "vertical"})
+
+    def test_direction_settings_follow_pdf_image_and_bookmark_without_overwriting_each_other(self):
+        app = self.app()
+        app.select_tab(2)
+        self.assertEqual(app.mode_key(), "auto")
+        self.assertIs(app.v_mode, app._mode_vars[2])
+        app.cb_mode.configure.assert_called_with(textvariable=app._mode_vars[2])
+        app.select_tab(3)
+        app.v_mode.set(self.gui.MODE_LABELS["vertical"])
+        app.return_to_ocr()
+        self.assertEqual(app.mode_key(), "vertical")
+        app.select_tab(1)
+        self.assertEqual(app.mode_key(), "horizontal_zh")
+        self.assertIs(app.v_mode, app._mode_vars[0])
+        app.select_tab(3)
+        app.v_mode.set(self.gui.MODE_LABELS["auto"])
+        app._remember_inputs()
+        self.assertEqual((app.cfg["mode"], app.cfg["image_mode"]), ("auto", "vertical"))
+        self.assertEqual(self.gui.ocr_mode_config(app.cfg), {0: "auto", 2: "vertical"})
+        app.return_to_ocr()
+        self.assertEqual((app._selected_tab, app.mode_key()), (1, "auto"))
+        app.select_tab(2)
+        self.assertEqual(app.mode_key(), "vertical")
+        app.select_tab(0)
+        self.assertEqual(app.mode_key(), "auto")
+
+    def test_advanced_input_check_restores_image_direction_after_bookmark_settings(self):
+        app = self.app(); app.select_tab(2); app.select_tab(1); app.select_tab(3)
+        self.assertEqual((app._active_input, app.mode_key()), (2, "horizontal_zh"))
+        with mock.patch.object(self.gui.Path, "exists", return_value=True):
+            self.assertTrue(self.gui.App._need_pdf(app))
+        self.assertEqual((app._selected_tab, app.pdf(), app.mode_key()), (2, "image.png", "auto"))
 
     def test_switch_keeps_pdf_and_image_aliases_pages_offsets_and_force_separate(self):
         app = self.app()
@@ -243,15 +295,16 @@ class InputTabs(unittest.TestCase):
                          ("book.pdf", "image.png", 2))
         self.assertEqual(saved["ocr_inputs"]["0"]["pages"], "10-20")
         self.assertEqual(saved["ocr_inputs"]["2"]["pages"], "2")
+        self.assertEqual((saved["mode"], saved["image_mode"]), ("horizontal_zh", "auto"))
 
     def test_settings_summary_omits_key_and_identifies_active_input_force_scope(self):
         app = self.app()
-        app.v_docx = Var(True); app.v_provider = Var("Claude"); app.v_mode = Var("가로쓰기 한문")
+        app.v_docx = Var(True); app.v_provider = Var("Claude")
         app.v_settings_summary = Var(""); app.v_force_scope = Var("")
         for tab, scope in ((0, "일반 OCR"), (2, "이미지 OCR")):
             app.select_tab(tab)
             self.gui.App._sync_settings_summary(app)
-            self.assertEqual(app.v_settings_summary.get(), "Claude · claude-test · 가로쓰기 한문 · HWPX + DOCX")
+            self.assertEqual(app.v_settings_summary.get(), f"Claude · claude-test · {app.v_mode.get()} · HWPX + DOCX")
             self.assertNotIn(app.v_key.get(), app.v_settings_summary.get())
             self.assertIn(scope, app.v_force_scope.get())
 
@@ -329,6 +382,98 @@ class InputTabs(unittest.TestCase):
         self.assertEqual((app._active_input, app.pdf()), (0, "new-book.pdf"))
         self.assertEqual(self.input_values(app, 2), previous)
         self.assertEqual(pick.call_args.kwargs["filetypes"], [("PDF", "*.pdf")])
+
+    def test_clear_image_input_preserves_files_other_work_and_settings_but_resets_results_view(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            image = root / "saved-capture.png"
+            image.write_bytes(b"synthetic screenshot")
+            work = self.gui.work_dir_for(str(image))
+            hwpx = work / "out" / "saved-capture.hwpx"
+            hwpx.parent.mkdir(parents=True)
+            hwpx.write_bytes(b"synthetic completed result")
+            record = work / "readings" / "p001.json"
+            record.parent.mkdir(); record.write_text('{"synthetic":true}', encoding="utf-8")
+            files = {path: path.read_bytes() for path in (image, hwpx, record)}
+            app = self.app(); app.select_tab(2)
+            app.v_pdf.set(str(image)); app.v_force.set(True)
+            app._mode_vars[2].set(self.gui.MODE_LABELS["vertical"])
+            app.v_pdf2.set("bookmark-book.pdf"); app.v_hwpx = Var("bookmark-book.hwpx")
+            app.cfg.update(collate_pdf="bookmark-book.pdf", hwpx="bookmark-book.hwpx", collate_policy="memo")
+            before_general = self.input_values(app, 0)
+            before_reader = (app.v_reader.get(), app.v_model.get(), app.v_key.get())
+            app.v_output_dir = Var("")
+            app._sync_output_location = self.gui.App._sync_output_location.__get__(app)
+            app._input_vars[2]["pdf"].trace_add("write", app._sync_output_location)
+            app._sync_output_location()
+            app.open_after = hwpx; app.progress = mock.Mock(); app.v_prog = Var("100% complete"); app.v_status = Var("done")
+            rows = {"old-page": (1, "completed")}
+            app.table = SimpleNamespace(get_children=lambda: tuple(rows), delete=lambda key: rows.pop(key), insert=mock.Mock())
+            app._table_gen = 8; app._table_pdf = app.pdf()
+            app._fill_table = self.gui.App._fill_table.__get__(app)
+            app.refresh_table = self.gui.App.refresh_table.__get__(app)
+            with mock.patch.object(self.gui.threading, "Thread"), mock.patch.object(ImageGrab, "grabclipboard") as clipboard:
+                self.gui.App.clear_image_input(app)
+            clipboard.assert_not_called()
+            self.assertEqual(self.input_values(app, 2), {"pdf": "", "pages": "", "print_offset": ""})
+            self.assertFalse(app.v_force.get()); self.assertFalse(app._input_force[2])
+            self.assertEqual(self.input_values(app, 0), before_general)
+            self.assertTrue(app._input_force[0])
+            self.assertEqual((app.v_reader.get(), app.v_model.get(), app.v_key.get()), before_reader)
+            self.assertEqual((app.v_pdf2.get(), app.v_hwpx.get(), app.cfg["collate_policy"]),
+                             ("bookmark-book.pdf", "bookmark-book.hwpx", "memo"))
+            self.assertEqual((app.mode_key(0), app.mode_key(2)), ("horizontal_zh", "vertical"))
+            self.assertNotIn(str(work), app.v_output_dir.get())
+            self.assertEqual(rows, {})
+            # An old worker completion cannot restore cleared page rows.
+            app._fill_table(8, str(image), [(1, "old result")])
+            self.assertEqual(rows, {}); app.table.insert.assert_not_called()
+            self.assertIsNone(app.open_after)
+            app.progress.configure.assert_called_with(value=0)
+            self.assertEqual(app.v_prog.get(), "")
+            self.assertNotEqual(app.v_status.get(), "done")
+            self.assertEqual({path: path.read_bytes() for path in files}, files)
+            saved = self.saved[-1]
+            restored, initial = self.gui.ocr_input_config(saved)
+            self.assertEqual(initial, 2)
+            self.assertEqual(restored[2], {"pdf": "", "pages": "", "print_offset": "", "force": False})
+            self.assertEqual(restored[0], {**before_general, "force": True})
+            self.assertEqual(saved["last_pdf"], "")
+            self.assertEqual(self.gui.ocr_mode_config(saved), {0: "horizontal_zh", 2: "vertical"})
+
+    def test_clear_image_input_is_blocked_during_work_shutdown_or_update(self):
+        for flag in ("running", "_closing", "_update_installing"):
+            with self.subTest(flag=flag):
+                app = self.app(); app.select_tab(2)
+                before = {tab: self.input_values(app, tab) for tab in (0, 2)}
+                cfg = copy.deepcopy(app.cfg)
+                setattr(app, flag, True)
+                app.progress = mock.Mock(); app.v_prog = Var("100%"); app.v_status = Var("busy")
+                app.open_after = Path("existing-result.hwpx")
+                self.gui.App.clear_image_input(app)
+                self.assertEqual({tab: self.input_values(app, tab) for tab in (0, 2)}, before)
+                self.assertEqual(app.cfg, cfg)
+                app.progress.configure.assert_not_called()
+                self.assertEqual((app.v_prog.get(), app.v_status.get()), ("100%", "busy"))
+                self.assertEqual(app.open_after, Path("existing-result.hwpx"))
+        self.save.assert_not_called()
+
+    def test_cleared_image_accepts_next_pasted_capture_without_reusing_old_page_settings(self):
+        app = self.app(); app.select_tab(2)
+        app.progress = mock.Mock(); app.v_prog = Var("100%"); app.v_status = Var("done")
+        app.open_after = Path("old.hwpx")
+        self.gui.App.clear_image_input(app)
+        self.assertEqual(app.pdf(), "")
+        image = Image.new("RGB", (30, 20), "white")
+        with mock.patch.object(ImageGrab, "grabclipboard", return_value=image), \
+             mock.patch("yeone_ocr.screenshots.save_screenshot", return_value=Path("next-capture.png")):
+            self.gui.App.paste_screenshot(app)
+        self.assertEqual((app.pdf(), app.v_pages.get(), app.v_off.get(), app.v_force.get()),
+                         ("next-capture.png", "", "", False))
+        self.assertEqual(app.mode_key(), "auto")
+        self.assertEqual(self.saved[-1]["ocr_inputs"]["2"]["pdf"], "next-capture.png")
+        self.assertEqual(self.saved[-1]["ocr_inputs"]["0"]["pdf"], "book.pdf")
+        self.error.assert_not_called()
 
 
 if __name__ == "__main__":

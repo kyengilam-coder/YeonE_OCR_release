@@ -152,6 +152,33 @@ def run(report_path: Path) -> int:
                     "pixels": "original resolution preserved", "repeat_paste": "same source", "network_calls": 0}
         check("screenshot-input", screenshot_probe)
 
+        def direction_probe():
+            import pymupdf
+            from .cli import detect_mode
+            from .pdfio import open_pdf
+            checked = []
+            text = "天地玄黃宇宙洪荒日月盈昃辰宿列張"
+            for mode in ("horizontal_zh", "vertical"):
+                path = folder / f"direction-{mode}.png"
+                with pymupdf.open() as source:
+                    page = source.new_page(width=600, height=700)
+                    if mode == "horizontal_zh":
+                        for row in range(8):
+                            page.insert_text((40, 60 + row * 42), text, fontname="china-t", fontsize=20)
+                    else:
+                        for col in range(8):
+                            for row, char in enumerate(text):
+                                page.insert_text((540 - col * 42, 60 + row * 24), char, fontname="china-t", fontsize=20)
+                    page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5)).save(path)
+                # Opening the raster loses the fixture's text layer deliberately.
+                with open_pdf(str(path)) as document:
+                    assert not document[0].get_text().strip()
+                    detected, reason = detect_mode(document)
+                    assert detected == mode, f"{mode}: {detected} ({reason})"
+                    checked.append({"expected": mode, "detected": detected, "reason": reason})
+            return {"raster_text_directions": checked, "network_calls": 0}
+        check("image-reading-direction", direction_probe)
+
         def pipeline_probe():
             from .cli import CANCEL, main
             from .verify import check_hwpx_file
