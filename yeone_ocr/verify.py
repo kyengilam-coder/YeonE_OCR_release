@@ -1,7 +1,7 @@
 """지침이 금지하는 결과가 섞이지 않았는지 기계적으로 검사한다. 글자 정확성 검사가 아니라 구조·형식 검사다."""
 from __future__ import annotations
 import re
-from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, region_text, region_columns
+from .schema import PageReading, KINDS, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, region_text, region_columns, duplicate_region_ids
 
 ASCII_GUA = re.compile(r"(={3,}|-{3,}|1{3,}|l{3,}|\|{3,})")
 
@@ -42,7 +42,11 @@ def verify_page(r: PageReading) -> list[dict]:
     issues: list[dict] = []
     def add(level, rule, where, msg): issues.append({"level": level, "rule": rule, "where": where, "msg": msg})
     body_all = ""
+    for rid in sorted(duplicate_region_ids(r)):
+        add("error", "영역 id 겹침", rid, "같은 id 의 영역이 여럿이어서 자동 병합·글자 수정을 적용할 수 없음")
     for reg in r.regions:
+        if reg.kind not in KINDS:
+            add("error", "지원하지 않는 영역 종류", reg.id, f"{reg.kind!r} — 본문 누락을 막기 위해 영역 분류를 확인해야 함")
         if reg.kind in TEXT_KINDS:
             t = region_text(reg); body_all += t
             if not t.strip():

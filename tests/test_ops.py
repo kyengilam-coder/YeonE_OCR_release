@@ -360,7 +360,7 @@ class PageKnobs(unittest.TestCase):
         if not os.path.exists(pdf):
             _vertical_pdf(pdf, n_pages)
         page, region = _page_json(), _region_json()
-        gen = lambda k, vx, kw: _resp(page if kw["config"].response_schema is PageReading else region)
+        gen = lambda k, vx, kw: _resp(page if issubclass(kw["config"].response_schema, PageReading) else region)
         argv = ["read", pdf, "--work", os.path.join(td, "w" + str(len(os.listdir(td)))), "--model", "gemini-3-pro", "--second-model", "", "--second-thinking", "full",
                 "--media-resolution", "default", "--second-mode", "each", "--chunk-lines", "0", "--no-cache", "--workers", "1", "--mode", "vertical", "--dpi", "72"] + extra
         buf = io.StringIO()
@@ -373,7 +373,7 @@ class PageKnobs(unittest.TestCase):
         from google.genai import types as gt
         with tempfile.TemporaryDirectory() as td:
             calls, log = self._read(td, ["--page-thinking", "high", "--page-media-resolution", "ultra_high"])
-            p1 = [c for c in calls if c[2]["config"].response_schema is PageReading]; p2 = [c for c in calls if c[2]["config"].response_schema is not PageReading]
+            p1 = [c for c in calls if issubclass(c[2]["config"].response_schema, PageReading)]; p2 = [c for c in calls if not issubclass(c[2]["config"].response_schema, PageReading)]
             self.assertEqual(len(p1), 1); self.assertTrue(p2)
             self.assertEqual(p1[0][2]["config"].thinking_config.thinking_level, gt.ThinkingLevel.HIGH)
             self.assertEqual(p1[0][2]["contents"][0].media_resolution.level, gt.PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH)   # 쪽 이미지 조각에

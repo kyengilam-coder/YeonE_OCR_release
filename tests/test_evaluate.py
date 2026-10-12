@@ -276,6 +276,27 @@ def run_main(argv):
 
 
 class Command(unittest.TestCase):
+    def test_owned_pdf_closes_on_early_return_and_exception(self):
+        from unittest import mock
+        from yeone_ocr import pdfio
+
+        with tempfile.TemporaryDirectory() as td:
+            hw = Path(td, "reference.hwpx")
+            hw.write_bytes(b"fixture")  # 기록이 없는 분기는 HWPX 를 파싱하기 전에 끝난다.
+            args = make_parser().parse_args([str(Path(td, "input.pdf")), "--hwpx", str(hw), "--work", str(Path(td, "work"))])
+            for fail in (False, True):
+                with self.subTest(exception=fail):
+                    doc = mock.Mock()
+                    with mock.patch.object(pdfio, "open_pdf", return_value=doc), \
+                            mock.patch.object(E.Records, "pages", return_value=[], side_effect=RuntimeError("fixture failure") if fail else None), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        if fail:
+                            with self.assertRaisesRegex(RuntimeError, "fixture failure"):
+                                E.cmd_eval(args)
+                        else:
+                            self.assertEqual(E.cmd_eval(args), 2)
+                    doc.close.assert_called_once_with()
+
     def test_no_pdf_whole_unit_writes_outputs(self):
         """명령줄(cli.main)로: PDF 가 없어도 --pages 가 있으면 기록만으로 평가(구획 없음 → 전체 한 단위)하고 summary.json·md·diffs.html 을 쓴다.
         --pages 가 없으면 PDF 가 있어야 한다(없는 파일 → '파일이 없습니다', 못 여는 파일 → '오류: PDF 를 열지 못했습니다'). 교정본은 거부."""

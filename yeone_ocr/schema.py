@@ -3,13 +3,18 @@
 좌표(bbox)는 Gemini 관례대로 [ymin, xmin, ymax, xmax] 0~1000 정규화 값이다.
 """
 from __future__ import annotations
+from collections import Counter
 from dataclasses import dataclass
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Annotated, Literal
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 # 영역 유형. 지침 3장의 A~G형을 영역 단위로 풀어 쓴 것.
 KINDS = ["제목", "본문", "소주", "설명문", "그림제목", "표제목",
          "원형나경도", "산도", "계통도", "도식", "삽화", "단순표", "복잡한표",
          "쪽번호", "머리말", "기타"]
+RegionKind = Literal["제목", "본문", "소주", "설명문", "그림제목", "표제목",
+                     "원형나경도", "산도", "계통도", "도식", "삽화", "단순표", "복잡한표", "쪽번호", "머리말", "기타"]
+Coordinate = Annotated[int, Field(ge=0, le=1000)]
 TEXT_KINDS = {"본문", "설명문", "소주"}          # 편집 가능한 문자로 입력
 TITLE_KINDS = {"제목", "그림제목", "표제목"}      # 제목 계층 유지
 IMAGE_KINDS = {"원형나경도", "산도", "계통도", "도식", "삽화", "복잡한표"}  # 원본 이미지로 보존
@@ -41,15 +46,31 @@ class TableRow(_M):
 
 
 class Region(_M):
-    id: str
-    kind: str = Field(alias="k")
-    bbox: list[int] = Field(default_factory=lambda: [0, 0, 1000, 1000])  # [ymin,xmin,ymax,xmax] 0~1000
+    id: str = Field(min_length=1)
+    kind: RegionKind = Field(alias="k")
+    bbox: list[Coordinate] = Field(default_factory=lambda: [0, 0, 1000, 1000], min_length=4, max_length=4)
     reading_direction: str = Field("", alias="dir")   # "세로(우→좌)" | "가로" | "해당없음"
     title_text: str = Field("", alias="title")        # 제목·그림제목·표제목의 글자
     title_level: int = Field(0, alias="lv")           # 1=章, 2=節·層, 3=그 아래. 모르면 0
     paragraphs: list[Paragraph] = Field(default_factory=list, alias="paras")   # 본문·설명문·소주
     table_rows: list[TableRow] = Field(default_factory=list, alias="rows")     # 단순표
     note: str = ""                                    # 판독 메모(손글씨 표시, 훼손 등). 원문이 아님
+
+    @field_validator("id")
+    @classmethod
+    def nonempty_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("영역 id 는 빈 글일 수 없음")
+        return value
+
+    @field_validator("bbox")
+    @classmethod
+    def valid_bbox(cls, value: list[int]) -> list[int]:
+        y0, x0, y1, x1 = value
+        if y0 == y1 or x0 == x1:
+            raise ValueError("영역 bbox 의 너비·높이는 0보다 커야 함")
+        # bbox_frac 가 지원하던 역순 끝점은 유지하되 저장할 때 정렬한다.
+        return [min(y0, y1), min(x0, x1), max(y0, y1), max(x0, x1)]
 
 
 class Uncertain(_M):
@@ -67,6 +88,22 @@ class PageReading(_M):
     regions: list[Region] = Field(default_factory=list)
     uncertain: list[Uncertain] = Field(default_factory=list, alias="unc")
     page_note: str = Field("", alias="note")          # 쪽 전체에 대한 메모(원문 아님)
+
+
+def duplicate_region_ids(page: PageReading) -> set[str]:
+    return {rid for rid, n in Counter(r.id for r in page.regions).items() if n > 1}
+
+
+class PageResponse(PageReading):
+    """새 모델 응답은 영역 id 가 유일해야 한다. PageReading 은 과거 중복 id 기록의 검수·본문 보존을 허용한다."""
+
+    @field_validator("regions")
+    @classmethod
+    def unique_region_ids(cls, regions: list[Region]) -> list[Region]:
+        duplicate = [rid for rid, n in Counter(r.id for r in regions).items() if n > 1]
+        if duplicate:
+            raise ValueError("영역 id 겹침: " + ", ".join(duplicate))
+        return regions
 
 
 class RegionReread(_M):

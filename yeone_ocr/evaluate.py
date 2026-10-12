@@ -6,13 +6,13 @@
 단계별 글: 글자층 · 1차 · 2차(2차가 없거나 일부 조각만 읽힌 영역은 1차 글, coverage 로 가름) · 병합(첫 후보) · 병합(oracle) · 3차 뒤(기록의 merged 그대로 — 3차 판별이 적용돼 있다고 본다).
   3차 전 병합문은 merged 에서 확정 글자를 표시로 되돌려 만든다(grades.decided_positions). 3차 기록이 없으면 병합 = 3차 뒤."""
 from __future__ import annotations
-import difflib, hashlib, html, json, random, re, time, unicodedata
+import difflib, hashlib, html, json, random, re, time
 from array import array
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from . import merge
-from .merge import MARK_RE, INVISIBLE, strip_marks_for_compare, _fold, columns_in_reading_order
+from .merge import MARK_RE, INVISIBLE, strip_marks_for_compare, _fold, columns_in_reading_order, nfc_text
 from .schema import PageReading, RegionReread, Paragraph, Column, TEXT_KINDS
 from .collate.run import index_both, trim_to_section, reading_text
 from .collate.collate import hwpx_cells, ocr_cells, note_spans
@@ -28,7 +28,7 @@ _COVER = chr(0xFFFFD)  # 2차 조각이 읽은 문단의 머리 표지
 TOKEN_RE = re.compile(r"([\U000F0000-\U000FFFFD])|(〔[^〔〕]*〕)|(\S)")
 SENT_RE = re.compile(r"[\U000F0000-\U000FFFFD]")
 WS_RE = re.compile(r"\s+")
-METHOD = ("정규화: NFC → 폭 없는 글자 제거 → 공백 제거 → 접기(전각 부호 → 반각; horizontal_zh 모드는 compare_key 로 간체·이체자 대표 글자). 접기는 글자 수를 보존한다.\n"
+METHOD = ("정규화: 이체자 호환 한자를 보존하는 NFC → 폭 없는 글자 제거 → 공백 제거 → 접기(전각 부호 → 반각; horizontal_zh 모드는 compare_key 로 간체·이체자 대표 글자). 원글 CER 은 이체자 호환 한자를 구분하며 접기는 글자 수를 보존한다.\n"
           f"정렬: 정확한 편집 거리(Levenshtein) — difflib 의 {ANCHOR}자 이상 일치 구간을 닻으로 한 정렬로 상한 U 를 얻고, 대각선마다 가장 멀리 닿는 방법(Ukkonen, 보통 O(n+D²))"
           f" 또는 너비 ~U 의 띠 DP 로 전체를 다시 맞춘다. 둘 다 {CELLS:,}칸을 넘으면 닻 정렬(상한, 닻 사이도 그 칸 수를 넘으면 difflib 로 어림)을 쓰고 summary 의 align 에 센다."
           " CER = 편집 수 ÷ 기준 글자 수.\n"
@@ -62,11 +62,11 @@ class Flat:
 
 
 def flatten(paras: list[tuple[int, str]], expand: bool = True) -> Flat:
-    """[(쪽, 문단 글)] → Flat. NFC·폭 없는 글자·공백 제거. expand 면 〔〕 표시를 첫 후보(strip_marks_for_compare)로 접고 후보를 남긴다."""
+    """[(쪽, 문단 글)] → Flat. 이체자를 보존하는 NFC·폭 없는 글자·공백 제거. expand 면 〔〕 표시를 첫 후보로 접고 후보를 남긴다."""
     f = Flat(); out: list[str] = []; n = 0
     for pg, text in paras:
         covered = False; entry = None
-        for m in TOKEN_RE.finditer(INVISIBLE.sub("", unicodedata.normalize("NFC", text))):
+        for m in TOKEN_RE.finditer(INVISIBLE.sub("", nfc_text(text))):
             if m.group(1):
                 covered = covered or m.group(1) == _COVER; entry = entry if m.group(1) == _COVER else ord(m.group(1)) - _SENT0; continue
             seg = m.group(0)

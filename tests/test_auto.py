@@ -676,8 +676,9 @@ class AdjudicateCommand(unittest.TestCase):
         fake = Fake()
         old = cli.make_glyph_readers; cli.make_glyph_readers = lambda args: (fake, None)
         try:
-            with tempfile.TemporaryDirectory() as td:
+            with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
                 doc, work = self._work(td)
+                handles.callback(doc.close)
                 args = Namespace(pdf=work.pdf_path.as_posix(), work=str(work.dir), pages=None, dpi=300, mode="vertical", reader="gemini", model="fake-pro",
                                  thinking_budget=None, no_cache=True, max_sites=0, zoom=6, batch_sites=8, workers=2, workers_start=2, adjudicate_model="", adjudicate_thinking="low")
                 buf = io.StringIO()
@@ -725,8 +726,9 @@ class AdjudicateCommand(unittest.TestCase):
                 return {sid: GlyphChoice(choice=a.candidates[0], evidence="획", window="") for sid, _, a in crops}
         old = cli.make_glyph_readers; cli.make_glyph_readers = lambda args: (Flash(), Pro())
         try:
-            with tempfile.TemporaryDirectory() as td:
+            with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
                 doc, work = self._work(td)
+                handles.callback(doc.close)
                 args = Namespace(pdf=work.pdf_path.as_posix(), work=str(work.dir), pages=None, dpi=300, mode="vertical", reader="gemini", model="pro",
                                  thinking_budget=None, no_cache=True, max_sites=0, zoom=6, batch_sites=8, workers=2, workers_start=2, adjudicate_model="auto", adjudicate_thinking="low")
                 buf = io.StringIO()
@@ -1881,7 +1883,7 @@ class PrevCopies(unittest.TestCase):
                 cli.refresh_stale_records(work, None, [4])
             rec = work.load_record(4); rec["merged"]["page_note"] = "EDIT-2"; work.save_record(4, rec)       # 첫 갱신 뒤 손으로 고침
             buf = io.StringIO()
-            with mock.patch.object(cli, "__version__", "0.6.9"), contextlib.redirect_stdout(buf):            # 다음 판으로 올림
+            with mock.patch.object(cli, "__version__", cli.__version__ + ".next"), contextlib.redirect_stdout(buf):  # 현재 판과 다른 다음 판
                 self.assertEqual(cli.refresh_stale_records(work, None, [4]), 1)
             notes = {f.name: json.loads(f.read_text(encoding="utf-8"))["merged"].get("page_note") for f in prev.iterdir()}
             self.assertEqual(notes.pop("p004.json"), "EDIT-1"); self.assertEqual(list(notes.values()), ["EDIT-2"])

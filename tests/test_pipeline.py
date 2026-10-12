@@ -1618,7 +1618,7 @@ class GeminiRetries(unittest.TestCase):
             slept.clear(); r2, calls2 = self._reader(lambda k: (_ for _ in ()).throw(S("503 UNAVAILABLE")))
             with self.assertRaises(rg.ReaderError) as cm2:
                 r2._call(None, "p", Out, extra_parts=["p"])
-            self.assertEqual(len(calls2), 5); self.assertFalse(cm2.exception.fatal); self.assertEqual(slept, [1, 2, 4, 8, 16])
+            self.assertEqual(len(calls2), 5); self.assertFalse(cm2.exception.fatal); self.assertEqual(slept, [1, 2, 4, 8])
             class Ok:
                 text = '{"x": 3}'; usage_metadata = None
             r3, calls3 = self._reader(lambda k: R() if k < 3 else Ok())                   # 세 번째에 맞게 오면 그대로

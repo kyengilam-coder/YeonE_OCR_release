@@ -1,7 +1,8 @@
 """YeonE_OCR 창 프로그램. 모든 기능을 단추로 조작한다.
 
 표준 라이브러리 tkinter 만 쓰므로 Python 만 있으면 뜬다. 무거운 패키지(pymupdf, hwpx, google-genai…)는
-단추를 눌렀을 때 비로소 불러오며, 없으면 [▸ 고급 → 패키지 설치·점검] 단추로 설치한다.
+단추를 눌렀을 때 비로소 불러온다. Windows 실행 파일에는 포함되며, Python 소스 실행에서 빠졌으면
+[▸ 고급 → 패키지 설치·점검] 단추로 설치한다.
 """
 from __future__ import annotations
 import contextlib, io, json, os, queue, re, subprocess, sys, threading, time, traceback, webbrowser
@@ -12,6 +13,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from . import __version__
 from .progress import Tracker, fmt_duration, fmt_elapsed
 from .providers import DEFAULT_MODELS, PROVIDER_LABELS, ENV_KEYS, KEY_URLS
+from .runtime import is_frozen, is_installed_bundle, can_replace_executable, safe_output_path, external_dll_search
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".jp2", ".j2k", ".jpx")   # pdfio.IMAGE_EXTS 와 같게(창은 pymupdf 없이도 떠야 하므로 따로 둠)
 
@@ -22,7 +24,7 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
-            "chunk_lines": 8, "media_res": "high", "mode": "auto", "advanced_open": False, "details_open": False}
+            "chunk_lines": 8, "media_res": "high", "mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
@@ -46,7 +48,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 2차 판독 모델·속도·조각 같은 설정은 판독 칸의 [세부 설정 ▾] 에, 단계별 단추는 [▸ 고급] 에 접혀 있습니다. 단추에 마우스를 올리면 하는 일이 나옵니다.
 
 차례
- 1. [패키지 설치·점검](고급 안) — 처음 한 번(빠진 패키지가 있으면 켤 때 설치할지 묻습니다).
+ 1. Windows 실행 파일에는 패키지가 들어 있습니다. Python 소스로 실행하면 [패키지 설치·점검](고급 안)으로 설치할 수 있습니다.
  2. 판독기를 고르고 해당 제공사의 API 키를 넣어 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다.
  3. [PDF·이미지 고르기…] 로 파일을 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)도 됩니다 — 여러 장을 함께 고르면 이름의 숫자 순서로
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
@@ -61,6 +63,8 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
  7. "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
     글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
+ 8. 시작할 때 새 버전을 확인하며, 위의 [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
+    실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 고급에서 끌 수 있습니다.
 
 결과는 PDF 와 같은 폴더의 「<PDF 이름>_YeonE_OCR」 안에 생깁니다.
  out/      HWPX (+DOCX)
@@ -217,10 +221,12 @@ def work_dir_for(pdf: str) -> Path:
     (같은 이름의 PDF·이미지·폴더가 한곳에 있어도 판독 기록이 섞이지 않게)."""
     p = Path(pdf)
     if p.is_dir():
-        return p.with_name(p.name + "_이미지_YeonE_OCR")
-    if p.suffix.lower() not in ("", ".pdf"):
-        return p.with_name(f"{p.stem}_{p.suffix.lower().lstrip('.')}_YeonE_OCR")
-    return p.with_name(p.stem + "_YeonE_OCR")
+        out = p.with_name(p.name + "_이미지_YeonE_OCR")
+    elif p.suffix.lower() not in ("", ".pdf"):
+        out = p.with_name(f"{p.stem}_{p.suffix.lower().lstrip('.')}_YeonE_OCR")
+    else:
+        out = p.with_name(p.stem + "_YeonE_OCR")
+    return safe_output_path(out, p)
 
 
 SECRET_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
@@ -234,7 +240,8 @@ def child_env() -> dict:
 def open_path(path: str | Path) -> None:
     path = str(path)
     if sys.platform.startswith("win"):
-        os.startfile(path)                      # type: ignore[attr-defined]   (ShellExecute 는 환경을 따로 받지 않는다)
+        with external_dll_search():
+            os.startfile(path)                  # type: ignore[attr-defined]   (ShellExecute 는 환경을 따로 받지 않는다)
     elif sys.platform == "darwin":
         subprocess.Popen(["open", path], env=child_env())
     else:
@@ -559,6 +566,37 @@ class EstimateDialog(tk.Toplevel):
         self.proceed = True; self.destroy()
 
 
+class UpdateDialog(tk.Toplevel):
+    """조회만으로 설치하지 않는다. 새 판 확인 뒤 사용자가 설치·재시작을 고른다."""
+    def __init__(self, app, info, can_install: bool):
+        super().__init__(app)
+        self.install = False
+        self.title(f"{APP_NAME} 업데이트")
+        self.transient(app); self.resizable(False, False)
+        P = app.px
+        body = ttk.Frame(self, padding=P(20)); body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"새 버전 {info.version}을 사용할 수 있습니다.", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(body, text=f"현재 버전 {__version__}", style="PageHint.TLabel").pack(anchor="w", pady=(P(4), P(12)))
+        explanation = ("실행 파일을 내려받아 확인한 뒤 프로그램을 다시 시작합니다.\nAPI 키·설정·판독 기록은 그대로 유지됩니다."
+                       if can_install else ("설치판은 릴리스 페이지의 Setup 설치파일로 업데이트하십시오.\nAPI 키·설정·판독 기록은 그대로 유지됩니다." if is_installed_bundle() else
+                       "Python 소스로 실행 중입니다. 릴리스 페이지에서 Windows 실행 파일을\n내려받을 수 있습니다. 현재 소스 파일은 자동으로 교체하지 않습니다."))
+        ttk.Label(body, text=explanation, wraplength=P(530), justify="left").pack(anchor="w")
+        if info.notes:
+            notes = tk.Text(body, height=9, width=64, wrap="word", font=app.font_small)
+            notes.insert("1.0", info.notes[:6000]); notes.configure(state="disabled")
+            notes.pack(fill="x", pady=(P(12), 0))
+        actions = ttk.Frame(body); actions.pack(fill="x", pady=(P(18), 0))
+        ttk.Button(actions, text="릴리스 보기" if can_install else "릴리스 다운로드 열기", command=lambda: webbrowser.open(info.url)).pack(side="left")
+        ttk.Button(actions, text="나중에", command=self.destroy).pack(side="right")
+        if can_install:
+            ttk.Button(actions, text="설치 후 재시작", command=self._install).pack(side="right", padx=P(8))
+        self.grab_set()
+
+    def _install(self):
+        self.install = True
+        self.destroy()
+
+
 class Tip:
     """마우스를 올리면 잠시 뒤 짧은 설명을 띄운다(화면에 늘 보이던 긴 안내문을 줄이기 위해)."""
     def __init__(self, widget, text: str, app: "App"):
@@ -614,6 +652,10 @@ class App(tk.Tk):
         self.geometry(f"{w}x{h}"); self.minsize(min(self.px(960), w), min(self.px(640), h))
         self.q: queue.Queue = queue.Queue()
         self.running = False
+        self._update_checking = False
+        self._update_installing = False
+        self._update_pending = None
+        self._update_prompt_open = False
         self.open_after: Path | None = None
         self.buttons: list[ttk.Button] = []
         self.tracker = Tracker()
@@ -621,6 +663,7 @@ class App(tk.Tk):
         self._build()
         self.after(100, self._poll)
         self.after(400, self.check_packages)
+        self.after(1800, lambda: self.check_updates(manual=False))
         self._fx, need_fx = fx_from_config(self.cfg, time.strftime("%Y-%m-%d"))     # 환율은 하루 한 번만 조회(받은 값은 설정에 남김)
         if need_fx:
             threading.Thread(target=self._fetch_fx, daemon=True).start()
@@ -911,6 +954,9 @@ class App(tk.Tk):
         bar = ttk.Frame(self, padding=(P(16), P(12), P(16), 0)); bar.pack(fill="x")
         self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])
         self._segmented(bar, [("일반 OCR", 0), ("책갈피 OCR", 1)], self.v_tab, lambda: self.select_tab(self.v_tab.get())).pack(side="left")
+        self.b_update = self._btn(bar, "업데이트 확인", self.check_updates, style="PageLink.TButton",
+                                  tip="GitHub 릴리스에서 새 버전을 확인합니다. 설치와 재시작은 확인 후 진행합니다.")
+        self.b_update.pack(side="right")
         ttk.Label(bar, textvariable=self.v_tabhint, style="PageHint.TLabel").pack(side="left", padx=(P(14), 0))
         # 위(설정·실행)는 스크롤되는 칸, 아래(진행·기록)는 늘 보이는 칸. 가운데 경계를 끌어 높이를 나눈다.
         self.pane = ttk.PanedWindow(self, orient="vertical"); self.pane.pack(fill="both", expand=True)
@@ -1108,16 +1154,23 @@ class App(tk.Tk):
                  ("혼동 장부", self.do_ledger, "어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(모델 호출 없음)"),
                  ("비교 다시 계산", self.do_remerge, "저장된 1차·2차 판독으로 확인 표시만 다시 계산합니다(모델 호출 없음). 프로그램을 새 판으로 바꾼 뒤에"),
                  ("검수 결과 기록…", self.do_mark, "사람이 원본 대조를 마친 쪽에 '원본 대조 완료(사람)' 를 남깁니다"),
-                 ("패키지 설치·점검", self.install_packages, "필요한 파이썬 패키지를 설치하거나 새 판으로 올립니다"),
+                 ("구성요소 점검" if is_frozen() else "패키지 설치·점검", self.install_packages,
+                  "설치판에 포함된 구성요소를 점검합니다" if is_frozen() else "필요한 파이썬 패키지를 설치하거나 새 판으로 올립니다"),
                  ("도움말", self.show_help, "쓰는 법을 간단히 보여 줍니다")]
         for r_, (head, items) in enumerate((("단계", steps), ("도구", tools))):
             ttk.Label(g, text=head, style="Section.TLabel").grid(row=r_, column=0, sticky="w", padx=(0, P(12)))
             for i, (t, c, tip) in enumerate(items):
-                self._btn(g, t, c, style="Tool.TButton", tip=tip).grid(row=r_, column=i + 1, sticky="ew", padx=P(3), pady=P(3))
+                button = self._btn(g, t, c, style="Tool.TButton", tip=tip)
+                button.grid(row=r_, column=i + 1, sticky="ew", padx=P(3), pady=P(3))
+                if c == self.install_packages:
+                    self.b_packages = button
         for i in range(1, 7):
             g.columnconfigure(i, weight=1, uniform="tools")
         self._hint(g, "단추에 마우스를 올리면 하는 일이 나옵니다. 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산], 사람이 확인한 쪽은 [검수 결과 기록…].").grid(
             row=2, column=0, columnspan=7, sticky="ew", pady=(P(6), 0))
+        self.v_auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
+        ttk.Checkbutton(g, text="시작할 때 업데이트 확인", variable=self.v_auto_update,
+                        command=self._save_update_preference).grid(row=3, column=0, columnspan=7, sticky="w", pady=(P(8), 0))
         self._apply_advanced()
 
         self._build_collate_tab(tab2)
@@ -1392,7 +1445,9 @@ class App(tk.Tk):
         def t():
             try:
                 from .collate.sections import HwpxBook
-                names = HwpxBook(h).heading_style_names()
+                book = HwpxBook(h)
+                with contextlib.closing(book.doc):
+                    names = book.heading_style_names()
                 self.q.put(("styles_suggest", ", ".join(names)))
             except Exception:
                 pass
@@ -1404,7 +1459,9 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "먼저 HWPX 를 고르십시오."); return
         try:
             from .collate.sections import HwpxBook
-            counts = HwpxBook(h).style_counts()
+            book = HwpxBook(h)
+            with contextlib.closing(book.doc):
+                counts = book.style_counts()
         except Exception as e:
             messagebox.showerror(APP_NAME, f"스타일을 읽지 못했습니다: {e}"); return
         StylePicker(self, counts)
@@ -1443,8 +1500,10 @@ class App(tk.Tk):
                 from .collate.run import index_both
                 from .collate.pdf_outline import HOW_LABELS as _HOW
                 from .pdfio import open_pdf
-                doc = open_pdf(pdf); book = HwpxBook(hwpx)
-                anchors, pdf_anchors, matches = index_both(doc, book, src, styles)
+                with open_pdf(pdf) as doc:
+                    book = HwpxBook(hwpx)
+                    with contextlib.closing(book.doc):
+                        anchors, pdf_anchors, matches = index_both(doc, book, src, styles)
                 from .collate import reading as _rd
                 rows = [{"no": i + 1, "lv": a.level, "name": a.name, "read": _rd.reading(a.name), "para": a.para, "pdf": m.pdf.title if m.pdf else "", "page": m.pdf.page if m.pdf else "",
                          "how": _HOW.get(m.how, m.how) + (f" {m.score:.2f}" if m.how in ("fuzzy", "contains") else "")} for i, (a, m) in enumerate(zip(anchors, matches))]
@@ -1506,7 +1565,8 @@ class App(tk.Tk):
             guess = None
             try:
                 nxt = next((r2["name"] for r2 in self.collate_rows if r2["no"] > idx and r2["lv"] <= row["lv"]), None)
-                guess = find_title_pages(open_pdf(self.pdf2()), row["name"], nxt)
+                with open_pdf(self.pdf2()) as doc:
+                    guess = find_title_pages(doc, row["name"], nxt)
             except Exception:
                 guess = None
             msg = f"「{row['name']}」 에 맞는 PDF 책갈피가 없습니다.\n"
@@ -1561,7 +1621,9 @@ class App(tk.Tk):
     def open_collated(self):
         h = self.v_hwpx.get().strip()
         if not h: return
-        out = Path(h).with_name(Path(h).stem.replace("_교정", "") + "_교정.hwpx")
+        original = Path(h)
+        stem = original.stem if original.stem.endswith("_교정") else original.stem + "_교정"
+        out = safe_output_path(original.with_name(stem + ".hwpx"), original)
         if out.exists(): open_path(out)
         else: messagebox.showinfo(APP_NAME, f"교정본이 아직 없습니다: {out.name}")
 
@@ -1751,7 +1813,7 @@ class App(tk.Tk):
         self._reader_changed()
         for b in (self.b_stop, getattr(self, "b_stop2", None)):
             if b is not None:
-                b.configure(state="normal" if on else "disabled")
+                b.configure(state="normal" if on and command != "update" else "disabled")
         if on:
             self.tracker = Tracker(command)
             self.progress.configure(value=0); self._prog_shown = 0.0
@@ -1830,8 +1892,19 @@ class App(tk.Tk):
                     self._fill_table(*item[1:])
                 elif item[0] == "fx":
                     self._fx_fetched(item[1], item[2])
+                elif item[0] == "update_check":
+                    self._update_checked(item[1], item[2])
+                elif item[0] == "update_download":
+                    self._update_downloaded(item[1], item[2])
+                    if getattr(self, "_closing", False):
+                        return
         except queue.Empty:
             pass
+        if getattr(self, "_closing", False) and getattr(self, "_update_installing", False):
+            return
+        self._offer_update()
+        if getattr(self, "_closing", False):
+            return
         if self.running and time.time() - self._prog_shown > 1.0:
             self.v_prog.set(self.tracker.live_text()); self._prog_shown = time.time()      # 남은 시간(또는 지난 시간) 글을 1초마다 새로
         self.after(100, self._poll)
@@ -1899,7 +1972,8 @@ class App(tk.Tk):
                         f.seek(at); d.update(f.read(65536))
             h.update(f"{s.name}|{n}|{d.hexdigest()}\n".encode("utf-8"))
             if progress: progress(i, len(srcs))
-        return srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+        out = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+        return safe_output_path(out, srcs[0])
 
     def _bundle_images(self, paths: list[str]) -> None:
         """이미지 여러 장 → 이름의 숫자 순서로 한 PDF 로 묶어 첫 이미지 옆에 저장(무손실: JPEG 는 그대로, 나머지는 PNG).
@@ -1923,6 +1997,7 @@ class App(tk.Tk):
                 if out.exists():
                     err = None; log = f"같은 이미지 {len(srcs)}장으로 묶은 파일을 다시 씀: {out.name}\n  {names}\n"; return
                 old = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장).pdf")       # 0.6.4 전 이름(지문 없음)
+                out.parent.mkdir(parents=True, exist_ok=True)
                 part = out.with_name(out.name + ".part")                       # 다 쓴 뒤에만 이름을 붙인다(끊긴 묶음을 다시 쓰지 않게)
                 from .pdfio import save_images_as_pdf
                 save_images_as_pdf(srcs, part, progress=lambda d, n: self.q.put(("bundle", "prog", d, n)))
@@ -2064,12 +2139,18 @@ class App(tk.Tk):
         from .estimate import estimate
         from .pdfio import open_pdf, parse_pages
         from .state import Work
-        doc = open_pdf(self.pdf()); pages = parse_pages(self.v_pages.get().strip() or None, len(doc))
-        w = Work(self.pdf(), str(self.work()))
+        with open_pdf(self.pdf()) as doc:
+            pages = parse_pages(self.v_pages.get().strip() or None, len(doc))
+        w = Work(self.pdf(), str(self.work()), initialize=False)
+        same_source = w.source_matches(300)              # 창의 판독 명령은 기본 DPI 300 을 쓴다
         fx, fx_src = self.fx_setting()
-        return estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
+        e = estimate(self.pdf(), pages, upscale=float(self.v_up.get() or 2), second_pass=self.v_second.get(), model=self.v_model.get().strip(),
                         second_model=self.v_model2.get().strip(), use_cache=self.v_cache.get(),
-                        prices=self.cfg.get("prices") or {}, fx_krw=fx, fx_source=fx_src, records=[] if self.v_force.get() else w.records(pages), reader=self.v_reader.get())
+                        prices=self.cfg.get("prices") or {}, fx_krw=fx, fx_source=fx_src,
+                        records=w.records(pages, repair=False) if same_source and not self.v_force.get() else [], reader=self.v_reader.get())
+        if not same_source and any(w.readings_dir.glob("p*.json")):
+            e["notes"].append("원본·영상 설정이 바뀌었거나 기존 기록의 원본을 확인할 수 없어 선택한 쪽을 모두 새로 판독하는 비용입니다. 실행할 때 이전 결과는 보관됩니다.")
+        return e
 
     def estimate_text(self) -> str:
         try:
@@ -2159,29 +2240,30 @@ class App(tk.Tk):
             return
         if self.v_reader.get() == "mock":
             messagebox.showinfo(APP_NAME, "3차 판별은 자형을 보는 모델이 필요합니다. Gemini·ChatGPT·Claude 중에서 고르십시오."); return
+        sus = bool(self.v_suspects.get()); n_sus = sus_calls = None
         try:
             from .state import Work
             from .adjudicate import find_sites
             from .schema import PageReading
             from .pdfio import parse_pages, open_pdf
-            w = Work(self.pdf(), str(self.work())); doc = open_pdf(self.pdf())
-            recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)))
-            per_page = [len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs]
-            n_sites = sum(per_page); n_calls = sum(-(-n // 8) for n in per_page if n)
+            w = Work(self.pdf(), str(self.work()))
+            with open_pdf(self.pdf()) as doc:
+                recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)))
+                per_page = [len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs]
+                n_sites = sum(per_page); n_calls = sum(-(-n // 8) for n in per_page if n)
+                if sus and recs:
+                    try:                                 # 합의 의심도 모델 없이 미리 센다. 조각을 읽는 동안만 PDF 를 연다.
+                        from . import cli
+                        from .adjudicate import suspects_pending, suspect_freq, SUSPECT_MAX
+                        freq = suspect_freq(w.dir)
+                        ks = [suspects_pending(r, cli._load_layer(w, doc, r["pdf_page"]).get("plain", ""), SUSPECT_MAX, False, freq) for r in recs]
+                        n_sus = sum(ks); sus_calls = sum(-(-k // 8) for k in ks if k)
+                    except Exception:
+                        pass                             # 못 세면 수 없이 알린다.
         except Exception as e:
             messagebox.showerror(APP_NAME, f"판독 기록을 읽지 못했습니다: {e}"); return
         if not recs:
             messagebox.showinfo(APP_NAME, f"이 쪽 범위에 판독 기록이 없습니다.\n결과 폴더: {self.work()}"); return
-        sus = bool(self.v_suspects.get()); n_sus = sus_calls = None
-        if sus:
-            try:                                         # 합의 의심도 모델 없이 미리 센다(저장된 기록·글자층 파일로 — 명령이 묻기 전에 세는 것과 같은 셈)
-                from . import cli
-                from .adjudicate import suspects_pending, suspect_freq, SUSPECT_MAX
-                freq = suspect_freq(w.dir)
-                ks = [suspects_pending(r, cli._load_layer(w, doc, r["pdf_page"]).get("plain", ""), SUSPECT_MAX, False, freq) for r in recs]
-                n_sus = sum(ks); sus_calls = sum(-(-k // 8) for k in ks if k)
-            except Exception:
-                pass                                     # 못 세면 수 없이 알린다
         sus_note = ("1차·2차가 같게 읽었지만 PDF 글자층과 자형이 헷갈리는 쌍(入/人 등) 한 글자가 다른 자리(합의 판독 의심"
                     + (f") {n_sus}곳도 같은 방식으로 묻습니다(쪽당 최대 8곳 · 묶음 호출 약 {sus_calls}회 더" + (f", 재확인 최대 약 {sus_calls}회 더" if self.v_blind.get() else "") + ")"
                        if n_sus is not None else ", 쪽당 최대 8곳)도 같은 방식으로 묻습니다") + " — 본문은 그대로, 확인 항목만.\n")
@@ -2224,16 +2306,139 @@ class App(tk.Tk):
     def show_help(self):
         messagebox.showinfo(f"{APP_NAME} 도움말", HELP)
 
+    # ---------- 업데이트 ----------
+    def _save_update_preference(self):
+        self.cfg["auto_update"] = self.v_auto_update.get()
+        save_config(self.cfg)
+
+    def check_updates(self, manual=True):
+        if getattr(self, "_closing", False) or self._update_installing:
+            return
+        if not manual and not self.cfg.get("auto_update", True):
+            return
+        if self._update_checking:
+            self._update_manual = self._update_manual or manual
+            return
+        self._update_checking = True
+        self._update_manual = manual
+        if manual:
+            self._append("업데이트 확인 중…\n")
+
+        def target():
+            try:
+                from .updater import check_update
+                info = check_update(__version__)
+                self.q.put(("update_check", info, ""))
+            except Exception as exc:
+                self.q.put(("update_check", None, str(exc)))
+        threading.Thread(target=target, daemon=True).start()
+
+    def _update_checked(self, info, error: str):
+        self._update_checking = False
+        if getattr(self, "_closing", False):
+            return
+        manual = self._update_manual
+        if not manual and not self.cfg.get("auto_update", True):
+            return
+        if error:
+            self._append(f"업데이트 확인을 마치지 못했습니다: {error}\n")
+            if manual:
+                messagebox.showwarning(APP_NAME, "업데이트를 확인하지 못했습니다. 잠시 후 다시 확인하십시오.\n\n" + error)
+            return
+        if info is None:
+            if manual:
+                messagebox.showinfo(APP_NAME, f"현재 버전 {__version__}이 최신 버전입니다.")
+            return
+        self._update_pending = info
+        self._append(f"새 버전 {info.version}이 있습니다. 작업 중이면 작업을 마친 뒤 안내합니다.\n")
+
+    def _offer_update(self):
+        worker = getattr(self, "_worker", None)
+        if (not self._update_pending or self.running or self._update_installing or self._update_prompt_open
+                or getattr(self, "_closing", False) or (worker is not None and worker.is_alive())):
+            return
+        info, self._update_pending = self._update_pending, None
+        self._update_prompt_open = True
+        try:
+            dialog = UpdateDialog(self, info, can_replace_executable())
+            self.wait_window(dialog)
+            if dialog.install:
+                self._start_update(info)
+        finally:
+            self._update_prompt_open = False
+
+    def _start_update(self, info):
+        worker = getattr(self, "_worker", None)
+        if (self.running or self._update_installing or getattr(self, "_closing", False)
+                or (worker is not None and worker.is_alive())):
+            self._update_pending = info
+            return
+        if is_installed_bundle():
+            messagebox.showinfo(APP_NAME, "설치판은 릴리스 페이지에서 Setup 설치파일을 내려받아 업데이트하십시오.\n\n" + info.url)
+            return
+        if not can_replace_executable():
+            messagebox.showinfo(APP_NAME, "소스 실행 환경에서는 자동 설치하지 않습니다. 릴리스 페이지에서 실행 파일을 내려받으십시오.\n\n" + info.url)
+            return
+        try:
+            self.save_settings(quiet=True)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, "설정을 저장하지 못해 업데이트를 시작하지 않았습니다.\n\n" + str(exc))
+            return
+        self._update_installing = True
+        self._set_running(True, "update")
+        self.v_status.set(f"버전 {info.version} 다운로드·검증 중…")
+        self._append(f"업데이트 {info.version} 다운로드를 시작합니다.\n")
+
+        def target():
+            try:
+                from .updater import download_update
+                path = download_update(info)
+                self.q.put(("update_download", path, ""))
+            except Exception as exc:
+                self.q.put(("update_download", None, str(exc)))
+        threading.Thread(target=target, daemon=True).start()
+
+    def _update_downloaded(self, path, error: str):
+        if getattr(self, "_closing", False) or not self._update_installing:
+            return
+        try:
+            if error:
+                raise RuntimeError(error)
+            self.save_settings(quiet=True)
+            from .updater import install_update
+            install_update(Path(path), Path(sys.executable), os.getpid())
+        except Exception as exc:
+            self._update_installing = False
+            self._set_running(False)
+            self.v_status.set("업데이트 실패 — 현재 버전을 계속 사용할 수 있습니다")
+            self._append(f"업데이트 실패: {exc}\n")
+            messagebox.showerror(APP_NAME, "업데이트를 설치하지 못했습니다. 현재 프로그램은 계속 사용할 수 있습니다.\n\n" + str(exc))
+            return
+        self._closing = True
+        self.destroy()                  # 도우미가 이 프로세스 종료를 확인한 뒤 교체·재시작한다.
+
     # ---------- 패키지 ----------
     def check_packages(self):
-        here = Path(__file__).resolve().parent.parent
-        self.q.put(("log", f"{APP_NAME} v{__version__} · 프로그램 위치: {here} · Python {sys.version.split()[0]}\n"
-                           f"(다른 판이 뜨면 이 위치의 YeonE_OCR.pyw 를 실행하는지 확인하십시오)\n"))
+        frozen = bool(getattr(sys, "frozen", False))
+        here = Path(sys.executable).resolve() if frozen else Path(__file__).resolve().parent.parent
+        hint = "Windows 실행 파일 · 패키지 포함" if frozen else "이 위치의 YeonE_OCR.pyw 를 실행하는지 확인하십시오"
+        self.q.put(("log", f"{APP_NAME} v{__version__} · 프로그램 위치: {here} · Python {sys.version.split()[0]}\n({hint})\n"))
         def t():
             self.q.put(("pkg", missing_packages()))
         threading.Thread(target=t, daemon=True).start()
 
     def _pkg_result(self, missing: list[str]):
+        if is_frozen():
+            if missing:
+                self.v_pkg.set(f"설치 구성요소 오류 {len(missing)}개 → 설치파일로 다시 설치")
+                self._append("불러오지 못한 구성요소: " + ", ".join(missing) + "\n")
+                if not getattr(self, "_asked_install", False) and not self.running:
+                    self._asked_install = True
+                    messagebox.showerror(APP_NAME, "설치판 구성요소를 불러오지 못했습니다:\n  " + ", ".join(missing)
+                                         + "\n\nYeonE_OCR 설치파일로 다시 설치하십시오. Python이나 패키지를 따로 설치할 필요는 없습니다.")
+            else:
+                self.v_pkg.set("설치 구성요소 모두 있음")
+            return
         if missing:
             self.v_pkg.set(f"빠진 패키지 {len(missing)}개 → ▸ 고급의 [패키지 설치·점검]")       # 긴 목록은 머리띠를 밀어내므로 기록에
             self._append("빠진 패키지: " + ", ".join(missing) + "\n")
@@ -2246,6 +2451,9 @@ class App(tk.Tk):
 
     def install_packages(self):
         if self.running: return
+        if is_frozen():
+            self.check_packages()
+            return
         req = Path(__file__).resolve().parent.parent / "requirements.txt"
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + (["-r", str(req)] if req.exists() else [p for _, p in PACKAGES])
         self._set_running(True, "install"); self.v_status.set("패키지 설치 중… (몇 분 걸릴 수 있음)"); self.nb.select(0)
@@ -2254,7 +2462,8 @@ class App(tk.Tk):
         def t():
             rc = 1; seen: set[str] = set(); n_get = got = 0
             try:
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=child_env())   # 설치 스크립트가 API 키를 물려받지 않게
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=child_env(),
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))   # 설치 스크립트가 API 키를 물려받지 않게
                 for line in p.stdout:
                     self.q.put(("log", line))
                     # pip 출력의 세 마디: 패키지 확인(Collecting·Requirement already satisfied) → 내려받기(Downloading·Using cached) → 설치
@@ -2308,6 +2517,13 @@ class App(tk.Tk):
         self._table_pdf = pdf
 
     def on_close(self):
+        if getattr(self, "_update_installing", False) and not getattr(self, "_closing", False):
+            if not messagebox.askyesno(APP_NAME, "업데이트 다운로드를 취소하고 닫을까요?\n현재 실행 파일은 바뀌지 않습니다."):
+                return
+            self.save_settings(quiet=True)
+            self._closing = True
+            self.destroy()
+            return
         if self.running and not getattr(self, "_closing", False):
             if not messagebox.askyesno(APP_NAME, "작업이 진행 중입니다. 그래도 닫을까요?\n(지금 쓰는 쪽을 마저 쓰고 멈춥니다 — 몇 초 걸릴 수 있습니다)"):
                 return
@@ -2321,6 +2537,7 @@ class App(tk.Tk):
             self.v_status.set("멈추는 중… (지금 쪽을 마저 쓰면 닫힙니다)")
             self._close_when_idle(); return
         self.save_settings(quiet=True)
+        self._closing = True
         self.destroy()
 
     def _close_when_idle(self):

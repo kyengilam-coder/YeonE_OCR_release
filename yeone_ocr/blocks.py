@@ -135,6 +135,8 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     t = paragraph_text(p).strip()
                     if t:
                         blocks.append(Block(type="para", text=t, kind="기타", page=n))
+            else:
+                raise ValueError(f"지원하지 않는 영역 종류 {reg.kind!r} ({reg.id}) — 본문 누락을 막기 위해 문서 조립을 중단함")
         items = []
         body, dec = (page_body(pr), decided_keys(rec)) if check_list == "extra" else ("", set())
         for u in pr.uncertain:

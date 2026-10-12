@@ -40,6 +40,12 @@ FOOTNOTE_RE = re.compile(r"^[注註]\s*[0-9０-９一二三四五六七八九十
 TITLE_RE = re.compile(r"[『《〈「]([^』》〉」]{2,14})[』》〉」]")
 MARK_RE = re.compile(r"〔[^〔〕]*〕")
 PUNCT_RE = re.compile(r"[\s　·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥]+")
+# 부호를 버리기 전에 확실한 번호 표기만 구별한다. '10毫升'·'2024年'처럼 문장 속 수치는 남긴다.
+NUMBER_NOTATION_RE = re.compile(
+    r"(?m)^\s*[0-9０-９]{1,3}[.．、)）](?![0-9０-９])\s*(?=\S)"
+    r"|[\[［][0-9０-９]+(?:\s*[,，;；、–-]\s*[0-9０-９]+)*[\]］]"
+    r"|(?m:^\s*[-–—]\s*[0-9０-９]+\s*[-–—]\s*$)"
+)
 # 교정이 글 속에 남기는 짧은 표기(hwpx_edit._short_note, inline·0.6.3 까지의 메모 없음). 두 글자 후보 표시(〔확인/학인〕)와 겹치지 않게 쌍점·닫는 괄호까지
 INLINE_NOTE_PREFIXES = ("〔확인〕", "〔확인: ", "〔제안: ", "〔삽입〕", "〔삽입·확인〕", "〔삽입 제안: ", "〔삭제: ", "〔삭제 제안: ", "〔원: ", "〔자동 교정")
 
@@ -118,9 +124,11 @@ def _cells(text: str, para: int, *, strip: bool = False, skip: list[tuple[int, i
     """글 → 비교 글자 목록. 부호·공백은 뺀다. 위치(pos)는 원래 글의 글자 번호 그대로라 편집에 바로 쓴다. skip 구간(작업 표시)의 글자도 뺀다.
     once: 1차만으로 읽은 영역의 글 — 글자마다 불확실로 둔다."""
     s, unc_spans = (strip_marks(text) if strip else (text, []))
+    number_spans = [(m.start(), m.end()) for m in NUMBER_NOTATION_RE.finditer(s)]
+    excluded = [*skip, *number_spans]
     out: list[Char] = []
     for i, ch in enumerate(s):
-        if PUNCT_RE.match(ch) or unicodedata.category(ch)[0] in "ZCPS" or any(a <= i < b for a, b in skip):
+        if PUNCT_RE.match(ch) or unicodedata.category(ch)[0] in "ZCPS" or any(a <= i < b for a, b in excluded):
             continue
         key = zh.compare_key(ch)
         if not key:
@@ -199,7 +207,7 @@ def _mark(it: "Item", kind: str, note: str, notice: bool = False) -> None:
 
 def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) -> None:
     """글자 오탈이 아닌 차이를 걸러 낸다(0.6.0, 중의역대약론선 실측 근거).
-    - 아라비아 숫자만인 삽입·삭제·치환(인용 번호 1. 2. 3.·쪽수): HWPX 가 자동 번호를 쓰면 글자로 없다 → 표기 차이(D).
+    - 확실한 인용·목록 번호와 쪽수 표기는 _cells 에서 뺀다. 나머지 아라비아 수치 차이는 원문 확인 대상으로 남긴다.
     - 숫자와 글자가 섞인 치환(「本草」→「4」): 표시만(C).
     - 한자 숫자만인 삽입·삭제: 분량·순서일 수 있어 표시만(C). 한자 숫자끼리의 치환(三錢↔二錢)은 그대로 둔다(지침 14).
     - HWPX 글자에 한글이 있거나 삽입 자리 바로 옆이 한글(편집자의 풀이): 어떤 정책에서도 자동 반영하지 않는다(B1).
@@ -216,9 +224,9 @@ def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) 
         hw_ar, oc_ar = bool(hw) and bool(ARABIC_RE.match(hw)), bool(oc) and bool(ARABIC_RE.match(oc))
         hw_cn, oc_cn = bool(hw) and bool(CJK_NUM_RE.match(hw)), bool(oc) and bool(CJK_NUM_RE.match(oc))
         if it.action in ("insert", "delete") and (hw_ar or oc_ar):
-            it.kind = "D"; it.note = "아라비아 숫자(인용 번호·쪽수)만 다름 — 표기 차이"; continue
+            _mark(it, "C", "숫자가 한쪽에만 있음 — 분량·연도·번호인지 원본 확인", notice=True); continue
         if it.action == "replace" and hw_ar and oc_ar:
-            it.kind = "D"; it.note = "아라비아 숫자끼리 다름 — 표기 차이"; continue
+            _mark(it, "C", "수치가 서로 다름 — 분량·연도·번호인지 원본 확인", notice=True); continue
         if it.action == "replace" and (hw_ar != oc_ar) and (hw and oc):
             _mark(it, "C", f"숫자와 글자가 섞인 치환(「{hw}」↔「{oc}」) — 번호 체계 차이로 보여 자동 반영하지 않음", notice=True); continue
         if it.action in ("insert", "delete") and (hw_cn or oc_cn):
@@ -352,10 +360,15 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
                 cands = sorted({x for ch in amb for x in zh.candidates(ch)}) if amb else []
                 items.append(Item(kind, "insert", para, pos, pos, "", oc_text, new, cands, page, "빠진 글자", hw_ctx=hctx, oc_ctx=octx))
             continue
+        offset = 0
         for g in groups:
             para, start, end = g[0].para, g[0].pos, g[-1].pos + 1
             g_text = "".join(c.ch for c in g)
-            gi = hw.index(g[0]); hctx = _ctx(hw, gi, gi + len(g)); octx = _ctx(oc, j1, j2)
+            gi = i1 + offset; hctx = _ctx(hw, gi, gi + len(g)); octx = _ctx(oc, j1, j2)
+            # 누적 경계를 공유해야 앞 문단 끝과 다음 문단 시작이 같아져 중복·누락이 없다.
+            k1 = j1 + round(offset * len(oc_span) / len(hw_span))
+            offset += len(g)
+            k2 = j1 + round(offset * len(oc_span) / len(hw_span))
             if op == "delete" or not oc_span:
                 if uncertain:
                     items.append(Item("B1", "mark", para, start, end, g_text, "", "", pdf_page=page, note=unote, hw_ctx=hctx, oc_ctx=octx))
@@ -366,15 +379,15 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
                 else:
                     items.append(Item("C", "mark", para, start, end, g_text, "", "", pdf_page=page, note="판독에 없는 글자(여러 자)", hw_ctx=hctx, oc_ctx=octx))
                 continue
-            # replace: 이 문단 조각에 대응하는 판독 글자 — 길이 비례로 나눈다
-            share = len(g) / max(1, len(hw_span))
-            k1 = j1 + round((g[0].pos - hw_span[0].pos if g is groups[0] else sum(len(x) for x in groups[:groups.index(g)])) / max(1, len(hw_span)) * (j2 - j1))
-            k2 = j2 if g is groups[-1] else min(j2, k1 + max(1, round(share * (j2 - j1))))
+            # replace: 길이 비례 분할은 보고용. 문단을 넘으며 길이도 달라지면 실제 경계를 모르므로 자동 교정하지 않는다.
             seg = oc[k1:k2]
             seg_text = "".join(c.ch for c in seg)
             octx = _ctx(oc, k1, k2)
             if uncertain or any(c.uncertain for c in seg):
                 items.append(Item("B1", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note=unote, hw_ctx=hctx, oc_ctx=octx))
+            elif len(groups) > 1 and len(hw_span) != len(oc_span):
+                items.append(Item("C", "mark", para, start, end, g_text, seg_text, "", pdf_page=page,
+                                  note="문단 경계를 넘는 길이 차이 — 글자 배정 위치를 원본에서 확인", hw_ctx=hctx, oc_ctx=octx, notice=True))
             elif len(g) >= LONG and len(seg) >= LONG:
                 items.append(Item("C", "mark", para, start, end, g_text, seg_text, "", pdf_page=page, note="긴 구간이 서로 다름 — 문단 순서·범위 확인", hw_ctx=hctx, oc_ctx=octx))
             elif long_op or _long_change(len(g), len(seg)):
@@ -468,11 +481,11 @@ def witness_filter(items: list[Item], layers: dict[int, str], policy: str = "all
                 continue
             pat = (re.escape(pk[-a:]) if a else "") + "(.)" + (re.escape(nk[:b]) if b else "")
             if not a: pat = "(?:^|(?<=.))" + pat        # 앞 문맥이 없으면 어디서든
-            ms = re.findall(pat, lk)
-            if len(ms) == 1:
+            ms = re.findall("(?=" + pat + ")", lk)   # 반복 문맥이 겹쳐 있어도 모두 살핀다
+            if ms and len(set(ms)) == 1:
                 found = ms[0]; break
-            if len(ms) > 1 and a + b >= 4:
-                found = ms[0]; break
+            if ms:
+                break                                  # 같은 문맥의 글자가 서로 다르면 위치를 모르므로 증거로 쓰지 않는다
         st["checked"] += 1
         if found is None:
             st["none"] += 1; continue

@@ -6,6 +6,7 @@
 from __future__ import annotations
 import html, json, os, re, time, unicodedata
 from argparse import Namespace
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from . import zh
@@ -497,6 +498,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                 ed.add_legend_memo()                                   # 범례 메모 하나(이미 있으면 그대로)
             out = getattr(args, "out", None) or corrected_path(book.path)
             try:
+                Path(out).parent.mkdir(parents=True, exist_ok=True)
                 saved = ed.save_copy(out)
             except OSError as e:                                       # 한컴에 열린 교정본 등 — 고친 것이 저장되지 않았다
                 raise SaveFailed(f"교정본 {Path(out).name} 을(를) 저장하지 못했습니다({str(e)[:80]}) — 한컴 등에서 그 파일을 열어 두었으면 닫고 다시 누르십시오") from e
@@ -599,7 +601,8 @@ def corrected_path(hwpx_path: str) -> str:
     """원본 → <이름>_교정.hwpx. 이미 교정본이면 그 자리(같은 이름)."""
     p = Path(hwpx_path)
     stem = p.stem if p.stem.endswith("_교정") else p.stem + "_교정"
-    return str(p.with_name(stem + ".hwpx"))
+    from ..runtime import safe_output_path
+    return str(safe_output_path(p.with_name(stem + ".hwpx"), p))
 
 
 def set_aside(path: Path) -> Path:
@@ -623,8 +626,10 @@ def _cmd_collate(args, resources):
     from ..state import Work
     if not getattr(args, "hwpx", None) or not Path(args.hwpx).exists():
         log("--hwpx 파일이 필요합니다."); return 2
-    pdf_doc = open_pdf(args.pdf); work = Work(args.pdf, args.work)
+    pdf_doc = open_pdf(args.pdf)
     resources.callback(pdf_doc.close)
+    preview = bool(getattr(args, "list", False) or not (getattr(args, "all", False) or
+                   getattr(args, "anchor_index", None) or getattr(args, "section", None)))
     styles = [s for s in (getattr(args, "heading_styles", "") or "").split(",") if s.strip()] or None
     src = getattr(args, "anchor_source", "auto") or "auto"
     book = HwpxBook(args.hwpx)
@@ -640,18 +645,27 @@ def _cmd_collate(args, resources):
             resources.callback(book2.doc.close)
             a2, _, m2 = index_both(pdf_doc, book2, src, styles)
             if len(a2) == len(anchors) and all(x.para == y.para for x, y in zip(a2, anchors)):
+                book.doc.close()
                 book, anchors, matches = book2, a2, m2
                 log(f"기존 교정본에 이어서 작업합니다(앞서 고친 구획 유지): {target.name}")
-            elif getattr(args, "apply", False):
+            elif getattr(args, "apply", False) and not preview:
                 # 저장하면 덮어써질 교정본 — 앞서 고친 것이 사라지지 않게 옆으로 옮겨 두고 원본에서 다시 시작한다
+                book2.doc.close()                           # Windows 에서 읽던 ZIP 핸들을 닫아야 파일을 옮길 수 있다
                 moved = set_aside(target)
                 log(f"주의: 교정본 {target.name} 의 구획 목록이 원본과 달라(한컴에서 제목·책갈피를 넣거나 뺀 듯) 원본에서 다시 시작합니다 — "
                     f"앞서 고친 교정본은 지우지 않고 {moved.name} 으로 옮겨 두었습니다. 필요한 교정은 그 파일에서 옮겨 적으십시오.")
             else:
+                book2.doc.close()
                 log(f"주의: 교정본 {target.name} 의 구획 목록이 원본과 달라 원본을 기준으로 대조합니다(반영하면 교정본을 _이전_n 으로 옮겨 두고 원본에서 다시 시작).")
     if not anchors:
         log("구획 기준을 찾지 못했습니다. HWPX 에 책갈피·제목 스타일이 없고 PDF 책갈피 이름도 본문에서 찾지 못했습니다. "
             "--anchor-source pdf 로 다시 하거나, 한컴에서 제목에 '제목' 스타일 또는 책갈피를 넣어 주십시오."); return 2
+    if preview:
+        log(list_text(anchors, pdf_anchors, matches, limit=getattr(args, "limit", 0) or 0)); return 0
+    # 조회는 결과 폴더를 만들거나 옮기지 않는다. 실제 대조를 시작할 때 한 번 검증해야
+    # '모든 쪽의 기록이 있음' 경로도 바뀐 PDF·DPI의 옛 판독을 재사용하지 않는다.
+    work = Work(args.pdf, args.work)
+    work.ensure_source(getattr(args, "dpi", 300))
     from ..cli import progress
     if getattr(args, "all", False):
         r = run_all(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches) or {}
@@ -676,8 +690,6 @@ def _cmd_collate(args, resources):
         if (r or {}).get("halt"):
             return 1                                            # 3차 판별이 호출 상한·키·한도로 멈춤(오류: 줄은 run_section 이)
         return 3 if moved or to_check(r) else 0                 # 판독이 끝난 뒤 눌린 [중지]는 이 구획을 마저 끝내고 저장했으므로 완료
-    if getattr(args, "list", False) or not getattr(args, "section", None):
-        log(list_text(anchors, pdf_anchors, matches, limit=getattr(args, "limit", 0) or 0)); return 0
     hits = find_anchor(anchors, args.section)
     if not hits:
         log(f"「{args.section}」 이라는 책갈피·제목이 HWPX 에 없습니다. --list 로 목록을 보십시오."); return 2

@@ -1,7 +1,7 @@
 """1차(쪽 전체) 판독과 2차(영역 확대) 독립 판독의 비교·병합, 기존 텍스트 레이어와의 대조."""
 from __future__ import annotations
 import difflib, re, unicodedata
-from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_columns, region_text
+from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_columns, region_text, duplicate_region_ids
 
 WS = re.compile(r"\s+")
 INVISIBLE = re.compile(r"[\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufe00-\ufe0f\ufeff]")   # 폭 없는 글자·이체자 선택자 등
@@ -320,14 +320,27 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
     merged = p1.model_copy(deep=True)
     stats = {"regions_compared": 0, "columns_compared": 0, "columns_differ": 0, "marks": 0,
              "long_segments": 0, "notation_diffs": 0, "column_count_mismatch": []}
+    duplicate = duplicate_region_ids(merged)
+    for rid in sorted(duplicate):
+        merged.uncertain.append(Uncertain(region_id=rid, context="영역 id 겹침 — 2차 판독의 대상을 구분할 수 없어 병합하지 않음(원본 확인)"))
+
+    def keep_uncertain(rid: str, rr: RegionReread | None) -> None:
+        if rr is None:
+            return
+        for u in rr.uncertain:            # 본문이 같거나 비어 있어도 2차의 추가 확인 메모를 보존한다.
+            u2 = u.model_copy(); u2.region_id = u2.region_id or rid
+            if all(not (x.region_id == u2.region_id and x.context == u2.context) for x in merged.uncertain):
+                merged.uncertain.append(u2)
+
     for r in merged.regions:
-        if r.kind not in TEXT_KINDS:
+        if r.kind not in TEXT_KINDS or r.id in duplicate:
             continue
         cols = columns_in_reading_order(r)
         for k, c in enumerate(cols, 1):           # 영역 전체에서 오른쪽부터 1, 2, 3… 으로 통일
             c.col_from_right = k
         rr = rereads.get(r.id)
         if not rr or not rr.columns or not cols:
+            keep_uncertain(r.id, rr)
             continue
         stats["regions_compared"] += 1
         cols2 = sorted(rr.columns, key=lambda c: c.col_from_right)
@@ -346,6 +359,7 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
         notation = _notation_item(r.id, a, b, idx, pos, cols) if idx else None       # 열 글을 고치기 전 위치로
         if sm is None:
             if notation: merged.uncertain.append(notation)
+            keep_uncertain(r.id, rr)
             continue
         ops = [op for op in sm.get_opcodes() if op[0] != "equal"]
         touched_cols: set[int] = set()
@@ -394,10 +408,7 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
             cols[ci].text = _apply_edits(cols[ci].text, [(e[1], e[2], e[3]) for e in edits if e[0] == ci], table)
         stats["columns_differ"] += len(touched_cols)
         if notation: merged.uncertain.append(notation)
-        for u in rr.uncertain:            # 2차가 따로 적은 불확실 항목도 보탠다
-            u2 = u.model_copy(); u2.region_id = u2.region_id or r.id
-            if all(not (x.region_id == u2.region_id and x.context == u2.context) for x in merged.uncertain):
-                merged.uncertain.append(u2)
+        keep_uncertain(r.id, rr)
     return merged, stats
 
 

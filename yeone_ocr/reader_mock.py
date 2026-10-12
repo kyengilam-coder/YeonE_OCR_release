@@ -17,6 +17,8 @@ LABEL_RE = re.compile(r"[-–—ー一]\s*(\d{1,4})\s*[-–—ー一]")
 class MockReader:
     name = "mock"
     model = "textlayer+cv"
+    # 모델을 호출하지 않는 시험 판독기는 독립 2차 판독을 의도적으로 생략한다.
+    allow_empty_reread = True
     usage = {"calls": 0}
 
     def __init__(self, textlayers: dict[int, TextLayer]):

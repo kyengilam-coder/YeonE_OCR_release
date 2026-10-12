@@ -7,7 +7,7 @@ EXIF 방향 태그가 있는 사진(휴대전화 세로 사진)은 JPEG 를 그�
 16비트 회색조는 실제로 쓰인 비트(12비트 자료 등)의 위 8비트로 넣는다.
 """
 from __future__ import annotations
-import io, os, re
+import hashlib, io, os, re
 from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
@@ -15,7 +15,7 @@ import pymupdf
 from PIL import Image, ImageOps
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".jp2", ".j2k", ".jpx")
-_IMG_CACHE: dict = {}            # 같은 이미지(들)로 만든 PDF 를 다시 만들지 않게: (경로·크기·수정 시각) → PDF 바이트
+_IMG_CACHE: dict = {}            # 같은 이미지(들)로 만든 PDF 를 다시 만들지 않게: (경로·내용 지문) → PDF 바이트
 _TURN = {3: 180, 6: 270, 8: 90}  # EXIF 방향(순수 회전) → insert_image 의 rotate(시계 반대 방향 각도)
 
 PAGE_LABEL_RE = re.compile(r"^\s*[-–—ー一]\s*(\d{1,4})\s*[-–—ー一]\s*$")
@@ -155,7 +155,7 @@ def open_pdf(path: str) -> pymupdf.Document:
         if Path(path).is_dir():
             raise ValueError(f"폴더에 이미지가 없습니다: {path} (읽는 형식: {', '.join(IMAGE_EXTS)})")
         return pymupdf.open(path)
-    key = tuple((str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in srcs)
+    key = tuple((str(p.resolve()), hashlib.sha256(p.read_bytes()).digest()) for p in srcs)
     data = _IMG_CACHE.get(key)
     if data is None:
         data = images_to_pdf(srcs)
@@ -180,12 +180,21 @@ def _embedded(page: pymupdf.Page, prefer_embedded: bool = True) -> tuple[int, py
     돌림 각도에는 쪽의 /Rotate 도 넣는다(Acrobat 의 '쪽 돌리기' 로 바로 세운 거꾸로 된 스캔도 화면에 보이는 대로). /Rotate 가 90·270 인 쪽은 렌더하고,
     놓인 사각형은 쪽에 보이는 좌표(렌더하는 쪽의 page.rect 와 같은 틀)로 준다. page_image·page_frame 이 같은 판단을 쓴다(쪽 이미지와 그 틀이 늘 짝이 맞게)."""
     imgs = page.get_images(full=True)
-    if not (prefer_embedded and len(imgs) == 1) or page.rotation % 180:
+    if not (prefer_embedded and len(imgs) == 1) or page.rotation % 180 or imgs[0][1]:
         return None
     rects = page.get_image_rects(imgs[0][0], transform=True)               # 놓인 행렬은 /Rotate 를 빼고 본 것
-    if rects:
+    if len(rects) == 1:
         ir, m = rects[0]
-        if ir.width >= page.rect.width * 0.9 and ir.height >= page.rect.height * 0.9 and (t := _turn(m)) is not None:
+        shown = ir * page.rotation_matrix
+        # CropBox 밖의 숨은 이미지, 작은 삽입 그림, 그림 위에 그린 선·주석은 전체 페이지 렌더로 보존한다.
+        bounds = page.rect
+        covered = (shown.x0 >= bounds.x0 - 0.5 and shown.y0 >= bounds.y0 - 0.5 and
+                   shown.x1 <= bounds.x1 + 0.5 and shown.y1 <= bounds.y1 + 0.5 and
+                   shown.width >= bounds.width * 0.9 and shown.height >= bounds.height * 0.9)
+        if covered and not page.get_drawings(extended=True) and not page.first_annot and (t := _turn(m)) is not None:
+            # 기존 OCR 숨은 글자층은 허용하되 실제로 보이는 PDF 글자는 합성해야 한다.
+            if any(span.get("type", 0) != 3 and span.get("opacity", 1) > 0 for span in page.get_texttrace()):
+                return None
             return imgs[0][0], ir * page.rotation_matrix, (t - page.rotation) % 360     # /Rotate 는 시계 방향
     return None
 

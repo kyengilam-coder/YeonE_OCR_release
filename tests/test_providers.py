@@ -4,6 +4,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -24,10 +25,12 @@ def page():
 class SDKReaders(unittest.TestCase):
     def setUp(self):
         rg.set_call_cap(0)
+        rg.set_cancel_event(None)
         self.image = Image.new("RGB", (24, 24), "white")
 
     def tearDown(self):
         rg.set_call_cap(0)
+        rg.set_cancel_event(None)
 
     def fake(self, provider, payload):
         if provider == "openai":
@@ -151,7 +154,7 @@ class SDKReaders(unittest.TestCase):
 
     def test_owned_document_closed_on_error_borrowed_document_kept_open(self):
         document = mock.Mock()
-        @cli._with_document
+        @cli._document_command
         def operation(args, work=None, doc=None):
             self.assertIs(doc, document)
             raise RuntimeError("stop")
@@ -162,6 +165,28 @@ class SDKReaders(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             operation(NS(pdf="source.pdf"), None, document)
         document.close.assert_not_called()
+
+    def test_cancelled_provider_request_spends_no_call(self):
+        for provider in ("openai", "anthropic"):
+            reader, create, _ = self.fake(provider, page().model_dump())
+            event = threading.Event(); event.set()
+            rg.set_cancel_event(event)
+            with self.assertRaises(rg.ReaderError) as caught:
+                reader.read_page(self.image, "x", 1, 1)
+            self.assertEqual(caught.exception.kind, "cancelled")
+            create.assert_not_called()
+        self.assertEqual(rg.CALL_CAP.used, 0)
+
+    def test_server_outage_keeps_infrastructure_kind_for_batch_handling(self):
+        for provider in ("openai", "anthropic"):
+            reader, create, _ = self.fake(provider, {})
+            failure = RuntimeError("temporary server outage"); failure.status_code = 503
+            create.side_effect = failure
+            with mock.patch.object(rg, "_wait_retry"), self.assertRaises(rg.ReaderError) as caught:
+                reader.read_page(self.image, "x", 1, 1)
+            self.assertEqual(caught.exception.kind, "infrastructure")
+            self.assertFalse(caught.exception.fatal)
+            self.assertEqual(create.call_count, 3)
 
 
 class ProviderResume(unittest.TestCase):
@@ -178,6 +203,7 @@ class ProviderResume(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.work = Work(str(Path(self.temp.name) / "source.png"), str(Path(self.temp.name) / "work"))
         Image.new("RGB", (80, 80), "white").save(self.work.pdf_path)
+        self.work.ensure_source()
         self.args = cli.build_parser().parse_args(["read", str(self.work.pdf_path), "--work", str(self.work.dir), "--second-mode", "each", "--workers", "1", "--mode", "vertical"])
         cli.apply_mode(self.args)
         self.stack = contextlib.ExitStack()

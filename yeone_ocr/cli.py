@@ -19,7 +19,7 @@
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
 """
 from __future__ import annotations
-import argparse, json, re, sys, time, threading
+import argparse, functools, inspect, json, re, sys, time, threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from PIL import Image
@@ -45,6 +45,23 @@ DOC_LOCK = threading.Lock()  # PyMuPDF 문서 객체는 스레드 안전하지 �
 LOG_LOCK = threading.Lock()
 
 
+def _document_command(fn):
+    """명령이 연 PDF만 명령 끝에 닫는다. 호출자가 전달한 문서는 빌려 쓴다."""
+    signature = inspect.signature(fn)
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        if bound.arguments.get("doc") is not None:
+            return fn(*args, **kwargs)
+        doc = open_pdf(bound.arguments["args"].pdf)
+        try:
+            bound.arguments["doc"] = doc
+            return fn(*bound.args, **bound.kwargs)
+        finally:
+            doc.close()
+    return wrapped
+
+
 def log(*a):
     with LOG_LOCK:
         print(*a, flush=True)
@@ -61,24 +78,8 @@ def progress(stage: str, done: int, total: int) -> None:
 
 
 # ---------- inspect ----------
-def _with_document(fn):
-    """이 명령이 연 원본만 finally 에서 닫는다. 호출자가 건넨 문서는 호출자가 관리한다."""
-    from functools import wraps
-    @wraps(fn)
-    def wrapped(args, work=None, doc=None, *positional, **kwargs):
-        owned = doc is None
-        if owned:
-            doc = open_pdf(args.pdf)
-        try:
-            return fn(args, work, doc, *positional, **kwargs)
-        finally:
-            if owned:
-                doc.close()
-    return wrapped
-
-
-def cmd_inspect(args):
-    doc = open_pdf(args.pdf)
+@_document_command
+def cmd_inspect(args, doc=None):
     log(f"파일 {Path(args.pdf).name} · 쪽수 {len(doc)} · 메타 { {k: v for k, v in doc.metadata.items() if v} }")
     log("쪽 | 크기(pt) | 쪽 이미지 | 텍스트 레이어 글자수 | 쪽번호 표기(레이어)")
     many = len(doc) > 60
@@ -99,22 +100,39 @@ def cmd_inspect(args):
 
 
 # ---------- prepare ----------
+def _page_cache_io(fn):
+    @functools.wraps(fn)
+    def wrapped(work, doc, n, *args, **kwargs):
+        with work.page_lock(n):
+            return fn(work, doc, n, *args, **kwargs)
+    return wrapped
+
+
 def _save_png_atomic(img: Image.Image, path: Path) -> None:
     """쪽 이미지를 임시 이름으로 다 쓴 뒤 바꿔 넣는다 — 다른 스레드(판독·미리 준비)가 반쯤 쓴 PNG 를 여는 일이 없게."""
     write_atomic_with(path, lambda t: img.save(t, "PNG"))
 
 
+@_page_cache_io
 def _write_layer(work: Work, doc, n: int) -> dict:
-    """PDF 에서 쪽 글자층을 꺼내 textlayer/pNNN.json 에 (원자적으로) 쓰고 그 사전을 돌려준다."""
+    """쪽 이미지의 좌표 틀에 맞춘 글자층을 textlayer/pNNN.json 에 원자적으로 쓴다. 평문은 원래 글자층 그대로다."""
+    from .pdfio import page_frame
     with DOC_LOCK:
         tl = text_layer(doc, n)
+        x0, y0, width, height = page_frame(doc, n)
+    # 내장 스캔은 PDF 쪽 가장자리보다 안쪽에 놓일 수 있다. 판독 bbox 는 이 스캔 기준이므로
+    # 2차 영역 보정에 쓰는 줄·열도 같은 원점과 크기로 옮긴다(3차 글자 상자는 별도로 page_frame 을 쓴다).
+    vertical = [{**c, "x": c["x"] - x0, "y0": c["y0"] - y0, "y1": c["y1"] - y0} for c in tl.vertical_columns]
+    horizontal = [{**line, "bbox": [v - (x0 if i % 2 == 0 else y0) for i, v in enumerate(line["bbox"])]}
+                  for line in tl.horizontal_lines]
     d = {"char_count": tl.char_count, "page_label": tl.page_label, "plain": tl.plain(),
-         "vertical_columns": tl.vertical_columns, "horizontal_lines": tl.horizontal_lines,
-         "page_width": tl.page_width, "page_height": tl.page_height}
+         "vertical_columns": vertical, "horizontal_lines": horizontal,
+         "page_width": width, "page_height": height, "page_frame": [x0, y0, width, height]}
     write_atomic(work.textlayer_path(n), json.dumps(d, ensure_ascii=False, indent=1))
     return d
 
 
+@_page_cache_io
 def _load_layer(work: Work, doc, n: int) -> dict:
     """쪽 글자층 사전. 파일이 없거나 깨졌으면(쓰다 만 JSON — 0.6.7 이하 결과 폴더·정전) PDF 에서 다시 만들어 둔다. doc 이 없으면 빈 사전."""
     tp = work.textlayer_path(n)
@@ -128,6 +146,7 @@ def _load_layer(work: Work, doc, n: int) -> dict:
     return _write_layer(work, doc, n) if doc is not None else {}
 
 
+@_page_cache_io
 def _prepare_page(work: Work, doc, n: int, dpi: int, force: bool = False) -> None:
     """쪽 이미지·출처·글자층 파일(없을 때만, force 면 다시). PyMuPDF 접근은 DOC_LOCK 안에서(판독 스레드와 같은 문서 객체).
     있는 파일이 깨졌는지는 여기서 보지 않는다 — 쓰는 쪽(_load_page_image·_load_layer)이 알아보고 다시 만든다."""
@@ -141,13 +160,14 @@ def _prepare_page(work: Work, doc, n: int, dpi: int, force: bool = False) -> Non
         _write_layer(work, doc, n)
 
 
-@_with_document
+@_document_command
 def cmd_prepare(args, work: Work | None = None, doc=None, pages: list[int] | None = None, quiet: bool = False, stop: threading.Event | None = None,
                 force: bool | None = None):
     """쪽 이미지·글자층을 작업 폴더에 꺼낸다. quiet=True 는 한 번에 인식의 미리 준비 스레드용: 진행·요약을 알리지 않고 CANCEL(또는 stop)이 켜지면 멈춘다.
-    판독 쪽(read_one)도 없는 파일은 스스로 만드므로 같은 쪽을 두 군데서 만들 수 있다 — 쓰기가 원자적이라 해롭지 않다. force=None 이면 args.force 를 따른다."""
+    판독 쪽(read_one)도 없는 파일은 스스로 만든다. 같은 쪽 캐시는 잠금으로 조정하고 원자적으로 저장한다. force=None 이면 args.force 를 따른다."""
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    work.ensure_source(getattr(args, "dpi", 300))
     pages = parse_pages(args.pages, len(doc)) if pages is None else list(pages)
     force = bool(getattr(args, "force", False)) if force is None else bool(force)
     work.ensure_pages(pages, len(doc))
@@ -332,6 +352,7 @@ def make_reader(args, doc, work):
                         thinking=None if think == "auto" else think, media_resolution=None if mres == "auto" else mres)
 
 
+@_page_cache_io
 def _load_page_image(work: Work, doc, n: int, dpi: int) -> tuple[Image.Image, str]:
     """쪽 이미지(없으면 만들어 두고). 바로 다 읽어 파일을 닫는다 — 미리 준비 스레드가 뒤에 같은 파일을 바꿔 넣어도(Windows) 걸리지 않게."""
     ip = work.page_image_path(n)
@@ -403,10 +424,11 @@ def remerge_record(rec: dict, layer_plain: str, layer: dict | None = None) -> di
     return rec
 
 
-@_with_document
+@_document_command
 def cmd_remerge(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    work.ensure_source()
     resolve_mode(args, doc, work)                      # 가로쓰기 한문이면 간체·부호 차이를 접어 비교
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
@@ -635,7 +657,7 @@ def _reread_batch(reader2, batch: list, n: int, rereads: dict) -> None:
     try:
         rereads.update(reader2.reread_regions(batch, n)); return
     except Exception as e:
-        if isinstance(e, ReaderError) and e.fatal:
+        if isinstance(e, ReaderError) and (e.fatal or e.kind == "infrastructure"):
             raise
         if len(batch) <= 2:
             log(f"    {n}쪽: 묶음 2차 판독 실패({str(e)[:60]}) → 영역별로 다시"); return
@@ -647,7 +669,7 @@ def _reread_batch(reader2, batch: list, n: int, rereads: dict) -> None:
         try:
             rereads.update(reader2.reread_regions(half, n))
         except Exception as e:
-            if isinstance(e, ReaderError) and e.fatal:
+            if isinstance(e, ReaderError) and (e.fatal or e.kind == "infrastructure"):
                 raise
             log(f"    {n}쪽: 반 묶음({len(half)}장) 2차 판독 실패({str(e)[:60]}) → 빠진 영역은 낱개로")
 
@@ -711,16 +733,21 @@ def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str,
 
     def one(rid: str, kind: str, im) -> str:
         """낱개 2차 호출. 일시 오류면 그 사유를 돌려준다(기록은 부르는 쪽이 — failed)."""
+        if CANCEL.is_set():
+            raise ReaderError("중지 요청으로 2차 판독을 멈춥니다", kind="cancelled")
         asked.add(rid)
         try:
             rr = reader2.reread_region(im, kind, rid, n)
         except ReaderError as e:
-            if e.fatal:
+            if e.fatal or e.kind == "infrastructure":
                 raise
             return str(e)[:80] or type(e).__name__
-        if rr.columns:
+        if rr.columns and any(c.text.strip() for c in rr.columns):
             rereads[rid] = rr; single.add(rid)
-        return ""
+            return ""
+        if getattr(reader2, "allow_empty_reread", False):
+            return ""                         # 모의 판독의 생략은 일치한 2차 증거로 저장하지 않는다
+        return "빈 2차 판독 응답 — 문자 영역을 확인하지 못함"
 
     def failed(rid: str, why: str) -> None:
         # 조각 하나의 일시 오류로 쪽 전체(1차 pro 결과까지)를 버리지 않는다 — 그 영역만 2차 없이 두고 기록에 남긴다
@@ -728,8 +755,9 @@ def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str,
         log(f"    {n}쪽: {rid} 2차 판독 실패({why[:60]}) → 이 영역은 1차만으로")
 
     for rid, kind, im in items:
-        if rid in rereads and rereads[rid].columns:
+        if rid in rereads and any(c.text.strip() for c in rereads[rid].columns):
             continue
+        rereads.pop(rid, None)                 # 빈 묶음 응답은 낱개로 한 번 더 확인한다
         if err := one(rid, kind, im):
             failed(rid, err)
     odd_of: dict[str, list[str]] = {}
@@ -940,13 +968,18 @@ def _take_usage(reader, reader2) -> dict:
 
 
 def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
+    # 초 단위 경과 시간: 최종 기록 저장 직전까지(저장·상태 파일 쓰기는 제외). 벽시계 변경에도 흔들리지 않는다.
+    t0 = time.perf_counter()
+    timings = {k: 0.0 for k in ("image_load", "layer_load", "pass1", "layout", "pass2", "postprocess", "total")}
     total = len(doc)
     img, src = _load_page_image(work, doc, n, args.dpi)
+    timings["image_load"] = time.perf_counter() - t0
     up = page_upscale(reader, args.upscale, img.size)
-    t0 = time.time()
     for r in {id(reader): reader, id(reader2): reader2}.values():
         if hasattr(r, "usage_begin"): r.usage_begin()
+    stage_start = time.perf_counter()
     layer = _load_layer(work, doc, n)                       # 1차 호출 전에 — 깨진 글자층 파일 때문에 산 1차를 버리지 않게
+    timings["layer_load"] = time.perf_counter() - stage_start
     # 이전 실행이 2차 도중(또는 일부 영역에서) 실패해 남긴 1차 결과는 다시 사지 않는다(1차 pro 호출이 쪽 비용의 대부분)
     old = None if getattr(args, "force", False) else work.load_record(n)       # 덮어쓸 기록(2차가 덜 된 채 저장된 쪽) — 바꾸기 전에 prev/ 에 남긴다
     pp = partial_path(work, n); partial = _reusable_pass1(work, n, reader, args, old)
@@ -957,8 +990,11 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
         p1 = PageReading.model_validate(partial["pass1"]); src = partial.get("image_source") or src; up = partial.get("upscale") or up
         log(f"  {n}쪽: 이전 실행의 1차 판독을 재사용(2차만 다시)")
     else:
+        stage_start = time.perf_counter()
         model_img = upscale(img, up) if up != 1 else img
         p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total))
+        timings["pass1"] = time.perf_counter() - stage_start
+    stage_start = time.perf_counter()
     p1_raw = p1.model_dump()                                  # 좌표 보정·덮개 검사 전의 모델 답 — 부분 기록은 이것을 남긴다(재사용 때 보정을 다시 하므로 중복되지 않게)
     from . import prompts
     horizontal = prompts.MODE == "horizontal_zh"
@@ -967,9 +1003,11 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     coverage_notes = ([refit_describe(bbox_fix)] if bbox_fix["fixed"] else []) + cover_check(img, p1, horizontal)
     if horizontal:
         coverage_notes += absorb_edge_lines(p1, layer)
+    timings["layout"] = time.perf_counter() - stage_start
     rereads: dict[str, RegionReread] = {}
     meta: dict[str, dict] = {}
     if not args.no_second_pass:
+        stage_start = time.perf_counter()
         try:
             sub = p1.model_copy(update={"regions": [r for r in p1.regions if r.id in redo]}) if keep else p1
             rereads, meta = _second_pass(reader2, img, sub, n, args)
@@ -978,18 +1016,24 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
             if texts and len(bad) == len(texts):           # 문자 영역 모두 2차 실패(서버 오류 등) — 1차만인 쪽을 '완료'로 저장하지 않고 실패로 센다(1차는 아래에서 partial/ 에)
                 raise ReaderError(f"2차 판독이 문자 영역 {len(texts)}개 모두에서 실패 — {meta[bad[0]]['pass2_failed'][:80]}", fatal=False)
         except Exception as e:
+            timings["pass2"] = time.perf_counter() - stage_start
+            stage_start = time.perf_counter()
             # 2차에서 빠져나온 오류(치명 포함): 이미 산 1차 결과를 부분 기록으로 남겨 다음 실행이 2차만 다시 하게
             usage0 = _take_usage(reader, reader2)
             if partial:
                 _usage_add(usage0, partial.get("usage") or {})
             pp.parent.mkdir(exist_ok=True)
+            timings["postprocess"] = time.perf_counter() - stage_start
+            timings["total"] = time.perf_counter() - t0
             write_atomic(pp, json.dumps({"file": Path(args.pdf).name, "pdf_page": n, "reader": origin["provider"], "model": origin["model"], "version": __version__,
                                          "mode": getattr(args, "mode", ""), "pass1_cfg": origin["config"], "provenance": {"pass1": origin},
                                          "image_source": src, "upscale": up, "pass1": p1_raw, "bbox_fix": bbox_fix,
-                                         "coverage_notes": coverage_notes, "usage": usage0, "error": f"{type(e).__name__}: {str(e)[:200]}",
+                                         "coverage_notes": coverage_notes, "usage": usage0, "timings": timings, "pass1_reused": bool(partial), "error": f"{type(e).__name__}: {str(e)[:200]}",
                                          "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=1))
             log(f"  {n}쪽: 2차 판독 중 오류 — 1차 결과는 readings/partial/ 에 남겨 다음 실행에서 재사용합니다")
             raise
+        timings["pass2"] = time.perf_counter() - stage_start
+    stage_start = time.perf_counter()
     kept2 = {k: v for k, v in ((keep or {}).get("pass2") or {}).items() if k not in redo}       # 다시 묻지 않은 영역의 이전 2차(조각 정보 포함 그대로)
     for k, v in kept2.items():
         rereads.setdefault(k, RegionReread.model_validate(v))
@@ -1030,7 +1074,8 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
            "provenance": {"pass1": origin, "pass2": {k: {"provider": v.get("provider", _record_provider(keep or {})),
                          "model": v.get("model", (keep or {}).get("second_model") or (keep or {}).get("model", ""))} for k, v in pass2.items()}},
            "second_reader": reader2.name, "second_model": getattr(reader2, "model", "") if reader2 is not reader or partial else "",
-           "image_source": src, "upscale": up, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(time.time() - t0, 1),
+           "image_source": src, "upscale": up, "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": 0.0,
+           "timings": timings, "pass1_reused": bool(partial),
            "usage": usage, "coverage_notes": coverage_notes, "bbox_fix": bbox_fix,
            "pass1": p1.model_dump(), "pass2": pass2,
            "merged": merged.model_dump(), "merge_stats": mstats, "textlayer_diff": tdiff, "verify": issues, "crops": {}}
@@ -1054,6 +1099,9 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
                 log(f"주의: {n}쪽 영역 {', '.join(changed)} 의 이전 글(손 고침·3차 확정)은 2차를 다시 물어 새 비교로 바뀌었습니다 — 이전 기록은 {where}")
         else:
             log(f"주의: {n}쪽의 이전 기록을 1차부터 새로 읽은 기록으로 바꿨습니다(손 고침·3차 확정은 이어지지 않음) — 이전 기록은 {where}")
+    timings["postprocess"] = time.perf_counter() - stage_start
+    timings["total"] = time.perf_counter() - t0
+    rec["seconds"] = round(timings["total"], 1)
     work.save_record(n, rec)
     if pp.exists():                                   # 새 기록이 부분 기록을 대신한다(2차 일부 실패면 1차는 기록의 pass1_raw 에)
         try: pp.unlink()
@@ -1066,17 +1114,24 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     return rec
 
 
-@_with_document
+@_document_command
 def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     """쪽을 여러 개 동시에 판독한다(--workers). 치명 오류(키·권한·모델·한도 0)는 전체를 멈추고, 일시 오류는 그 쪽만 건너뛴다.
     checkpoint_fn 이 있으면 --checkpoint 쪽마다, 그리고 멈출 때 호출해 중간 HWPX 를 남긴다."""
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    work.ensure_source(getattr(args, "dpi", 300))
     pages = parse_pages(args.pages, len(doc))
+    existing = {n: work.load_record(n) for n in pages}
+    if not args.force and all(existing[n] is not None and
+                              (args.no_second_pass or not existing[n].get("pass2_failed")) for n in pages):
+        log(f"read: {len(pages)}쪽은 이미 판독되어 모델 호출 없이 건너뜁니다.")
+        progress("read", len(pages), len(pages))
+        return 130 if CANCEL.is_set() else 0
     try:
         reader = make_reader(args, doc, work)
         reader2 = reader
-        if args.reader != "mock":
+        if args.reader != "mock" and not args.no_second_pass:
             from .reader_gemini import list_models, pick_second_model
             want = (args.second_model or "").strip()
             if want.lower() == "auto":
@@ -1451,10 +1506,11 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     return ok
 
 
-@_with_document
+@_document_command
 def cmd_build(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    work.ensure_source()
     pages = parse_pages(args.pages, len(doc))
     records = work.records(pages)
     if not records:
@@ -1543,7 +1599,7 @@ def make_glyph_readers(args) -> tuple:
     return make(want), None
 
 
-@_with_document
+@_document_command
 def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = True):
     """3차 글자 판별. 〔a/b〕 자리를 조각 묶음(--batch-sites)으로 묻고, 쪽은 동시(--workers)에 돌린다. 확정한 글자는 merged 와
     adjudications 에 남고, remerge 뒤에도 유지된다. 자리 창은 글자층 글자 상자 → 먹 실측 → 균등 분할 순으로 잡는다.
@@ -1552,6 +1608,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
     from . import prompts
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    work.ensure_source()
     resolve_mode(args, doc, work)
     max_sites = int(getattr(args, "max_sites", 0) or 0); zoom = int(getattr(args, "zoom", 6) or 6)
     batch = int(getattr(args, "batch_sites", 8) or 0)
@@ -1704,7 +1761,7 @@ def cmd_ledger(args, work: Work | None = None, doc=None):
 
 
 # ---------- review / report / mark ----------
-@_with_document
+@_document_command
 def cmd_review(args, work: Work | None = None, doc=None):
     work = work or Work(args.pdf, args.work)
     doc = doc or open_pdf(args.pdf)
@@ -1720,7 +1777,7 @@ def cmd_review(args, work: Work | None = None, doc=None):
     return 0
 
 
-@_with_document
+@_document_command
 def cmd_report(args, work: Work | None = None, doc=None):
     work = work or Work(args.pdf, args.work)
     doc = doc or open_pdf(args.pdf)
@@ -1732,38 +1789,43 @@ def cmd_report(args, work: Work | None = None, doc=None):
     return 0
 
 
-def cmd_mark(args):
+@_document_command
+def cmd_mark(args, doc=None):
     work = Work(args.pdf, args.work)
-    doc = open_pdf(args.pdf)
     for n in parse_pages(args.pages, len(doc)):
         work.set_status(n, args.status, note=args.note, remove=["판독 확인 필요"] if args.status in HUMAN_ONLY and args.clear_check else None)
     log(f"mark: {args.pages} → {args.status}")
     return 0
 
 
-@_with_document
+@_document_command
 def cmd_estimate(args, work: Work | None = None, doc=None):
     """판독 전에 호출·토큰·비용을 어림해 보여 준다."""
     from .estimate import estimate, format_estimate
     doc = doc or open_pdf(args.pdf)
-    work = work or Work(args.pdf, args.work)
+    work = work or Work(args.pdf, args.work, initialize=False)
     pages = parse_pages(args.pages, len(doc))
+    same_source = work.source_matches(getattr(args, "dpi", 300))
     prices = {}
     if getattr(args, "price_in", None) or getattr(args, "price_out", None):
         prices[args.model or ""] = {"in": args.price_in or 0, "out": args.price_out or 0}
     e = estimate(args.pdf, pages, upscale=args.upscale, second_pass=not args.no_second_pass, model=args.model or "", reader=getattr(args, "reader", "gemini"),
                  second_model=getattr(args, "second_model", "") or "", use_cache=not getattr(args, "no_cache", False),
-                 prices=prices, fx_krw=getattr(args, "fx", None), records=work.records(pages) if not getattr(args, "force", False) else [])
+                 prices=prices, fx_krw=getattr(args, "fx", None),
+                 records=work.records(pages, repair=False) if same_source and not getattr(args, "force", False) else [])
+    if not same_source and any(work.readings_dir.glob("p*.json")):
+        e["notes"].append("원본·영상 설정이 바뀌었거나 기존 기록의 원본을 확인할 수 없어 선택한 쪽을 모두 새로 판독하는 비용입니다. 실행할 때 이전 결과는 보관됩니다.")
     log(format_estimate(e))
     return 0
 
 
-@_with_document
+@_document_command
 def cmd_run(args, work: Work | None = None, doc=None):
     """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
     사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
+    work.ensure_source(args.dpi)
     log(f"▶ 한 번에 인식: {Path(args.pdf).name} ({len(doc)}쪽) → {work.dir}")
     pages = parse_pages(args.pages, len(doc))
     work.ensure_pages(pages, len(doc))
@@ -1782,7 +1844,7 @@ def cmd_run(args, work: Work | None = None, doc=None):
             log(f"  미리 준비 중 예외(판독 쪽에서 직접 준비합니다): {type(e).__name__}: {str(e)[:80]}")
     ahead_thread = threading.Thread(target=prepare_ahead, daemon=True, name="prepare-ahead")
 
-    def ahead_done(timeout: float = 5.0):
+    def ahead_done(timeout: float | None = None):
         ahead_stop.set()
         if ahead_thread.is_alive():
             ahead_thread.join(timeout)
@@ -1996,7 +2058,7 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    from .reader_gemini import set_call_cap
+    from .reader_gemini import set_call_cap, set_cancel_event
     set_call_cap(getattr(args, "max_calls", 0) or 0)        # 호출 상한은 명령마다 새로 센다(창 프로그램은 한 프로세스에서 명령을 여럿 돌린다)
     if getattr(args, "max_calls", 0):
         log(f"모델 호출 상한: 이번 명령에서 {args.max_calls}회(재시도 포함)")
@@ -2004,4 +2066,13 @@ def main(argv=None):
         log(f"파일이 없습니다: {args.pdf}"); return 2
     if not getattr(args, "work", None) and (old := legacy_work_dir(args.pdf)):     # 예전 판의 이미지 결과 폴더(work/<이름>)는 저절로 옮겨 쓰지 않고 알린다
         log(f"참고: 예전 판의 결과 폴더가 있습니다: {old} — 그 판독 기록을 이어 쓰려면 --work \"{old}\" 을(를) 붙이십시오.")
-    return args.fn(args)
+    set_cancel_event(CANCEL)
+    try:
+        rc = args.fn(args)
+        return 130 if CANCEL.is_set() and rc not in (0, None) else rc
+    except ReaderError as e:
+        if e.kind == "cancelled":
+            log(str(e)); return 130
+        raise
+    finally:
+        set_cancel_event(None)

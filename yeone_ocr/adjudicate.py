@@ -28,8 +28,8 @@ from dataclasses import dataclass, asdict
 from difflib import SequenceMatcher
 import numpy as np
 from PIL import Image
-from .schema import PageReading, Region, Column, Uncertain, TEXT_KINDS, bbox_frac, GlyphChoice, GlyphAsk
-from .merge import columns_in_reading_order, MARK_RE
+from .schema import PageReading, Region, Column, Uncertain, TEXT_KINDS, bbox_frac, GlyphChoice, GlyphAsk, duplicate_region_ids
+from .merge import columns_in_reading_order, MARK_RE, nfc_text
 from .layout import ink_runs, merge_glyph_runs
 
 MARK_AB = re.compile(r"〔([^〔〕/]{1,2})/([^〔〕]{1,2})〕")
@@ -97,8 +97,9 @@ def plain(text: str) -> str:
 def find_sites(merged: PageReading) -> list[Site]:
     """병합 판독문의 〔a/b〕 자리를 모두 찾는다(한두 글자짜리만)."""
     out: list[Site] = []
+    duplicate = duplicate_region_ids(merged)
     for reg in merged.regions:
-        if reg.kind not in TEXT_KINDS:
+        if reg.kind not in TEXT_KINDS or reg.id in duplicate:
             continue
         cols = columns_in_reading_order(reg)
         for ci, col in enumerate(cols):
@@ -472,6 +473,8 @@ def apply_choice(merged: PageReading, site: Site, choice: str, moved: int = 0, d
     바로 옆 글자가 다른 후보로 확정된 표시였을 수 있으므로(〔於/不〕→不) 그 옆 글자(pre[-2]·post[1])가 맞아도 약하게 쳐 준다.
     제자리의 표시는 이웃이 안 맞아도 받되 이웃이 맞는 자리가 있으면 그쪽을 앞세운다. 앞뒤 글자 기록이 둘 다 없으면 가장 가까운 표시.
     맞는 자리가 없으면 False(표시를 그대로 둔다 — apply_adjudications 가 못 찾음으로 센다)."""
+    if sum(r.id == site.region_id for r in merged.regions) != 1:
+        return False                                      # 과거 기록의 중복 id 는 첫 영역에 잘못 반영하지 않는다.
     def side(seen: str, want: str, back: bool) -> int:
         """이웃 한쪽의 맞음: 바로 옆 글자가 같으면 2, 그 옆 글자만 같으면 1, 아니면 0."""
         if not want:
@@ -619,7 +622,7 @@ def blind_agrees(got: str, choice: str, candidates) -> bool:
     """눈가림 답(got)이 객관식 답(choice)과 같은가. 빈 답은 다르다고 본다. 간체·번체·이체는 접어서 맞춰 보되,
     두 후보가 접으면 같아지는 자리(黃/黄·苡/苢 같은 이체자 쌍)와 접으면 빈 글이 되는 숫자·부호 후보는 글자 그대로 맞춰 본다
     (그래야 인쇄된 꼴을 고르는 이 자리에서 재확인이 뜻을 가진다)."""
-    g, c = unicodedata.normalize("NFC", (got or "").strip()), unicodedata.normalize("NFC", (choice or "").strip())
+    g, c = nfc_text((got or "").strip()), nfc_text((choice or "").strip())
     if not g or not c:
         return False
     if g == c:
@@ -909,6 +912,13 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
             key = (site.region_id, site.col_index)
             if apply_choice(merged, site, entry["choice"], done=changed.get(key, [])):
                 changed.setdefault(key, []).append((site.char_index, site.a, entry["choice"]))
+            else:
+                entry["choice"] = ""
+                entry["evidence"] = "확정 위치를 찾지 못해 반영하지 않음 — " + entry["evidence"]
+                stats["undecided"] += 1
+                stats["unmapped"] = stats.get("unmapped", 0) + 1
+                done.append(entry)
+                continue
             stats["decided"] += 1; stats["a" if entry["choice"] == site.a else "b"] += 1; confirmed.add(sid)
             for u in merged.uncertain:
                 if site.mark in (u.context or "") and "3차 판별" not in u.context:
@@ -1021,10 +1031,11 @@ def find_suspects(merged: PageReading, layer_plain: str, adjudications: list[dic
         for L in decided_positions(merged, adjudications)[0]:
             near_dec.update((L.region_id, L.para_index, i) for i in range(L.start - 1, L.end + 1))
     chars: list[str] = []; spots: list = []                              # 맞출 글자와 그 자리((영역, 열 번호, 열 수, 글자 번호, 열) 또는 None=묻지 않음)
+    duplicate = duplicate_region_ids(merged)
     for reg in merged.regions:
         if reg.kind not in TEXT_KINDS:
             continue
-        ok_reg = regions is None or reg.id in regions; n_cols = len(columns_in_reading_order(reg)); ci = 0
+        ok_reg = reg.id not in duplicate and (regions is None or reg.id in regions); n_cols = len(columns_in_reading_order(reg)); ci = 0
         for pi, p in enumerate(reg.paragraphs):
             off = 0
             for col in sorted(p.columns, key=lambda c: c.col_from_right):   # columns_in_reading_order 와 같은 차례

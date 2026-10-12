@@ -5,7 +5,7 @@
 from __future__ import annotations
 import os, re, time, json, logging, threading
 from PIL import Image
-from .schema import PageReading, RegionReread, MultiRegionReread, GlyphChoice, MultiGlyphChoice, GlyphAsk
+from .schema import PageReading, PageResponse, RegionReread, MultiRegionReread, GlyphChoice, MultiGlyphChoice, GlyphAsk
 from .layout import to_png_bytes
 from . import prompts
 
@@ -15,8 +15,46 @@ DEFAULT_MODEL = "gemini-2.5-pro"
 class ReaderError(RuntimeError):
     """사용자에게 그대로 보여 줄 수 있는 한 줄 오류. fatal=True 면 다른 쪽도 같은 이유로 실패하므로 전체를 멈춘다(키·권한·모델·한도 0).
     fatal=False 면 이 쪽만 건너뛰고 계속한다(여러 번 시도해도 응답 형식이 맞지 않음 등)."""
-    def __init__(self, msg: str, fatal: bool = True):
-        super().__init__(msg); self.fatal = fatal
+    def __init__(self, msg: str, fatal: bool = True, kind: str = ""):
+        super().__init__(msg); self.fatal = fatal; self.kind = kind
+
+
+_CANCEL_EVENT: threading.Event | None = None
+
+
+def set_cancel_event(event: threading.Event | None) -> None:
+    """현재 명령의 중지 신호. 명령이 끝나면 None 으로 돌려 독립 키 확인에 영향을 주지 않는다."""
+    global _CANCEL_EVENT
+    _CANCEL_EVENT = event
+
+
+def _check_cancelled() -> None:
+    if _CANCEL_EVENT is not None and _CANCEL_EVENT.is_set():
+        raise ReaderError("중지 요청으로 모델 호출을 멈췄습니다.", kind="cancelled")
+
+
+def _wait_retry(seconds: float) -> None:
+    event = _CANCEL_EVENT
+    if event is None:
+        time.sleep(seconds)
+    elif event.wait(seconds):
+        _check_cancelled()
+
+
+def _failure_kind(e: Exception) -> str:
+    """통신·서버 장애는 조각을 작게 나눠 다시 물어도 해결되지 않는다."""
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    try:
+        code = int(code) if code is not None else None
+    except (TypeError, ValueError):
+        code = None
+    msg = str(e).lower()
+    if (code == 429 or (code is not None and 500 <= code < 600)
+            or isinstance(e, (OSError, TimeoutError, ConnectionError))
+            or any(s in msg for s in ("resource_exhausted", "timeout", "timed out"))
+            or type(e).__module__.split(".")[0] in ("httpx", "httpcore", "requests", "urllib3")):
+        return "infrastructure"
+    return "format" if is_format_error(e) else ""
 
 
 def normalize_key(key: str | None) -> str:
@@ -190,20 +228,27 @@ def list_models(api_key: str, vertexai: bool = False) -> list[str]:
     return sorted(set(names), key=model_sort_key)
 
 
-def probe_model(api_key: str, model: str, vertexai: bool = False) -> tuple[bool, str]:
-    """모델을 아주 짧게 실제로 호출해 본다(토큰 몇 개). 목록에 있어도 호출이 거부되는 퇴역 모델을 가려낸다."""
+def probe_model(api_key: str, model: str, vertexai: bool = False, *, count_call: bool = False) -> tuple[bool, str]:
+    """모델을 짧게 호출한다. 명령 중 자동 진단(count_call)은 그 명령의 호출 상한·중지 신호를 따른다."""
     from google.genai import types
     try:
         client = make_client(api_key, vertexai, timeout_ms=40_000)
+        if count_call:
+            _check_cancelled()
+            CALL_CAP.take()
         client.models.generate_content(model=model, contents="1", config=types.GenerateContentConfig(
             max_output_tokens=5, temperature=0.0, automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)))
         return True, "호출 확인됨"
+    except ReaderError:
+        raise
     except Exception as e:
         return False, friendly_error(e, model)[0]
 
 
-def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int = 8) -> dict:
+def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int = 8, *, count_calls: bool = False) -> dict:
     """키가 쓸 수 있는지, 어느 접속 경로(AI Studio / Vertex 익스프레스)에서 쓰이는지, 지정한 모델이 있는지 확인한다."""
+    if count_calls:
+        _check_cancelled()
     ks = split_keys(api_key)
     k = ks[0] if ks else ""                  # 키를 여러 개 넣었으면 첫 키(나머지는 창 프로그램이 따로 확인)
     out = {"ok": False, "key_len": len(k), "shape_warning": key_shape_warning(k), "models": [], "model_ok": None,
@@ -236,7 +281,7 @@ def check_key(api_key: str, model: str = "", probe: bool = True, max_probe: int 
         tried = 0
         while order and tried < max_probe:
             m = order.pop(0); tried += 1
-            ok, pm = probe_model(k, m, vx)
+            ok, pm = probe_model(k, m, vx, count_call=True) if count_calls else probe_model(k, m, vx)
             out["probe"][m] = pm
             if ok:
                 out["working_model"] = m; break
@@ -483,11 +528,13 @@ class GeminiReader:
 
     def _call(self, img: Image.Image, prompt: str, schema, extra_parts: list | None = None):
         """이미지 한 장(또는 extra_parts 로 여러 장)과 지시문을 보내 schema 대로 받는다."""
+        _check_cancelled()
         t = self.types
         contents = extra_parts if extra_parts is not None else [self.image_part(img), prompt]
-        last_msg = ""; tried_msgs: list[str] = []; fmt_fails = 0
+        last_msg = ""; last_kind = ""; tried_msgs: list[str] = []; fmt_fails = 0
         attempts = max(self.retries, 5)
         for i in range(attempts):
+            _check_cancelled()
             used_cache = self.cache_name                                  # 이 호출이 쓰는 캐시(실패하면 이 이름이 만료된 것)
             with self._lock:                                              # 이 호출이 쓰는 키(하루 한도면 다음 키로)·접속 경로·클라이언트 — 한꺼번에(다른 스레드가 바꾸는 중일 수 있다)
                 used_key, used_vx, client = self.key_idx, self.vertexai, self.client
@@ -496,6 +543,7 @@ class GeminiReader:
             except Exception as e:
                 raise ReaderError(f"호출 설정을 만들지 못했습니다 — 설치된 google-genai SDK 가 이 설정(생각 수준·해상도 등)을 모르는 듯합니다: {type(e).__name__}: {str(e)[:160]} "
                                   "→ pip install -U google-genai 로 SDK 를 올리거나 [세부 설정] 의 생각 줄이기·조각 해상도를 끄십시오(1차 생각 수준·쪽 해상도는 auto 로).", fatal=True) from e
+            _check_cancelled()
             CALL_CAP.take()                                               # 호출 상한(--max-calls) — 재시도 try 밖에서: 닿으면 부르지 않고 바로 멈춘다
             try:
                 resp = client.models.generate_content(model=self.model, contents=contents, config=config)
@@ -523,7 +571,9 @@ class GeminiReader:
                 text = resp.text or ""
                 return schema.model_validate_json(text)
             except Exception as e:
+                _check_cancelled()
                 last_msg, retry = friendly_error(e, self.model)
+                last_kind = _failure_kind(e)
                 code = getattr(e, "code", None) or getattr(e, "status_code", None)
                 if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
                     if is_daily_quota(str(e)):
@@ -559,23 +609,27 @@ class GeminiReader:
                     final = " / ".join(tried_msgs) if tried_msgs else last_msg
                     if code in (403, 404):
                         try:                       # 되는 모델을 찾아 바로 제안한다
-                            res = check_key(self.key, self.model, probe=True, max_probe=6)
+                            res = check_key(self.key, self.model, probe=True, max_probe=6, count_calls=True)
                             if res.get("working_model"):
                                 final += f" → 호출 확인된 모델: '{res['working_model']}'. [키 확인·모델 고르기] 에서 이 모델로 바꾸십시오."
+                        except ReaderError:
+                            raise
                         except Exception:
                             pass
                     raise ReaderError(final) from e
                 if last_msg == FORMAT_MSG:
                     fmt_fails += 1
                     if fmt_fails >= FORMAT_ATTEMPTS:   # 응답 형식 오류는 세 번까지만 — 기다려도 나아지지 않는 편이라 쪽마다 30초를 버리지 않게
-                        raise ReaderError(f"{fmt_fails}회 시도 뒤에도 실패: {last_msg}", fatal=False) from e
+                        raise ReaderError(f"{fmt_fails}회 시도 뒤에도 실패: {last_msg}", fatal=False, kind="format") from e
+                if i + 1 >= attempts:
+                    break                              # 마지막 실패 뒤에는 더 시도하지 않으므로 기다리지 않는다
                 if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
                     d = retry_delay_seconds(str(e))
                     print(f"주의: 요청 한도 초과 — {d:.0f}초 뒤 다시 시도 ({i + 1}/{attempts})", flush=True)
-                    time.sleep(d)
+                    _wait_retry(d)
                 else:
-                    time.sleep(2 ** i)             # 서버·형식 오류는 잠시 뒤 다시
-        raise ReaderError(f"{attempts}회 시도 뒤에도 실패: {last_msg}", fatal=False)
+                    _wait_retry(2 ** i)             # 서버·형식 오류는 잠시 뒤 다시
+        raise ReaderError(f"{attempts}회 시도 뒤에도 실패: {last_msg}", fatal=False, kind=last_kind)
 
     def usage_begin(self) -> None:
         """이 스레드에서 이어지는 호출들의 토큰을 쪽 단위로 따로 센다(여러 쪽을 동시에 읽어도 섞이지 않게)."""
@@ -592,7 +646,7 @@ class GeminiReader:
         return d
 
     def read_page(self, img: Image.Image, file_name: str, pdf_page: int, total: int, extra: str = "") -> PageReading:
-        r = self._call(img, prompts.page_prompt(file_name, pdf_page, total, extra), PageReading)
+        r = self._call(img, prompts.page_prompt(file_name, pdf_page, total, extra), PageResponse)
         r.pdf_page = pdf_page
         return r
 

@@ -1,6 +1,6 @@
 """작업 폴더와 쪽별 상태·판독 기록. '완료'는 실제 수행한 범위에만 붙는다(지침 33)."""
 from __future__ import annotations
-import json, os, shutil, time, threading
+import hashlib, json, os, shutil, time, threading
 from pathlib import Path
 
 STATUSES = ["미처리", "영역 분류 완료", "1차 OCR 완료", "2차 독립 판독 비교 완료", "판독 확인 필요",
@@ -58,6 +58,9 @@ def default_work_dir(pdf_path: str) -> Path:
     이미지 폴더는 work/<폴더>_이미지(같은 이름끼리 판독 기록이 섞이지 않게)."""
     p = Path(pdf_path)
     name = p.absolute().name + "_이미지" if p.is_dir() else (f"{p.stem}_{p.suffix.lower().lstrip('.')}" if p.suffix.lower() not in ("", ".pdf") else p.stem)
+    from .runtime import is_frozen, user_work_path
+    if is_frozen():
+        return user_work_path(name, p)
     return Path("work") / name
 
 
@@ -77,7 +80,7 @@ def legacy_work_dir(pdf_path: str) -> Path | None:
 class Work:
     _lock = threading.RLock()      # 여러 쪽을 동시에 판독할 때 state.json 읽기-고치기-쓰기가 겹치지 않게
 
-    def __init__(self, pdf_path: str, work_dir: str | None = None):
+    def __init__(self, pdf_path: str, work_dir: str | None = None, *, initialize: bool = True):
         self.pdf_path = Path(pdf_path)
         self.dir = Path(work_dir) if work_dir else default_work_dir(pdf_path)
         self.pages_dir = self.dir / "pages"
@@ -85,9 +88,89 @@ class Work:
         self.readings_dir = self.dir / "readings"
         self.crops_dir = self.dir / "crops"
         self.out_dir = self.dir / "out"
+        self.state_path = self.dir / "state.json"
+        self._page_locks: dict[int, threading.RLock] = {}
+        if not initialize:                              # 비용 미리보기: 폴더·원본 지문을 새로 쓰지 않는다
+            return
         for d in (self.pages_dir, self.textlayer_dir, self.readings_dir, self.crops_dir, self.out_dir):
             d.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.dir / "state.json"
+        # 새 작업만 원본 지문을 등록한다. 조회용 Work 생성으로 기존 자료를 옮기지 않는다.
+        if not any(self.dir.iterdir()) or all(d.is_dir() and not any(d.iterdir()) for d in self.dir.iterdir()):
+            self.ensure_source()
+
+    def page_lock(self, page: int):
+        """동일 쪽의 준비·판독이 Windows에서 열린 캐시 파일을 교체하지 않도록 한다."""
+        with self._lock:
+            return self._page_locks.setdefault(page, threading.RLock())
+
+    def _source_state(self, dpi: int | None = None) -> tuple[dict, dict, bool]:
+        """조회와 실제 처리에 같은 원본·DPI 비교 규칙을 쓴다. 파일은 읽기만 한다."""
+        previous = {}
+        try:
+            previous = json.loads((self.dir / "source.json").read_text(encoding="utf-8"))
+            if not isinstance(previous, dict):
+                previous = {}
+        except (ValueError, OSError):
+            pass
+        from .pdfio import image_sources
+        sources = image_sources(self.pdf_path) if self.pdf_path.is_dir() else [self.pdf_path]
+        digest = hashlib.sha256()
+        for src in sources:
+            digest.update(src.name.encode("utf-8") + b"\0")
+            file_digest = hashlib.sha256()
+            with src.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    file_digest.update(chunk)
+            digest.update(file_digest.digest())
+        current = {"sha256": digest.hexdigest(), "path": str(self.pdf_path.resolve()),
+                   "image_pipeline": 2, "dpi": int(dpi) if dpi is not None else previous.get("dpi")}
+        same = previous.get("sha256") == current["sha256"] and previous.get("image_pipeline") == current["image_pipeline"]
+        if dpi is not None and previous.get("dpi") is not None:
+            same = same and previous["dpi"] == current["dpi"]
+        return previous, current, same
+
+    def source_matches(self, dpi: int | None = None) -> bool:
+        """기존 기록을 이번 입력에 재사용할 수 있는지 읽기만 하여 확인한다. 옛 기록은 옮기지 않는다."""
+        if not self.pdf_path.exists():
+            return False
+        with self._lock:
+            return self._source_state(dpi)[2]
+
+    def ensure_source(self, dpi: int | None = None) -> None:
+        """원본 내용과 영상 설정이 같은 작업만 재사용한다. 옛 결과는 삭제하지 않고 archives/에 보관한다."""
+        if not self.pdf_path.exists():
+            return                                      # 기록만 다루는 평가·시험은 원본이 없을 수 있다
+        with self._lock:
+            manifest_path = self.dir / "source.json"
+            previous, current, same = self._source_state(dpi)
+            names = ("pages", "textlayer", "readings", "crops", "out", "collate", "eval", "state.json",
+                     "review.html", "report.md", "confusion.json", "context.json", "source.json")
+            populated = any((self.dir / n).is_file() or
+                            ((self.dir / n).is_dir() and any((self.dir / n).iterdir())) for n in names)
+            if not same and populated:
+                root = self.dir.resolve()
+                archive_root = root / "archives"
+                if archive_root.is_symlink() or archive_root.resolve() != archive_root:
+                    raise ValueError("잘못된 이전 결과 보관 경로")
+                sources_to_move = [root / name for name in names if (root / name).exists()]
+                if any(src.resolve().parent != root or src.is_symlink() for src in sources_to_move):
+                    raise ValueError("작업 폴더 밖의 결과는 옮기지 않습니다")
+                archive = free_name(archive_root / ("input-" + time.strftime("%Y%m%d-%H%M%S")))
+                archive.mkdir(parents=True)
+                moved = []
+                try:
+                    for src in sources_to_move:
+                        os.replace(src, archive / src.name)
+                        moved.append(src)
+                except OSError:
+                    for src in reversed(moved):
+                        os.replace(archive / src.name, src)
+                    raise
+                WARN(f"주의: 원본·영상 설정이 바뀌었거나 이전 결과의 원본을 검증할 수 없어 {archive} 에 보관했습니다. 새로 처리합니다.")
+            for d in (self.pages_dir, self.textlayer_dir, self.readings_dir, self.crops_dir, self.out_dir):
+                d.mkdir(parents=True, exist_ok=True)
+            if previous != current:
+                write_atomic(manifest_path, json.dumps(current, ensure_ascii=False, indent=1))
 
     # ---- 상태 ----
     def load_state(self) -> dict:
@@ -139,12 +222,14 @@ class Work:
     def record_path(self, page: int) -> Path:
         return self.readings_dir / f"p{page:03d}.json"
 
-    def _read_record(self, p: Path) -> dict | None:
+    def _read_record(self, p: Path, *, repair: bool = True) -> dict | None:
         """기록 파일 하나. 쓰다 만 JSON 이면 readings/broken/ 으로 옮기고 None(그 쪽은 안 읽은 것으로) — 결과 폴더 전체가 못 쓰게 되지 않게.
         손으로 고치다 BOM 이 붙은 기록은 깨진 것이 아니다(utf-8-sig). 앞서 broken/ 에 옮긴 같은 쪽 파일은 덮지 않는다."""
         try:
             return json.loads(p.read_text(encoding="utf-8-sig"))
         except ValueError:
+            if not repair:
+                return None
             bd = self.readings_dir / "broken"; bd.mkdir(exist_ok=True)
             dst = free_name(bd / p.name)
             try: os.replace(p, dst)
@@ -181,11 +266,13 @@ class Work:
     def textlayer_path(self, page: int) -> Path:
         return self.textlayer_dir / f"p{page:03d}.json"
 
-    def records(self, pages: list[int] | None = None) -> list[dict]:
+    def records(self, pages: list[int] | None = None, *, repair: bool = True) -> list[dict]:
         out = []
         for p in sorted(self.readings_dir.glob("p*.json")):
-            rec = self._read_record(p)
+            rec = self._read_record(p, repair=repair)
             if rec is None:
+                continue
+            if not repair and (not isinstance(rec, dict) or not isinstance(rec.get("pdf_page"), int)):
                 continue
             if pages is None or rec["pdf_page"] in pages:
                 out.append(rec)

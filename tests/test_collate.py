@@ -227,7 +227,8 @@ class Edit(unittest.TestCase):
             self.assertIn("陶云無毒", t[sec.start + 1]); self.assertIn("初起之發血症", t[sec.start + 2]); self.assertNotIn("切記切記切記", t[sec.start + 2])   # 긴 구간(C)은 넣지 않음
             self.assertEqual(t[sec.start + 1].count("胎因熱則不安"), 0)                 # B1 은 글자를 넣지 않음
             self.assertEqual(len(bk2.paragraphs), len(bk.paragraphs))                   # 문단 수 그대로
-            z = zipfile.ZipFile(out); x = z.read("Contents/section0.xml").decode(); h = z.read("Contents/header.xml").decode()
+            with zipfile.ZipFile(out) as z:
+                x = z.read("Contents/section0.xml").decode(); h = z.read("Contents/header.xml").decode()
             self.assertEqual(x.count('type="MEMO"'), 4); self.assertEqual(x.count("<hp:fieldEnd"), 4)       # 'all'(파이썬 기본): 항목마다
             self.assertIn('textColor="#1F4FBF"', h); self.assertIn('textColor="#C00000"', h); self.assertIn('shadeColor="#E1EBFF"', h)   # 파랑·빨강
             self.assertIn("[자동 교정] 원래 「有」 → 「無」", x); self.assertIn("여러 번체로 갈라짐: 發/髮", x)
@@ -243,7 +244,8 @@ class Edit(unittest.TestCase):
             self.assertTrue(ed4.add_legend_memo()); self.assertFalse(ed4.add_legend_memo())     # 범례는 한 번만
             self.assertEqual(len(bk4.paragraphs), n_par); self.assertEqual(bk4.texts(), texts_before)   # 문단·글 그대로
             out4 = ed4.save_copy(os.path.join(td, "out4.hwpx"))
-            x4 = zipfile.ZipFile(out4).read("Contents/section0.xml").decode()
+            with zipfile.ZipFile(out4) as z:
+                x4 = z.read("Contents/section0.xml").decode()
             self.assertEqual(x4.count('type="MEMO"'), 1 + sum(1 for it in items4 if needs_memo(it, "notice")))
             self.assertLess(x4.count('type="MEMO"'), x.count('type="MEMO"') + 1)
             self.assertEqual(x4.count("[연어OCR 표시 범례"), 1)
@@ -377,7 +379,7 @@ class StructuralRules(unittest.TestCase):
 
     def test_arabic_numbers_are_notation(self):
         # 인용 번호 "1. 2." 가 HWPX 에는 자동 번호라 글자로 없다 → 표기 차이(D), 항목 없음
-        self.assertEqual(self._items(["本草發揮丹溪曰冬瓜"], ["1本草发挥丹溪曰冬瓜"]), [])
+        self.assertEqual(self._items(["本草發揮丹溪曰冬瓜"], ["1. 本草发挥丹溪曰冬瓜"]), [])
         # 「本草」→「4」 처럼 숫자와 글자가 섞인 치환은 표시만
         items = self._items(["液而渴反盛矣本草綱目滑石利竅"], ["液而渴反盛矣4纲目滑石利窍"])
         self.assertTrue(items and all(it.kind == "C" and it.action == "mark" and not it.auto for it in items), [(i.kind, i.action, i.hwpx, i.ocr) for i in items])

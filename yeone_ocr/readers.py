@@ -203,6 +203,7 @@ class JSONVisionReader:
             for k, v in delta.items(): page[k] = page.get(k, 0) + v
 
     def _call(self, img, prompt, schema, extra_parts=None):
+        gemini._check_cancelled()
         parts = extra_parts if extra_parts is not None else [self.image_part(img), prompt]
         text_type = "input_text" if self.name == "openai" else "text"
         content = [{"type": text_type, "text": part} if isinstance(part, str) else part for part in parts]
@@ -212,6 +213,7 @@ class JSONVisionReader:
         if self.name == "anthropic" and len(json.dumps(content, ensure_ascii=False).encode("utf-8")) > 28_000_000:
             raise ReaderError("Claude 이미지 묶음이 너무 큽니다. --batch-crops 또는 --batch-sites 값을 줄이십시오.", fatal=False)
         for attempt in range(self.retries):
+            gemini._check_cancelled()
             gemini.CALL_CAP.take()
             self._add_usage({"calls": 1})
             try:
@@ -231,10 +233,12 @@ class JSONVisionReader:
                 result = result.strip()
                 if result.startswith("```"):
                     result = re.sub(r"^```(?:json)?\s*|\s*```$", "", result, flags=re.I)
+                gemini._check_cancelled()
                 return schema.model_validate_json(result)
             except ReaderError:
                 raise
             except Exception as e:
+                gemini._check_cancelled()
                 msg, retry = _error(self.name, e, self.model)
                 code = getattr(e, "status_code", None)
                 if code == 429:
@@ -242,8 +246,9 @@ class JSONVisionReader:
                 if not retry:
                     raise ReaderError(msg, fatal=True) from e
                 if attempt + 1 >= self.retries:
-                    raise ReaderError(f"{self.retries}회 시도 뒤에도 실패: {msg}", fatal=False) from e
-                time.sleep(min(30, 2 ** attempt * (5 if code == 429 else 1)))
+                    raise ReaderError(f"{self.retries}회 시도 뒤에도 실패: {msg}", fatal=False,
+                                      kind=gemini._failure_kind(e)) from e
+                gemini._wait_retry(min(30, 2 ** attempt * (5 if code == 429 else 1)))
 
 
 class OpenAIReader(JSONVisionReader):
