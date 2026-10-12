@@ -19,7 +19,7 @@
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
 """
 from __future__ import annotations
-import argparse, functools, inspect, json, re, sys, time, threading
+import argparse, functools, inspect, json, re, time, threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from PIL import Image
@@ -201,21 +201,53 @@ def _sample_pages(n: int, k: int = 8) -> list[int]:
     return sorted({start + int(i * (n - start - 1) / (k - 1)) for i in range(k)})
 
 
-def detect_mode(doc) -> tuple[str, str]:
-    """글자층으로 읽기 방향을 판정한다. 세로 열 글자가 가로 줄 글자 이상이면 세로쓰기, 아니면 가로쓰기 한문. 글자층이 없으면 세로쓰기(지침 기본)."""
+def _detect_mode(doc) -> tuple[str, str, str]:
+    """글자층을 우선 보고, 부족하면 실제 쪽 이미지의 글줄 기하를 비교한다."""
     v = h = 0; sample = []
-    for n in _sample_pages(len(doc)):
+    pages = _sample_pages(len(doc))
+    for n in pages:
         try:
-            tl = text_layer(doc, n)
+            with DOC_LOCK:
+                tl = text_layer(doc, n)
         except Exception:
             continue
         v += sum(len(c["text"]) for c in tl.vertical_columns)
         hs = "".join(l["text"] for l in tl.horizontal_lines)
         h += len(hs); sample.append(hs[:400])
     if v + h < 40:
-        return "vertical", "글자층이 거의 없어 기본값(세로쓰기 한자·한글)"
+        from .direction import image_direction
+        votes = {"horizontal_zh": 0.0, "vertical": 0.0}
+        counts = {"horizontal_zh": 0, "vertical": 0}
+        failures = 0
+        for n in pages:
+            try:
+                with DOC_LOCK:
+                    rect = doc[n - 1].rect
+                    dpi = max(1, min(150, int(1800 * 72 / max(rect.width, rect.height, 1))))
+                    img, _ = page_image(doc, n, dpi=dpi)
+                try:
+                    evidence = image_direction(img)
+                finally:
+                    img.close()
+                if evidence.mode:
+                    votes[evidence.mode] += evidence.confidence
+                    counts[evidence.mode] += 1
+            except Exception:
+                # Missing optional image libraries or an unreadable sample must
+                # not prevent a manual OCR run; do not claim a successful guess.
+                failures += 1
+        mode = max(votes, key=votes.get)
+        weight = sum(votes.values())
+        if weight and votes[mode] >= weight * 0.70:
+            why = (f"이미지 글줄 배치 표본 {len(pages)}쪽 중 가로 {counts['horizontal_zh']}쪽·세로 {counts['vertical']}쪽"
+                   " (로컬 분석, 모델 호출 없음)")
+            return mode, why, "image_geometry"
+        why = "글자층이 거의 없어 이미지 글줄도 비교했으나 방향 근거가 부족하거나 서로 달라 기본값(세로쓰기 한자·한글)"
+        if failures:
+            why += f" · 이미지 분석 실패 {failures}쪽"
+        return "vertical", why, "fallback"
     if v >= h:
-        return "vertical", f"글자층 표본에서 세로 열 글자 {v:,} ≥ 가로 줄 글자 {h:,}"
+        return "vertical", f"글자층 표본에서 세로 열 글자 {v:,} ≥ 가로 줄 글자 {h:,}", "text_layer"
     note = f"글자층 표본에서 가로 줄 글자 {h:,} > 세로 열 글자 {v:,}"
     try:
         from .collate import zh
@@ -225,7 +257,13 @@ def detect_mode(doc) -> tuple[str, str]:
             note += f" · 한자 {len(cjk):,}자 중 번체로 바뀌는 글자 {changed / len(cjk):.0%}" + ("(간체 인쇄)" if changed / len(cjk) > 0.08 else "(번체·한글 혼용으로 보이나 가로쓰기라 같은 모드로 읽음)")
     except Exception:
         pass
-    return "horizontal_zh", note
+    return "horizontal_zh", note, "text_layer"
+
+
+def detect_mode(doc) -> tuple[str, str]:
+    """읽기 방향과 판단 근거. 불확실한 이미지에는 기존 세로 기본값을 쓴다."""
+    mode, why, _ = _detect_mode(doc)
+    return mode, why
 
 
 def detect_print_offset(doc) -> int | None:
@@ -284,19 +322,49 @@ def flag_print_mismatch(work: "Work", records: list[dict], off: int) -> int:
 
 
 def resolve_mode(args, doc, work: "Work | None" = None) -> str:
-    """--mode auto 면 결과 폴더에 적힌 모드를 쓰고, 없으면 글자층으로 판정해 적어 둔다. 명시한 모드는 그대로 쓰되 역시 적어 둔다.
-    이렇게 해 두면 다시 계산·3차 판별·책갈피 OCR 이 같은 모드를 저절로 따른다."""
+    """자동 판정 근거를 캐시하고, 이미지 분석 이전의 세로 기본값만 재검토한다.
+
+    방향 갱신은 state만 바꾼다. 완료 판독/부분 판독을 지우거나 강제 재판독하지
+    않으며, 기존 방향과 다른 부분 판독의 재사용 여부는 기존 읽기 흐름이 결정한다.
+    """
+    from .direction import DETECTION_VERSION
     mode = getattr(args, "mode", None)
+    # run → read/adjudicate shares args. Its resolved auto value is not a new
+    # explicit manual choice, which would otherwise lose the cache provenance.
+    requested = (getattr(args, "_mode_requested", mode)
+                 if mode == getattr(args, "_resolved_mode", None) else mode)
+    args._mode_requested = requested
     st = work.load_state() if work else {}
-    if mode not in ("vertical", "horizontal_zh"):
-        if st.get("mode") in ("vertical", "horizontal_zh"):
-            mode = st["mode"]; why = "결과 폴더에 적힌 값"
+    old_mode = st.get("mode")
+    metadata = st.get("mode_detection")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if requested not in ("vertical", "horizontal_zh"):
+        stale_default = (old_mode == "vertical" and metadata.get("source") != "manual"
+                         and metadata.get("version") != DETECTION_VERSION)
+        if old_mode in ("vertical", "horizontal_zh") and not stale_default:
+            mode = old_mode; why = "결과 폴더에 적힌 값"
+            metadata = metadata or {"version": DETECTION_VERSION, "source": "legacy", "reason": why}
         else:
-            mode, why = detect_mode(doc)
+            mode, why, source = _detect_mode(doc)
+            if stale_default and source != "image_geometry":
+                # Old records do not say whether vertical was chosen manually.
+                # Only positive raster evidence can supersede that legacy value.
+                mode = old_mode
+                why = "결과 폴더의 이전 세로쓰기 값 유지 · " + why
+                source = "legacy"
+            metadata = {"version": DETECTION_VERSION, "source": source, "reason": why}
+            if stale_default and mode != old_mode:
+                log("읽기 방향 갱신: 이전 세로쓰기 기본값을 이미지 근거로 변경합니다. 기존 판독 기록은 보존하며 완료 쪽을 자동으로 다시 읽지 않습니다.")
         log(f"읽기 방향: {'가로쓰기 한문' if mode == 'horizontal_zh' else '세로쓰기 한자·한글'} (자동 — {why})")
+    else:
+        mode = requested
+        metadata = {"version": DETECTION_VERSION, "source": "manual", "reason": "사용자가 지정한 읽기 방향"}
     args.mode = mode
-    if work and st.get("mode") != mode:
-        st["mode"] = mode; work.save_state(st)
+    args._resolved_mode = mode
+    if work and (old_mode != mode or st.get("mode_detection") != metadata):
+        st["mode"] = mode
+        st["mode_detection"] = metadata
+        work.save_state(st)
     apply_mode(args)
     return mode
 
@@ -1719,7 +1787,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
             + (f" · 보완 확정 {st['fallback_decided']}" if st.get("fallback_decided") else "") + (f" · {sus_txt}" if sus_txt else "") + f"  {shown[:160]}")
 
     def on_error(item, e) -> bool:
-        rec, n = item[0], item[1]; pg = rec["pdf_page"]
+        rec = item[0]; pg = rec["pdf_page"]
         pages_done[0] += 1; progress("adjudicate", pages_done[0], len(todo))
         if isinstance(e, ReaderError) and e.fatal:
             fatal.append(e); log(f"오류: {pg}쪽 판별 실패 — {e}"); return True

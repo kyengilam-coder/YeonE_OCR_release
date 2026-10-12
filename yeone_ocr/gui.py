@@ -24,7 +24,7 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
-            "chunk_lines": 8, "media_res": "high", "mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
+            "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
@@ -56,11 +56,12 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
  3. [일반 OCR]의 [PDF 고르기…]로 PDF를 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)는 [이미지(스크린샷) OCR]의 [이미지 고르기…]로 엽니다.
     이미지를 여러 장 함께 고르면 이름의 숫자 순서로
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
-    인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 이미지는 글자층이 없어 세로쓰기로 보므로
-    가로쓰기 책이면 읽기 방향을 직접 고르십시오.
+    인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 글자층이 없는 이미지·스캔의 읽기 방향은
+    실제 글줄 배치로 자동 판정합니다. 이미지 OCR은 기본값이 자동 판정이며 PDF·책갈피와 방향 설정을 따로 기억합니다.
     화면 캡처는 Win+Shift+S → [스크린샷 붙여넣기](Ctrl+Shift+V)로 불러옵니다. 자동으로 이미지 OCR 탭으로 이동하며 바로 옆 [원본 보기]로 확인합니다.
     붙여넣은 캡처는 사용자 데이터 폴더의 screenshots에 PNG로 보관하며 같은 캡처는 기존 작업을 이어 씁니다.
     붙여넣기는 이전 쪽 범위·인쇄 쪽수 보정·강제 재판독을 초기화하며, 일반 Ctrl+V는 입력 칸의 글자 붙여넣기로 유지합니다.
+    [입력 비우기]는 선택한 이미지·묶음과 쪽 범위·진행 표시를 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 그대로 남습니다.
  4. [▶ 한 번에 인식 (PDF·이미지 → HWPX)] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
     준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 만들기 → 검수 화면 → 보고·혼동 장부 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
     이전 판으로 만든 판독 기록이 있으면 지금 규칙으로 저절로 다시 비교합니다(모델 호출 없음).
@@ -273,6 +274,12 @@ def ocr_input_config(cfg: dict) -> tuple[dict, int]:
         states[tab] = {key: str(state.get(key) or "") for key in ("pdf", "pages", "print_offset")}
         states[tab]["force"] = bool(state.get("force", False))
     return states, initial
+
+
+def ocr_mode_config(cfg: dict) -> dict[int, str]:
+    """이미지 방향은 PDF 설정을 물려받지 않고 자동 판정으로 시작한다."""
+    return {tab: cfg.get(key) if cfg.get(key) in MODE_LABELS else "auto"
+            for tab, key in ((0, "mode"), (2, "image_mode"))}
 
 
 SECRET_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
@@ -974,6 +981,8 @@ class App(tk.Tk):
         self.v_tab.set(i)
         if i != 3:
             self._last_ocr_tab = i
+            self.v_mode = self._mode_vars[2 if i == 2 else 0]
+            self.cb_mode.configure(textvariable=self.v_mode)
         if i in (0, 2):
             self._input_force[self._active_input] = self.v_force.get()
             self._active_input = i
@@ -1066,7 +1075,7 @@ class App(tk.Tk):
             variables["pdf"].trace_add("write", self._sync_output_location)
 
         # ---- 설정 탭: 판독·문서·책갈피 교정·고급 도구 ----
-        self._hint(common, "판독 설정은 세 OCR 탭에서 함께 씁니다. 문서 옵션은 일반·이미지 OCR에 적용되며, 책갈피 교정 옵션은 아래에서 따로 고릅니다.",
+        self._hint(common, "판독기·모델은 세 OCR 탭에서 함께 씁니다. 읽기 방향은 일반·책갈피 OCR과 이미지 OCR이 따로 기억하며, 이미지 OCR의 기본값은 자동 판정입니다. 문서 옵션은 일반·이미지 OCR에 적용됩니다.",
                    page=True).pack(fill="x")
         mid = ttk.Frame(common); mid.pack(fill="x", pady=(P(10), 0))
         mid.columnconfigure(0, weight=3); mid.columnconfigure(1, weight=2)
@@ -1088,7 +1097,8 @@ class App(tk.Tk):
         self.v_blind = tk.BooleanVar(value=bool(self.cfg.get("adjudicate_blind", False)))
         self.v_chunk = tk.StringVar(value=str(self.cfg.get("chunk_lines", 8)))
         self.v_mres = tk.StringVar(value=MRES_LABELS.get(self.cfg.get("media_res", "high"), MRES_LABELS["high"]))
-        self.v_mode = tk.StringVar(value=MODE_LABELS.get(self.cfg.get("mode", "auto"), MODE_LABELS["auto"]))
+        self._mode_vars = {tab: tk.StringVar(value=MODE_LABELS[mode]) for tab, mode in ocr_mode_config(self.cfg).items()}
+        self.v_mode = self._mode_vars[0]
         b = c2.body; b.columnconfigure(1, weight=1)
         self._field_label(b, "판독기", 0)
         rr = ttk.Frame(b, style="Panel.TFrame"); rr.grid(row=0, column=1, columnspan=2, sticky="w", pady=P(3))
@@ -1097,9 +1107,9 @@ class App(tk.Tk):
         self.cb_provider.bind("<<ComboboxSelected>>", self._select_provider)
         Tip(self.cb_provider, "제공사를 바꿔도 같은 결과 폴더의 완료 기록을 이어 씁니다. '기록 있는 쪽도 다시 판독'은 꺼 두십시오. 제공사마다 API 키가 필요합니다.", self)
         self._field_label(b, "읽기 방향", 1)
-        cb = ttk.Combobox(b, textvariable=self.v_mode, values=list(MODE_LABELS.values()), state="readonly", width=self._cw(MODE_LABELS.values()))
+        cb = self.cb_mode = ttk.Combobox(b, textvariable=self.v_mode, values=list(MODE_LABELS.values()), state="readonly", width=self._cw(MODE_LABELS.values()))
         cb.grid(row=1, column=1, sticky="w", pady=P(3))
-        Tip(cb, "자동 판정이면 PDF 글자층의 세로 열·가로 줄 글자 수로 세로쓰기 한자·한글 / 가로쓰기 한문(간체)을 고르고 결과 폴더에 적어 둡니다.", self)
+        Tip(cb, "자동 판정이면 PDF 글자층을 먼저 보고, 글자층이 부족한 이미지·스캔은 실제 글줄 배치로 가로·세로를 고릅니다. 판정 근거는 진행 기록에 표시합니다. 이미지 OCR의 방향은 따로 기억합니다.", self)
         self._field_label(b, "모델", 2)
         self.e_model = ttk.Entry(b, textvariable=self.v_model); self.e_model.grid(row=2, column=1, sticky="ew", pady=P(3))
         self._btn(b, "키 확인·모델 고르기", self.check_key, tip="선택한 제공사에 키를 확인하고 모델 목록에서 고릅니다.").grid(row=2, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
@@ -1283,7 +1293,7 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y"); self.table.pack(side="left", fill="both", expand=True)
         nb.add(tc, text="쪽별 상태")
         self._reader_changed()
-        for variable in (self.v_provider, self.v_model, self.v_mode, self.v_docx):
+        for variable in (self.v_provider, self.v_model, *self._mode_vars.values(), self.v_docx):
             variable.trace_add("write", self._sync_settings_summary)
         self._inputs_ready = True
         self.select_tab(self._initial_input_tab)
@@ -1313,7 +1323,9 @@ class App(tk.Tk):
         self._btn(controls, "원본 보기", self.open_source,
                   tip="바로 앞에서 불러온 스크린샷이나 선택한 원본을 엽니다.").pack(side="left", padx=(P(6), 0))
         if images:
-            self._hint(body, "Win+Shift+S로 캡처 → 붙여넣기 → 원본 확인 → [한 번에 인식]. 가로쓰기 캡처는 읽기 방향을 가로쓰기로 고르십시오.").grid(
+            self._btn(controls, "입력 비우기", self.clear_image_input,
+                      tip="불러온 이미지 선택과 쪽 범위를 모두 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 보존합니다.").pack(side="left", padx=(P(14), 0))
+            self._hint(body, "Win+Shift+S로 캡처 → 붙여넣기 → 원본 확인 → [한 번에 인식]. 가로·세로 읽기 방향은 이미지의 글줄 배치로 자동 판정합니다.").grid(
                 row=2, column=1, columnspan=2, sticky="ew", pady=(P(4), P(3)))
         self._field_label(body, "쪽 범위", 3, top=6)
         row = ttk.Frame(body, style="Panel.TFrame"); row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
@@ -1780,6 +1792,8 @@ class App(tk.Tk):
                               else "원본을 불러오면 저장 폴더가 표시됩니다")
 
     def _need_pdf(self) -> bool:
+        if getattr(self, "_selected_tab", None) == 3 and not self.running:
+            self.select_tab(self._active_input)  # 고급 도구의 원본과 그 원본용 읽기 방향을 함께 복원한다.
         if not self.pdf() or not Path(self.pdf()).exists():
             messagebox.showinfo(APP_NAME, "일반 OCR의 [PDF 고르기…] 또는 이미지 OCR의 [이미지 고르기…]·[스크린샷 붙여넣기]로 원본을 불러오십시오."); return False
         return True
@@ -1867,8 +1881,9 @@ class App(tk.Tk):
     def check_list_mode(self) -> str:
         return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "none")
 
-    def mode_key(self) -> str:
-        return next((k for k, v in MODE_LABELS.items() if v == self.v_mode.get()), "auto")
+    def mode_key(self, tab: int | None = None) -> str:
+        variable = self.v_mode if tab is None else self._mode_vars[2 if tab == 2 else 0]
+        return next((k for k, v in MODE_LABELS.items() if v == variable.get()), "auto")
 
     def media_res_key(self) -> str:
         return next((k for k, v in MRES_LABELS.items() if v == self.v_mres.get()), "high")
@@ -2083,6 +2098,20 @@ class App(tk.Tk):
         self.v_pages.set(""); self.v_off.set(""); self.v_force.set(False)
         self.cfg.update(pages="", print_offset="", force=False)
 
+    def clear_image_input(self):
+        """이미지 작업 선택만 비운다. 디스크 파일과 다른 작업의 입력은 보존한다."""
+        if self.running or getattr(self, "_closing", False) or getattr(self, "_update_installing", False):
+            return
+        self.select_tab(2)
+        self._reset_screenshot_pages()
+        self.v_pdf.set(""); self.cfg["last_pdf"] = ""
+        self._remember_inputs(); save_config(self.cfg)
+        self.refresh_table()
+        self.open_after = None
+        self.progress.configure(value=0); self.v_prog.set("")
+        self.v_status.set("새 이미지나 스크린샷을 입력하십시오")
+        self._append("이미지 입력을 비웠습니다. 저장된 원본과 결과 파일은 보존됩니다. 새 이미지를 고르거나 스크린샷을 붙여넣으십시오.\n")
+
     def paste_screenshot(self, event=None):
         """명시적으로 붙여넣었을 때만 클립보드를 읽는다. API 호출은 실행 단추에서 한다."""
         if self.running or getattr(self, "_closing", False) or getattr(self, "_update_installing", False):
@@ -2147,13 +2176,15 @@ class App(tk.Tk):
                                             "force": self._input_force[tab]}
                                   for tab, variables in self._input_vars.items()}
         self.cfg["input_tab"] = self._active_input
+        self.cfg["mode"] = self.mode_key(0)
+        self.cfg["image_mode"] = self.mode_key(2)
 
     def _use_pdf(self, p: str):
         self.v_pdf.set(p); self.cfg["last_pdf"] = p; self._remember_inputs(); save_config(self.cfg); self.refresh_table()
         kind = "이미지" if Path(p).suffix.lower() in IMAGE_EXTS else "PDF"
         self._append(f"{kind}: {p}\n결과 폴더: {self.work()}\n")
         if kind == "이미지" and self.mode_key() == "auto":
-            self._append("  이미지에는 글자층이 없어 읽기 방향을 세로쓰기로 봅니다. 가로쓰기 책이면 [읽기 방향] 을 바꾸십시오.\n")
+            self._append("  실행할 때 이미지의 글줄 배치로 가로·세로 읽기 방향을 자동 판정합니다.\n")
 
     @staticmethod
     def _bundle_path(srcs: list[Path], progress=None) -> Path:
@@ -2306,7 +2337,7 @@ class App(tk.Tk):
                          "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode(),
                          "workers": int(self.v_workers.get() or 8), "second_model": self.v_model2.get().strip(),
                          "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "adjudicate_blind": self.v_blind.get(), "last_pdf": self.pdf(),
-                         "chunk_lines": int(self.v_chunk.get() or 0), "media_res": self.media_res_key(), "mode": self.mode_key(),
+                         "chunk_lines": int(self.v_chunk.get() or 0), "media_res": self.media_res_key(), "mode": self.mode_key(0), "image_mode": self.mode_key(2),
                          "page_thinking": self.page_think_key(), "page_media_res": self.page_mres_key()})
         if getattr(self, "v_suspects", None) is not None:
             self.cfg["suspects"] = self.v_suspects.get()
