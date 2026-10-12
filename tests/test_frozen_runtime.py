@@ -26,6 +26,7 @@ class FrozenRuntime(unittest.TestCase):
     def frozen(self):
         stack = contextlib.ExitStack()
         stack.enter_context(mock.patch.object(sys, "frozen", True, create=True))
+        stack.enter_context(mock.patch.object(sys, "platform", "win32"))
         stack.enter_context(mock.patch.object(sys, "executable", str(self.exe)))
         stack.enter_context(mock.patch.object(sys, "_MEIPASS", str(self.install / "_internal"), create=True))
         stack.enter_context(mock.patch.object(runtime, "user_data_dir", return_value=self.root / "user-data"))
