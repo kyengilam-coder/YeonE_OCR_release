@@ -526,7 +526,7 @@ class GuiOps(unittest.TestCase):
                     with mock.patch.object(gui.subprocess, "Popen", P), mock.patch.object(gui.sys, "platform", plat):
                         gui.open_path(Path("/tmp/결과.html"))
                     cmd, kw = seen[-1]
-                    self.assertEqual(cmd, [opener, "/tmp/결과.html"]); self.assertNotIn("GEMINI_API_KEY", kw["env"]); self.assertNotIn("GOOGLE_API_KEY", kw["env"])
+                    self.assertEqual(cmd, [opener, str(Path("/tmp/결과.html"))]); self.assertNotIn("GEMINI_API_KEY", kw["env"]); self.assertNotIn("GOOGLE_API_KEY", kw["env"])
 
     def test_fx_fetched_at_most_once_a_day(self):
         with gui_module() as gui:

@@ -663,6 +663,12 @@ def collate_traces(book) -> str:
 def cmd_eval(args) -> int:
     """명령줄 진입점(읽기 전용 — 결과 폴더의 기록·state.json 을 옮기거나 고치지 않고 하위 폴더도 만들지 않는다. 쓰는 것은 결과 폴더 eval/ 뿐).
     기준 HWPX·기록이 없거나 평가할 단위가 없으면 2, 끝나면 0."""
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        return _cmd_eval(args, resources)
+
+
+def _cmd_eval(args, resources) -> int:
     from .state import default_work_dir
     from .pdfio import open_pdf, parse_pages
     from .collate.sections import HwpxBook
@@ -674,6 +680,7 @@ def cmd_eval(args) -> int:
     work = Records(getattr(args, "work", None) or default_work_dir(args.pdf))
     try:
         doc = open_pdf(args.pdf)
+        resources.callback(doc.close)
     except Exception as e:
         doc = None
         if not getattr(args, "pages", None):
@@ -688,6 +695,7 @@ def cmd_eval(args) -> int:
         from .cli import detect_mode
         mode = st["mode"] if st.get("mode") in ("vertical", "horizontal_zh") else (detect_mode(doc)[0] if doc is not None else "vertical")
     zh_fold = mode == "horizontal_zh"; book = HwpxBook(hw); t0 = time.time()
+    resources.callback(book.doc.close)
     if why := collate_traces(book):                                  # 이름을 바꾼 교정본(--out 으로 저장한 것 포함)
         log(f"오류: 교정본의 흔적({why})이 있는 HWPX 는 OCR 이 이미 고친 파일이라 기준으로 쓰면 평가가 순환합니다 — 원본 HWPX 를 주십시오: {Path(hw).name}"); return 2
     log(f"평가: 기준 {Path(hw).name}(문단 {len(book.paragraphs):,}개) · 기록 {len(have)}쪽 · 모드 {mode}({'간체·이체자 접음' if zh_fold else '부호만 접음'}) · 모델 호출 없음")

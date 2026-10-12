@@ -252,24 +252,25 @@ _READER_CACHE: dict = {}
 def _reader_cache_key(args) -> tuple:
     """(모델, 설정, 키 목록의 sha1) — 창에서 API 키를 바꾸면 새 판독기를 만든다(옛 키로 계속 부르지 않게). 키 자체는 들고 있지 않는다."""
     import hashlib
-    from ..reader_gemini import split_keys
-    keys = split_keys(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-    return (getattr(args, "model", None) or os.environ.get("GEMINI_MODEL") or "", getattr(args, "adjudicate_thinking", "low"),
+    from ..readers import split_keys, environment_key, default_model
+    provider = getattr(args, "reader", "gemini")
+    keys = split_keys(provider, environment_key(provider))
+    return (provider, getattr(args, "model", None) or default_model(provider), getattr(args, "adjudicate_thinking", "low"),
             hashlib.sha1("\n".join(keys).encode("utf-8")).hexdigest())
 
 
 def glyph_reader(args):
-    """항목 3차 판별용 Gemini 판독기(같은 모델·설정·키면 한 번만 만들어 재사용). 키가 없거나 만들지 못하면 None."""
-    if getattr(args, "no_glyph_check", False) or getattr(args, "reader", "gemini") != "gemini":
+    """항목 3차 판별용 판독기(같은 제공사·모델·설정·키면 한 번만 만들어 재사용)."""
+    if getattr(args, "no_glyph_check", False) or getattr(args, "reader", "gemini") == "mock":
         return None
     key = _reader_cache_key(args)
     if key in _READER_CACHE:
         return _READER_CACHE[key]
     try:
-        from ..reader_gemini import GeminiReader
+        from ..readers import create_reader
         from ..prompts import glyph_system_prompt
         think = None if getattr(args, "adjudicate_thinking", "low") == "full" else "low"
-        r = GeminiReader(model=getattr(args, "model", None), use_cache=False, media_resolution="high", thinking=think, system=glyph_system_prompt())
+        r = create_reader(getattr(args, "reader", "gemini"), model=getattr(args, "model", None), use_cache=False, media_resolution="high", thinking=think, system=glyph_system_prompt())
     except Exception as e:
         log(f"자형 3차 판별은 건너뜁니다({str(e)[:80]}).")
         r = None
@@ -612,14 +613,22 @@ def set_aside(path: Path) -> Path:
 
 def cmd_collate(args):
     """명령줄 진입점. --list 면 색인만, --section 이면 그 구획을 대조(--apply 면 반영·저장)."""
+    from contextlib import ExitStack
+    with ExitStack() as resources:
+        return _cmd_collate(args, resources)
+
+
+def _cmd_collate(args, resources):
     from ..pdfio import open_pdf
     from ..state import Work
     if not getattr(args, "hwpx", None) or not Path(args.hwpx).exists():
         log("--hwpx 파일이 필요합니다."); return 2
     pdf_doc = open_pdf(args.pdf); work = Work(args.pdf, args.work)
+    resources.callback(pdf_doc.close)
     styles = [s for s in (getattr(args, "heading_styles", "") or "").split(",") if s.strip()] or None
     src = getattr(args, "anchor_source", "auto") or "auto"
     book = HwpxBook(args.hwpx)
+    resources.callback(book.doc.close)
     anchors, pdf_anchors, matches = index_both(pdf_doc, book, src, styles)
     moved = None                                                 # 교정본을 _이전_n 으로 옮겼으면 그 경로 — 끝나도 3(확인할 것 있음)으로 알린다
     # 교정본(<이름>_교정.hwpx)이 이미 있으면 거기에 이어서 고친다 — 앞서 고친 구획이 지워지지 않게.
@@ -628,6 +637,7 @@ def cmd_collate(args):
         target = Path(getattr(args, "out", None) or corrected_path(args.hwpx))
         if target.exists() and os.path.abspath(target) != os.path.abspath(args.hwpx):
             book2 = HwpxBook(str(target))
+            resources.callback(book2.doc.close)
             a2, _, m2 = index_both(pdf_doc, book2, src, styles)
             if len(a2) == len(anchors) and all(x.para == y.para for x, y in zip(a2, anchors)):
                 book, anchors, matches = book2, a2, m2

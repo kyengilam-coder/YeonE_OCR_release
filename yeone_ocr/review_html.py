@@ -1,7 +1,8 @@
 """검수용 정적 HTML. 왼쪽 원본 쪽 이미지, 오른쪽 판독문·확인 필요 목록·기존 OCR 과의 차이·구조 검사 결과."""
 from __future__ import annotations
-import html, os, re
+import html, json, os, re
 from pathlib import Path
+from urllib.parse import quote
 from .state import Work
 from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, paragraph_text, bbox_frac
 
@@ -85,6 +86,43 @@ def overlay_boxes(pr: PageReading) -> str:
     return "".join(parts)
 
 
+def _normalization_reports(work: Work, out: Path) -> str:
+    """검수 본문은 판독 원문이다. 최종 문서의 표기 변환은 따로 비교할 수 있게 한다."""
+    sections = []
+    for path in sorted(work.out_dir.glob("*_normalization.json")):
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            summary = report.get("summary", {})
+            rows = report.get("blocks") or []
+            href = quote(os.path.relpath(path, out.parent).replace("\\", "/"), safe="/")
+            label = html.escape(path.name)
+            desc = (f"변경 {summary.get('changes', 0)}건 · 확인 필요 {summary.get('review', 0)}건"
+                    if report.get("enabled", True) else "이번 문서는 번체·문맥 교정 생략")
+            sections.append(f"<details><summary>{label} — {html.escape(desc)}</summary>"
+                            f"<p><a href='{href}'>변환 내역 전체(JSON)</a></p>")
+            report_html = path.with_suffix(".html")
+            if report_html.exists():
+                html_href = quote(os.path.relpath(report_html, out.parent).replace("\\", "/"), safe="/")
+                sections.append(f"<p><a href='{html_href}'>변환 보고 열기 — 변경 전후·문맥 판단·확인할 자리</a></p>")
+            if rows:
+                sections.append("<table border=1 cellpadding=6><tr><th>PDF 쪽</th><th>판독 원문</th><th>최종 문서</th></tr>")
+                for row in rows[:200]:
+                    sections.append(f"<tr><td>{html.escape(str(row.get('page', '')))}</td>"
+                                    f"<td>{html.escape(str(row.get('before', '')))}</td>"
+                                    f"<td>{html.escape(str(row.get('after', '')))}</td></tr>")
+                sections.append("</table>")
+                if len(rows) > 200:
+                    sections.append("<p>처음 200개 문단을 표시했습니다. 전체는 JSON에서 확인하십시오.</p>")
+            sections.append("</details>")
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    if not sections:
+        return ""
+    return ("<section style='padding:16px 20px'><h2>최종 문서의 번체·문맥 교정</h2>"
+            "<p>아래 쪽별 판독문은 OCR 원문입니다. 최종 HWPX·DOCX에 반영한 번체·부호·문맥 교정은 여기서 비교합니다. "
+            "문맥을 확정하지 못한 한자는 원문을 유지하고 변환 내역에 남겼습니다.</p>" + "".join(sections) + "</section>")
+
+
 def make_review(work: Work, records: list[dict], out_path: str | None = None, context: dict | None = None) -> str:
     out = Path(out_path) if out_path else work.dir / "review.html"
     parts = [f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>검수 · {html.escape(work.pdf_path.name)}</title><style>{CSS}</style></head><body>",
@@ -92,6 +130,7 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
              "<div class=grades>글자 색(문서와 같음): <span class=g>초록</span> = 1차·2차가 갈려 3차 자형 판별로 고름(정밀도 미측정, 훑어 확인) · "
              "<span class=b>파랑</span> = 골랐지만 조각 위치를 확인 못 했거나 이 판독의 다른 대목과 어긋남 · <mark>〔 〕</mark> = 정하지 못함(원본 확인) · "
              "<mark>〔</mark><mark class=c>入</mark><mark>/人〕</mark> 실선 밑줄 = 이 판독의 다른 대목이 더 쓰는 후보(문맥 추정, 확정 아님)</div></header>"]
+    parts.append(_normalization_reports(work, out))
     from .grades import page_grades
     for rec in records:
         pr = PageReading.model_validate(rec["merged"])

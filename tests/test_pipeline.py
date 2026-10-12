@@ -359,8 +359,9 @@ class Build(unittest.TestCase):
             self.assertEqual(st["page_breaks"], 1)                     # 둘째 쪽 앞에서만
             self.assertGreaterEqual(st["marks"], 2)                    # 〔疑: 龍〕 + 〔낮/낯〕 ; 〔→PDF 4쪽〕 은 작업 표시
             self.assertEqual(check_hwpx_file(out), [])
-            z = zipfile.ZipFile(out); self.assertEqual(z.namelist()[0], "mimetype")
-            allxml = (z.read("Contents/header.xml") + z.read("Contents/section0.xml")).decode("utf-8")
+            with zipfile.ZipFile(out) as z:
+                self.assertEqual(z.namelist()[0], "mimetype")
+                allxml = (z.read("Contents/header.xml") + z.read("Contents/section0.xml")).decode("utf-8")
             self.assertIn("FFFF00", allxml.upper()); self.assertIn("C00000", allxml.upper()); self.assertIn('pageBreak="1"', allxml)
             import re
             refs = re.findall(r'<hp:p\b[^>]*styleIDRef="(\d+)"', allxml)

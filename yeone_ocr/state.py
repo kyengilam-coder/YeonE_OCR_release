@@ -20,7 +20,16 @@ def write_atomic_with(path: Path, writer) -> None:
     path = Path(path); tmp = _tmp_path(path)
     try:
         writer(tmp)
-        os.replace(tmp, path)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError as exc:
+                # Windows에서 다른 스레드/검수 화면/백신이 파일을 읽는 짧은 동안
+                # 삭제 공유가 거부될 수 있다. 완성된 임시파일의 rename만 다시 시도한다.
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
     finally:
         if tmp.exists():
             try: tmp.unlink()
