@@ -128,6 +128,30 @@ def run(report_path: Path) -> int:
             return {"image": "Pillow/NumPy/OpenCV", "pdf": "MuPDF create/read/render", "xml": "lxml"}
         check("native-rendering", native_probe)
 
+        def screenshot_probe():
+            from PIL import Image, ImageGrab
+            from .screenshots import save_screenshot
+            from .pdfio import open_pdf, page_image
+            assert callable(ImageGrab.grabclipboard)
+            if sys.platform == "win32":
+                assert callable(Image.core.grabclipboard_win32)
+            with Image.new("RGBA", (320, 180), (0, 0, 0, 0)) as screenshot:
+                screenshot.putpixel((20, 30), (10, 20, 30, 255))
+                saved = save_screenshot(screenshot, folder / "screenshots")
+                assert save_screenshot(screenshot, folder / "screenshots") == saved
+            with open_pdf(str(saved)) as document:
+                assert len(document) == 1
+                extracted, _ = page_image(document, 1)
+                try:
+                    assert extracted.size == (320, 180)
+                    assert extracted.getpixel((20, 30)) == (10, 20, 30)
+                    assert extracted.getpixel((0, 0)) == (255, 255, 255)
+                finally:
+                    extracted.close()
+            return {"clipboard_backend": "available (not read)", "input": "PNG → one-page OCR input",
+                    "pixels": "original resolution preserved", "repeat_paste": "same source", "network_calls": 0}
+        check("screenshot-input", screenshot_probe)
+
         def pipeline_probe():
             from .cli import CANCEL, main
             from .verify import check_hwpx_file

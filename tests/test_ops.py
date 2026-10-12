@@ -631,6 +631,9 @@ class GuiOps(unittest.TestCase):
             for n in ("_read_opts", "_cap_opts", "media_res_key", "mode_key", "page_think_key", "page_mres_key", "save_settings", "memo_mode", "check_list_mode", "pdf", "_prepare_env"):
                 setattr(Stub, n, getattr(gui.App, n))
             s = Stub()
+            s._remember_inputs = mock.Mock()
+            s.collate_policy = mock.Mock(return_value="sure")
+            s.collate_memo_mode = mock.Mock(return_value="notice")
             vals = dict(v_reader="gemini", v_up="2", v_model="gemini-3-pro", v_second=True, v_off="", v_force=False, v_workers="8", v_model2="auto", v_think2=True,
                         v_chunk="8", v_mres=gui.MRES_LABELS["high"], v_mode=gui.MODE_LABELS["auto"], v_cache=True, v_ckpt="20",
                         v_think1=gui.PAGE_THINK_LABELS["medium"], v_mres1=gui.PAGE_MRES_LABELS["ultra_high"], v_maxcalls="250",

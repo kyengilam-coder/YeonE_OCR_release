@@ -75,6 +75,8 @@ def license_files(dist: metadata.Distribution) -> list[metadata.PackagePath]:
     for entry in dist.files or []:
         parts = [part.lower() for part in PurePosixPath(str(entry).replace("\\", "/")).parts]
         leaf = parts[-1] if parts else ""
+        if "__pycache__" in parts or leaf.endswith((".pyc", ".pyo")):
+            continue
         if (any(part in {"license", "licenses", "licence", "licences"} for part in parts[:-1])
                 or leaf.startswith(("license", "licence", "copying", "notice", "third-party", "third_party"))):
             if Path(dist.locate_file(entry)).is_file():

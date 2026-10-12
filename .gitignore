@@ -6,4 +6,5 @@ __pycache__/
 venv/
 build/
 dist/
+.test-tmp*/
 *.egg-info/

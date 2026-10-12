@@ -31,6 +31,7 @@ for resource in (ROOT / "LICENSE", ROOT / "DISTRIBUTION_NOTICE.txt"):
     if resource.is_file():
         datas.append((str(resource), "."))
 for directory, destination in ((ROOT / "packaging" / "licenses", "licenses/bundled"),
+                               (ROOT / "packaging" / "third_party_licenses", "third_party_licenses"),
                                (ROOT / "resources" / "licenses", "licenses/upstream")):
     if directory.is_dir():
         datas.append((str(directory), destination))
@@ -40,7 +41,7 @@ if python_license.is_file():
 
 binaries = []
 hiddenimports = ["tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox", "tkinter.simpledialog",
-                 "PIL.ImageTk", "PIL.IcoImagePlugin", "fitz", "pymupdf", "cv2", "numpy", "lxml.etree",
+                 "PIL.ImageTk", "PIL.ImageGrab", "PIL.IcoImagePlugin", "fitz", "pymupdf", "cv2", "numpy", "lxml.etree",
                  "pydantic_core", "jiter", "yeone_ocr.launcher", "yeone_ocr.frozen_smoke"]
 
 def runtime_module(name):
