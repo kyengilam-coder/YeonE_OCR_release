@@ -476,7 +476,7 @@ class HorizontalCover(unittest.TestCase):
         im, p1, truth, _ = _drifted_page()
         for r in p1.regions:                                   # 참 좌표로 놓고 머리글만 남긴다
             y0, y1 = truth[r.id]; r.bbox = [int(y0 * 1000), 100, int(y1 * 1000), 900]
-        cols = uncovered_ink_boxes(im, [bbox_frac(r.bbox) for r in p1.regions], axis="x")
+        uncovered_ink_boxes(im, [bbox_frac(r.bbox) for r in p1.regions], axis="x")
         rows = uncovered_ink_boxes(im, [bbox_frac(r.bbox) for r in p1.regions], axis="y")
         self.assertEqual(len(rows), 1); self.assertLess(rows[0][3], 0.06)                 # 세로 기둥 검사(axis x)는 납작한 머리글을 아예 못 보거나 여러 조각으로 쪼갠다
         notes = cover_check(im, p1, horizontal=True)
@@ -1264,7 +1264,6 @@ class BundleImages(unittest.TestCase):
     def test_hint_for_bundle_from_older_version(self):
         """예전 판의 지문 없는 묶음 '<첫>~<끝> (N장).pdf' 과 그 결과 폴더(판독 기록)가 옆에 있으면, 새로 묶으면서 그 판독 기록은 그 결과 폴더에 있다고
         한 줄 알린다(단추 이름은 실제 단추 그대로). 묶기만 하고 판독하지 않아 결과 폴더가 없으면 있지도 않은 기록을 찾게 하지 않는다."""
-        import re
         from yeone_ocr import pdfio
         gui, app = self._app()
         with tempfile.TemporaryDirectory() as td:
@@ -1277,8 +1276,7 @@ class BundleImages(unittest.TestCase):
             os.remove(a); os.makedirs(gui.work_dir_for(old) / "readings")                           # 예전 판으로 판독한 기록이 있으면
             self.assertEqual(self._bundle(app, td, ["p01.png", "p02.png", "p05.png"]), a)
             self.assertEqual(len(hints()), 1); self.assertIn("p01~p05 (3장)_YeonE_OCR", hints()[0])
-            label = re.search(r'_btn\(b, "([^"]+)", self\.choose_pdf', Path(gui.__file__).read_text(encoding="utf-8")).group(1)
-            self.assertEqual(label, "PDF·이미지 고르기…"); self.assertIn(f"[{label}]", hints()[0])          # 실제 단추 이름 그대로
+            self.assertIn("[일반 OCR]의 [PDF 고르기…]", hints()[0])
             self.assertEqual(self._bundle(app, td, ["p01.png", "p02.png", "p05.png"]), a)         # 다시 쓸 때는 되풀이하지 않는다
             self.assertEqual(len(hints()), 1)
 

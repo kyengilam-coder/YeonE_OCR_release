@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from . import __version__
-from .progress import Tracker, fmt_duration, fmt_elapsed
+from .progress import Tracker, fmt_duration
 from .providers import DEFAULT_MODELS, PROVIDER_LABELS, ENV_KEYS, KEY_URLS
 from .runtime import is_frozen, is_installed_bundle, can_replace_executable, safe_output_path, external_dll_search
 
@@ -40,31 +40,36 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 제공사별 API 키와 모델을 따로 기억합니다. 채팅 서비스 구독과 별도로 해당 제공사의 API 키가 필요합니다.
 같은 파일·결과 폴더에서 판독기를 바꿔 실행하면 완료한 쪽은 보존하고 남은 작업을 이어 갑니다.
 문서를 만들 때 간체→번체, 제공된 중문부호 규칙, 문맥에 따른 云/雲 교정을 자동 적용하고 변경 내역을 남깁니다.
-맨 위의 [일반 OCR] 은 PDF·이미지·스크린샷 → HWPX, [책갈피 OCR] 은 이미 입력된 HWPX 를 PDF 와 대조해 고친 사본을 만듭니다.
+맨 위의 [일반 OCR]은 PDF → HWPX, [책갈피 OCR]은 기존 HWPX를 PDF와 대조합니다.
+[이미지(스크린샷) OCR]은 이미지 파일이나 캡처를 HWPX로 만듭니다. PDF와 이미지 입력·쪽 범위는 따로 기억합니다.
+[설정]에는 판독기·모델·API 키·읽기 방향·문서 옵션·책갈피 교정 옵션과 고급 도구가 모여 있습니다.
+[설정 바꾸기]로 이동하고 [설정 저장] 후 [OCR로 돌아가기]로 하던 작업을 계속합니다.
 
-쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② [PDF·이미지 고르기…] → ③ [▶ 한 번에 인식].
+쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② 원본 선택 → ③ [▶ 한 번에 인식].
 읽기 방향·인쇄 쪽수 차이·이전 판 기록 갱신·2차 비교·3차 글자 판별·문서·검수 화면·보고·혼동 장부를 프로그램이 알아서 이어서 합니다.
 진행 막대는 처음부터 끝까지 한 방향으로 차며, 오른쪽에 단계·쪽 수·남은 시간이 나옵니다.
 2차 판독 모델·속도·조각 같은 설정은 판독 칸의 [세부 설정 ▾] 에, 단계별 단추는 [▸ 고급] 에 접혀 있습니다. 단추에 마우스를 올리면 하는 일이 나옵니다.
 
 차례
  1. Windows 실행 파일에는 패키지가 들어 있습니다. Python 소스로 실행하면 [패키지 설치·점검](고급 안)으로 설치할 수 있습니다.
- 2. 판독기를 고르고 해당 제공사의 API 키를 넣어 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다.
- 3. [PDF·이미지 고르기…] 로 파일을 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)도 됩니다 — 여러 장을 함께 고르면 이름의 숫자 순서로
+ 2. [설정]에서 판독기를 고르고 해당 제공사의 API 키를 넣어 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다.
+ 3. [일반 OCR]의 [PDF 고르기…]로 PDF를 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)는 [이미지(스크린샷) OCR]의 [이미지 고르기…]로 엽니다.
+    이미지를 여러 장 함께 고르면 이름의 숫자 순서로
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
     인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 이미지는 글자층이 없어 세로쓰기로 보므로
     가로쓰기 책이면 읽기 방향을 직접 고르십시오.
-    화면 캡처는 Win+Shift+S → [스크린샷 붙여넣기](Ctrl+Shift+V)로 불러옵니다. [원본 보기]로 확인할 수 있습니다.
+    화면 캡처는 Win+Shift+S → [스크린샷 붙여넣기](Ctrl+Shift+V)로 불러옵니다. 자동으로 이미지 OCR 탭으로 이동하며 바로 옆 [원본 보기]로 확인합니다.
     붙여넣은 캡처는 사용자 데이터 폴더의 screenshots에 PNG로 보관하며 같은 캡처는 기존 작업을 이어 씁니다.
     붙여넣기는 이전 쪽 범위·인쇄 쪽수 보정·강제 재판독을 초기화하며, 일반 Ctrl+V는 입력 칸의 글자 붙여넣기로 유지합니다.
  4. [▶ 한 번에 인식 (PDF·이미지 → HWPX)] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
     준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 만들기 → 검수 화면 → 보고·혼동 장부 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
     이전 판으로 만든 판독 기록이 있으면 지금 규칙으로 저절로 다시 비교합니다(모델 호출 없음).
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
- 5. 끝나면 검수 화면을 열지 묻습니다. [HWPX 열기] 로 결과를 보고 검수 화면에서 원본과 대조합니다. 〔 〕 로 남은 자리만 사람이 보면 됩니다.
+ 5. 끝나면 [HWPX 바로 열기]로 결과를 엽니다. [HWPX 저장]에 실제 저장 폴더가 표시되며 [저장 폴더]로 탐색기에서 확인합니다.
+    검수 화면에서 원본과 대조합니다. 〔 〕로 남은 자리만 사람이 보면 됩니다.
  6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
     사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
- 7. "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
+ 7. [설정]에서 "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
     글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
  8. 시작할 때 새 버전을 확인하며, 위의 [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
     실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 고급에서 끌 수 있습니다.
@@ -231,6 +236,43 @@ def work_dir_for(pdf: str) -> Path:
     else:
         out = p.with_name(p.stem + "_YeonE_OCR")
     return safe_output_path(out, p)
+
+
+def latest_result_hwpx(pdf: str, work: Path) -> Path | None:
+    """이 원본의 완성된 문서만 고른다. 중간 저장본이나 다른 문서는 열지 않는다."""
+    stem = Path(pdf).stem
+    partial = re.compile(re.escape(stem) + r"_p\d+-\d+\Z")
+    candidates = []
+    for path in (work / "out").glob("*.hwpx"):
+        if path.stem != stem and not partial.fullmatch(path.stem):
+            continue
+        try:
+            if path.is_file():
+                candidates.append((path.stat().st_mtime_ns, path.name, path))
+        except FileNotFoundError:  # 다른 작업에서 결과를 정리한 경우
+            continue
+    return max(candidates)[2] if candidates else None
+
+
+def ocr_input_config(cfg: dict) -> tuple[dict, int]:
+    """이전 단일 입력을 보존하면서 PDF와 이미지 탭의 입력 상태를 분리한다."""
+    legacy = str(cfg.get("last_pdf") or "")
+    initial = cfg.get("input_tab")
+    if initial not in (0, 2):
+        initial = 2 if Path(legacy).suffix.lower() in IMAGE_EXTS else 0
+    saved = cfg.get("ocr_inputs")
+    saved = saved if isinstance(saved, dict) else {}
+    states = {}
+    for tab in (0, 2):
+        state = saved.get(str(tab))
+        if not isinstance(state, dict):
+            state = {"pdf": legacy if tab == initial else "",
+                     "pages": cfg.get("pages", "") if tab == initial else "",
+                     "print_offset": cfg.get("print_offset", "") if tab == initial else "",
+                     "force": cfg.get("force", False) if tab == initial else False}
+        states[tab] = {key: str(state.get(key) or "") for key in ("pdf", "pages", "print_offset")}
+        states[tab]["force"] = bool(state.get("force", False))
+    return states, initial
 
 
 SECRET_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
@@ -639,7 +681,8 @@ class Tip:
         tw.geometry(f"+{max(0, x)}+{y}")
 
 
-TAB_HINTS = ("스캔 PDF·이미지를 지침대로 판독해 HWPX 문서로 만듭니다", "이미 입력된 HWPX를 PDF 원본과 대조해 고친 사본을 만듭니다")
+TAB_HINTS = ("스캔 PDF를 판독해 HWPX 문서로 만듭니다", "이미 입력된 HWPX를 PDF 원본과 대조해 고친 사본을 만듭니다",
+             "이미지 파일·화면 캡처를 판독하고 저장된 HWPX를 바로 엽니다", "판독기·모델·문서 옵션과 OCR 도구를 설정합니다")
 
 
 class App(tk.Tk):
@@ -673,8 +716,6 @@ class App(tk.Tk):
         self._fx, need_fx = fx_from_config(self.cfg, time.strftime("%Y-%m-%d"))     # 환율은 하루 한 번만 조회(받은 값은 설정에 남김)
         if need_fx:
             threading.Thread(target=self._fetch_fx, daemon=True).start()
-        if self.cfg.get("last_pdf") and Path(self.cfg["last_pdf"]).exists():
-            self.v_pdf.set(self.cfg["last_pdf"]); self.refresh_table()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def px(self, v: float) -> int:
@@ -816,7 +857,7 @@ class App(tk.Tk):
             st.map(f"T{w}", background=[("active", C["PANEL"]), ("disabled", C["PANEL"])], foreground=[("disabled", C["DIS_INK"])])
         # ---- 두 갈래 고르기(탭 대신): 붙어 있는 알약 모양 ----
         r = P(9); nw, bd_ = A.stretch_size(r, 96); nh, _ = A.stretch_size(r, 16)
-        for side, corners in (("L", "l"), ("R", "r")):
+        for side, corners in (("L", "l"), ("M", ""), ("R", "r")):
             on, off, hov, on_f, off_f = (img(f"seg{side}_{k}", A.rounded_box(nw, nh, r, fill, line, bw * 1.6, corners=corners))
                                          for k, fill, line in (("on", C["ACC"], None), ("off", C["TRACK"], None), ("h", C["TRACK_HI"], None),
                                                                ("on_f", C["ACC"], G), ("off_f", C["TRACK"], G)))
@@ -907,10 +948,10 @@ class App(tk.Tk):
         ttk.Label(parent, text=text, style="Field.TLabel").grid(row=row, column=0, sticky="w", padx=(0, self.px(12)), pady=(self.px(top), self.px(3)))
 
     def _segmented(self, parent, items: list[tuple[str, int]], var: tk.IntVar, command, small: bool = False) -> ttk.Frame:
-        """붙어 있는 두 갈래 고르기. 탭처럼 화면을 바꾸지만 단추처럼 또렷하게 보인다."""
+        """붙어 있는 탭 고르기. 가운데 탭은 양쪽 모두 직선으로 이어진다."""
         f = ttk.Frame(parent)
         for k, (text, val) in enumerate(items):
-            side = "L" if k == 0 else "R"
+            side = "L" if k == 0 else "R" if k == len(items) - 1 else "M"
             ttk.Radiobutton(f, text=text, value=val, variable=var, command=command, cursor="hand2",
                             style=("Small." if small else "") + f"Seg{side}.TRadiobutton").pack(side="left")
         return f
@@ -925,8 +966,21 @@ class App(tk.Tk):
             return max(6, max(len(str(v)) for v in values) * 2)
 
     def select_tab(self, i: int):
-        """일반 OCR(0) · 책갈피 OCR(1). 고른 쪽만 보여 높이가 내용에 맞는다."""
+        """작업별 입력을 보관하고 설정 탭에서는 마지막 작업의 상태를 유지한다."""
+        if self.running:
+            self.v_tab.set(self._selected_tab)
+            return
+        self._selected_tab = i
         self.v_tab.set(i)
+        if i != 3:
+            self._last_ocr_tab = i
+        if i in (0, 2):
+            self._input_force[self._active_input] = self.v_force.get()
+            self._active_input = i
+            variables = self._input_vars[i]
+            self.v_pdf, self.v_pages, self.v_off = variables["pdf"], variables["pages"], variables["print_offset"]
+            self.v_force.set(self._input_force[i])
+            self._sync_output_location()
         for k, f in enumerate(self.tab_frames):
             if k == i:
                 f.pack(fill="x")
@@ -936,12 +990,24 @@ class App(tk.Tk):
         if hasattr(self, "_canvas"):
             self._canvas.yview_moveto(0)
         for k, a in enumerate(getattr(self, "act_cards", [])):
-            if k == i:
+            if k == (2 if i == 3 else 0 if i == 2 else i):
                 a.pack(fill="x")
             else:
                 a.pack_forget()
         if hasattr(self, "pane"):
             self.after_idle(self._fit_sash)
+        if self._inputs_ready:
+            self._sync_settings_summary()
+            self.refresh_table()
+
+    def return_to_ocr(self):
+        self.select_tab(self._last_ocr_tab)
+
+    def _sync_settings_summary(self, *_):
+        document = "HWPX + DOCX" if self.v_docx.get() else "HWPX"
+        self.v_settings_summary.set(f"{self.v_provider.get()} · {self.v_model.get().strip()} · {self.v_mode.get()} · {document}")
+        scope = "이미지 OCR" if self._active_input == 2 else "일반 OCR"
+        self.v_force_scope.set(f"{scope}: 기록 있는 쪽도 다시 판독")
 
     def _build(self):
         C = self.colors; P = self.px
@@ -956,14 +1022,15 @@ class App(tk.Tk):
         tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", padx=(0, P(14)), pady=(P(6), 0))
         tk.Label(hd, text="한자·한글 문헌 스캔 PDF·이미지를 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#bfae8e").pack(side="left", padx=(P(16), 0), pady=(P(6), 0))
 
-        # ---- 일반 OCR / 책갈피 OCR 고르기 ----
+        # ---- 작업 / 설정 탭 ----
         bar = ttk.Frame(self, padding=(P(16), P(12), P(16), 0)); bar.pack(fill="x")
         self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])
-        self._segmented(bar, [("일반 OCR", 0), ("책갈피 OCR", 1)], self.v_tab, lambda: self.select_tab(self.v_tab.get())).pack(side="left")
+        tabs = self._segmented(bar, [("일반 OCR", 0), ("책갈피 OCR", 1), ("이미지(스크린샷) OCR", 2), ("설정", 3)], self.v_tab, lambda: self.select_tab(self.v_tab.get()))
+        tabs.pack(side="left"); self._tab_buttons = list(tabs.winfo_children())
         self.b_update = self._btn(bar, "업데이트 확인", self.check_updates, style="PageLink.TButton",
                                   tip="GitHub 릴리스에서 새 버전을 확인합니다. 설치와 재시작은 확인 후 진행합니다.")
         self.b_update.pack(side="right")
-        ttk.Label(bar, textvariable=self.v_tabhint, style="PageHint.TLabel").pack(side="left", padx=(P(14), 0))
+        self._hint(bar, textvariable=self.v_tabhint, page=True).pack(side="left", fill="x", expand=True, padx=(P(14), 0))
         # 위(설정·실행)는 스크롤되는 칸, 아래(진행·기록)는 늘 보이는 칸. 가운데 경계를 끌어 높이를 나눈다.
         self.pane = ttk.PanedWindow(self, orient="vertical"); self.pane.pack(fill="both", expand=True)
         upper = ttk.Frame(self.pane)
@@ -980,34 +1047,28 @@ class App(tk.Tk):
                 self.bind_class(cls, ev, "")
         self.bind_all("<<TraverseIn>>", self._focus_into_view, add="+")   # Tab 으로 옮길 때만(마우스로 누를 때 위 칸이 튀어 클릭이 씹히지 않게)
         self.pane.add(upper, weight=0)
-        root = ttk.Frame(host); tab2 = ttk.Frame(host)
-        self.tab_frames = [root, tab2]
+        root = ttk.Frame(host); tab2 = ttk.Frame(host); image_tab = ttk.Frame(host)
+        self._common_frame = common = ttk.Frame(host)
+        self.tab_frames = [root, tab2, image_tab, common]
+        self._inputs_ready = False; self._selected_tab = 0; self._active_input = 0; self._last_ocr_tab = 0
+        states, self._initial_input_tab = ocr_input_config(self.cfg)
+        self._input_vars = {tab: {key: tk.StringVar(value=state[key]) for key in ("pdf", "pages", "print_offset")}
+                            for tab, state in states.items()}
+        self._input_force = {tab: state["force"] for tab, state in states.items()}
+        variables = self._input_vars[0]
+        self.v_pdf, self.v_pages, self.v_off = variables["pdf"], variables["pages"], variables["print_offset"]
+        self.v_output_dir = tk.StringVar(value="원본을 불러오면 저장 폴더가 표시됩니다")
+        self.v_settings_summary = tk.StringVar()
+        self.v_force_scope = tk.StringVar()
+        self._build_input_card(root, 0)
+        self._build_input_card(image_tab, 2)
+        for variables in self._input_vars.values():
+            variables["pdf"].trace_add("write", self._sync_output_location)
 
-        # ---- 카드 1: PDF 파일 ----
-        c1 = self._card(root, "PDF · 이미지 · 스크린샷"); c1.pack(fill="x")
-        b = c1.body; b.columnconfigure(1, weight=1)
-        self.v_pdf = tk.StringVar()
-        self._field_label(b, "파일", 0)
-        ttk.Entry(b, textvariable=self.v_pdf, state="readonly").grid(row=0, column=1, sticky="ew", pady=P(3))
-        self._btn(b, "PDF·이미지 고르기…", self.choose_pdf, tip="판독할 스캔 PDF 나 이미지(PNG·JPG·TIFF 등)를 고릅니다. 이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다. 결과는 파일 옆 '<이름>_YeonE_OCR' 폴더에 생깁니다.").grid(row=0, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
-        self.v_pages = tk.StringVar(value=self.cfg["pages"]); self.v_off = tk.StringVar(value=self.cfg["print_offset"])
-        self._field_label(b, "쪽 범위", 1, top=6)
-        row = ttk.Frame(b, style="Panel.TFrame"); row.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
-        ttk.Entry(row, textvariable=self.v_pages, width=12).pack(side="left")
-        self._btn(row, "전체", lambda: self.v_pages.set(""), tip="쪽 범위를 비워 PDF 전체를 합니다").pack(side="left", padx=(P(6), 0))
-        ttk.Label(row, text="비우면 전체 · 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
-        ttk.Label(row, text="빈칸이면 자동 판정", style="Hint.TLabel").pack(side="right", padx=(P(8), 0))
-        e_off = ttk.Entry(row, textvariable=self.v_off, width=6); e_off.pack(side="right")
-        ttk.Label(row, text="인쇄 쪽수 = PDF 쪽수 +", style="Field.TLabel").pack(side="right", padx=(0, P(6)))
-        Tip(e_off, "PDF 1쪽이 인쇄 30쪽이면 29. 비우거나 0 이면 글자층·판독한 쪽번호로 자동 판정하고, 어긋나는 쪽만 확인 항목으로 표시합니다.", self)
-        shot = ttk.Frame(b, style="Panel.TFrame"); shot.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
-        self._btn(shot, "스크린샷 붙여넣기", self.paste_screenshot,
-                  tip="Win+Shift+S로 캡처한 이미지를 불러옵니다. 단축키는 Ctrl+Shift+V입니다. 같은 이미지는 기존 작업을 이어 쓰며, [한 번에 인식]을 눌러야 판독을 시작합니다.").pack(side="left")
-        ttk.Label(shot, text="Win+Shift+S로 캡처 → Ctrl+Shift+V로 붙여넣기", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
-        self._btn(shot, "원본 보기", self.open_source, tip="선택한 PDF나 이미지를 열어 판독할 원본을 확인합니다.").pack(side="right", padx=(P(8), 0))
-
-        # ---- 카드 2·3: 판독 / 문서 ----
-        mid = ttk.Frame(root); mid.pack(fill="x", pady=(P(10), 0))
+        # ---- 설정 탭: 판독·문서·책갈피 교정·고급 도구 ----
+        self._hint(common, "판독 설정은 세 OCR 탭에서 함께 씁니다. 문서 옵션은 일반·이미지 OCR에 적용되며, 책갈피 교정 옵션은 아래에서 따로 고릅니다.",
+                   page=True).pack(fill="x")
+        mid = ttk.Frame(common); mid.pack(fill="x", pady=(P(10), 0))
         mid.columnconfigure(0, weight=3); mid.columnconfigure(1, weight=2)
         c2 = self._card(mid, "판독"); c2.grid(row=0, column=0, sticky="nsew", padx=(0, P(10)))
         c3 = self._card(mid, "문서"); c3.grid(row=0, column=1, sticky="nsew")
@@ -1016,7 +1077,7 @@ class App(tk.Tk):
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
-        self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self.cfg.get("force", False))
+        self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
         self.v_memo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), MEMO_LABELS["notice"]))
@@ -1047,7 +1108,7 @@ class App(tk.Tk):
         Tip(self.e_key, "선택한 제공사의 API 키를 넣으십시오. 키·모델은 제공사별로 따로 저장됩니다. Gemini는 쉼표로 여러 프로젝트의 키를 넣을 수 있습니다.", self)
         self._btn(b, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC의 설정 파일에 제공사별로 저장됩니다.").grid(row=3, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
-        ttk.Checkbutton(foot, text="기록 있는 쪽도 다시 판독", variable=self.v_force).pack(side="left")
+        ttk.Checkbutton(foot, textvariable=self.v_force_scope, variable=self.v_force).pack(side="left")
         self.v_details = tk.BooleanVar(value=bool(self.cfg.get("details_open", False)))
         self.b_details = ttk.Button(foot, text="", command=self.toggle_details, style="Link.TButton", cursor="hand2")
         self.b_details.pack(side="right")
@@ -1150,10 +1211,10 @@ class App(tk.Tk):
 
         # ---- 고급(접힘) ----
         self.v_adv = tk.BooleanVar(value=bool(self.cfg.get("advanced_open", False)))
-        advbar = ttk.Frame(root); advbar.pack(fill="x", pady=(P(8), 0))
+        advbar = ttk.Frame(common); advbar.pack(fill="x", pady=(P(8), 0))
         self.b_adv = ttk.Button(advbar, text="", command=self.toggle_advanced, style="PageLink.TButton", cursor="hand2"); self.b_adv.pack(side="left")
         ttk.Label(advbar, text="보통은 필요 없습니다. 일부 단계만 다시 하거나 기록을 손볼 때 펼치십시오.", style="PageHint.TLabel").pack(side="left", padx=(P(10), 0))
-        sf = self.adv_frame = self._card(root)
+        sf = self.adv_frame = self._card(common)
         g = sf.body
         steps = [("① 구조 보기", self.do_inspect, "쪽수, 쪽마다 스캔 이미지인지, 텍스트 레이어 글자 수, 쪽번호 표기를 보여 줍니다"),
                  ("② 준비", self.do_prepare, "쪽 이미지와 기존 텍스트 레이어를 결과 폴더에 꺼냅니다"),
@@ -1185,6 +1246,8 @@ class App(tk.Tk):
         self._apply_advanced()
 
         self._build_collate_tab(tab2)
+        self._build_collate_settings(common)
+        self._build_settings_summary(tab2)
         self.select_tab(0)
 
         # ---- 진행(공통): 상태 글 · 진행 글 / 끝까지 차는 막대 ----
@@ -1220,7 +1283,10 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y"); self.table.pack(side="left", fill="both", expand=True)
         nb.add(tc, text="쪽별 상태")
         self._reader_changed()
-        self.select_tab(0)
+        for variable in (self.v_provider, self.v_model, self.v_mode, self.v_docx):
+            variable.trace_add("write", self._sync_settings_summary)
+        self._inputs_ready = True
+        self.select_tab(self._initial_input_tab)
         self.update_idletasks()
         mid.columnconfigure(1, minsize=c3.winfo_reqwidth())           # 문서 카드는 줄어도 글자가 잘리지 않게
         self.after(60, self._fit_sash)
@@ -1229,6 +1295,48 @@ class App(tk.Tk):
         # 마우스로 누른 체크·라디오·두 갈래·글자 단추는 초점을 창으로 돌린다 — 초점 고리는 키보드(Tab)로 옮겼을 때만 보이게
         for cls in ("TCheckbutton", "TRadiobutton", "TButton"):
             self.bind_class(cls, "<ButtonRelease-1>", lambda e: self.after_idle(self._drop_mouse_focus, e.widget), add="+")
+
+    def _build_input_card(self, parent, tab: int) -> None:
+        """탭별 입력과 결과 열기. 판독기·문서 옵션은 설정 탭에서 고른다."""
+        P = self.px; images = tab == 2; variables = self._input_vars[tab]
+        card = self._card(parent, "이미지 · 스크린샷" if images else "PDF"); card.pack(fill="x")
+        body = card.body; body.columnconfigure(1, weight=1)
+        self._field_label(body, "원본", 0)
+        ttk.Entry(body, textvariable=variables["pdf"], state="readonly").grid(row=0, column=1, columnspan=2, sticky="ew", pady=P(3))
+        controls = ttk.Frame(body, style="Panel.TFrame")
+        controls.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
+        self._btn(controls, "이미지 고르기…" if images else "PDF 고르기…", self.choose_images if images else self.choose_pdf,
+                  tip="이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다." if images else "판독할 스캔 PDF를 고릅니다.").pack(side="left")
+        if images:
+            self._btn(controls, "스크린샷 붙여넣기", self.paste_screenshot,
+                      tip="Win+Shift+S로 캡처 → Ctrl+Shift+V로 붙여넣기. [한 번에 인식]을 눌러 판독을 시작합니다.").pack(side="left", padx=(P(6), 0))
+        self._btn(controls, "원본 보기", self.open_source,
+                  tip="바로 앞에서 불러온 스크린샷이나 선택한 원본을 엽니다.").pack(side="left", padx=(P(6), 0))
+        if images:
+            self._hint(body, "Win+Shift+S로 캡처 → 붙여넣기 → 원본 확인 → [한 번에 인식]. 가로쓰기 캡처는 읽기 방향을 가로쓰기로 고르십시오.").grid(
+                row=2, column=1, columnspan=2, sticky="ew", pady=(P(4), P(3)))
+        self._field_label(body, "쪽 범위", 3, top=6)
+        row = ttk.Frame(body, style="Panel.TFrame"); row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
+        ttk.Entry(row, textvariable=variables["pages"], width=12).pack(side="left")
+        self._btn(row, "전체", lambda: variables["pages"].set(""), tip="비우면 원본 전체를 판독합니다.").pack(side="left", padx=(P(6), 0))
+        ttk.Label(row, text="비우면 전체 · 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        ttk.Label(row, text="빈칸이면 자동 판정", style="Hint.TLabel").pack(side="right", padx=(P(8), 0))
+        offset = ttk.Entry(row, textvariable=variables["print_offset"], width=6); offset.pack(side="right")
+        ttk.Label(row, text="인쇄 쪽수 = 원본 쪽수 +", style="Field.TLabel").pack(side="right", padx=(0, P(6)))
+        Tip(offset, "원본 1쪽이 인쇄 30쪽이면 29. 비우면 자동 판정합니다.", self)
+        self._field_label(body, "HWPX 저장", 4, top=6)
+        ttk.Entry(body, textvariable=self.v_output_dir, state="readonly").grid(row=4, column=1, sticky="ew", pady=(P(6), P(3)))
+        actions = ttk.Frame(body, style="Panel.TFrame"); actions.grid(row=4, column=2, sticky="w", padx=(P(8), 0), pady=(P(6), P(3)))
+        self._btn(actions, "HWPX 바로 열기", self.open_hwpx,
+                  tip="현재 원본의 가장 최근 완성된 HWPX를 바로 엽니다. 중간 저장본은 제외합니다.").pack(side="left")
+        self._btn(actions, "저장 폴더", self.open_output_folder,
+                  tip="HWPX가 저장되는 out 폴더를 탐색기로 엽니다.").pack(side="left", padx=(P(6), 0))
+        self._build_settings_summary(parent)
+
+    def _build_settings_summary(self, parent):
+        row = ttk.Frame(parent); row.pack(fill="x", pady=(self.px(8), 0))
+        self._btn(row, "설정 바꾸기", lambda: self.select_tab(3), style="PageLink.TButton").pack(side="right")
+        self._hint(row, textvariable=self.v_settings_summary, page=True).pack(side="left", fill="x", expand=True)
 
     def _build_actions(self, host) -> None:
         """실행 줄 — 진행 막대 바로 위, 늘 보이는 자리. 탭마다 그 탭의 실행 단추를 보여 준다(실행 중에도 [중지]가 가려지지 않게)."""
@@ -1254,20 +1362,20 @@ class App(tk.Tk):
         self._btn(a, "교정본 열기", self.open_collated, tip="고친 사본(<이름>_교정.hwpx)을 한컴오피스로 엽니다").pack(side="right", padx=(P(6), 0))
         self._btn(a, "보고 열기", self.open_collate_report, tip="가장 최근 대조 보고(구획별 HTML)를 엽니다").pack(side="right", padx=(P(6), 0))
         self._hint(a, "원본 HWPX 는 건드리지 않고, 고친 사본 하나에 구획을 차례로 쌓습니다.").pack(side="left", fill="x", expand=True, padx=(P(14), P(8)))
-        # 둘째 줄: 교정 방법과 표에서 고른 한 구획만 하는 단추(위 칸을 굴리지 않아도 늘 보이게)
-        from .collate.labels import POLICIES
+        # 둘째 줄: 표에서 고른 한 구획만 하는 단추
         ttk.Separator(act2).pack(fill="x", pady=(P(10), P(8)))
         r4 = ttk.Frame(act2, style="Panel.TFrame"); r4.pack(fill="x")
-        ttk.Label(r4, text="교정 정책", style="Field.TLabel").pack(side="left", padx=(0, P(6)))
-        ttk.Combobox(r4, textvariable=self.v_policy, values=list(POLICIES.values()), state="readonly", width=self._cw(POLICIES.values())).pack(side="left", padx=(0, P(14)))
-        ttk.Label(r4, text="메모", style="Field.TLabel").pack(side="left", padx=(0, P(6)))
-        cm = ttk.Combobox(r4, textvariable=self.v_cmemo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(MEMO_LABELS.values())); cm.pack(side="left")
-        Tip(cm, "고지 사항만(기본): 지운 글자·폭 없는 표시·구조 차이·반영하지 않은 제안에만 메모를 답니다. 자동 교정은 초록·파랑, 확인 요청은 빨강으로 칠하고, "
-                "원래 글자와 근거 전체는 보고(collate 폴더의 html)에 남습니다. 0.6.3 처럼 모든 항목에 메모를 원하면 '모든 표시에 메모'.", self)
         self._btn(r4, "이 구획 교정", lambda: self.do_collate(apply=True), tip="표에서 고른 구획만 대조해 교정본에 고쳐 넣습니다").pack(side="right")
         self._btn(r4, "이 구획 대조만", lambda: self.do_collate(apply=False), tip="표에서 고른 구획만 대조해 보고를 만듭니다(문서는 고치지 않음). 표에서 두 번 눌러도 됩니다").pack(side="right", padx=(0, P(6)))
         ttk.Label(r4, text="표에서 고른 구획:", style="Field.TLabel").pack(side="right", padx=(0, P(8)))
-        self.act_cards = [act, act2]
+        settings = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
+        self._btn(settings.body, "설정 저장", self.save_settings, style="Accent.TButton").pack(side="left")
+        self._btn(settings.body, "OCR로 돌아가기", self.return_to_ocr).pack(side="left", padx=(P(8), 0))
+        self.b_stop3 = ttk.Button(settings.body, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
+        self.b_stop3.pack(side="left", padx=(P(8), 0))
+        Tip(self.b_stop3, "고급 도구에서 시작한 판독을 중지합니다. 끝난 쪽의 기록은 보존됩니다.", self)
+        self._hint(settings.body, "바꾼 설정은 다음 실행에 적용됩니다. [설정 저장]으로 다음 시작에도 유지할 수 있습니다.").pack(side="left", fill="x", expand=True, padx=(P(14), 0))
+        self.act_cards = [act, act2, settings]
 
     def _update_scroll(self):
         """위 칸 내용이 넘칠 때만 스크롤 막대를 오른쪽 여백 위에 띄운다(카드 너비는 그대로)."""
@@ -1401,8 +1509,7 @@ class App(tk.Tk):
             e = ttk.Entry(b, textvariable=var); e.grid(row=i, column=1, sticky="ew", pady=P(3)); Tip(e, tip, self)
             self._btn(b, bt, cmd).grid(row=i, column=2, sticky="ew", padx=(P(8), 0), pady=P(3))
         foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
-        ttk.Checkbutton(foot, text="기록 있는 쪽도 다시 판독", variable=self.v_cforce).pack(side="right", padx=(P(12), 0))
-        self._hint(foot, "판독기·모델·API 키·속도·읽기 방향은 [일반 OCR] 의 설정을 따릅니다. 읽기 방향이 '자동 판정'이면 글자층으로 가로·세로를 정합니다.").pack(side="left", fill="x", expand=True)
+        self._hint(foot, "판독기·모델·API 키·속도·읽기 방향과 교정 정책은 [설정] 탭에서 고릅니다. 읽기 방향이 '자동 판정'이면 글자층으로 가로·세로를 정합니다.").pack(side="left", fill="x", expand=True)
 
         g = self._card(tab, "구획 (책갈피·제목)"); g.pack(fill="x", pady=(P(10), 0))
         gb = g.body
@@ -1430,14 +1537,29 @@ class App(tk.Tk):
                         "메모는 지운 자리·넣지 않은 자리·구조 차이·반영하지 않은 제안에만 답니다(원래 글자와 근거 전체는 보고 화면). 이전처럼 모든 교정에 메모를 원하면 '모든 표시에 메모'.",
                    page=True).pack(fill="x", pady=(P(8), 0))
 
+    def _build_collate_settings(self, parent):
+        from .collate.labels import POLICIES
+        P = self.px
+        card = self._card(parent, "책갈피 OCR 교정"); card.pack(fill="x", pady=(P(10), 0))
+        body = card.body; body.columnconfigure(1, weight=1)
+        self._field_label(body, "교정 정책", 0)
+        ttk.Combobox(body, textvariable=self.v_policy, values=list(POLICIES.values()), state="readonly",
+                     width=self._cw(POLICIES.values())).grid(row=0, column=1, sticky="w", pady=P(3))
+        self._field_label(body, "메모", 1)
+        cm = ttk.Combobox(body, textvariable=self.v_cmemo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(MEMO_LABELS.values()))
+        cm.grid(row=1, column=1, sticky="w", pady=P(3))
+        Tip(cm, "고지 사항만(기본): 지운 글자·폭 없는 표시·구조 차이·반영하지 않은 제안에만 메모를 답니다. 자동 교정은 초록·파랑, 확인 요청은 빨강으로 칠하고, "
+                "원래 글자와 근거 전체는 보고(collate 폴더의 html)에 남습니다. 모든 항목에 메모를 원하면 '모든 표시에 메모'.", self)
+        ttk.Checkbutton(body, text="책갈피 OCR: 기록 있는 쪽도 다시 판독", variable=self.v_cforce).grid(row=2, column=0, columnspan=2, sticky="w", pady=(P(6), 0))
+
     def pick_pdf2(self):
         p = filedialog.askopenfilename(title="책갈피가 든 원본 PDF", filetypes=[("PDF", "*.pdf"), ("모든 파일", "*.*")])
         if p:
             self.v_pdf2.set(p); self.cfg["collate_pdf"] = p; save_config(self.cfg)
 
     def pdf2(self) -> str:
-        """교정 탭의 PDF. 비어 있으면 인식 탭의 PDF 를 쓴다."""
-        return self.v_pdf2.get().strip() or self.pdf()
+        """교정 탭의 PDF. 비어 있으면 일반 OCR의 PDF를 쓴다(이미지 탭과 무관)."""
+        return self.v_pdf2.get().strip() or self._input_vars[0]["pdf"].get().strip()
 
     def work2(self) -> Path:
         return work_dir_for(self.pdf2())
@@ -1653,9 +1775,13 @@ class App(tk.Tk):
     def work(self) -> Path:
         return work_dir_for(self.pdf())
 
+    def _sync_output_location(self, *_):
+        self.v_output_dir.set(str((self.work() / "out").resolve()) if self.pdf()
+                              else "원본을 불러오면 저장 폴더가 표시됩니다")
+
     def _need_pdf(self) -> bool:
         if not self.pdf() or not Path(self.pdf()).exists():
-            messagebox.showinfo(APP_NAME, "먼저 [PDF·이미지 고르기…]로 파일을 고르거나 [스크린샷 붙여넣기]로 캡처 이미지를 불러오십시오."); return False
+            messagebox.showinfo(APP_NAME, "일반 OCR의 [PDF 고르기…] 또는 이미지 OCR의 [이미지 고르기…]·[스크린샷 붙여넣기]로 원본을 불러오십시오."); return False
         return True
 
     def _pages(self) -> list[str]:
@@ -1682,12 +1808,11 @@ class App(tk.Tk):
         if n2:
             if messagebox.askyesno(APP_NAME, f"[일반 OCR] 의 PDF 에는 판독 기록이 없습니다.\n  {self.pdf()}\n  → 결과 폴더 {self.work()}\n\n"
                                              f"[책갈피 OCR] 의 PDF 에는 {n2}쪽 기록이 있습니다.\n  {other}\n\n{what}을(를) 그 PDF 로 할까요? ([일반 OCR] 의 PDF 도 그것으로 바뀝니다)"):
-                self.v_pdf.set(other); self.cfg["last_pdf"] = other; save_config(self.cfg); self.refresh_table()
-                self._append(f"PDF: {other}\n결과 폴더: {self.work()}\n")
+                self.select_tab(0); self._use_pdf(other)
                 return True
             return False
         messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [▶ 한 번에 인식] 을 하거나, "
-                                      f"기록이 있는 원본 PDF 를 [PDF·이미지 고르기…] 로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
+                                      f"기록이 있는 원본을 [PDF 고르기…]나 [이미지 고르기…]로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
         return False
 
     def _read_opts(self, print_offset: bool = True, force: bool | None = None) -> list[str]:
@@ -1821,8 +1946,10 @@ class App(tk.Tk):
         self.running = on
         for b in self.buttons:
             b.configure(state="disabled" if on else "normal")
+        for button in getattr(self, "_tab_buttons", []):
+            button.configure(state="disabled" if on else "normal")
         self._reader_changed()
-        for b in (self.b_stop, getattr(self, "b_stop2", None)):
+        for b in (self.b_stop, getattr(self, "b_stop2", None), getattr(self, "b_stop3", None)):
             if b is not None:
                 b.configure(state="normal" if on and command != "update" else "disabled")
         if on:
@@ -1926,7 +2053,7 @@ class App(tk.Tk):
             self._last_writer = None; return
         w = getattr(self, "_last_writer", None)
         kind, status, head = finish_words(rc, w.problems if w is not None else None)    # [중지]로 멈춘 명령은 130(멈추기 전에 일을 다 끝냈으면 0), 실패한 쪽이 있으면 3, 3차 판별을 못 마치면 4
-        ok, partial, stopped = kind == "ok", kind == "partial", kind == "stopped"
+        ok, partial = kind == "ok", kind == "partial"
         self.v_status.set(f"{label} {status}")
         took = "걸린 시간 " + fmt_duration(time.time() - self.tracker.t0)
         if ok or partial:
@@ -1967,8 +2094,8 @@ class App(tk.Tk):
             if isinstance(captured, Image.Image):
                 from .screenshots import save_screenshot
                 source = save_screenshot(captured)
+                self.select_tab(2)
                 self._reset_screenshot_pages()
-                self.select_tab(0)
                 self._use_pdf(str(source))
                 self._append(f"스크린샷 불러옴 ({captured.width} × {captured.height} 픽셀). 원본은 자동 보관됩니다. [한 번에 인식]을 눌러 판독하십시오.\n")
             elif isinstance(captured, list) and captured:
@@ -1976,14 +2103,14 @@ class App(tk.Tk):
                 if any(Path(p).suffix.lower() not in IMAGE_EXTS or not Path(p).is_file() for p in paths):
                     messagebox.showinfo(APP_NAME, "복사한 파일 중 이미지가 아닌 파일이 있습니다. PNG·JPG 등의 이미지 파일만 복사하거나 Win+Shift+S로 화면을 캡처하십시오.")
                     return "break"
-                self.select_tab(0)
+                self.select_tab(2)
                 if len(paths) == 1:
                     self._reset_screenshot_pages()
                     self._use_pdf(paths[0])
                 else:
                     self._bundle_images(paths, reset_pages=True)
             else:
-                messagebox.showinfo(APP_NAME, "클립보드에 이미지가 없습니다.\nWin+Shift+S로 원하는 부분을 캡처한 뒤 [스크린샷 붙여넣기]를 누르십시오.\n저장된 이미지는 [PDF·이미지 고르기…]로 열 수 있습니다.")
+                messagebox.showinfo(APP_NAME, "클립보드에 이미지가 없습니다.\nWin+Shift+S로 원하는 부분을 캡처한 뒤 [스크린샷 붙여넣기]를 누르십시오.\n저장된 이미지는 [이미지 고르기…]로 열 수 있습니다.")
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"스크린샷을 불러오지 못했습니다. 다시 캡처하거나 이미지 파일로 저장해 열어 보십시오.\n{exc}")
         finally:
@@ -1992,18 +2119,37 @@ class App(tk.Tk):
         return "break"
 
     def choose_pdf(self):
+        if self.running: return
+        path = filedialog.askopenfilename(title="PDF 고르기", filetypes=[("PDF", "*.pdf")])
+        if path:
+            self.select_tab(0)
+            self._use_pdf(path)
+
+    def choose_images(self):
+        if self.running: return
         imgs = " ".join("*" + e for e in IMAGE_EXTS)
-        ps = filedialog.askopenfilenames(title="PDF·이미지 고르기 (이미지는 여러 장 고를 수 있음)",
-                                         filetypes=[("PDF·이미지", "*.pdf " + imgs), ("PDF", "*.pdf"), ("이미지", imgs), ("모든 파일", "*.*")])
+        ps = filedialog.askopenfilenames(title="이미지 고르기 (여러 장 선택 가능)", filetypes=[("이미지", imgs)])
         ps = [p for p in (ps or ()) if p]
         if not ps:
             return
+        if any(Path(p).suffix.lower() not in IMAGE_EXTS for p in ps):
+            messagebox.showinfo(APP_NAME, "PNG·JPG·TIFF 등의 이미지 파일을 고르십시오. PDF는 [일반 OCR] 탭에서 엽니다.")
+            return
+        self.select_tab(2)
         if len(ps) > 1:
-            self._bundle_images(ps); return             # 묶기는 작업 스레드에서 — 끝나면 _use_pdf 로 이어진다
+            self._bundle_images(ps, reset_pages=True); return
+        self._reset_screenshot_pages()
         self._use_pdf(ps[0])
 
+    def _remember_inputs(self):
+        self._input_force[self._active_input] = self.v_force.get()
+        self.cfg["ocr_inputs"] = {str(tab): {**{key: value.get() for key, value in variables.items()},
+                                            "force": self._input_force[tab]}
+                                  for tab, variables in self._input_vars.items()}
+        self.cfg["input_tab"] = self._active_input
+
     def _use_pdf(self, p: str):
-        self.v_pdf.set(p); self.cfg["last_pdf"] = p; save_config(self.cfg); self.refresh_table()
+        self.v_pdf.set(p); self.cfg["last_pdf"] = p; self._remember_inputs(); save_config(self.cfg); self.refresh_table()
         kind = "이미지" if Path(p).suffix.lower() in IMAGE_EXTS else "PDF"
         self._append(f"{kind}: {p}\n결과 폴더: {self.work()}\n")
         if kind == "이미지" and self.mode_key() == "auto":
@@ -2059,7 +2205,7 @@ class App(tk.Tk):
                 save_images_as_pdf(srcs, part, progress=lambda d, n: self.q.put(("bundle", "prog", d, n)))
                 os.replace(part, out); err = None
                 log = f"이미지 {len(srcs)}장을 이름 순서로 묶음: {out.name}\n  {names}\n" + (
-                    f"  참고: 예전 판이 묶은 '{old.name}' 이(가) 옆에 있습니다 — 그 판독 기록은 '{work_dir_for(str(old)).name}' 에 따로 있으니 이어 쓰려면 [PDF·이미지 고르기…] 로 그 PDF 를 고르십시오.\n"
+                    f"  참고: 예전 판이 묶은 '{old.name}' 이(가) 옆에 있습니다 — 그 판독 기록은 '{work_dir_for(str(old)).name}' 에 따로 있으니 이어 쓰려면 [일반 OCR]의 [PDF 고르기…]로 그 PDF를 고르십시오.\n"
                     if old.exists() and work_dir_for(str(old)).is_dir() else "")                # 판독 기록(결과 폴더)이 없으면 알리지 않는다
             except ModuleNotFoundError as e:
                 err = f"패키지가 없어 이미지를 묶지 못했습니다: {e.name}. [▸ 고급 → 패키지 설치·점검] 을 누르십시오."
@@ -2157,6 +2303,7 @@ class App(tk.Tk):
                          "model": self.v_model.get(), "api_key": self.v_key.get(), "second_pass": self.v_second.get(), "docx": self.v_docx.get(),
                          "join_pages": self.v_join.get(), "force": self.v_force.get(), "highlight": self.v_hl.get(), "page_breaks": self.v_pb.get(), "check_list": self.check_list_mode(),
                          "context_hint": self.v_ctx.get(), "memo_mode": self.memo_mode(),
+                         "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode(),
                          "workers": int(self.v_workers.get() or 8), "second_model": self.v_model2.get().strip(),
                          "checkpoint": int(self.v_ckpt.get() or 0), "use_cache": self.v_cache.get(), "second_thinking_low": self.v_think2.get(), "adjudicate_blind": self.v_blind.get(), "last_pdf": self.pdf(),
                          "chunk_lines": int(self.v_chunk.get() or 0), "media_res": self.media_res_key(), "mode": self.mode_key(),
@@ -2165,6 +2312,7 @@ class App(tk.Tk):
             self.cfg["suspects"] = self.v_suspects.get()
         mc = max_calls_value(self.v_maxcalls.get())
         self.cfg["max_calls"] = mc if mc is not None else self.cfg.get("max_calls", 0)     # 잘못 넣은 값은 저장하지 않는다(실행은 _prepare_env 가 막음)
+        self._remember_inputs()
         save_config(self.cfg)
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
@@ -2337,7 +2485,7 @@ class App(tk.Tk):
         elif not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(쪽마다 8자리씩 묶어 한 호출, 쪽은 동시에 — 묶음 호출 약 {n_calls}회, 빠진 자리는 낱개로 더).\n"
                                              "앞뒤 글자는 글로 주지 않고(조각에는 보임) 후보 차례를 섞어 자형만 묻습니다(눈가림)."
                                              + (f" 고른 자리는 후보 없이 한 번 더 읽어 같을 때만 확정합니다(호출 최대 약 {n_calls}회 더)." if self.v_blind.get() else "") + "\n"
-                                             f"획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. " + (sus_note if sus else "") + "계속할까요?"):
+                                             "획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. " + (sus_note if sus else "") + "계속할까요?"):
             return
         self.nb.select(0)
         argv = ["adjudicate", self.pdf(), "--work", str(self.work()), "--reader", self.v_reader.get()] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
@@ -2358,10 +2506,25 @@ class App(tk.Tk):
 
     def open_hwpx(self):
         if not self._need_pdf(): return
-        files = sorted((self.work() / "out").glob("*.hwpx"), key=lambda p: p.stat().st_mtime) if (self.work() / "out").exists() else []
-        if not files:
-            messagebox.showinfo(APP_NAME, "아직 HWPX 가 없습니다. [④ 문서 만들기] 를 먼저 누르십시오."); return
-        open_path(files[-1])
+        try:
+            path = latest_result_hwpx(self.pdf(), self.work())
+            if path is None:
+                messagebox.showinfo(APP_NAME, f"이 원본의 완성된 HWPX가 아직 없습니다. [한 번에 인식]으로 문서를 만든 뒤 누르십시오.\n\n저장 위치: {self.work() / 'out'}")
+                return
+            open_path(path)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"HWPX를 열지 못했습니다. [저장 폴더]에서 파일을 확인하거나 HWPX를 지원하는 프로그램의 파일 연결을 확인하십시오.\n{exc}")
+
+    def open_output_folder(self):
+        if not self._need_pdf(): return
+        out = self.work() / "out"
+        if not out.is_dir():
+            messagebox.showinfo(APP_NAME, f"아직 HWPX 저장 폴더가 없습니다. [한 번에 인식]으로 문서를 만든 뒤 누르십시오.\n\n저장 위치: {out}")
+            return
+        try:
+            open_path(out)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"저장 폴더를 열지 못했습니다.\n{out}\n{exc}")
 
     def show_help(self):
         messagebox.showinfo(f"{APP_NAME} 도움말", HELP)

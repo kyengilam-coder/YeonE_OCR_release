@@ -47,6 +47,7 @@ class ScreenshotGui(unittest.TestCase):
                               v_pdf=Var(self.original), v_pages=Var("12-20"), v_off=Var("29"), v_force=Var(True),
                               v_reader=Var("anthropic"), v_model=Var("claude-test"), v_key=Var("synthetic-key"),
                               select_tab=mock.Mock(), refresh_table=mock.Mock(), _append=mock.Mock(),
+                              _remember_inputs=mock.Mock(),
                               _bundle_images=mock.Mock(), do_run=mock.Mock(), start=mock.Mock(),
                               _set_running=mock.Mock(), v_status=Var("working"), v_prog=Var(""), progress=mock.Mock(),
                               mode_key=lambda: "horizontal_zh")
@@ -84,7 +85,7 @@ class ScreenshotGui(unittest.TestCase):
         app._use_pdf.assert_called_once_with(str(self.saved))
         self.assertEqual((app.v_pdf.get(), app.cfg["last_pdf"]), (str(self.saved), str(self.saved)))
         self.assert_reset(app)
-        app.select_tab.assert_called_once_with(0)
+        app.select_tab.assert_called_once_with(2)
         app.refresh_table.assert_called_once_with()
         self.assertEqual(self.persisted[-1]["pages"], "")
         self.assertEqual((app.v_reader.get(), app.v_model.get(), app.v_key.get()),
@@ -149,7 +150,7 @@ class ScreenshotGui(unittest.TestCase):
         save.assert_not_called()
         app._use_pdf.assert_called_once_with(str(source))
         app._bundle_images.assert_not_called()
-        app.select_tab.assert_called_once_with(0)
+        app.select_tab.assert_called_once_with(2)
         self.assert_reset(app)
 
     def test_copied_multiple_images_use_existing_bundle_workflow(self):
@@ -161,7 +162,7 @@ class ScreenshotGui(unittest.TestCase):
         app._bundle_images.assert_called_once_with([str(source) for source in sources], reset_pages=True)
         app._use_pdf.assert_not_called()
         self.assertEqual(self.snapshot(app), before)  # 실제 묶기 완료 콜백에서만 원본·쪽 설정을 바꾼다.
-        app.select_tab.assert_called_once_with(0)
+        app.select_tab.assert_called_once_with(2)
 
     def test_bundle_success_resets_page_settings_when_new_input_is_ready(self):
         app = self.app(); app._bundle_reset_pages = True
