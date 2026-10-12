@@ -40,7 +40,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 제공사별 API 키와 모델을 따로 기억합니다. 채팅 서비스 구독과 별도로 해당 제공사의 API 키가 필요합니다.
 같은 파일·결과 폴더에서 판독기를 바꿔 실행하면 완료한 쪽은 보존하고 남은 작업을 이어 갑니다.
 문서를 만들 때 간체→번체, 제공된 중문부호 규칙, 문맥에 따른 云/雲 교정을 자동 적용하고 변경 내역을 남깁니다.
-맨 위의 [일반 OCR] 은 PDF → HWPX, [책갈피 OCR] 은 이미 입력된 HWPX 를 PDF 와 대조해 고친 사본을 만듭니다.
+맨 위의 [일반 OCR] 은 PDF·이미지·스크린샷 → HWPX, [책갈피 OCR] 은 이미 입력된 HWPX 를 PDF 와 대조해 고친 사본을 만듭니다.
 
 쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② [PDF·이미지 고르기…] → ③ [▶ 한 번에 인식].
 읽기 방향·인쇄 쪽수 차이·이전 판 기록 갱신·2차 비교·3차 글자 판별·문서·검수 화면·보고·혼동 장부를 프로그램이 알아서 이어서 합니다.
@@ -54,7 +54,10 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
     인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 이미지는 글자층이 없어 세로쓰기로 보므로
     가로쓰기 책이면 읽기 방향을 직접 고르십시오.
- 4. [▶ 한 번에 인식 (PDF → HWPX)] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
+    화면 캡처는 Win+Shift+S → [스크린샷 붙여넣기](Ctrl+Shift+V)로 불러옵니다. [원본 보기]로 확인할 수 있습니다.
+    붙여넣은 캡처는 사용자 데이터 폴더의 screenshots에 PNG로 보관하며 같은 캡처는 기존 작업을 이어 씁니다.
+    붙여넣기는 이전 쪽 범위·인쇄 쪽수 보정·강제 재판독을 초기화하며, 일반 Ctrl+V는 입력 칸의 글자 붙여넣기로 유지합니다.
+ 4. [▶ 한 번에 인식 (PDF·이미지 → HWPX)] 를 누르면 먼저 예상 호출·토큰·비용을 보여 주고([비용 미리 보기] 와 같음), [계속 실행] 을 누르면
     준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 만들기 → 검수 화면 → 보고·혼동 장부 까지 한 번에 갑니다. 단가를 한 번 넣어 두면 금액도 나옵니다.
     이전 판으로 만든 판독 기록이 있으면 지금 규칙으로 저절로 다시 비교합니다(모델 호출 없음).
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
@@ -66,7 +69,8 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
  8. 시작할 때 새 버전을 확인하며, 위의 [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
     실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 고급에서 끌 수 있습니다.
 
-결과는 PDF 와 같은 폴더의 「<PDF 이름>_YeonE_OCR」 안에 생깁니다.
+결과는 원본 옆의 「<이름>_YeonE_OCR」(이미지는 「<이름>_<확장자>_YeonE_OCR」) 안에 생깁니다.
+붙여넣은 캡처는 Windows의 %LOCALAPPDATA%\\YeonE_OCR\\screenshots에 보관합니다. [결과 폴더]로 결과 위치를 엽니다.
  out/      HWPX (+DOCX)
  review.html  검수 화면      report.md  상태 보고
  readings/ 쪽별 판독 기록    crops/     이미지로 보존한 도판
@@ -661,6 +665,8 @@ class App(tk.Tk):
         self.tracker = Tracker()
         self._prog_shown = 0.0
         self._build()
+        self.bind("<Control-Shift-KeyPress-V>", self.paste_screenshot, add="+")
+        self.bind("<Control-Shift-KeyPress-v>", self.paste_screenshot, add="+")
         self.after(100, self._poll)
         self.after(400, self.check_packages)
         self.after(1800, lambda: self.check_updates(manual=False))
@@ -978,7 +984,7 @@ class App(tk.Tk):
         self.tab_frames = [root, tab2]
 
         # ---- 카드 1: PDF 파일 ----
-        c1 = self._card(root, "PDF · 이미지"); c1.pack(fill="x")
+        c1 = self._card(root, "PDF · 이미지 · 스크린샷"); c1.pack(fill="x")
         b = c1.body; b.columnconfigure(1, weight=1)
         self.v_pdf = tk.StringVar()
         self._field_label(b, "파일", 0)
@@ -994,6 +1000,11 @@ class App(tk.Tk):
         e_off = ttk.Entry(row, textvariable=self.v_off, width=6); e_off.pack(side="right")
         ttk.Label(row, text="인쇄 쪽수 = PDF 쪽수 +", style="Field.TLabel").pack(side="right", padx=(0, P(6)))
         Tip(e_off, "PDF 1쪽이 인쇄 30쪽이면 29. 비우거나 0 이면 글자층·판독한 쪽번호로 자동 판정하고, 어긋나는 쪽만 확인 항목으로 표시합니다.", self)
+        shot = ttk.Frame(b, style="Panel.TFrame"); shot.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
+        self._btn(shot, "스크린샷 붙여넣기", self.paste_screenshot,
+                  tip="Win+Shift+S로 캡처한 이미지를 불러옵니다. 단축키는 Ctrl+Shift+V입니다. 같은 이미지는 기존 작업을 이어 쓰며, [한 번에 인식]을 눌러야 판독을 시작합니다.").pack(side="left")
+        ttk.Label(shot, text="Win+Shift+S로 캡처 → Ctrl+Shift+V로 붙여넣기", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
+        self._btn(shot, "원본 보기", self.open_source, tip="선택한 PDF나 이미지를 열어 판독할 원본을 확인합니다.").pack(side="right", padx=(P(8), 0))
 
         # ---- 카드 2·3: 판독 / 문서 ----
         mid = ttk.Frame(root); mid.pack(fill="x", pady=(P(10), 0))
@@ -1225,7 +1236,7 @@ class App(tk.Tk):
         self.actbars = ttk.Frame(host); self.actbars.pack(fill="x")
         act = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
         a = act.body
-        self._btn(a, "▶  한 번에 인식 (PDF → HWPX)", self.do_run, style="Accent.TButton",
+        self._btn(a, "▶  한 번에 인식 (PDF·이미지 → HWPX)", self.do_run, style="Accent.TButton",
                   tip="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. 먼저 예상 비용을 보여 주고 묻습니다.").pack(side="left")
         self.b_stop = ttk.Button(a, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop.pack(side="left", padx=(P(8), 0))
         Tip(self.b_stop, "지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 이어서 합니다.", self)
@@ -1644,7 +1655,7 @@ class App(tk.Tk):
 
     def _need_pdf(self) -> bool:
         if not self.pdf() or not Path(self.pdf()).exists():
-            messagebox.showinfo(APP_NAME, "먼저 [PDF·이미지 고르기…] 로 PDF 나 이미지를 고르십시오."); return False
+            messagebox.showinfo(APP_NAME, "먼저 [PDF·이미지 고르기…]로 파일을 고르거나 [스크린샷 붙여넣기]로 캡처 이미지를 불러오십시오."); return False
         return True
 
     def _pages(self) -> list[str]:
@@ -1936,6 +1947,50 @@ class App(tk.Tk):
         self.open_after = None
 
     # ---------- 단추 동작 ----------
+    def open_source(self):
+        if self._need_pdf():
+            open_path(self.pdf())
+
+    def _reset_screenshot_pages(self):
+        # 이전 책의 쪽 범위·쪽번호 보정·강제 재판독을 새 캡처에 적용하지 않는다.
+        self.v_pages.set(""); self.v_off.set(""); self.v_force.set(False)
+        self.cfg.update(pages="", print_offset="", force=False)
+
+    def paste_screenshot(self, event=None):
+        """명시적으로 붙여넣었을 때만 클립보드를 읽는다. API 호출은 실행 단추에서 한다."""
+        if self.running or getattr(self, "_closing", False) or getattr(self, "_update_installing", False):
+            return "break"
+        captured = None
+        try:
+            from PIL import Image, ImageGrab
+            captured = ImageGrab.grabclipboard()
+            if isinstance(captured, Image.Image):
+                from .screenshots import save_screenshot
+                source = save_screenshot(captured)
+                self._reset_screenshot_pages()
+                self.select_tab(0)
+                self._use_pdf(str(source))
+                self._append(f"스크린샷 불러옴 ({captured.width} × {captured.height} 픽셀). 원본은 자동 보관됩니다. [한 번에 인식]을 눌러 판독하십시오.\n")
+            elif isinstance(captured, list) and captured:
+                paths = [str(p) for p in captured]
+                if any(Path(p).suffix.lower() not in IMAGE_EXTS or not Path(p).is_file() for p in paths):
+                    messagebox.showinfo(APP_NAME, "복사한 파일 중 이미지가 아닌 파일이 있습니다. PNG·JPG 등의 이미지 파일만 복사하거나 Win+Shift+S로 화면을 캡처하십시오.")
+                    return "break"
+                self.select_tab(0)
+                if len(paths) == 1:
+                    self._reset_screenshot_pages()
+                    self._use_pdf(paths[0])
+                else:
+                    self._bundle_images(paths, reset_pages=True)
+            else:
+                messagebox.showinfo(APP_NAME, "클립보드에 이미지가 없습니다.\nWin+Shift+S로 원하는 부분을 캡처한 뒤 [스크린샷 붙여넣기]를 누르십시오.\n저장된 이미지는 [PDF·이미지 고르기…]로 열 수 있습니다.")
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"스크린샷을 불러오지 못했습니다. 다시 캡처하거나 이미지 파일로 저장해 열어 보십시오.\n{exc}")
+        finally:
+            if captured is not None and hasattr(captured, "close"):
+                captured.close()
+        return "break"
+
     def choose_pdf(self):
         imgs = " ".join("*" + e for e in IMAGE_EXTS)
         ps = filedialog.askopenfilenames(title="PDF·이미지 고르기 (이미지는 여러 장 고를 수 있음)",
@@ -1975,7 +2030,7 @@ class App(tk.Tk):
         out = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
         return safe_output_path(out, srcs[0])
 
-    def _bundle_images(self, paths: list[str]) -> None:
+    def _bundle_images(self, paths: list[str], *, reset_pages: bool = False) -> None:
         """이미지 여러 장 → 이름의 숫자 순서로 한 PDF 로 묶어 첫 이미지 옆에 저장(무손실: JPEG 는 그대로, 나머지는 PNG).
         이름에 고른 이미지들의 지문이 들어가므로 정확히 같은 선택으로 이미 묶은 파일이 있을 때만 그대로 쓴다(판독 기록이 이어지게).
         지문 계산과 묶기는 작업 스레드에서 하고(느린 드라이브에서도 창이 멈추지 않게) 끝날 때까지 단추를 잠근다. 끝나면 _bundle_msg 가 _use_pdf 로 잇는다."""
@@ -1983,6 +2038,7 @@ class App(tk.Tk):
         if bad:
             messagebox.showinfo(APP_NAME, "여러 개를 고를 때는 이미지만 고르십시오(PDF 는 한 번에 하나).\n  " + "\n  ".join(Path(b).name for b in bad[:5])); return
         if self.running: return
+        self._bundle_reset_pages = reset_pages
         from .pdfio import _natural_key
         srcs = sorted((Path(p) for p in paths), key=_natural_key)
         names = " → ".join(s.name for s in srcs[:8]) + (" …" if len(srcs) > 8 else "")
@@ -2022,11 +2078,15 @@ class App(tk.Tk):
             self.progress.configure(value=self._bar_value(d / n if n else 1.0))
             self.v_status.set(f"이미지를 한 권으로 묶는 중… {d}/{n}장" if kind == "prog" else f"고른 이미지 확인 중(같은 묶음이 있는지)… {d}/{n}장"); return
         out, err, log = a
+        reset_pages = getattr(self, "_bundle_reset_pages", False)
+        self._bundle_reset_pages = False
         self._set_running(False); self.v_status.set("준비됨")
         if err:
             self.progress.configure(value=0); self.v_prog.set("이미지 묶기 실패")
             messagebox.showerror(APP_NAME, err); return
         self.progress.configure(value=1000); self.v_prog.set("이미지 묶기 끝")
+        if reset_pages:
+            self._reset_screenshot_pages()
         self._append(log); self._use_pdf(str(out))
 
     def toggle_key(self):
@@ -2213,7 +2273,7 @@ class App(tk.Tk):
     def do_run(self):
         if self._need_pdf() and self._prepare_env() and self._confirm_cost():
             self.nb.select(0)
-            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._build_opts(), "한 번에 인식 (PDF 전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
+            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._build_opts(), "한 번에 인식 (전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
 
     def do_stop(self):
         try:

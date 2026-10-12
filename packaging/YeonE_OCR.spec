@@ -41,7 +41,7 @@ if python_license.is_file():
 
 binaries = []
 hiddenimports = ["tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox", "tkinter.simpledialog",
-                 "PIL.ImageTk", "PIL.IcoImagePlugin", "fitz", "pymupdf", "cv2", "numpy", "lxml.etree",
+                 "PIL.ImageTk", "PIL.ImageGrab", "PIL.IcoImagePlugin", "fitz", "pymupdf", "cv2", "numpy", "lxml.etree",
                  "pydantic_core", "jiter", "yeone_ocr.launcher", "yeone_ocr.frozen_smoke"]
 
 def runtime_module(name):

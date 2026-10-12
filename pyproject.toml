@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yeone-ocr"
-version = "0.7.1"
+version = "0.7.2"
 description = "YeonE_OCR · 연어OCR · 한자·한글 혼용 문헌 OCR·교정 처리기 (Gemini·ChatGPT·Claude 판독, HWPX 출력)"
 readme = "README.md"
 requires-python = ">=3.10"
