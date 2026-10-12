@@ -1,0 +1,11 @@
+work/
+*.hwpx
+*.docx
+__pycache__/
+.venv/
+venv/
+build/
+*.egg-info/
+dist/
+*.exe
+release-assets/

@@ -1,0 +1,60 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements-windows.txt
+            requirements-build.txt
+      - name: Install pinned build dependencies
+        run: python -m pip install -r requirements-windows.txt -r requirements-build.txt
+      - name: Verify updater
+        run: python -m unittest discover -s tests -p test_updater.py -v
+      - name: Build standalone executable
+        run: python scripts/build_windows.py --dist-dir release-assets --work-dir build/windows
+      - name: Verify frozen application
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'release-assets/YeonE_OCR-Windows-x64.exe').Path
+          $smoke = Join-Path $env:RUNNER_TEMP 'yeone-frozen-check'
+          $process = Start-Process -FilePath $exe -ArgumentList @('--self-test', '--output', "`"$smoke`"") -WindowStyle Hidden -PassThru
+          if (-not $process.WaitForExit(180000)) {
+            $process.Kill($true)
+            throw 'Frozen application check timed out'
+          }
+          if ($process.ExitCode -ne 0) { throw "Frozen application check failed: $($process.ExitCode)" }
+      - name: Prepare update metadata and source
+        shell: pwsh
+        run: |
+          python scripts/make_update_manifest.py release-assets
+          if ($LASTEXITCODE -ne 0) { throw 'Update metadata generation failed' }
+          $manifest = Get-Content release-assets/update.json -Raw | ConvertFrom-Json
+          git archive --format=zip --prefix="YeonE_OCR-$($manifest.version)/" --output="release-assets/YeonE_OCR-$($manifest.version)-source.zip" HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive failed' }
+          Compress-Archive -Path release-assets/THIRD_PARTY_LICENSES, release-assets/THIRD_PARTY_NOTICES.txt, release-assets/DISTRIBUTION_NOTICE.txt, release-assets/build-manifest.json -DestinationPath "release-assets/YeonE_OCR-$($manifest.version)-licenses.zip"
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $manifest = Get-Content release-assets/update.json -Raw | ConvertFrom-Json
+          $tag = "v$($manifest.version)"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists. Bump the version before publishing." }
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --draft --title "YeonE OCR $tag · Windows" --notes-file docs/release-notes.md release-assets/YeonE_OCR-Windows-x64.exe release-assets/update.json release-assets/SHA256SUMS.txt "release-assets/YeonE_OCR-$($manifest.version)-source.zip" "release-assets/YeonE_OCR-$($manifest.version)-licenses.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

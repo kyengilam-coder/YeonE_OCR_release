@@ -1,0 +1,15 @@
+YeonE_OCR Windows distribution
+
+Upstream project: https://github.com/kyengilam-coder/YeonE_OCR
+Release repository: https://github.com/kyengilam-coder/YeonE_OCR_release
+This release includes the developed source, build scripts and third-party notices.
+
+PyMuPDF is distributed under the project owner's existing commercial licensing
+arrangement, as selected by the project owner for this release. This notice does
+not grant or sublicense a PyMuPDF commercial license. Other dependencies retain
+their respective licenses. Upstream license notices included with packages are
+preserved. No new AGPL license is applied to YeonE_OCR application source here.
+
+No personal API key, access token, user settings, source document or OCR work
+directory is included. Each user supplies their own Gemini API key. API use is
+separate from distribution of this executable.

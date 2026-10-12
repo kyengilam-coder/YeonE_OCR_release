@@ -1,0 +1,4 @@
+# Build tooling only. Install requirements-windows.txt first.
+# 6.16+ supports Python 3.14; the tested release uses these exact versions.
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
