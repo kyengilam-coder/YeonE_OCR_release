@@ -13,12 +13,12 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 import numpy as np
-from .blocks import Block
+from .blocks import Block, first_reading
 
 ROLES = ("chapter", "section", "subsection", "entry", "body", "bonjing", "bielu", "commentary", "small", "caption", "note")
 PRESETS = ("none", "auto", "bencao")   # auto = 주석·출처 규칙은 늘, 약재명 떼기는 그런 문단이 문서에 셋 이상일 때만(다른 책의 우연한 꼴을 떼지 않게)
 _HAN = "㐀-䶿一-鿿豈-﫿\U00020000-\U0003134f"
-ENTRY_RE = re.compile(rf"^([{_HAN}]{{1,6}})[ 　]+(?=(?:味|一名|主|生|性|氣|气)[{_HAN}])")
+ENTRY_RE = re.compile(rf"^([{_HAN}]{{1,6}})[ \t\n\u00a0\u2002\u2003\u3000]+(?=(?:味|一名|主|生|性|氣|气)[{_HAN}])")   # 사이 빈칸: 보통·전각·em·줄바꿈
 COMMENT_RE = re.compile(r"^[［\[〔【（(]\s*[^］\]〕】）)\s]{0,10}?(?:云|曰|按|注|謹按|谨按|又按|今注|今按|說|说)\s*[］\]〕】）)]")
 SOURCE_RE = re.compile(r"(?:(?<=[。，、；：\s　])|^)((?:唐|今|宋|新|陳藏器|陈藏器|海藥|海药|唐本)(?:附|餘|余|增|退|移))[ 　]*$")
 BOLD_RATIO = 1.25            # 책 전체 중앙값의 이 배수를 넘으면 굵은 글자
@@ -51,6 +51,36 @@ def _entry_cut(b: Block) -> tuple[int, int] | None:
     return None
 
 
+def _join(a: Block, b: Block) -> Block:
+    """a 의 글을 b 앞에 잇는다(쓰임·종류는 b 의 것). 등급·메모·쓰임 범위·책갈피 자리를 함께 옮긴다."""
+    k = len(a.text)
+    sh = lambda rs: [(x + k, y + k, z) for x, y, z in rs]
+    return replace(b, text=a.text + b.text, spans=list(a.spans) + sh(b.spans), cstyles=list(a.cstyles) + sh(b.cstyles),
+                   memos=list(a.memos) + [(o + k, m) for o, m in b.memos], anchors=list(a.anchors) + [(o + k, t) for o, t in b.anchors])
+
+
+def _heading_entry(blocks: list[Block], i: int) -> tuple | None:
+    """제목 블록 i 가 약재명인지(판독이 약재명을 제목으로 읽은 쪽이 많다):
+    ("split", 이름 끝, 조문 시작) — 제목 글 안에 「약재명 + 빈칸 + 味·一名·主…」 가 붙음,
+    ("name",) — 제목이 한자 1~6자이고 다음 문단이 味·一名 으로 시작(앞에 이름을 되읽은 표시 〔疑: 黄连〕 가 있어도).
+    生·主 로 여는 문단은 보지 않는다: 序例의 병증 제목(吐唾血) 뒤 약재 목록(生地黃…)을 약재명으로 잘못 떼지 않게."""
+    b = blocks[i]
+    if b.type != "heading" or b.kind in ("그림제목", "표제목"):
+        return None
+    if m := ENTRY_RE.match(b.text):
+        return ("split", m.end(1), m.end())
+    name = re.sub(r"[\s　·・.,，。]", "", first_reading(b.text))
+    if not re.fullmatch(rf"[{_HAN}]{{1,6}}", name):
+        return None
+    nxt = next((x for x in blocks[i + 1:i + 4] if x.type in ("para", "heading") and x.text.strip()), None)
+    if nxt is None or nxt.type != "para" or _entry_cut(nxt):
+        return None                                                     # 다음 문단이 제 약재명으로 시작하면(「菜 下」 뒤 「香薷 味辛…」) 이 제목은 위 단계
+    t = first_reading(nxt.text).lstrip(" 　")
+    if re.match(rf"[{_HAN}]{{0,{len(name)}}}[ 　,，、]*(?:味|一名)[{_HAN}]", t):
+        return ("name",)
+    return None
+
+
 def _bold_role(b: Block) -> tuple[str, list]:
     """조문 블록의 본경·별록과 남길 굵은 범위(섞인 문단만). 굵기를 재지 못했으면 별록으로 둔다."""
     bold = [(a, e) for a, e, k in b.cstyles if k == "bold"]
@@ -65,45 +95,69 @@ def _bold_role(b: Block) -> tuple[str, list]:
 
 
 def apply_structure(blocks: list[Block], preset: str = "bencao") -> tuple[list[Block], dict]:
-    """블록에 쓰임을 붙이고(필요하면 약재명 제목을 떼어 내고) 쓰임별 글자 범위를 단다. 돌려주는 값: (새 블록 목록, 쓰임별 수)."""
+    """블록에 쓰임을 붙이고(필요하면 약재명 제목을 떼어 내고) 쓰임별 글자 범위를 단다. 돌려주는 값: (새 블록 목록, 쓰임별 수).
+    약재명은 문단 첫머리(_entry_cut)에서도, 판독이 약재명을 제목으로 읽은 제목 블록(_heading_entry)에서도 찾는다.
+    제목 안에 붙은 조문 앞부분(「孔公孽 味辛，溫，無毒。」의 味…)은 떼어 다음 문단 앞에 잇는다."""
     if preset not in PRESETS:
         raise ValueError(f"preset 은 {PRESETS} 중 하나: {preset!r}")
-    entries = preset == "bencao" or (preset == "auto" and sum(1 for b in blocks if b.type == "para" and _entry_cut(b)) >= 3)
     rules = preset != "none"
+    heads = {i: h for i in range(len(blocks)) if rules and (h := _heading_entry(blocks, i))}
+    entries = preset == "bencao" or (preset == "auto" and sum(1 for b in blocks if b.type == "para" and _entry_cut(b)) + len(heads) >= 3)
     out: list[Block] = []; stats: dict = {}
-    for b in blocks:
+    tail: Block | None = None                                           # 제목에서 떼어 낸 조문 앞부분 — 다음 문단 앞에 잇는다
+
+    def count(role: str) -> None:
+        stats[role] = stats.get(role, 0) + 1
+
+    def para(b: Block) -> None:
+        nb = replace(b, cstyles=list(b.cstyles))
+        if b.kind == "소주":
+            nb.role = "small"
+        elif rules and COMMENT_RE.match(b.text):
+            nb.role = "commentary"
+        elif entries and (cut := _entry_cut(b)):
+            head, nb = _split(b, *cut)
+            head.type, head.role, head.level = "heading", "entry", 3
+            head.cstyles = []
+            out.append(head); count("entry")
+            nb.role, extra = _bold_role(nb)
+            nb.cstyles = [c for c in nb.cstyles if c[2] != "bold"] + extra
+        else:
+            nb.role = "body"
+            if entries:                                                 # 약재 조문을 이어 쓰는 문단(앞 쪽에서 넘어온 것 등)도 굵기로
+                role, extra = _bold_role(nb)
+                if role == "bonjing":
+                    nb.role, nb.cstyles = role, [c for c in nb.cstyles if c[2] != "bold"] + extra
+        if nb.role != "bonjing" and nb.role != "bielu":
+            nb.cstyles = [c for c in nb.cstyles if c[2] != "bold"]
+        nb.cstyles = [c for c in nb.cstyles if c[2] != "gap"]
+        if rules and (m := SOURCE_RE.search(nb.text)):
+            nb.cstyles.append((m.start(1), m.end(1), "source"))
+        out.append(nb); count(nb.role)
+
+    for i, b in enumerate(blocks):
+        if tail is not None and not (b.type == "para" and b.kind != "소주" and not COMMENT_RE.match(b.text) and not _entry_cut(b)):
+            para(tail); tail = None                                     # 이어 붙일 조문 문단이 아니면 따로 둔다
         if b.type == "heading":
-            role = "caption" if b.kind in ("그림제목", "표제목") else ("chapter", "section", "subsection")[min(3, max(1, b.level)) - 1]
-            out.append(replace(b, role=role, cstyles=[c for c in b.cstyles if c[2] != "bold"]))
-        elif b.type == "para":
-            nb = replace(b, cstyles=list(b.cstyles))
-            if b.kind == "소주":
-                nb.role = "small"
-            elif rules and COMMENT_RE.match(b.text):
-                nb.role = "commentary"
-            elif entries and (cut := _entry_cut(b)):
-                head, nb = _split(b, *cut)
-                head.type, head.role, head.level = "heading", "entry", 3
-                head.cstyles = []
-                out.append(head); stats["entry"] = stats.get("entry", 0) + 1
-                nb.role, extra = _bold_role(nb)
-                nb.cstyles = [c for c in nb.cstyles if c[2] != "bold"] + extra
+            h = heads.get(i) if entries else None
+            if h and h[0] == "split":
+                head, rest = _split(b, h[1], h[2])
+                out.append(replace(head, role="entry", level=3, cstyles=[])); count("entry")
+                tail = replace(rest, type="para", kind="본문", level=0, role="")
+                continue
+            if h:
+                role = "entry"
             else:
-                nb.role = "body"
-                if entries:                                             # 약재 조문을 이어 쓰는 문단(앞 쪽에서 넘어온 것 등)도 굵기로
-                    role, extra = _bold_role(nb)
-                    if role == "bonjing":
-                        nb.role, nb.cstyles = role, [c for c in nb.cstyles if c[2] != "bold"] + extra
-            if nb.role != "bonjing" and nb.role != "bielu":
-                nb.cstyles = [c for c in nb.cstyles if c[2] != "bold"]
-            nb.cstyles = [c for c in nb.cstyles if c[2] != "gap"]
-            if rules and (m := SOURCE_RE.search(nb.text)):
-                nb.cstyles.append((m.start(1), m.end(1), "source"))
-            out.append(nb)
+                role = "caption" if b.kind in ("그림제목", "표제목") else ("chapter", "section", "subsection")[min(3, max(1, b.level)) - 1]
+            out.append(replace(b, role=role, level=3 if role == "entry" else b.level, cstyles=[c for c in b.cstyles if c[2] != "bold"])); count(role)
+        elif b.type == "para":
+            if tail is not None:
+                b, tail = _join(tail, b), None
+            para(b)
         else:
             out.append(replace(b, role=b.role or "note") if b.type in ("note", "uncertain", "report", "meta") else b)
-            continue
-        stats[out[-1].role] = stats.get(out[-1].role, 0) + 1
+    if tail is not None:
+        para(tail)
     return out, stats
 
 

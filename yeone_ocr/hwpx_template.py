@@ -42,21 +42,23 @@ def template_styles(doc) -> dict[str, dict]:
 
 
 def _break_word_para(header, base_id: str, cache: dict) -> str:
-    """base_id 문단 모양을 복사해 한글(한자 포함) 줄 나눔만 '글자 단위'로 바꾼 문단 모양 id. 이미 글자 단위면 그대로."""
+    """base_id 문단 모양을 복사해 줄 나눔을 '글자 단위'로 바꾼 문단 모양 id(한자 문단에 씀). 이미 둘 다 글자 단위면 그대로.
+    라틴 쪽도 바꾼다: 판독 글은 쉼표·마침표를 반각(,.)으로 적는 일이 많아 「就州者大,徑二四寸,長五六寸.」 가 라틴 단어 하나로 묶이고,
+    어절 단위(KEEP_WORD)면 그 덩어리가 통째로 다음 줄로 넘어가 앞 줄이 양쪽 맞춤으로 벌어진다."""
     if base_id in cache:
         return cache[base_id]
     root = header.element
     props = root.find(f".//{HH}paraProperties")
     base = next((p for p in props.iter(f"{HH}paraPr") if p.get("id") == str(base_id)), None) if props is not None else None
     brk = base.find(f".//{HH}breakSetting") if base is not None else None
-    if brk is None or brk.get("breakNonLatinWord") == "BREAK_WORD":
+    if brk is None or (brk.get("breakNonLatinWord") == "BREAK_WORD" and brk.get("breakLatinWord", "BREAK_WORD") == "BREAK_WORD"):
         cache[base_id] = str(base_id)
         return cache[base_id]
     new = copy.deepcopy(base)
     new_id = str(max(int(p.get("id", "0")) for p in props.iter(f"{HH}paraPr")) + 1)
     new.set("id", new_id)
     for b in new.iter(f"{HH}breakSetting"):
-        b.set("breakNonLatinWord", "BREAK_WORD")
+        b.set("breakNonLatinWord", "BREAK_WORD"); b.set("breakLatinWord", "BREAK_WORD")
     props.append(new)
     props.set("itemCnt", str(sum(1 for _ in props.iter(f"{HH}paraPr"))))
     header.mark_dirty()

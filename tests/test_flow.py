@@ -56,6 +56,60 @@ class FlowAssembly(unittest.TestCase):
         self.assertTrue(para.memos and para.memos[0][0] == 0 and "범례" in para.memos[0][1])
 
 
+def title_region(rid: str, text: str, top: float = 0.03, level: int = 1) -> dict:
+    return {"id": rid, "k": "제목", "bbox": frac_bbox((0.2, top, 0.8, top + 0.04)), "title": text, "lv": level}
+
+
+class RunningHeads(unittest.TestCase):
+    """쪽마다 찍힌 머리말(書眉)을 판독이 '제목' 으로 읽으면 내용별 문서에서 장 제목이 되어 글을 끊었다(개보본초 462쪽에서 제목-장 263개)."""
+    def test_running_heads_are_dropped_and_the_paragraph_rejoins(self):
+        def body(rid, t, cont=False, top=0.2):
+            return text_region(rid, [t], cont=cont, box=(0.1, top, 0.9, top + 0.3))
+        recs = [rec(1, [title_region("t", "開寶本草草部上品之上  卷第六", top=0.05), body("b", "青芝本經145 赤芝本經145")]),
+                rec(2, [body("b", "黃芝本經145", cont=True), title_region("t", "芫花草草部上品之上卷第六")]),      # 영역 순서가 거꾸로·잘못 읽은 머리말
+                rec(3, [title_region("t", "開寶本草草部上品之上卷第六"), body("b", "肉蓯蓉本經165", cont=True)]),
+                rec(4, [title_region("t", "開寶本草草部上品之下  卷第七"), body("b", "地膚子本經165")]),          # 권이 바뀌면 새 장
+                rec(5, [title_region("t", "雲母", top=0.5), body("b", "味甘，平。", top=0.6)])]
+        st = {}
+        blocks = assemble_blocks(recs, grades=False, layout="flow", stats=st)
+        heads = [b.text for b in blocks if b.type == "heading"]
+        self.assertEqual(heads, ["開寶本草草部上品之上  卷第六", "開寶本草草部上品之下  卷第七", "雲母"])
+        self.assertEqual(st["running_heads"], 2)
+        para = next(b for b in blocks if b.type == "para")
+        self.assertEqual(para.text, "青芝本經145 赤芝本經145黃芝本經145肉蓯蓉本經165")                        # 머리말에 끊기지 않고 이어짐
+        self.assertEqual([a for a in para.anchors], [(15, "PDF 2쪽"), (22, "PDF 3쪽")])                   # 쪽 책갈피는 그 쪽 첫 글자에
+        recs[3]["merged"]["header"] = "開寶本草 卷第七"; recs[3]["merged"]["regions"][0]["title"] = "開寶本草卷第七"     # 판독이 적은 머리말과 같으면 위치와 상관없이
+        self.assertNotIn("開寶本草卷第七", [b.text for b in assemble_blocks(recs, grades=False, layout="flow") if b.type == "heading"])
+        self.assertIn("芫花草草部上品之上卷第六", [b.text for b in assemble_blocks(recs, grades=False) if b.type == "heading"])  # 원본 쪽대로는 그대로
+
+
+class HeadingEntries(unittest.TestCase):
+    """판독이 약재명을 제목으로 읽은 블록: 다음 문단이 味·一名 으로 시작하면 약재명, 제목에 味… 가 붙었으면 떼어 다음 문단 앞에 잇는다."""
+    def test_herb_headings_become_entries(self):
+        blocks = [Block(type="heading", text="開寶本草玉石等部中品 卷第四", level=1, kind="제목"),
+                  Block(type="heading", text="雄黃", level=1, kind="제목"),
+                  Block(type="para", text="〔疑: 雄黄〕味苦，甘，平。主寒熱。", kind="본문"),
+                  Block(type="heading", text="孔公孽　味辛，溫，無毒。", level=1, kind="제목"),
+                  Block(type="para", text="主傷食不化。", kind="본문", spans=[(1, 2, "green")], anchors=[(0, "PDF 9쪽")]),
+                  Block(type="heading", text="附子\u2003味辛·甘，溫。", level=2, kind="제목"),
+                  Block(type="para", text="〔陶隱居云〕此物。", kind="본문"),
+                  Block(type="heading", text="吐唾血", level=2, kind="제목"),
+                  Block(type="para", text="生地黃『本經』寒。", kind="본문"),
+                  Block(type="heading", text="菜　下", level=2, kind="제목"),
+                  Block(type="para", text="香薷　味辛，微溫。", kind="본문")]
+        out, st = apply_structure(blocks, "auto")
+        got = [(b.type, b.role, b.text) for b in out]
+        self.assertEqual(got, [("heading", "chapter", "開寶本草玉石等部中品 卷第四"),
+                               ("heading", "entry", "雄黃"), ("para", "body", "〔疑: 雄黄〕味苦，甘，平。主寒熱。"),
+                               ("heading", "entry", "孔公孽"), ("para", "body", "味辛，溫，無毒。主傷食不化。"),
+                               ("heading", "entry", "附子"), ("para", "body", "味辛·甘，溫。"), ("para", "commentary", "〔陶隱居云〕此物。"),
+                               ("heading", "section", "吐唾血"), ("para", "body", "生地黃『本經』寒。"),   # 序例 병증 제목 뒤 生… 은 약재명이 아님
+                               ("heading", "section", "菜　下"), ("heading", "entry", "香薷"), ("para", "bielu", "味辛，微溫。")])  # 다음 문단이 제 이름으로 시작
+        joined = out[4]
+        self.assertEqual((joined.spans, joined.anchors), ([(9, 10, "green")], [(8, "PDF 9쪽")]))      # 이은 문단의 색·책갈피 자리도 함께 밀림
+        self.assertEqual(st["entry"], 4)
+
+
 class Structure(unittest.TestCase):
     def para(self, text: str, **kw) -> Block:
         return Block(type="para", text=text, kind=kw.pop("kind", "본문"), **kw)
@@ -192,7 +246,7 @@ class Template(unittest.TestCase):
         m3 = marks(body[2])
         self.assertLess(m3.index(("bm", "PDF 2쪽")), m3.index(("t", "〔腹/腸〕")))       # 책갈피는 그 글자 자리(9번째) 앞에
         ppr = body[3].get("paraPrIDRef")                                            # 주석(본문 바탕 KEEP_WORD) → 글자 단위 사본
-        self.assertRegex(head, rf'<hh:paraPr id="{ppr}"(?:(?!</hh:paraPr>).)*breakNonLatinWord="BREAK_WORD"')
+        self.assertRegex(head, rf'<hh:paraPr id="{ppr}"(?:(?!</hh:paraPr>).)*breakLatinWord="BREAK_WORD"(?:(?!</hh:paraPr>).)*breakNonLatinWord="BREAK_WORD"')   # 반각 ,. 이 든 한자 덩어리도 글자 단위로
         src_run = next(r for r in body[3].findall(f"{HP}run") if (r.findtext(f"{HP}t") or "") == "唐附")
         char_of_source = re.search(r'<hh:style id="\d+" type="CHAR" name="출처"[^>]*charPrIDRef="(\d+)"', head).group(1)
         self.assertEqual(src_run.get("charPrIDRef"), char_of_source)

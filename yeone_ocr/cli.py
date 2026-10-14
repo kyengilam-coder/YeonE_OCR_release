@@ -1641,7 +1641,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             blocks, roles = apply_structure(blocks, getattr(args, "structure", "auto") or "auto")
             names = {"chapter": "장 제목", "section": "절 제목", "subsection": "소제목", "entry": "약재명", "body": "본문", "bonjing": "본경",
                      "bielu": "별록", "commentary": "주석", "small": "소주", "caption": "그림·표 제목", "note": "작업 표시"}
-            log("내용별 짜임: " + " · ".join(f"{names.get(k, k)} {v}" for k, v in roles.items()))
+            log("내용별 짜임: " + " · ".join(f"{names.get(k, k)} {v}" for k, v in roles.items())
+                + (f" · 쪽 머리말로 보고 뺀 제목 {gstats['running_heads']}" if gstats.get("running_heads") else ""))
         if not interim and args.append_report and ci == len(chunks) - 1:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:

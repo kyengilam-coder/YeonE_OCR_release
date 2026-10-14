@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from .schema import PageReading, Region, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, SKIP_KINDS, paragraph_text
+from .schema import PageReading, Region, TEXT_KINDS, TITLE_KINDS, IMAGE_KINDS, SKIP_KINDS, paragraph_text, bbox_frac
 
 
 @dataclass
@@ -26,6 +26,46 @@ class Block:
 
 
 LAYOUTS = ("page", "flow")   # page = 원본 쪽마다 기록 줄·쪽 나누기(검수용), flow = 내용별(제목·문단으로 잇고 원본 쪽은 책갈피로)
+
+
+_MARK = re.compile(r"〔([^〔〕]*)〕")
+_VOLUME = re.compile(r"卷\s*第?\s*([一二三四五六七八九十百千〇零\d]+)")
+RUNNING_TOP = 0.15        # 쪽 위 이 비율 안에서 시작하는 제목만 머리말 후보
+RUNNING_SIMILAR = 0.6     # 앞서 남긴 쪽머리 제목과 이만큼 비슷하면 머리말(잘못 읽은 변형 포함)
+
+
+def first_reading(text: str) -> str:
+    """판독 표시를 1차 글자로: 〔疑: X〕→X, 〔a/b〕→a, 〔판독불명〕→빈 글. 그 밖의 〔…〕는 괄호만 뗀다."""
+    def rep(m):
+        inner = m.group(1).strip()
+        if inner.startswith(("疑:", "疑：")):
+            return inner[2:].strip()
+        if "/" in inner:
+            return inner.split("/")[0]
+        return "" if inner == "판독불명" else inner
+    return _MARK.sub(rep, text or "")
+
+
+def _title_key(text: str) -> str:
+    """머리말 견주기용: 표시는 1차 글자로, 빈칸·부호·쪽수·점선은 뺀다."""
+    return re.sub(r"[\s　·・.,，。:：;；…‥\-—_()\[\]（）『』「」《》〈〉\d]", "", first_reading(text))
+
+
+def is_running_head(text: str, kept: list[str]) -> bool:
+    """쪽 맨 위 제목이 쪽마다 찍힌 머리말(書眉)을 제목으로 읽은 것인지: 앞서 남긴 쪽머리 제목과 비슷하면 그렇다.
+    권 번호(卷第五·卷第六)가 서로 다르면 새 장이므로 아니다. 처음 나온 장 제목은 남는다."""
+    from difflib import SequenceMatcher
+    key = _title_key(text)
+    if len(key) < 4:
+        return False
+    vol = _VOLUME.search(key)
+    for old in kept:
+        ov = _VOLUME.search(old)
+        if vol and ov and vol.group(1) != ov.group(1):
+            continue
+        if SequenceMatcher(None, key, old).ratio() >= RUNNING_SIMILAR:
+            return True
+    return False
 
 
 def anchor_label(rec: dict, whole_offset: int | None) -> str:
@@ -85,6 +125,10 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
     legend_block: Block | None = None
     no_pass2_pages: list[int] = []
     pending: tuple[str, list[str]] | None = None    # 내용별: 아직 글자 자리를 못 찾은 이 쪽의 책갈피(이름, 메모들)
+    top_titles: list[str] = []                      # 내용별: 쪽 맨 위에서 남긴 제목(최근 셋) — 쪽마다 찍힌 머리말을 가린다
+    vol_titles: list[str] = []                      # 권 이름(卷)이 든 제목 가운데 남긴 것(최근 셋) — 장 안의 소제목에 밀려나지 않게 따로
+    if stats is not None and flow:
+        stats.setdefault("running_heads", 0)
     pending_list: list[tuple[str, list[str]]] = []  # 글 없는 쪽(그림만 등)이 이어질 때 앞 쪽들의 것
 
     def place(b: Block, offset: int) -> None:
@@ -137,12 +181,27 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         if rec.get("reader") == "mock":
             blocks.append(Block(type="note", text="〔작업 메모〕 아래 본문은 기존 PDF 텍스트 레이어를 옮긴 것으로 원본 대조 전 상태입니다.", page=n))
         first_text_done = False
+        tops = [bbox_frac(r.bbox)[1] for r in pr.regions if r.kind not in SKIP_KINDS and (r.kind in TITLE_KINDS or r.kind in TEXT_KINDS)]
+        page_top = min(tops) if tops else 0.0       # 이 쪽에서 가장 위 영역(판독 영역 순서가 위→아래가 아닐 수 있어 좌표로)
         for reg in pr.regions:
             if reg.kind in SKIP_KINDS:
                 continue
             if reg.kind in TITLE_KINDS:
                 lvl = reg.title_level if reg.title_level in (1, 2, 3) else (2 if reg.kind == "제목" else 3)
                 hb = Block(type="heading", text=reg.title_text.strip(), level=lvl, kind=reg.kind, page=n)
+                if flow and hb.text and reg.kind == "제목":
+                    y0 = bbox_frac(reg.bbox)[1]
+                    key = _title_key(hb.text); vol = "卷" in key
+                    at_top = y0 < RUNNING_TOP and y0 <= page_top + 0.02          # 쪽에서 가장 위 영역
+                    same_as_header = bool(pr.running_header.strip()) and is_running_head(hb.text, [_title_key(pr.running_header)])
+                    if same_as_header or ((at_top or vol) and is_running_head(hb.text, vol_titles + top_titles)):
+                        if stats is not None:                   # 쪽마다 찍힌 머리말을 판독이 제목으로 읽은 것 — 내용별에서는 글을 끊지 않게 뺀다
+                            stats["running_heads"] = stats.get("running_heads", 0) + 1
+                        continue
+                    if vol:
+                        vol_titles[:] = (vol_titles + [key])[-3:]
+                    elif at_top:
+                        top_titles[:] = (top_titles + [key])[-3:]
                 if flow and hb.text:
                     place(hb, 0)
                 blocks.append(hb)
