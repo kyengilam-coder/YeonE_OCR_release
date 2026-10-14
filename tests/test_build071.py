@@ -131,7 +131,60 @@ class BuildNormalization(unittest.TestCase):
         with patch.object(cli, "create_reader", return_value=Reader()):
             resolver, _ = cli._normalization_resolver(self.work, self.args())
             self.assertEqual(resolver([item]), {})
-        self.assertFalse((self.work.dir / "normalization_cache.json").exists())
+        saved = json.loads((self.work.dir / "normalization_cache.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["choices"], {})                                     # 간체 원문은 확정 답으로 남기지 않는다
+        self.assertEqual(list(saved["undecided"].values()), ["gpt-test"])          # 못 고른 후보로만 기억
+        with patch.object(cli, "create_reader") as factory:                        # 같은 모델이면 다시 묻지 않는다
+            resolver, metadata = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(resolver([item]), {})
+            factory.assert_not_called(); self.assertEqual(metadata["remembered"], 1)
+
+    def test_model_sees_a_short_window_once_per_distinct_context_and_progress_is_logged(self):
+        """모델에는 후보마다 앞뒤 60자만 보내고, 앞뒤 글이 같은 후보는 한 번만 묻는다. 문서 쪽 묶음은 80건, 진행은 기록에 남는다."""
+        long = "甲" * 700
+        items = [dict(id=str(i), context=long + "云" + long, source="云", candidates=["云", "雲"], target_offset=700,
+                      original_context=long + "云" + long, original_source="云", original_target_offset=700) for i in range(1, 4)]
+        sent = []
+        class Reader:
+            model = "gpt-test"; usage = {"calls": 1}
+            def resolve_text_choices(self, xs):
+                sent.append(xs); return {x["id"]: "云" for x in xs}
+        with patch.object(cli, "create_reader", return_value=Reader()):
+            resolver, meta = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(resolver(items), {"1": "云", "2": "云", "3": "云"})
+        self.assertEqual(len(sent), 1); self.assertEqual(len(sent[0]), 1)              # 셋이 같은 글 → 하나만
+        x = sent[0][0]
+        self.assertEqual((len(x["context"]), x["target_offset"], x["context"][x["target_offset"]]), (121, 60, "云"))
+        self.assertEqual((len(x["original_context"]), x["original_target_offset"]), (61, 30))
+        self.assertEqual((meta["asked"], meta["deduped"], resolver.batch_size), (1, 2, 80))
+        other = [dict(id="9", context="乙云丙", source="云", candidates=["云", "雲"], target_offset=1),
+                 dict(id="10", context="丁云戊", source="云", candidates=["云", "雲"], target_offset=1)]
+        class Partial:                                                             # 하나는 '못 고름', 하나는 답에서 빠짐
+            model = "gpt-test"; usage = {"calls": 1}
+            def resolve_text_choices(self, xs):
+                return {"9": ""}
+        with patch.object(cli, "create_reader", return_value=Partial()):
+            resolver, meta = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(resolver(other), {})
+        with patch.object(cli, "create_reader", return_value=Reader()):            # 빠졌던 것만 다시 묻는다
+            sent.clear(); resolver, meta = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(resolver(other), {"10": "云"})
+        self.assertEqual([[x["id"] for x in b] for b in sent], [["10"]]); self.assertEqual(meta["remembered"], 1)
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            resolver.progress(0, 9000); resolver.progress(9000, 9000)
+        self.assertIn("후보 9,000건을 80건씩", buf.getvalue()); self.assertIn("문맥 교정 9,000/9,000건", buf.getvalue())
+
+    def test_context_model_off_keeps_rules_and_does_not_flag_incomplete(self):
+        with patch.object(cli, "create_reader") as factory:
+            self.assertEqual(self.run_build(self.args("--no-context-model")), 0)
+            factory.assert_not_called()
+        audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
+        self.assertTrue(audit["reader"]["disabled"]); self.assertGreater(audit["summary"]["context_unresolved"], 0)
+        with ZipFile(self.work.out_dir / "source.hwpx") as archive:
+            xml = archive.read("Contents/section0.xml").decode("utf-8")
+        self.assertIn("漢書", xml); self.assertIn("髒", xml)                            # 규칙 변환은 하고, 갈리는 후보는 원문
 
 
 if __name__ == "__main__":

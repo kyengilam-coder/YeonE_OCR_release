@@ -235,12 +235,12 @@ class Command(unittest.TestCase):
             self.skipTest("tkinter 없음")
         V = lambda v: SimpleNamespace(get=lambda: v)
         app = SimpleNamespace(v_docx=V(False), v_join=V(True), v_hl=V(True), v_ctx=V(True), v_pb=V(True), v_tlpdf=V(False),
-                              v_layout=V(gui.LAYOUT_LABELS["flow"]), v_template=V(" C:/양식.hwpx "), v_bold=V(False),
+                              v_layout=V(gui.LAYOUT_LABELS["flow"]), v_template=V(" C:/양식.hwpx "), v_bold=V(False), v_ctxmodel=V(False),
                               check_list_mode=lambda: "none", memo_mode=lambda: "notice")
         app.layout_key = lambda: gui.App.layout_key(app)
         o = gui.App._build_opts(app)
         a = build_parser().parse_args(["build", "x.pdf"] + o)
-        self.assertEqual((a.layout, a.template, a.no_bold), ("flow", "C:/양식.hwpx", True))
+        self.assertEqual((a.layout, a.template, a.no_bold, a.no_context_model), ("flow", "C:/양식.hwpx", True, True))
         app.v_layout = V(gui.LAYOUT_LABELS["page"])
         self.assertNotIn("--layout", gui.App._build_opts(app))
         self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"]), ("page", "", True))

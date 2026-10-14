@@ -69,7 +69,7 @@ class ProviderSettings(unittest.TestCase):
             app = types.SimpleNamespace(_need_pdf=lambda: True, _prepare_env=lambda: True,
                 v_reader=Var("anthropic"), v_model=Var("claude-custom"), pdf=lambda: "book.pdf", work=lambda: "work",
                 _pages=lambda: [], _build_opts=lambda: [], _cap_opts=lambda: ["--max-calls", "12"],
-                start=lambda argv, label: calls.append(argv))
+                _confirm_model_steps=lambda adjudicate=False: [], start=lambda argv, label: calls.append(argv))
             gui.App.do_build(app)
             from yeone_ocr.cli import build_parser
             args = build_parser().parse_args(calls[0])

@@ -267,6 +267,7 @@ class InputTabs(unittest.TestCase):
                 app._need_pdf = lambda: True; app._prepare_env = lambda: True
                 app._pages = self.gui.App._pages.__get__(app)
                 app._build_opts = lambda: []; app._cap_opts = lambda: []
+                app._confirm_model_steps = lambda adjudicate=False: []          # 문맥 교정으로 물을 것 없음
                 app.start = mock.Mock()
                 self.gui.App.do_build(app)
                 argv = app.start.call_args.args[0]

@@ -15,6 +15,8 @@ UNITS = {"collate": "구획", "resolve": "개", "download": "개"}            # 
 NO_ETA = {"install"}
 # 쪽 수 뒤에 한 걸음이 더 붙는 단계: 문서 만들기는 쪽마다 도판을 자른 뒤 문서를 한 번 조립한다(전체 = 쪽 수 + 1).
 TAIL_STEP = {"build": "문서 조립"}
+# 단계 안의 알림(막대는 움직이지 않고 글만): 문서 조립 중 문맥 교정은 후보가 수천 건이라 오래 걸리므로 몇 건째인지 보인다.
+NOTES = {"normalize": "문맥 교정"}
 
 # 명령별 단계와 무게. 한 번에 인식(run)은 판독이 대부분이다.
 PLANS: dict[str, tuple[tuple[str, float], ...]] = {
@@ -56,6 +58,7 @@ class Tracker:
         self.nested = NESTED.get(command, {})
         self.frac = 0.0
         self.stage = ""; self.done = 0; self.total = 0; self.sub = 0.0
+        self.note = ""                                            # 단계 안 알림(NOTES) — 그동안은 남은 시간을 어림하지 않는다
         self._idx = -1
         self.t0 = time.time() if now is None else now
         # 남은 시간은 가장 무거운 단계(한 번에 인식이면 판독)가 시작된 때부터의 속도로 어림한다.
@@ -67,10 +70,15 @@ class Tracker:
     def update(self, stage: str, done: int, total: int, now: float | None = None) -> float:
         names = [s for s, _ in self.plan]
         before_frac = self.frac
+        if stage in NOTES:
+            self.note = f"{NOTES[stage]} {max(0, int(done)):,}/{int(total):,}건" if total and done < total else ""
+            return self.frac
         if stage in names:
             i = names.index(stage)
             if i < self._idx:
                 return self.frac                                  # 지난 단계의 늦은 알림
+            if i != self._idx:
+                self.note = ""
             if i != self._idx or done != self.done:
                 self.sub = 0.0                                    # 새 단위가 시작되면 하위 진행은 처음부터
             self._idx = i; self.stage = stage
@@ -98,7 +106,7 @@ class Tracker:
 
     def eta(self, now: float | None = None) -> str:
         now = time.time() if now is None else now
-        if self.command in NO_ETA or self.frac < 0.03 or now - self.t0 < 15 or self.frac >= 1.0 or self._t_main is None:
+        if self.command in NO_ETA or self.note or self.frac < 0.03 or now - self.t0 < 15 or self.frac >= 1.0 or self._t_main is None:
             return ""
         el, gained = now - self._t_main, self.frac - self._f_main
         if el <= 0 or gained <= 0.005:
@@ -119,7 +127,7 @@ class Tracker:
             name = STAGE_NAMES.get(self.stage, self.stage)
             total = self.total - (1 if self.stage in TAIL_STEP else 0)
             if self.stage in TAIL_STEP and self.done >= total:
-                parts.append(f"{name} · {TAIL_STEP[self.stage]}")
+                parts.append(f"{name} · {self.note or TAIL_STEP[self.stage]}")
             elif total > 1 or (total == 1 and self.stage not in ("review", "report", "setup")):
                 parts.append(f"{name} {min(self.done, total)}/{total}{UNITS.get(self.stage, '쪽')}")
             else:

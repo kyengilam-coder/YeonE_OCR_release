@@ -1388,67 +1388,159 @@ def context_snapshots(work: Work, records: list[dict], write: bool = True) -> di
         return {}
 
 
+CHOICE_WINDOW = 60      # 문맥 교정: 모델에 보내는 앞뒤 글자 수(변환 뒤 글). 원문은 그 절반
+CHOICE_BATCH = 80       # 문맥 교정: 한 호출에 묻는 후보 수
+
+
+def clip_choice_item(item: dict, window: int = CHOICE_WINDOW) -> dict:
+    """문맥 후보 하나를 모델에 보낼 작은 꼴로. 문서 쪽(normalization)은 앞뒤 600자 문맥을 두 벌(변환 뒤·원문) 붙여 주는데,
+    글자 하나를 고르는 데는 앞뒤 몇십 자면 되고 그대로 보내면 후보 하나에 2천 자가 넘어 호출이 크고 느리다."""
+    def clip(text, at, n, span):
+        text = text or ""
+        if at is None:
+            return text[:2 * n + span], None
+        a = max(0, int(at) - n)
+        return text[a:int(at) + span + n], int(at) - a
+    out = {k: item[k] for k in ("id", "source", "candidates", "source_is_valid_traditional", "reason") if k in item}
+    src = len(item.get("source") or "")
+    out["context"], at = clip(item.get("context"), item.get("target_offset"), window, src)
+    if at is not None:
+        out["target_offset"] = at
+    if item.get("original_context") is not None:
+        span = len(item.get("original_source") or item.get("source") or "")
+        out["original_context"], at = clip(item["original_context"], item.get("original_target_offset"), window // 2, span)
+        if at is not None:
+            out["original_target_offset"] = at
+    return out
+
+
+def _normalization_keys(item: dict, provider: str, model: str, rules_hash: str) -> tuple[str, str]:
+    """(예전 열쇠: 문서 쪽이 준 항목 그대로 — 0.7.4 까지의 재사용 기록, 새 열쇠: 모델에 보내는 작은 꼴 — 앞뒤 몇십 자만 같으면 같은 후보)."""
+    import hashlib
+    def h(d):
+        d = {k: v for k, v in d.items() if k != "id"}
+        d.update(provider=provider, model=model, rules=rules_hash, version=__version__)
+        return hashlib.sha256(json.dumps(d, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return h(item), h({**clip_choice_item(item), "clip": CHOICE_WINDOW})
+
+
+def _load_normalization_cache(work: Work) -> tuple[dict, dict]:
+    """(고른 답 {열쇠: 글자}, 물었지만 모델이 고르지 못한 후보 {열쇠: 모델})."""
+    try:
+        saved = json.loads((work.dir / "normalization_cache.json").read_text(encoding="utf-8"))
+        if saved.get("schema_version") != 1:
+            return {}, {}
+        choices, undecided = saved.get("choices", {}), saved.get("undecided", {})
+        return (choices if isinstance(choices, dict) else {}), (undecided if isinstance(undecided, dict) else {})
+    except (OSError, ValueError, AttributeError):
+        return {}, {}
+
+
+def _cached_choice(item: dict, keys: tuple[str, str], choices: dict):
+    for key in keys:
+        c = choices.get(key)
+        if c in (item.get("candidates") or []) and (item.get("source_is_valid_traditional", True) or c != item.get("source")):
+            return c
+    return None
+
+
+def normalization_plan(work: Work, records: list[dict], provider: str, model: str, layout: str = "page") -> dict:
+    """문맥 교정에서 모델에 새로 물을 후보 수 어림(모델 호출 없음). 문서 조립·규칙 변환까지 해 보고 재사용 기록과 견준다.
+    실제 문서와 표시·조문 나누기가 조금 달라 앞뒤 글이 다를 수 있으므로 '약' 이다.
+    돌려주는 값: {total, reused, remembered, ask, calls}."""
+    import hashlib
+    from .normalization import normalize_blocks, RULE_FILE
+    blocks = assemble_blocks(records, grades=False, layout=layout)
+    if layout == "flow":
+        from .structure import apply_structure
+        blocks, _ = apply_structure(blocks, "auto")
+    seen: list[dict] = []
+    def capture(items):
+        seen.extend(items); return {}
+    capture.batch_size = 1 << 30
+    normalize_blocks(blocks, resolver=capture)
+    rules_hash = hashlib.sha256(RULE_FILE.read_bytes()).hexdigest()
+    cache, undecided = _load_normalization_cache(work)
+    reused = remembered = 0; ask: set[str] = set()
+    for item in seen:
+        keys = _normalization_keys(item, provider, model, rules_hash)
+        if _cached_choice(item, keys, cache) is not None:
+            reused += 1
+        elif keys[1] in undecided:
+            remembered += 1
+        else:
+            ask.add(keys[1])
+    return {"total": len(seen), "reused": reused, "remembered": remembered, "ask": len(ask), "calls": -(-len(ask) // CHOICE_BATCH)}
+
+
 def _normalization_resolver(work: Work, args):
-    """실제로 문맥 후보가 있을 때만 모델을 만들고, 같은 근거의 확정 답은 재사용한다."""
+    """실제로 문맥 후보가 있을 때만 모델을 만들고, 같은 근거의 확정 답은 재사용한다.
+    - 모델에는 후보마다 앞뒤 CHOICE_WINDOW 자만 보내고 CHOICE_BATCH 건씩 묻는다(clip_choice_item).
+    - 앞뒤 글이 같은 후보는 한 번만 묻고, 모델이 고르지 못한 후보도 기억해 다시 묻지 않는다(같은 제공사·모델일 때).
+    - --no-context-model 이면 모델을 부르지 않는다(규칙 변환은 그대로, 갈리는 후보는 원문 유지·보고)."""
     import hashlib
     from .normalization import RULE_FILE
     from .readers import default_model
     provider = getattr(args, "reader", "gemini") or "gemini"
     model = getattr(args, "model", None) or default_model(provider)
-    meta = {"provider": provider, "model": model, "cache_hits": 0, "usage": {}}
+    meta = {"provider": provider, "model": model, "cache_hits": 0, "remembered": 0, "deduped": 0, "asked": 0, "usage": {}}
     if provider == "mock":
+        return None, meta
+    if getattr(args, "no_context_model", False):
+        meta["disabled"] = True
         return None, meta
     rules_hash = hashlib.sha256(RULE_FILE.read_bytes()).hexdigest()
     cache_path = work.dir / "normalization_cache.json"
-    try:
-        saved = json.loads(cache_path.read_text(encoding="utf-8"))
-        cache = saved.get("choices", {}) if saved.get("schema_version") == 1 else {}
-        if not isinstance(cache, dict):
-            cache = {}
-    except (OSError, ValueError, AttributeError):
-        cache = {}
+    cache, undecided = _load_normalization_cache(work)
     active = None
     failure = None
+    said = [0.0]
 
     def resolve(items):
         nonlocal active, failure
-        answers = {}; pending = []; keys = {}
+        answers = {}; groups: dict[str, list] = {}
         for item in items:
-            payload = {k: value for k, value in item.items() if k != "id"}
-            payload.update(provider=provider, model=model, rules=rules_hash, version=__version__)
-            key = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-            keys[item["id"]] = key
-            if (cache.get(key) in (item.get("candidates") or []) and
-                    (item.get("source_is_valid_traditional", True) or cache[key] != item.get("source"))):
-                answers[item["id"]] = cache[key]; meta["cache_hits"] += 1
+            keys = _normalization_keys(item, provider, model, rules_hash)
+            got = _cached_choice(item, keys, cache)
+            if got is not None:
+                answers[item["id"]] = got; meta["cache_hits"] += 1
+            elif keys[1] in undecided:
+                meta["remembered"] += 1                                   # 이 모델이 앞서 물어 고르지 못한 후보 — 다시 사지 않는다
             else:
-                pending.append(item)
-        if not pending:
+                groups.setdefault(keys[1], []).append(item)
+        if not groups:
             return answers
         if CANCEL.is_set():
             meta["cancelled"] = True
             return answers
         if failure:
             return answers
+        reps = [g[0] for g in groups.values()]                          # 앞뒤 글이 같은 후보는 하나만 묻는다
+        meta["deduped"] += sum(len(g) - 1 for g in groups.values())
         try:
             if active is None:
                 active = create_reader(provider, model=model, use_cache=False)
-                log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} — 한자 치환 후보와 云/雲을 문맥으로 확인")
-            chosen = active.resolve_text_choices(pending)
+                log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} — 한자 치환 후보와 云/雲을 문맥으로 확인"
+                    f"(후보마다 앞뒤 {CHOICE_WINDOW}자 · 한 호출에 {CHOICE_BATCH}건)")
+            chosen = active.resolve_text_choices([clip_choice_item(r) for r in reps])
             meta["usage"] = dict(getattr(active, "usage", {}) or {})
-            changed = False
-            for item in pending:
-                choice = chosen.get(item["id"])
-                if (choice and choice in item["candidates"] and
-                        (item.get("source_is_valid_traditional", True) or choice != item.get("source"))):
-                    answers[item["id"]] = choice
-                    cache[keys[item["id"]]] = choice; changed = True
-            if changed:
-                try:
-                    write_atomic(cache_path, json.dumps({"schema_version": 1, "choices": cache}, ensure_ascii=False, indent=1))
-                except OSError:
-                    meta["cache_error"] = "문맥 판단 재사용 기록을 저장하지 못했습니다. 이번 판단은 문서와 변환 보고에 반영합니다."
-                    log("주의: " + meta["cache_error"])
+            meta["asked"] += len(reps)
+            for key, group in groups.items():
+                rep = group[0]; choice = chosen.get(rep["id"])
+                if choice is None:
+                    continue                                              # 답에서 빠진 후보 — 기억하지 않고 다음에 다시 묻는다
+                if (choice and choice in rep["candidates"] and
+                        (rep.get("source_is_valid_traditional", True) or choice != rep.get("source"))):
+                    cache[key] = choice
+                    for it in group:
+                        answers[it["id"]] = choice
+                else:
+                    undecided[key] = getattr(active, "model", model)
+            try:
+                write_atomic(cache_path, json.dumps({"schema_version": 1, "choices": cache, "undecided": undecided}, ensure_ascii=False, indent=1))
+            except OSError:
+                meta["cache_error"] = "문맥 판단 재사용 기록을 저장하지 못했습니다. 이번 판단은 문서와 변환 보고에 반영합니다."
+                log("주의: " + meta["cache_error"])
         except Exception as exc:
             failure = str(exc) if isinstance(exc, ReaderError) else f"{type(exc).__name__}: 문맥 교정 모델을 사용할 수 없습니다."
             meta["error"] = failure
@@ -1456,6 +1548,20 @@ def _normalization_resolver(work: Work, args):
             log(f"주의: {failure} 해당 후보는 바꾸지 않고 변환 보고에 남깁니다.")
         return answers
 
+    def tell(done: int, total: int):
+        """진행 막대(문서 조립 칸에 '문맥 교정 n/N건')와, 30초마다·끝에 진행 기록 한 줄."""
+        progress("normalize", done, total)
+        now = time.time()
+        if done == 0:
+            said[0] = now
+            log(f"문맥 교정: 후보 {total:,}건을 {CHOICE_BATCH}건씩 확인 — 앞서 고른 답과 이 모델이 이미 물어 못 고른 후보는 다시 묻지 않음")
+        elif done >= total or now - said[0] >= 30:
+            said[0] = now
+            log(f"  문맥 교정 {done:,}/{total:,}건 · 새로 물음 {meta['asked']:,}건(호출 {meta['usage'].get('calls', 0):,}회)"
+                f" · 재사용 {meta['cache_hits']:,} · 이미 물어 못 고름 {meta['remembered']:,} · 같은 글 묶음 {meta['deduped']:,}")
+
+    resolve.batch_size = CHOICE_BATCH
+    resolve.progress = tell
     return resolve, meta
 
 
@@ -1556,7 +1662,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             norm_report["output"] = out_h.name
             if resolver_meta.get("error") or resolver_meta.get("cancelled"):
                 norm_report["complete"] = False
-            args._normalization_incomplete |= not norm_report.get("complete", True)
+            if not resolver_meta.get("disabled"):                          # 모델을 일부러 끈 것은 미완료로 알리지 않는다(보고서에는 남음)
+                args._normalization_incomplete |= not norm_report.get("complete", True)
         elif not interim:
             norm_report = {"schema_version": 1, "enabled": False, "complete": True,
                            "output": out_h.name, "summary": {"changes": 0, "review": 0}}
@@ -1588,7 +1695,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             log((f"번체·문맥 교정: 변경 {summary.get('changes', 0)}건 · 확인 필요 {summary.get('review', 0)}건 · 보고 {report_html}"
                  + (" — 미확정 후보는 원문을 유지했습니다." if not norm_report.get("complete", True) else ""))
                 if norm_report.get("enabled") else "번체·문맥 교정: --no-normalize 설정으로 생략")
-            if not norm_report.get("complete", True):
+            if (norm_report.get("reader") or {}).get("disabled"):
+                log(f"  문맥 교정 모델 끔(--no-context-model): 갈리는 후보 {summary.get('context_unresolved', 0) + summary.get('yun_ambiguous', 0)}건은 원문을 유지했습니다 — 교정 보고 {report_html}")
+            elif not norm_report.get("complete", True):
                 log(f"주의: 문맥으로 확정하지 못한 글자는 원문을 유지했습니다. 교정 보고에서 확인하십시오: {report_html}")
         if args.docx:
             from .docx_builder import build_docx
@@ -2181,6 +2290,8 @@ def build_parser():
                        help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
+        p.add_argument("--no-context-model", action="store_true",
+                       help="번체 문맥 교정에 모델을 부르지 않음: 규칙 변환(간체→번체·부호)은 하고, 문맥으로 갈리는 후보(发→發/髮, 云/雲 등)는 원문을 두고 교정 보고에 남김")
         p.add_argument("--layout", choices=["page", "flow"], default="page",
                        help="문서 짜임: page=원본 쪽마다 기록 줄·쪽 나누기(기본, 검수용) / flow=내용별(제목·문단으로 잇고 원본 쪽은 책갈피로)")
         p.add_argument("--template", help="내용별 문서(--layout flow)를 채울 양식 HWPX — 그 스타일(제목-장·제목-절·본경 원문·주석…)과 쪽 설정을 쓴다")

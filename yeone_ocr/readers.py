@@ -289,7 +289,7 @@ source 가 이미 적합한 번체이면 그대로 고를 수 있지만, source_
 
 
 def resolve_text_choices(reader, items: list[dict]) -> dict[str, str]:
-    """OCR 설정을 건드리지 않고 문맥으로 후보를 고른다. 후보 밖/중복 답은 버린다."""
+    """OCR 설정을 건드리지 않고 문맥으로 후보를 고른다. 후보 밖·간체 원문 답은 빈 글("" = 답했지만 못 고름)로, 중복 답은 버린다(답 없음)."""
     import copy
     allowed = {str(it["id"]): tuple(c for c in (it.get("candidates") or ())
                                    if not (it.get("source_is_valid_traditional") is False and c == it.get("source"))) for it in items}
@@ -311,4 +311,6 @@ def resolve_text_choices(reader, items: list[dict]) -> dict[str, str]:
         seen.add(item.id)
         if item.choice and item.choice in allowed.get(item.id, ()):
             out[item.id] = item.choice
+        elif item.id in allowed:
+            out[item.id] = ""                    # 답은 왔지만 고르지 못함(빈 답·후보 밖·간체 원문) — 답이 없는 항목과 가른다
     return out

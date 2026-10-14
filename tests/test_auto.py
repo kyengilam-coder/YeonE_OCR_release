@@ -829,19 +829,20 @@ class AdjudicateCommand(unittest.TestCase):
             shown = []
             for answer, want in ((True, []), (False, ["--no-adjudicate"]), (None, None)):
                 with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg, a=answer: shown.append(msg) or a):
-                    self.assertEqual(app._confirm_glyphs(), want)
-            self.assertIn("자리가 4곳", shown[0]); self.assertIn("약 2회", shown[0]); self.assertIn("최대 약 6회", shown[0])
+                    self.assertEqual(app._confirm_model_steps(adjudicate=True), want)
+            self.assertIn("자리 4곳", shown[0]); self.assertIn("약 2회", shown[0]); self.assertIn("최대 약 6회", shown[0])
+            self.assertNotIn("문맥 교정", shown[0])                                            # 문맥 교정 칸이 없으면(옛 설정) 3차만
             r = work.load_record(1)                                                             # 1쪽 두 자리는 gpt-4.1 이 이미 물어 못 가림
             from yeone_ocr.adjudicate import find_sites
             r["adjudications"] = [{**{k: getattr(x, k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "gpt-4.1", "choice": "", "evidence": "x"}
                                   for x in find_sites(PageReading.model_validate(r["merged"]))]
             work.save_record(1, r)
             with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg: shown.append(msg) or True):
-                self.assertEqual(app._confirm_glyphs(), [])
-            self.assertIn("자리가 2곳", shown[-1]); self.assertIn("gpt-4.1)이 앞서 물어 고르지 못한 2곳은 다시 묻지 않습니다", shown[-1])
+                self.assertEqual(app._confirm_model_steps(adjudicate=True), [])
+            self.assertIn("자리 2곳", shown[-1]); self.assertIn("gpt-4.1)이 앞서 물어 고르지 못한 2곳은 다시 묻지 않습니다", shown[-1])
             app.v_force = var(True)                                                             # 다시 판독하는 실행은 판독 비용 창이 대신
             with mock.patch.object(gui.messagebox, "askyesnocancel", lambda *a: self.fail("묻지 않아야 함")):
-                self.assertEqual(app._confirm_glyphs(), [])
+                self.assertEqual(app._confirm_model_steps(adjudicate=True), [])
             app.v_force = var(False); started = []                                              # [아니요] 면 run 명령에 --no-adjudicate
             app._need_pdf = app._prepare_env = app._confirm_cost = lambda: True
             app._pages = app._read_opts = app._build_opts = lambda: []; app._glyph_opts = lambda suspects=False: []
@@ -852,6 +853,19 @@ class AdjudicateCommand(unittest.TestCase):
             with mock.patch.object(gui.messagebox, "askyesnocancel", lambda *a: None):
                 app.do_run()
             self.assertEqual(len(started), 1)
+            # 번체 문맥 교정도 함께 센다: 간체 '云' 이 든 쪽 → 云/雲 후보. [아니요] 면 두 단계 모두 모델 없이
+            r = work.load_record(2); r["merged"]["regions"][0]["paragraphs"][0]["columns"][1]["text"] = "白云在天" + self.COL[4:]; work.save_record(2, r)
+            for pg in (1, 2):                                                                    # 실제 판독 기록처럼 원본 이름을 담는다(문서 조립에 씀)
+                r = work.load_record(pg); r["file"] = "v.pdf"; work.save_record(pg, r)
+            app.v_ctxmodel = var(True); app.v_layout = var(gui.LAYOUT_LABELS["page"]); app.v_status = mock.Mock(); app.update_idletasks = lambda: None
+            with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg: shown.append(msg) or False):
+                self.assertEqual(app._confirm_model_steps(adjudicate=True), ["--no-adjudicate", "--no-context-model"])
+            self.assertIn("■ 번체 문맥 교정: 후보", shown[-1]); self.assertIn("80건씩 약 1회", shown[-1])
+            app.v_model = var("gpt-test"); app._cap_opts = lambda: []; built = []                 # [④ 문서 만들기]도 문맥 교정만 묻는다
+            app.start = lambda argv, label: built.append(argv)
+            with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg: shown.append(msg) or False):
+                app.do_build()
+            self.assertNotIn("3차 글자 판별", shown[-1]); self.assertIn("--no-context-model", built[0]); self.assertNotIn("--no-adjudicate", built[0])
 
     def test_run_adaptive_throttles_and_stops_on_fatal(self):
         import contextlib, io
@@ -928,6 +942,10 @@ class ProgressTracker(unittest.TestCase):
         t = Tracker("run", now=0.0)
         t.update("build", 3, 5); self.assertIn("문서 만들기 3/4쪽", t.text(now=1.0))    # 전체 5 = 4쪽 + 조립 한 번
         t.update("build", 4, 5); self.assertIn("문서 만들기 · 문서 조립", t.text(now=1.0))
+        f = t.frac; t.update("normalize", 1200, 9000)                                  # 문서 조립 중 문맥 교정: 막대는 그대로, 글로 몇 건째인지
+        self.assertEqual(t.frac, f); self.assertIn("문서 만들기 · 문맥 교정 1,200/9,000건", t.text(now=1.0))
+        self.assertEqual(t.eta(now=500.0), ""); self.assertIn("지난 시간", t.live_text(now=500.0))   # 판독 속도로 '약 1분' 이라 하지 않는다
+        t.update("normalize", 9000, 9000); self.assertIn("문서 만들기 · 문서 조립", t.text(now=1.0))
         t.update("review", 0, 1); self.assertTrue(t.text(now=1.0).endswith("검수 화면"))  # 0/1쪽 같은 뜻 없는 셈은 빼고
         i = Tracker("install", now=0.0)
         self.assertAlmostEqual(i.update("resolve", 10, 10), 0.3)                       # 확인만 끝나면 30%(예전: 몇 초 만에 90%)

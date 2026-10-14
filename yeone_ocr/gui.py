@@ -22,7 +22,7 @@ CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
-            "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
+            "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
@@ -1097,6 +1097,7 @@ class App(tk.Tk):
         self.v_layout = tk.StringVar(value=LAYOUT_LABELS.get(self.cfg.get("layout", "page"), LAYOUT_LABELS["page"]))
         self.v_template = tk.StringVar(value=self.cfg.get("template", "") or "")
         self.v_bold = tk.BooleanVar(value=bool(self.cfg.get("bold_split", True)))
+        self.v_ctxmodel = tk.BooleanVar(value=bool(self.cfg.get("context_model", True)))
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
@@ -1214,6 +1215,9 @@ class App(tk.Tk):
                                                          "이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
                   ("원본 쪽마다 쪽 나누기", self.v_pb, "원본 쪽대로 만들 때 PDF 한 쪽마다 한글 쪽을 나눕니다. 내용별 문서에서는 쓰지 않습니다(원본 쪽은 책갈피로 남김)."),
                   ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None),
+                  ("번체 문맥 교정에 모델 쓰기 (호출 듦)", self.v_ctxmodel, "간체→번체 변환에서 한 글자가 여러 번체로 갈리는 후보(发→發/髮, 干→幹/乾, 云/雲 등)를 모델이 앞뒤 글로 고릅니다. "
+                                                         "후보마다 앞뒤 60자만 80건씩 묻고, 앞서 고른 답과 이미 물어 못 고른 후보는 다시 묻지 않습니다. "
+                                                         "끄면 규칙 변환(간체→번체·부호)만 하고 갈리는 후보는 원문을 두며 교정 보고에 남깁니다(모델 호출 없음)."),
                   ("검색 가능한 PDF 도 만들기", self.v_tlpdf, "문서를 만들 때 원본 PDF 쪽 위에 판독한 글을 보이지 않는 글자층으로 넣은 사본(out\\<이름>_글자층.pdf)도 만듭니다. "
                                                          "화면은 원본 그대로이고 PDF 뷰어에서 찾기·복사가 됩니다. 원본에 다른 OCR 의 숨은 글자층이 있으면 그 쪽에서는 지우고 넣습니다. "
                                                          "원본 PDF 는 고치지 않으며 모델을 부르지 않습니다. 고급 도구의 [PDF 글자층 넣기]로 따로 만들 수도 있습니다."))
@@ -1913,6 +1917,7 @@ class App(tk.Tk):
         if not self.v_hl.get(): o.append("--no-highlight")
         if not self.v_ctx.get(): o.append("--no-context")
         if not self.v_pb.get(): o.append("--no-page-breaks")
+        if getattr(self, "v_ctxmodel", None) is not None and not self.v_ctxmodel.get(): o.append("--no-context-model")
         o += ["--check-list", self.check_list_mode(), "--memo", self.memo_mode()]
         return o
 
@@ -2406,7 +2411,8 @@ class App(tk.Tk):
         if getattr(self, "v_tlpdf", None) is not None:
             self.cfg["textlayer_pdf"] = self.v_tlpdf.get()
         if getattr(self, "v_layout", None) is not None:
-            self.cfg.update({"layout": self.layout_key(), "template": self.v_template.get().strip(), "bold_split": bool(self.v_bold.get())})
+            self.cfg.update({"layout": self.layout_key(), "template": self.v_template.get().strip(), "bold_split": bool(self.v_bold.get()),
+                             "context_model": bool(self.v_ctxmodel.get())})
         mc = max_calls_value(self.v_maxcalls.get())
         self.cfg["max_calls"] = mc if mc is not None else self.cfg.get("max_calls", 0)     # 잘못 넣은 값은 저장하지 않는다(실행은 _prepare_env 가 막음)
         self._remember_inputs()
@@ -2501,7 +2507,10 @@ class App(tk.Tk):
 
     def do_build(self):
         if self._need_pdf() and self._prepare_env():
-            opts = ["--reader", self.v_reader.get()]
+            extra = self._confirm_model_steps(adjudicate=False)            # 문서 만들기도 문맥 교정으로 모델을 부른다
+            if extra is None:
+                return
+            opts = ["--reader", self.v_reader.get()] + extra
             if self.v_model.get().strip(): opts += ["--model", self.v_model.get().strip()]
             self.start(["build", self.pdf(), "--work", str(self.work())] + self._pages() + self._build_opts() + opts + self._cap_opts(), "④ 문서 만들기·문맥 교정")
 
@@ -2529,39 +2538,70 @@ class App(tk.Tk):
             per.append(len(sites)); skipped += k
         return sum(per), skipped, sum(-(-n // 8) for n in per if n)
 
-    def _confirm_glyphs(self) -> list[str] | None:
-        """[▶ 한 번에 인식] 전에, 이미 판독한 쪽에서 3차 판별로 물을 자리와 호출 어림을 보여 주고 고르게 한다.
-        [] = 3차 판별까지 · ['--no-adjudicate'] = 빼고 · None = 취소. 물을 자리가 없거나 셀 수 없으면 묻지 않고 []
-        (다시 판독하는 실행은 기록이 새로 생기므로 판독 비용 창이 대신한다)."""
-        if self.v_reader.get() == "mock" or self.v_force.get():
-            return []
+    def _model_step_plan(self, adjudicate: bool) -> tuple[int, dict | None, tuple[int, int, int]] | None:
+        """이미 판독한 쪽에서 모델을 더 부를 단계의 어림(모델 호출 없음): (판독 기록 쪽 수, 문맥 교정 어림 또는 None, 3차 (자리, 건너뜀, 묶음 호출))."""
         try:
             from .state import Work
             from .pdfio import parse_pages, open_pdf
             w = Work(self.pdf(), str(self.work()), initialize=False)
             with open_pdf(self.pdf()) as doc:
                 recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)), repair=False)
-            n, skipped, calls = self._glyph_plan(recs)
         except Exception:
+            return None
+        if not recs:
+            return None
+        glyph = self._glyph_plan(recs) if adjudicate else (0, 0, 0)
+        norm = None
+        ctx = self.__dict__.get("v_ctxmodel")                           # getattr 은 Tk 가 덜 만들어진 창에서 무한 재귀(시험·옛 설정)
+        if ctx is not None and ctx.get():
+            try:
+                self.v_status.set("모델 호출 어림 계산 중…"); self.update_idletasks()   # 수백 쪽이면 몇 초 걸린다
+            except Exception:
+                pass
+            try:
+                from . import cli
+                norm = cli.normalization_plan(w, recs, self.v_reader.get(), self._glyph_model(),
+                                              self.layout_key() if self.__dict__.get("v_layout") is not None else "page")
+            except Exception:
+                norm = None
+        return len(recs), norm, glyph
+
+    def _confirm_model_steps(self, adjudicate: bool = True) -> list[str] | None:
+        """[▶ 한 번에 인식]·[④ 문서 만들기] 전에, 이미 판독한 쪽에서 3차 판별·번체 문맥 교정으로 모델에 물을 수와 호출 어림을 보여 주고 고르게 한다.
+        [] = 그대로 · [아니요] = 그 단계들을 모델 없이(--no-adjudicate · --no-context-model) · None = 취소.
+        물을 것이 없거나 셀 수 없으면 묻지 않고 []. 다시 판독하는 실행은 기록이 새로 생기므로 판독 비용 창이 대신한다."""
+        if self.v_reader.get() == "mock" or (adjudicate and self.v_force.get()):
             return []
-        if not n:
+        plan = self._model_step_plan(adjudicate)
+        if plan is None:
             return []
-        msg = (f"이미 판독한 {len(recs)}쪽에서 3차 글자 판별로 물을 〔a/b〕 자리가 {n:,}곳 있습니다.\n\n"
-               f"· 호출: 8자리씩 묶어 약 {calls:,}회. 묶음 답이 조각과 맞지 않은 자리는 하나씩 다시 물어 최대 약 {calls + n:,}회"
-               + (f", 고른 자리를 후보 없이 한 번 더 읽는 데 최대 약 {calls:,}회 더" if self.v_blind.get() else "") + ".\n"
-               + (f"· 같은 모델({self._glyph_model()})이 앞서 물어 고르지 못한 {skipped:,}곳은 다시 묻지 않습니다.\n" if skipped else "")
-               + "· 글자가 작아 묻지 않는 자리는 빠지므로 실제 호출은 이보다 적을 수 있고, 새로 판독하는 쪽의 자리는 더해집니다.\n\n"
-               "[예] 3차 판별까지 실행\n"
-               "[아니요] 3차 판별 없이 실행 — 〔a/b〕 는 그대로 남고 합의 의심 확인도 빠집니다. 나중에 고급 도구 [3차 글자 판별]로 따로 할 수 있습니다.\n"
-               "[취소] 실행하지 않음")
-        ans = messagebox.askyesnocancel(APP_NAME, msg)
+        pages, norm, (n, skipped, calls) = plan
+        from .cli import CHOICE_BATCH
+        ask = (norm or {}).get("ask", 0)
+        if not n and not ask:
+            return []
+        lines = [f"이미 판독한 {pages}쪽에서 모델을 더 부르는 단계입니다.", ""]
+        if n:
+            lines.append(f"■ 3차 글자 판별: 〔a/b〕 자리 {n:,}곳 — 8자리씩 묶어 약 {calls:,}회, 묶음 답이 조각과 맞지 않은 자리는 하나씩 다시 물어 최대 약 {calls + n:,}회"
+                         + (f", 고른 자리를 후보 없이 한 번 더 읽는 데 최대 약 {calls:,}회 더" if self.v_blind.get() else "") + ".")
+            if skipped:
+                lines.append(f"   같은 모델({self._glyph_model()})이 앞서 물어 고르지 못한 {skipped:,}곳은 다시 묻지 않습니다.")
+        if ask:
+            lines.append(f"■ 번체 문맥 교정: 후보 {norm['total']:,}건 가운데 새로 물을 것 약 {ask:,}건 — {CHOICE_BATCH}건씩 약 {norm['calls']:,}회.")
+            if norm["reused"] or norm["remembered"]:
+                lines.append(f"   앞서 고른 답 {norm['reused']:,}건은 다시 쓰고, 이 모델이 이미 물어 못 고른 {norm['remembered']:,}건은 다시 묻지 않습니다.")
+        lines += ["", "글자가 작아 묻지 않는 자리는 빠지므로 실제 호출은 이보다 적을 수 있고, 새로 판독하는 쪽에서 생기는 것은 더해집니다.", "",
+                  "[예] 모두 실행",
+                  "[아니요] 이 단계들은 모델 없이 실행 — 〔a/b〕 와 갈리는 번체 후보는 원문대로 남습니다(나중에 따로 할 수 있음)",
+                  "[취소] 실행하지 않음"]
+        ans = messagebox.askyesnocancel(APP_NAME, "\n".join(lines))
         if ans is None:
             return None
-        return [] if ans else ["--no-adjudicate"]
+        return [] if ans else (["--no-adjudicate"] if n else []) + (["--no-context-model"] if ask else [])
 
     def do_run(self):
         if self._need_pdf() and self._prepare_env() and self._confirm_cost():
-            glyph = self._confirm_glyphs()
+            glyph = self._confirm_model_steps(adjudicate=True)
             if glyph is None:
                 return
             self.nb.select(0)

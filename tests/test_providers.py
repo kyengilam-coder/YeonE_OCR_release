@@ -87,7 +87,7 @@ class SDKReaders(unittest.TestCase):
             reader, create, _ = self.fake(provider, {"items": [{"id": "a", "choice": "云"}, {"id": "b", "choice": "wrong"},
                                                                {"id": "c", "choice": "云"}, {"id": "c", "choice": "雲"}]})
             items = [{"id": key, "context": "詩雲：", "source": "雲", "candidates": ["云", "雲"]} for key in "abc"]
-            self.assertEqual(reader.resolve_text_choices(items), {"a": "云"})
+            self.assertEqual(reader.resolve_text_choices(items), {"a": "云", "b": ""})          # 후보 밖 답 = 못 고름, 중복 답 = 답 없음
             self.assertEqual(reader._system, "OCR guide")
             sent = create.call_args.kwargs
             content = (sent.get("input") or sent["messages"])[0]["content"]
@@ -167,7 +167,7 @@ class SDKReaders(unittest.TestCase):
     def test_simplified_source_cannot_be_confirmed_as_traditional(self):
         reader, _, _ = self.fake("openai", {"items": [{"id": "a", "choice": "发"}]})
         self.assertEqual(reader.resolve_text_choices([{"id": "a", "source": "发", "context": "头发", "candidates": ["发", "發", "髮"],
-                                                       "source_is_valid_traditional": False}]), {})
+                                                       "source_is_valid_traditional": False}]), {"a": ""})
 
     def test_owned_document_closed_on_error_borrowed_document_kept_open(self):
         document = mock.Mock()

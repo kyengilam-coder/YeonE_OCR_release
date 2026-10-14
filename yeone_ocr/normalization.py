@@ -362,7 +362,8 @@ def _prepare_text(text: str, converter: Callable[[str], str]) -> TextResult:
 
 
 def _resolve(results: list[TextResult], resolver: Callable | None, report: dict) -> None:
-    """문맥 후보를 32건씩 보내고, 요청한 ID와 정확히 같은 후보 문자열만 반영한다."""
+    """문맥 후보를 묶어(기본 32건, resolver.batch_size 가 있으면 그만큼) 보내고, 요청한 ID와 정확히 같은 후보 문자열만 반영한다.
+    resolver.progress(끝난 수, 전체 수)가 있으면 시작과 묶음마다 알린다(수천 건이면 오래 걸리므로)."""
     entries, requests = [], []
     for result in results:
         for proposal in result.proposals:
@@ -380,8 +381,12 @@ def _resolve(results: list[TextResult], resolver: Callable | None, report: dict)
             entries.append((result, proposal, request_id))
     decisions = {}
     if resolver is not None:
-        for begin in range(0, len(requests), 32):
-            batch = requests[begin:begin + 32]
+        size = max(1, int(getattr(resolver, "batch_size", 32) or 32))
+        tell = getattr(resolver, "progress", None)
+        if tell and requests:
+            tell(0, len(requests))
+        for begin in range(0, len(requests), size):
+            batch = requests[begin:begin + size]
             try:
                 response = resolver(batch)
                 if not isinstance(response, dict):
@@ -394,6 +399,8 @@ def _resolve(results: list[TextResult], resolver: Callable | None, report: dict)
                 # API의 예외 문자열에는 URL/키가 담길 수 있으므로 종류만 보고한다.
                 report.setdefault("resolver_errors", []).append(dict(type=type(exc).__name__,
                     count=len(batch), message="문맥 판별을 완료하지 못하여 원문을 보존했습니다."))
+            if tell:
+                tell(min(len(requests), begin + size), len(requests))
     replacements = {}
     for result, proposal, request_id in entries:
         begin, end = proposal["begin"], proposal["end"]
