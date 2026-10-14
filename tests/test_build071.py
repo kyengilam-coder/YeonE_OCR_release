@@ -156,7 +156,7 @@ class BuildNormalization(unittest.TestCase):
         x = sent[0][0]
         self.assertEqual((len(x["context"]), x["target_offset"], x["context"][x["target_offset"]]), (121, 60, "云"))
         self.assertEqual((len(x["original_context"]), x["original_target_offset"]), (61, 30))
-        self.assertEqual((meta["asked"], meta["deduped"], resolver.batch_size), (1, 2, 80))
+        self.assertEqual((meta["asked"], meta["deduped"]), (1, 2)); self.assertGreater(resolver.batch_size, 10 ** 6)   # 문서 쪽은 후보 전체를 한 번에
         other = [dict(id="9", context="乙云丙", source="云", candidates=["云", "雲"], target_offset=1),
                  dict(id="10", context="丁云戊", source="云", candidates=["云", "雲"], target_offset=1)]
         class Partial:                                                             # 하나는 '못 고름', 하나는 답에서 빠짐
@@ -174,7 +174,27 @@ class BuildNormalization(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             resolver.progress(0, 9000); resolver.progress(9000, 9000)
-        self.assertIn("후보 9,000건을 80건씩", buf.getvalue()); self.assertIn("문맥 교정 9,000/9,000건", buf.getvalue())
+        self.assertIn("후보 9,000건", buf.getvalue()); self.assertIn("새로 물을 것만 80건씩", buf.getvalue()); self.assertIn("문맥 교정 9,000/9,000건", buf.getvalue())
+
+    def test_only_new_candidates_fill_each_80_item_call(self):
+        """재사용이 많아도 새로 물을 것만 80건씩 꽉 채워 묻는다(전에는 문서 쪽 묶음마다 몇 건씩 보내 772건에 98회 호출)."""
+        item = lambda i: dict(id=str(i), context=f"{i:04d}云", source="云", candidates=["云", "雲"], target_offset=4)
+        calls = []
+        class Reader:
+            model = "gpt-test"; usage = {}
+            def resolve_text_choices(self, xs):
+                calls.append(len(xs)); return {x["id"]: "云" for x in xs}
+        with patch.object(cli, "create_reader", return_value=Reader()):
+            resolver, _ = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(len(resolver([item(i) for i in range(170)])), 170)
+        self.assertEqual(calls, [80, 80, 10])
+        calls.clear()
+        mixed = [item(i) for i in range(0, 170, 2)] + [item(i) for i in range(1000, 1085)]   # 85건은 앞서 고른 답, 85건은 새로
+        mixed.sort(key=lambda x: int(x["id"]) % 2)
+        with patch.object(cli, "create_reader", return_value=Reader()):
+            resolver, meta = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(len(resolver(mixed)), 170)
+        self.assertEqual((calls, meta["cache_hits"], meta["asked"]), ([80, 5], 85, 85))
 
     def test_context_model_off_keeps_rules_and_does_not_flag_incomplete(self):
         with patch.object(cli, "create_reader") as factory:

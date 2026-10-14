@@ -1497,6 +1497,8 @@ def _normalization_resolver(work: Work, args):
     said = [0.0]
 
     def resolve(items):
+        """후보 전체를 한 번에 받아(batch_size 가 크다) 재사용·기억을 먼저 가르고, 새로 물을 것만 CHOICE_BATCH 건씩 꽉 채워 묻는다.
+        (문서 쪽 묶음마다 부르면, 재사용이 많을 때 묶음마다 몇 건씩만 보내는 호출이 수십 번 생긴다.)"""
         nonlocal active, failure
         answers = {}; groups: dict[str, list] = {}
         for item in items:
@@ -1508,44 +1510,47 @@ def _normalization_resolver(work: Work, args):
                 meta["remembered"] += 1                                   # 이 모델이 앞서 물어 고르지 못한 후보 — 다시 사지 않는다
             else:
                 groups.setdefault(keys[1], []).append(item)
-        if not groups:
-            return answers
-        if CANCEL.is_set():
-            meta["cancelled"] = True
-            return answers
-        if failure:
-            return answers
-        reps = [g[0] for g in groups.values()]                          # 앞뒤 글이 같은 후보는 하나만 묻는다
-        meta["deduped"] += sum(len(g) - 1 for g in groups.values())
-        try:
-            if active is None:
-                active = create_reader(provider, model=model, use_cache=False)
-                log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} — 한자 치환 후보와 云/雲을 문맥으로 확인"
-                    f"(후보마다 앞뒤 {CHOICE_WINDOW}자 · 한 호출에 {CHOICE_BATCH}건)")
-            chosen = active.resolve_text_choices([clip_choice_item(r) for r in reps])
-            meta["usage"] = dict(getattr(active, "usage", {}) or {})
-            meta["asked"] += len(reps)
-            for key, group in groups.items():
-                rep = group[0]; choice = chosen.get(rep["id"])
-                if choice is None:
-                    continue                                              # 답에서 빠진 후보 — 기억하지 않고 다음에 다시 묻는다
-                if (choice and choice in rep["candidates"] and
-                        (rep.get("source_is_valid_traditional", True) or choice != rep.get("source"))):
-                    cache[key] = choice
-                    for it in group:
-                        answers[it["id"]] = choice
-                else:
-                    undecided[key] = getattr(active, "model", model)
+        meta["deduped"] += sum(len(g) - 1 for g in groups.values())     # 앞뒤 글이 같은 후보는 하나만 묻는다
+        done = len(items) - sum(len(g) for g in groups.values())
+        order = list(groups)
+        for at in range(0, len(order), CHOICE_BATCH):
+            tell(done, len(items))
+            if CANCEL.is_set():
+                meta["cancelled"] = True
+                break
+            if failure:
+                break
+            chunk = order[at:at + CHOICE_BATCH]
             try:
-                write_atomic(cache_path, json.dumps({"schema_version": 1, "choices": cache, "undecided": undecided}, ensure_ascii=False, indent=1))
-            except OSError:
-                meta["cache_error"] = "문맥 판단 재사용 기록을 저장하지 못했습니다. 이번 판단은 문서와 변환 보고에 반영합니다."
-                log("주의: " + meta["cache_error"])
-        except Exception as exc:
-            failure = str(exc) if isinstance(exc, ReaderError) else f"{type(exc).__name__}: 문맥 교정 모델을 사용할 수 없습니다."
-            meta["error"] = failure
-            meta["usage"] = dict(getattr(active, "usage", {}) or {})
-            log(f"주의: {failure} 해당 후보는 바꾸지 않고 변환 보고에 남깁니다.")
+                if active is None:
+                    active = create_reader(provider, model=model, use_cache=False)
+                    log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} — 한자 치환 후보와 云/雲을 문맥으로 확인"
+                        f"(후보마다 앞뒤 {CHOICE_WINDOW}자 · 한 호출에 {CHOICE_BATCH}건 · 새로 물을 것 {len(order):,}건)")
+                chosen = active.resolve_text_choices([clip_choice_item(groups[k][0]) for k in chunk])
+                meta["usage"] = dict(getattr(active, "usage", {}) or {})
+                meta["asked"] += len(chunk)
+                for key in chunk:
+                    group = groups[key]; rep = group[0]; choice = chosen.get(rep["id"])
+                    if choice is None:
+                        continue                                          # 답에서 빠진 후보 — 기억하지 않고 다음에 다시 묻는다
+                    if (choice and choice in rep["candidates"] and
+                            (rep.get("source_is_valid_traditional", True) or choice != rep.get("source"))):
+                        cache[key] = choice
+                        for it in group:
+                            answers[it["id"]] = choice
+                    else:
+                        undecided[key] = getattr(active, "model", model)
+                try:
+                    write_atomic(cache_path, json.dumps({"schema_version": 1, "choices": cache, "undecided": undecided}, ensure_ascii=False, indent=1))
+                except OSError:
+                    meta["cache_error"] = "문맥 판단 재사용 기록을 저장하지 못했습니다. 이번 판단은 문서와 변환 보고에 반영합니다."
+                    log("주의: " + meta["cache_error"])
+            except Exception as exc:
+                failure = str(exc) if isinstance(exc, ReaderError) else f"{type(exc).__name__}: 문맥 교정 모델을 사용할 수 없습니다."
+                meta["error"] = failure
+                meta["usage"] = dict(getattr(active, "usage", {}) or {})
+                log(f"주의: {failure} 해당 후보는 바꾸지 않고 변환 보고에 남깁니다.")
+            done += sum(len(groups[k]) for k in chunk)
         return answers
 
     def tell(done: int, total: int):
@@ -1554,13 +1559,13 @@ def _normalization_resolver(work: Work, args):
         now = time.time()
         if done == 0:
             said[0] = now
-            log(f"문맥 교정: 후보 {total:,}건을 {CHOICE_BATCH}건씩 확인 — 앞서 고른 답과 이 모델이 이미 물어 못 고른 후보는 다시 묻지 않음")
+            log(f"문맥 교정: 후보 {total:,}건 — 앞서 고른 답과 이 모델이 이미 물어 못 고른 후보는 다시 묻지 않고, 새로 물을 것만 {CHOICE_BATCH}건씩")
         elif done >= total or now - said[0] >= 30:
             said[0] = now
             log(f"  문맥 교정 {done:,}/{total:,}건 · 새로 물음 {meta['asked']:,}건(호출 {meta['usage'].get('calls', 0):,}회)"
                 f" · 재사용 {meta['cache_hits']:,} · 이미 물어 못 고름 {meta['remembered']:,} · 같은 글 묶음 {meta['deduped']:,}")
 
-    resolve.batch_size = CHOICE_BATCH
+    resolve.batch_size = 1 << 30                                        # 문서 쪽(normalization)은 후보 전체를 한 번에 넘긴다
     resolve.progress = tell
     return resolve, meta
 
