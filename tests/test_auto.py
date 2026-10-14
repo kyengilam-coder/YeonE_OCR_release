@@ -740,6 +740,119 @@ class AdjudicateCommand(unittest.TestCase):
         finally:
             cli.make_glyph_readers = old
 
+    def _undecided_reader(self, model):
+        import threading
+        from yeone_ocr.schema import GlyphChoice
+        class Fake:
+            n_429 = 0; cache_note = ""; thinking = "low"
+            def __init__(self): self.model = model; self.asked = 0; self._tls = threading.local()
+            def usage_begin(self): self._tls.u = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cached_tokens": 0}
+            def usage_end(self): u = getattr(self._tls, "u", None) or {}; self._tls.u = None; return u
+            def adjudicate_many(self, crops, h, p):
+                self.asked += len(crops); self._tls.u["calls"] += 1
+                return {sid: GlyphChoice(choice="", evidence="뭉개짐", window="") for sid, _, _ in crops}
+            def adjudicate(self, crop, ask, h, p):
+                self.asked += 1; self._tls.u["calls"] += 1
+                return GlyphChoice(choice="", evidence="뭉개짐", window="")
+        return Fake()
+
+    def test_rerun_does_not_buy_sites_the_same_model_already_left_undecided(self):
+        """다시 실행해도 같은 모델이 앞서 답했지만 못 가린 〔a/b〕 자리는 다시 묻지 않는다(0.7.4: [▶] 를 누를 때마다 책 전체를 다시 물었다).
+        다른 모델이거나 --readjudicate 면 다시 묻는다."""
+        from yeone_ocr import cli
+        old = cli.make_glyph_readers
+        try:
+            with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+                doc, work = self._work(td)
+                handles.callback(doc.close)
+                def run(model, **kw):
+                    fake = self._undecided_reader(model); cli.make_glyph_readers = lambda args: (fake, None)
+                    args = Namespace(pdf=work.pdf_path.as_posix(), work=str(work.dir), pages=None, dpi=300, mode="vertical", reader="gemini", model=model,
+                                     thinking_budget=None, no_cache=True, max_sites=0, zoom=6, batch_sites=8, workers=2, workers_start=2,
+                                     adjudicate_model="", adjudicate_thinking="low", no_suspects=True, **kw)
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        rc = cli.cmd_adjudicate(args, work, doc, standalone=True)
+                    self.assertEqual(rc, 0, buf.getvalue())
+                    return fake.asked, buf.getvalue()
+                asked, _ = run("gpt-4.1")
+                self.assertEqual(asked, 4)                                                    # 2쪽 × 2자리, 모두 못 가림
+                asked, out = run("gpt-4.1")
+                self.assertEqual(asked, 0); self.assertIn("결론 난 미정 자리 4곳은 다시 묻지 않음", out)
+                self.assertEqual(len(work.load_record(1)["adjudications"]), 2)                # 같은 기록을 다시 쌓지 않는다
+                self.assertEqual(run("gemini-2.5-pro")[0], 4)                                 # 다른 모델은 다시 묻는다
+                self.assertEqual(run("gpt-4.1", readjudicate=True)[0], 4)                     # 일부러 다시 묻기
+                self.assertEqual(run("gemini-2.5-pro")[0], 0)
+        finally:
+            cli.make_glyph_readers = old
+
+    def test_answered_sites_rules(self):
+        """다시 묻지 않을 자리: 그 모델이 답했지만 못 가린 자리(창 어긋남·눈가림 불일치 포함)와 문턱보다 작아 묻지 않은 자리.
+        호출 실패·눈가림 확인 실패·다른 모델·이미 고른 자리·문턱을 낮춘 저해상 자리는 넣지 않는다."""
+        from yeone_ocr.adjudicate import answered_sites, pending_sites, site_key
+        key = lambda i: {"region_id": "b1", "col_index": i, "a": "黃", "b": "黄", "pre": "天地玄", "post": "宇宙洪荒"}
+        rec = {"adjudications": [
+            {**key(0), "model": "m", "choice": "", "evidence": "뭉개짐"},
+            {**key(1), "model": "m", "choice": "", "evidence": "조각 위치가 어긋남(보인 글: 甲) — x"},
+            {**key(2), "model": "m", "choice": "", "evidence": "판별 실패: 묶음 호출 실패: 429"},
+            {**key(3), "model": "m", "choice": "", "evidence": "눈가림 확인 실패(응답 없음) — 확정 보류"},
+            {**key(4), "model": "other", "choice": "", "evidence": "뭉개짐"},
+            {**key(5), "model": "m", "choice": "黃", "evidence": "획"},
+            {**key(6), "choice": "", "evidence": "저해상: 원본 글자 약 9px(문턱 16px)", "em_px": 9.0},
+            {**key(7), "choice": "", "evidence": "저해상: 원본 글자 약 14px(문턱 16px)", "em_px": 14.0}]}
+        got = answered_sites(rec, {"m"}, min_px=12)
+        self.assertEqual(got, {site_key(key(0)), site_key(key(1)), site_key(key(6))})
+        self.assertEqual(answered_sites(rec, set(), min_px=0), set())
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+            doc, work = self._work(td); handles.callback(doc.close)
+            r = work.load_record(1)
+            sites, skipped = pending_sites(r, {"m"})
+            self.assertEqual((len(sites), skipped), (2, 0))
+            r["adjudications"] = [{**{k: getattr(sites[0], k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "m", "choice": "", "evidence": "x"}]
+            sites2, skipped = pending_sites(r, {"m"})
+            self.assertEqual(([x.mark for x in sites2], skipped), ([sites[1].mark], 1))
+            self.assertEqual(len(pending_sites(r, ())[0]), 2)                                  # 모델을 주지 않으면(--readjudicate) 모두
+
+    def test_window_asks_before_buying_third_pass_on_rerun(self):
+        """[▶ 한 번에 인식] 전에 이미 판독한 쪽의 3차 판별 자리·호출 어림을 보여 주고 고르게 한다: 예=그대로 · 아니요=--no-adjudicate · 취소=실행 안 함."""
+        from unittest import mock
+        try:
+            from yeone_ocr import gui
+        except Exception as e:
+            self.skipTest(f"gui 를 불러오지 못함: {e}")
+        with tempfile.TemporaryDirectory() as td:
+            doc, work = self._work(td); doc.close()
+            var = lambda v: Namespace(get=lambda v=v: v)
+            app = gui.App.__new__(gui.App)
+            app.v_reader = var("openai"); app.v_model = var("gpt-4.1"); app.v_force = var(False); app.v_pages = var(""); app.v_blind = var(False)
+            app.pdf = lambda: work.pdf_path.as_posix(); app.work = lambda: Path(work.dir)
+            shown = []
+            for answer, want in ((True, []), (False, ["--no-adjudicate"]), (None, None)):
+                with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg, a=answer: shown.append(msg) or a):
+                    self.assertEqual(app._confirm_glyphs(), want)
+            self.assertIn("자리가 4곳", shown[0]); self.assertIn("약 2회", shown[0]); self.assertIn("최대 약 6회", shown[0])
+            r = work.load_record(1)                                                             # 1쪽 두 자리는 gpt-4.1 이 이미 물어 못 가림
+            from yeone_ocr.adjudicate import find_sites
+            r["adjudications"] = [{**{k: getattr(x, k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "gpt-4.1", "choice": "", "evidence": "x"}
+                                  for x in find_sites(PageReading.model_validate(r["merged"]))]
+            work.save_record(1, r)
+            with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg: shown.append(msg) or True):
+                self.assertEqual(app._confirm_glyphs(), [])
+            self.assertIn("자리가 2곳", shown[-1]); self.assertIn("gpt-4.1)이 앞서 물어 고르지 못한 2곳은 다시 묻지 않습니다", shown[-1])
+            app.v_force = var(True)                                                             # 다시 판독하는 실행은 판독 비용 창이 대신
+            with mock.patch.object(gui.messagebox, "askyesnocancel", lambda *a: self.fail("묻지 않아야 함")):
+                self.assertEqual(app._confirm_glyphs(), [])
+            app.v_force = var(False); started = []                                              # [아니요] 면 run 명령에 --no-adjudicate
+            app._need_pdf = app._prepare_env = app._confirm_cost = lambda: True
+            app._pages = app._read_opts = app._build_opts = lambda: []; app._glyph_opts = lambda suspects=False: []
+            app.nb = mock.Mock(); app.start = lambda argv, label: started.append(argv)
+            with mock.patch.object(gui.messagebox, "askyesnocancel", lambda *a: False):
+                app.do_run()
+            self.assertIn("--no-adjudicate", started[0])
+            with mock.patch.object(gui.messagebox, "askyesnocancel", lambda *a: None):
+                app.do_run()
+            self.assertEqual(len(started), 1)
+
     def test_run_adaptive_throttles_and_stops_on_fatal(self):
         import contextlib, io
         from yeone_ocr import cli

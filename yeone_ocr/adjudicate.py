@@ -112,6 +112,42 @@ def find_sites(merged: PageReading) -> list[Site]:
     return out
 
 
+def site_key(s) -> tuple:
+    """같은 자리인지 가르는 열쇠: 영역·열·두 후보·앞뒤 넉 자(Site 와 판정 기록 dict 모두). 앞의 다른 자리가 정해져 글자 번호가 밀려도 같게 본다."""
+    get = s.get if isinstance(s, dict) else (lambda k: getattr(s, k, None))
+    return (get("region_id"), get("col_index"), get("a"), get("b"), get("pre"), get("post"))
+
+
+def answered_sites(rec: dict, models, min_px: float = 0) -> set[tuple]:
+    """앞선 차례에 이미 결론이 난 미정 자리(site_key). 다시 물어도 같은 답일 자리라 다시 사지 않는다.
+    - models 가운데 하나가 답했지만 고르지 못한 자리(미정·조각 위치 어긋남·눈가림 불일치·반영 못 함)
+    - 글자가 작아 묻지 않은 자리(저해상) 가운데 잰 크기가 지금 문턱(min_px)보다도 작은 자리
+    호출이 실패한 자리(판별 실패·눈가림 확인 실패)와 다른 모델이 답한 자리는 넣지 않는다 — 다음 실행·다른 모델로 다시 묻는다."""
+    ms = {m for m in models if m}
+    out = set()
+    for e in rec.get("adjudications") or []:
+        if e.get("choice"):
+            continue
+        ev = e.get("evidence") or ""
+        if ev.startswith(LOWRES_NOTE):
+            if min_px and 0 < (e.get("em_px") or 0) < min_px:
+                out.add(site_key(e))
+            continue
+        if e.get("model") in ms and not ev.startswith("판별 실패") and "눈가림 확인 실패" not in ev:
+            out.add(site_key(e))
+    return out
+
+
+def pending_sites(rec: dict, models=(), min_px: float = 0) -> tuple[list[Site], int]:
+    """이번에 물을 〔a/b〕 자리와 이미 결론이 나 건너뛸 자리 수. models 가 비면 모두 묻는다(--readjudicate)."""
+    sites = find_sites(PageReading.model_validate(rec["merged"]))
+    if not models:
+        return sites, 0
+    seen = answered_sites(rec, models, min_px)
+    keep = [x for x in sites if site_key(x) not in seen]
+    return keep, len(sites) - len(keep)
+
+
 def glyph_box(bbox: list[int], site: Site, horizontal: bool, span: int = 2) -> tuple[float, float, float, float]:
     """영역 좌표와 줄·글자 번호로 글자 ±span 자 창의 비율 좌표를 추정한다."""
     x0, y0, x1, y1 = bbox_frac(bbox)
@@ -856,7 +892,7 @@ def _verdict(q: _Quiz, sid: str, site: Site, stop, blind: bool, stats: dict) -> 
 
 def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_sites: int = 0, zoom: int = 6, batch: int = 8,
                     fallback_reader=None, layer_lines: list[dict] | None = None, frame=None, should_stop=None, page_size_pt=None,
-                    min_px: float = 0, blind: bool = False, ticks: bool = True) -> dict:
+                    min_px: float = 0, blind: bool = False, ticks: bool = True, skip_models=()) -> dict:
     """한 쪽의 〔a/b〕 자리를 판별한다. rec 을 고쳐 돌려준다(merged 글, adjudications, uncertain 메모).
 
     - 자리마다 창을 글자층 → 먹 실측 → 균등 분할 순으로 잡는다(기록 loc). frame 은 쪽 이미지의 PDF 좌표 틀(pdfio.page_frame).
@@ -868,15 +904,18 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
     - fallback_reader 가 있으면 첫 판독기가 못 가린 자리(c="")와 실패한 자리를 그 판독기로 다시 묻는다(예: flash 먼저, pro 보완).
     - blind 면 확정할 자리를 주 판독기에 후보 없이 한 번 더 읽게 해(identify / identify_many) 객관식 답과 같을 때만 확정한다.
     - should_stop() 이 참이면 남은 묶음·보완을 건너뛴다(끝난 자리는 적용). 키·권한 오류(fatal)는 그대로 올려 전체를 멈춘다.
+    - skip_models 를 주면 그 모델이 앞 차례에 답했지만 고르지 못한 자리와 문턱보다 작아 묻지 않은 자리는 다시 묻지 않는다(answered_sites, 수는 stats['already']).
     묻는 방식·검사는 합의 의심 자리(suspect_page)와 같다(_prepare_asks → _ask_glyphs → _verdict)."""
     merged = PageReading.model_validate(rec["merged"])
     p1 = PageReading.model_validate(rec["pass1"]) if rec.get("pass1") else merged
     bboxes = {r.id: r.bbox for r in p1.regions}
-    sites = find_sites(merged)
+    sites, already = pending_sites(rec, skip_models, min_px)
     if max_sites:
         sites = sites[:max_sites]
     done = list(rec.get("adjudications") or [])
     stats = {"sites": len(sites), "decided": 0, "undecided": 0, "a": 0, "b": 0, "failed": 0, "loc": {}}
+    if already:
+        stats["already"] = already
     pdf_page = rec.get("pdf_page", 0)
     frame = frame or page_size_pt
     stop = should_stop or (lambda: False)

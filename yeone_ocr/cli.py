@@ -1762,12 +1762,27 @@ def make_glyph_readers(args) -> tuple:
     return make(want), None
 
 
+def glyph_skip_models(args) -> set[str]:
+    """3차 판별에서 '이미 답했으니 다시 묻지 않을' 모델 이름(이번에 물을 모델). --readjudicate 면 빈 집합(모두 다시 묻는다).
+    auto 의 flash 처럼 판독기를 만들어야 아는 이름은 판독기를 만든 뒤 더한다."""
+    if getattr(args, "readjudicate", False):
+        return set()
+    from .readers import default_model
+    names = {getattr(args, "model", None) or default_model(getattr(args, "reader", "gemini") or "gemini")}
+    want = (getattr(args, "adjudicate_model", "") or "").strip()
+    if want and want.lower() != "auto":
+        names.add(want)
+    return {n for n in names if n}
+
+
 @_document_command
 def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = True):
     """3차 글자 판별. 〔a/b〕 자리를 조각 묶음(--batch-sites)으로 묻고, 쪽은 동시(--workers)에 돌린다. 확정한 글자는 merged 와
     adjudications 에 남고, remerge 뒤에도 유지된다. 자리 창은 글자층 글자 상자 → 먹 실측 → 균등 분할 순으로 잡는다.
     이어서 같은 쪽의 합의 판독 의심 자리(1차·2차가 같게 읽었는데 글자층과 자형 혼동 쌍 한 글자가 다름 — 〔a/b〕 가 없는 쪽도)를 같은 방식으로 묻는다
-    (--no-suspects 면 안 함, 쪽당 --suspect-max 곳, 이미 물은 자리는 --force-suspects 가 아니면 다시 묻지 않음). 본문은 바꾸지 않고 확인 항목만 단다."""
+    (--no-suspects 면 안 함, 쪽당 --suspect-max 곳, 이미 물은 자리는 --force-suspects 가 아니면 다시 묻지 않음). 본문은 바꾸지 않고 확인 항목만 단다.
+    〔a/b〕 자리도 같은 모델이 앞 차례에 답했지만 고르지 못한 자리·글자가 작아 묻지 않은 자리는 --readjudicate 가 아니면 다시 묻지 않는다
+    (다시 [▶] 를 누를 때마다 책 전체의 미정 자리를 다시 사지 않게)."""
     from . import prompts
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
@@ -1779,20 +1794,25 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
     records = work.records(parse_pages(args.pages, len(doc)))
     if not records:
         log(f"오류: 판독 기록이 없습니다 — 결과 폴더 {work.dir} 의 readings/ 가 비어 있습니다. 기록이 있는 원본 PDF 를 고르십시오."); return 2
-    from .adjudicate import find_sites, adjudicate_page, suspect_page, suspects_pending, suspect_freq, SUSPECT_MAX
+    from .adjudicate import pending_sites, adjudicate_page, suspect_page, suspects_pending, suspect_freq, SUSPECT_MAX
     sus = not getattr(args, "no_suspects", False)
     smax = max(0, int(SUSPECT_MAX if getattr(args, "suspect_max", None) is None else args.suspect_max)) if sus else 0
     sforce = bool(getattr(args, "force_suspects", False)); freq = suspect_freq(work.dir) if smax else None
+    skip = glyph_skip_models(args); again = bool(getattr(args, "readjudicate", False))
     todo = []                                                            # (기록, 〔a/b〕 자리 수, 물을 합의 의심 수(어림), 글자층 글)
+    already = 0                                                          # 같은 모델이 앞 차례에 결론 낸 미정 자리(다시 사지 않음)
     for rec in records:
-        n = len(find_sites(PageReading.model_validate(rec["merged"])))
+        sites, k_old = pending_sites(rec, skip, min_px)
+        n = len(sites); already += k_old
         layer = _load_layer(work, doc, rec["pdf_page"]).get("plain", "") if smax else ""
         k = suspects_pending(rec, layer, smax, sforce, freq) if layer else 0
         if n or k:
             todo.append((rec, n, k, layer))
     total_sites = sum(t[1] for t in todo); total_sus = sum(t[2] for t in todo)
+    skip_note = (f" · 같은 모델이 앞서 물어 결론 난 미정 자리 {already}곳은 다시 묻지 않음(다시 물으려면 --readjudicate)" if already else "")
     if not total_sites and not total_sus:
-        log("판별할 〔a/b〕 자리가 없습니다." + (" 합의 판독 의심 자리(1차·2차가 같게 읽었는데 글자층과 자형 혼동 쌍 한 글자가 다름)도 새로 물을 곳이 없습니다." if smax else "")); return 0
+        log("판별할 〔a/b〕 자리가 없습니다." + (" 합의 판독 의심 자리(1차·2차가 같게 읽었는데 글자층과 자형 혼동 쌍 한 글자가 다름)도 새로 물을 곳이 없습니다." if smax else "")
+            + skip_note); return 0
     if args.reader == "mock":
         log(f"mock 판독기는 자형을 보지 못합니다. 〔a/b〕 자리 {total_sites}곳" + (f" · 합의 판독 의심 {total_sus}곳" if smax else "") + "만 셌습니다."); return 0
     from .reader_gemini import ReaderError
@@ -1802,12 +1822,14 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
     except Exception as e:
         log(f"오류: {e}"); return 1
     readers = [r for r in (reader, fallback) if r is not None]
+    if not again:
+        skip |= {r.model for r in readers if getattr(r, "model", "")}
     ceiling = max(1, int(getattr(args, "workers", 6) or 1)); start = max(1, min(ceiling, int(getattr(args, "workers_start", 4) or ceiling)))
     log(f"adjudicate: 판독기 {reader.model}" + (f" → 못 가리면 {fallback.model}" if fallback else "") + (" (생각 줄임)" if getattr(reader, "thinking", None) == "low" else "")
         + f" · {len(todo)}쪽 · 〔a/b〕 {total_sites}곳" + (f" · 합의 의심 {total_sus}곳(쪽당 최대 {smax})" if total_sus else "")
         + f" · 조각 확대 {zoom}배 · 한 호출에 {batch}자리" + (f" · 쪽당 최대 {max_sites}곳" if max_sites else "")
         + f" · 동시 {start}쪽(최대 {ceiling}, 자동 조절)" + " · 눈가림(앞뒤 글자를 글로 주지 않음·후보 섞음)" + (" + 후보 없이 재확인" if blind else "")
-        + (f" · 글자 {min_px:g}px 미만은 묻지 않음" if min_px else ""))
+        + (f" · 글자 {min_px:g}px 미만은 묻지 않음" if min_px else "") + skip_note)
     horizontal = prompts.MODE == "horizontal_zh"
     progress("adjudicate", 0, len(todo))
     pages_done = [0]
@@ -1848,7 +1870,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
         try:
             if n:
                 rec = adjudicate_page(rec, img, reader, horizontal, max_sites=max_sites, zoom=zoom, batch=batch, fallback_reader=fallback,
-                                      layer_lines=lines, frame=frame, should_stop=CANCEL.is_set, min_px=min_px, blind=blind)
+                                      layer_lines=lines, frame=frame, should_stop=CANCEL.is_set, min_px=min_px, blind=blind, skip_models=skip)
             if smax and layer and not CANCEL.is_set():                  # 〔a/b〕 를 정한 뒤의 글로(3차가 정한 글자와 그 곁은 묻지 않는다)
                 if n:                                                    # 값을 치른 〔a/b〕 판정은 합의 의심 전에 남긴다(그 단계가 호출 상한·키 오류로 멈춰도 다시 사지 않게)
                     account(rec, more=True); work.save_record(pg, rec)
@@ -2139,6 +2161,8 @@ def build_parser():
                             "자형이 글자층 쪽이면 본문은 그대로 두고 확인 항목만 다는 일(기본은 함)")
         p.add_argument("--suspect-max", type=int, default=8, help="쪽당 묻는 합의 의심 자리 수 상한(기본 8, 이미 물은 자리도 셈. 혼동 장부가 있으면 잦은 쌍부터)")
         p.add_argument("--force-suspects", action="store_true", help="이미 물은 합의 의심 자리도 다시 물음(앞 결과를 바꿈)")
+        p.add_argument("--readjudicate", action="store_true",
+                       help="같은 모델이 앞 차례에 답했지만 고르지 못한 〔a/b〕 자리와 글자가 작아 묻지 않은 자리도 다시 물음(기본은 건너뜀 — 다시 실행할 때마다 다시 사지 않게)")
 
     def build_opts(p):
         p.add_argument("--docx", action="store_true", help="DOCX 도 함께 생성")

@@ -118,7 +118,8 @@ class GuiResources(unittest.TestCase):
         page = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", paragraphs=[Paragraph(columns=[Column(n=1, t="甲〔入/人〕乙")])])])
         rec = {"pdf_page": 1, "merged": page.model_dump()}
         app = SimpleNamespace(_need_records=lambda _: True, _prepare_env=lambda: True, v_reader=var("gemini"), v_suspects=var(True),
-                              v_pages=var("1"), v_blind=var(False), pdf=lambda: str(self.pdf), work=lambda: self.root / "result")
+                              v_pages=var("1"), v_blind=var(False), v_model=var(""), pdf=lambda: str(self.pdf), work=lambda: self.root / "result")
+        app._glyph_model = lambda: gui.App._glyph_model(app); app._glyph_plan = lambda recs: gui.App._glyph_plan(app, recs)
         for bad_record in (False, True):
             with self.subTest(bad_record=bad_record):
                 work = SimpleNamespace(dir=self.root, records=lambda _: [{"merged": {}}] if bad_record else [rec])

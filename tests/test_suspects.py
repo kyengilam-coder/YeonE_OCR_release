@@ -459,7 +459,7 @@ class Command(unittest.TestCase):
             var = lambda v: Namespace(get=lambda v=v: v)
             app._need_records = lambda *a: True; app._prepare_env = lambda: True
             app.v_reader = var("gemini"); app.pdf = lambda: work.pdf_path.as_posix(); app.work = lambda: Path(work.dir); app.v_pages = var("")
-            app.v_suspects = var(True); app.v_blind = var(False)
+            app.v_suspects = var(True); app.v_blind = var(False); app.v_model = var("")
             shown = []
             with mock.patch.object(gui.messagebox, "askyesno", lambda title, msg: shown.append(msg) or False):
                 app.do_adjudicate()

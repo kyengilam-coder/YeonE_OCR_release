@@ -2515,10 +2515,57 @@ class App(tk.Tk):
             self.nb.select(0)
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
+    def _glyph_model(self) -> str:
+        """3차 판별에 쓸 모델 이름(창은 --adjudicate-model 을 넘기지 않으므로 1차 모델)."""
+        from .readers import default_model
+        return self.v_model.get().strip() or default_model(self.v_reader.get())
+
+    def _glyph_plan(self, recs) -> tuple[int, int, int]:
+        """3차 판별로 물을 〔a/b〕 자리 수, 같은 모델이 앞서 물어 결론 난 미정 자리 수(다시 묻지 않음), 묶음 호출 어림(쪽마다 8자리씩)."""
+        from .adjudicate import pending_sites, MIN_GLYPH_PX
+        models = {self._glyph_model()}; per = []; skipped = 0
+        for r in recs:
+            sites, k = pending_sites(r, models, MIN_GLYPH_PX)
+            per.append(len(sites)); skipped += k
+        return sum(per), skipped, sum(-(-n // 8) for n in per if n)
+
+    def _confirm_glyphs(self) -> list[str] | None:
+        """[▶ 한 번에 인식] 전에, 이미 판독한 쪽에서 3차 판별로 물을 자리와 호출 어림을 보여 주고 고르게 한다.
+        [] = 3차 판별까지 · ['--no-adjudicate'] = 빼고 · None = 취소. 물을 자리가 없거나 셀 수 없으면 묻지 않고 []
+        (다시 판독하는 실행은 기록이 새로 생기므로 판독 비용 창이 대신한다)."""
+        if self.v_reader.get() == "mock" or self.v_force.get():
+            return []
+        try:
+            from .state import Work
+            from .pdfio import parse_pages, open_pdf
+            w = Work(self.pdf(), str(self.work()), initialize=False)
+            with open_pdf(self.pdf()) as doc:
+                recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)), repair=False)
+            n, skipped, calls = self._glyph_plan(recs)
+        except Exception:
+            return []
+        if not n:
+            return []
+        msg = (f"이미 판독한 {len(recs)}쪽에서 3차 글자 판별로 물을 〔a/b〕 자리가 {n:,}곳 있습니다.\n\n"
+               f"· 호출: 8자리씩 묶어 약 {calls:,}회. 묶음 답이 조각과 맞지 않은 자리는 하나씩 다시 물어 최대 약 {calls + n:,}회"
+               + (f", 고른 자리를 후보 없이 한 번 더 읽는 데 최대 약 {calls:,}회 더" if self.v_blind.get() else "") + ".\n"
+               + (f"· 같은 모델({self._glyph_model()})이 앞서 물어 고르지 못한 {skipped:,}곳은 다시 묻지 않습니다.\n" if skipped else "")
+               + "· 글자가 작아 묻지 않는 자리는 빠지므로 실제 호출은 이보다 적을 수 있고, 새로 판독하는 쪽의 자리는 더해집니다.\n\n"
+               "[예] 3차 판별까지 실행\n"
+               "[아니요] 3차 판별 없이 실행 — 〔a/b〕 는 그대로 남고 합의 의심 확인도 빠집니다. 나중에 고급 도구 [3차 글자 판별]로 따로 할 수 있습니다.\n"
+               "[취소] 실행하지 않음")
+        ans = messagebox.askyesnocancel(APP_NAME, msg)
+        if ans is None:
+            return None
+        return [] if ans else ["--no-adjudicate"]
+
     def do_run(self):
         if self._need_pdf() and self._prepare_env() and self._confirm_cost():
+            glyph = self._confirm_glyphs()
+            if glyph is None:
+                return
             self.nb.select(0)
-            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._build_opts(), "한 번에 인식 (전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
+            self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + glyph + self._build_opts(), "한 번에 인식 (전체 → HWPX)" if not self.v_pages.get().strip() else f"한 번에 인식 ({self.v_pages.get().strip()}쪽 → HWPX)")
 
     def do_stop(self):
         try:
@@ -2548,14 +2595,11 @@ class App(tk.Tk):
         sus = bool(self.v_suspects.get()); n_sus = sus_calls = None
         try:
             from .state import Work
-            from .adjudicate import find_sites
-            from .schema import PageReading
             from .pdfio import parse_pages, open_pdf
             w = Work(self.pdf(), str(self.work()))
             with open_pdf(self.pdf()) as doc:
                 recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)))
-                per_page = [len(find_sites(PageReading.model_validate(r["merged"]))) for r in recs]
-                n_sites = sum(per_page); n_calls = sum(-(-n // 8) for n in per_page if n)
+                n_sites, n_skip, n_calls = self._glyph_plan(recs)
                 if sus and recs:
                     try:                                 # 합의 의심도 모델 없이 미리 센다. 조각을 읽는 동안만 PDF 를 연다.
                         from . import cli
@@ -2572,17 +2616,18 @@ class App(tk.Tk):
         sus_note = ("1차·2차가 같게 읽었지만 PDF 글자층과 자형이 헷갈리는 쌍(入/人 등) 한 글자가 다른 자리(합의 판독 의심"
                     + (f") {n_sus}곳도 같은 방식으로 묻습니다(쪽당 최대 8곳 · 묶음 호출 약 {sus_calls}회 더" + (f", 재확인 최대 약 {sus_calls}회 더" if self.v_blind.get() else "") + ")"
                        if n_sus is not None else ", 쪽당 최대 8곳)도 같은 방식으로 묻습니다") + " — 본문은 그대로, 확인 항목만.\n")
+        skip_note = (f"같은 모델({self._glyph_model()})이 앞서 물어 고르지 못한 {n_skip}곳은 다시 묻지 않습니다.\n" if n_skip else "")
         if not n_sites and (not sus or n_sus == 0):
-            messagebox.showinfo(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음)."
-                                + ("\n합의 판독 의심 자리도 새로 물을 곳이 없습니다." if sus else "")); return
+            messagebox.showinfo(APP_NAME, f"판독 기록 {len(recs)}쪽에 새로 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없거나 이미 물음)."
+                                + ("\n합의 판독 의심 자리도 새로 물을 곳이 없습니다." if sus else "") + ("\n" + skip_note if skip_note else "")); return
         if not n_sites:
-            if not messagebox.askyesno(APP_NAME, f"판독 기록 {len(recs)}쪽에 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없음).\n" + sus_note
+            if not messagebox.askyesno(APP_NAME, f"판독 기록 {len(recs)}쪽에 새로 판별할 〔a/b〕 자리가 없습니다(1차·2차가 갈린 자리가 없거나 이미 물음).\n" + skip_note + sus_note
                                        + ("물을 자리가 없으면 호출 없이 끝납니다. " if n_sus is None else "") + "계속할까요?"):
                 return
         elif not messagebox.askyesno(APP_NAME, f"1차·2차가 갈린 자리 {n_sites}곳을 글자 하나씩 크게 잘라 모델에 묻습니다(쪽마다 8자리씩 묶어 한 호출, 쪽은 동시에 — 묶음 호출 약 {n_calls}회, 빠진 자리는 낱개로 더).\n"
                                              "앞뒤 글자는 글로 주지 않고(조각에는 보임) 후보 차례를 섞어 자형만 묻습니다(눈가림)."
                                              + (f" 고른 자리는 후보 없이 한 번 더 읽어 같을 때만 확정합니다(호출 최대 약 {n_calls}회 더)." if self.v_blind.get() else "") + "\n"
-                                             "획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. " + (sus_note if sus else "") + "계속할까요?"):
+                                             "획이 보이면 확정해 본문에 넣고, 보이지 않으면 표시를 그대로 둡니다. " + skip_note + (sus_note if sus else "") + "계속할까요?"):
             return
         self.nb.select(0)
         argv = ["adjudicate", self.pdf(), "--work", str(self.work()), "--reader", self.v_reader.get()] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
