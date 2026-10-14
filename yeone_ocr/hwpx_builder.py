@@ -56,7 +56,7 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
         "chk": _rs(font=FONT_BODY, size=9, color=COLOR_NOTE),
     }
     stats = {"paragraphs": 0, "headings": 0, "images": 0, "tables": 0, "uncertain_items": 0, "marks": 0, "page_breaks": 0,
-             "green": 0, "blue": 0, "red_ctx": 0, "memos": 0}
+             "green": 0, "blue": 0, "red_ctx": 0, "memos": 0, "bookmarks": 0}
     SIZE = {"body": 11, "small": 9.5, "chk": 9, "note": 9, "meta": 8}
     _grade_cache: dict[tuple[str, str], str] = {}
 
@@ -79,13 +79,26 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
 
     # 모든 문단은 '바탕글'(문단 모양 0, 스타일 0)을 명시한다. python-hwpx 는 앞 문단의 모양을 물려주므로,
     # 제목(개요 스타일) 다음 문단들이 개요 모양을 받아 한컴이 "가. 나. 다." 자동 번호를 붙이던 문제를 막는다.
-    def para(text: str, style: str, *, page_break: bool = False, marks: bool = False, spans=(), notes=()):
+    names: set = set()
+
+    def bookmark(p, label: str, st) -> None:
+        """원본 쪽 책갈피(내용별 문서). 같은 이름이 또 나오면 (2)·(3) 을 붙인다."""
+        name = label; k = 2
+        while name in names:
+            name = f"{label} ({k})"; k += 1
+        names.add(name); p.add_bookmark(name, char_pr_id_ref=st); stats["bookmarks"] += 1
+
+    def para(text: str, style: str, *, page_break: bool = False, marks: bool = False, spans=(), notes=(), anchors=()):
         attrs = {"pageBreak": "1"} if page_break else {}
         p = doc.add_paragraph("", para_pr_id_ref=0, style_id_ref=0, char_pr_id_ref=S[style], include_run=False, inherit_style=False, **attrs)
         if not memos and notes:                                    # 메모를 쓰지 않으면 고지를 글 끝에 회색으로
             text = text + "".join(f"〔고지: {m}〕" for _, m in notes); notes = ()
-        if marks or spans or notes:
+        amap: dict[int, list[str]] = {}
+        for o, label in anchors:
+            amap.setdefault(min(max(0, o), len(text)), []).append(label)
+        if marks or spans or notes or anchors:
             stats["marks"] += sum(1 for _, k in split_marks(text) if k == "mark")
+            pos = 0
             for seg, kind, msgs in styled_runs(text, spans if highlight else (), notes):
                 kind = STYLE_ALIAS.get(kind, kind)
                 if kind == "body":
@@ -98,9 +111,17 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
                     st = grade_style(style, kind)
                 if kind in ("green", "blue", "red_ctx") and seg.strip():
                     stats[kind] += 1
-                r = p.add_run(seg, char_pr_id_ref=st)
-                for m in msgs:
-                    if mw.wrap_run(getattr(r, "element", None), m): stats["memos"] += 1
+                cuts = sorted({pos, pos + len(seg)} | {o for o in amap if pos < o < pos + len(seg)})
+                for a, e in zip(cuts, cuts[1:]):                       # 책갈피 자리에서 조각을 가른다
+                    for label in amap.pop(a, []):
+                        bookmark(p, label, st)
+                    r = p.add_run(text[a:e], char_pr_id_ref=st)
+                    for m in (msgs if a == pos else []):
+                        if mw.wrap_run(getattr(r, "element", None), m): stats["memos"] += 1
+                pos += len(seg)
+            for o in sorted(amap):
+                for label in amap[o]:
+                    bookmark(p, label, S[style])
         else:
             p.add_run(text, char_pr_id_ref=S[style])
         if page_break: stats["page_breaks"] += 1
@@ -116,16 +137,16 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
             # 개요 스타일(add_heading)을 쓰지 않는다: 한컴이 개요 번호("1." "가.")를 덧붙여 원본에 없는 글자가 생긴다.
             # 제목은 바탕글 문단에 굵은 큰 글자로 두고, 자리 잡기(가운데·앞뒤 간격)만 문단 모양으로 준다.
             lvl = "h1" if b.level <= 1 else ("h2" if b.level == 2 else "h3")
-            para(b.text, lvl)
+            para(b.text, lvl, anchors=b.anchors, notes=b.memos)
             try:
                 doc.set_paragraph_format(paragraph_index=len(doc.paragraphs) - 1, **HEADING_FORMAT[lvl])
             except Exception:
                 pass
             stats["headings"] += 1
         elif b.type == "para":
-            para(b.text, "small" if b.kind == "소주" else "body", marks=True, spans=b.spans, notes=b.memos)
+            para(b.text, "small" if b.kind == "소주" else "body", marks=True, spans=b.spans, notes=b.memos, anchors=b.anchors)
         elif b.type == "note":
-            para(b.text, "note", marks=True)
+            para(b.text, "note", marks=True, anchors=b.anchors)
         elif b.type == "image":
             data = Path(b.path).read_bytes()
             w = figure_width_mm(b, min_mm, large_min_mm)

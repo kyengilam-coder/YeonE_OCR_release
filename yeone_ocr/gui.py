@@ -22,10 +22,11 @@ CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
-            "api_key": "", "second_pass": True, "docx": False, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
+            "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
+LAYOUT_LABELS = {"page": "원본 쪽대로(검수용)", "flow": "내용별(제목·문단)"}   # 문서 짜임 --layout
 from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
 MRES_LABELS = {"default": "기본", "high": "높음(high)", "ultra_high": "최고(ultra_high · Gemini 3)"}   # 2차 조각 이미지 토큰 예산
@@ -70,7 +71,9 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     검수 화면에서 원본과 대조합니다. 〔 〕로 남은 자리만 사람이 보면 됩니다.
  6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
     사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
- 7. [설정]에서 "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[검수 결과 기록…] 이 보입니다.
+ 7. [설정]에서 "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[PDF 글자층 넣기]·[검수 결과 기록…] 이 보입니다.
+    [PDF 글자층 넣기]는 판독한 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)를 만듭니다.
+    문서 옵션의 "검색 가능한 PDF 도 만들기"를 켜면 [▶ 한 번에 인식] 끝에 저절로 만듭니다. 원본 PDF 는 고치지 않습니다.
     글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
  8. 시작할 때 새 버전을 확인하며, 위의 [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
     실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 고급에서 끌 수 있습니다.
@@ -1014,6 +1017,10 @@ class App(tk.Tk):
 
     def _sync_settings_summary(self, *_):
         document = "HWPX + DOCX" if self.v_docx.get() else "HWPX"
+        if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get():
+            document += " + 검색 PDF"
+        if getattr(self, "v_layout", None) is not None and self.layout_key() == "flow":
+            document += " · 내용별" + (" · 양식" if self.v_template.get().strip() else "")
         self.v_settings_summary.set(f"{self.v_provider.get()} · {self.v_model.get().strip()} · {self.v_mode.get()} · {document}")
         scope = "이미지 OCR" if self._active_input == 2 else "일반 OCR"
         self.v_force_scope.set(f"{scope}: 기록 있는 쪽도 다시 판독")
@@ -1086,6 +1093,10 @@ class App(tk.Tk):
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
+        self.v_tlpdf = tk.BooleanVar(value=bool(self.cfg.get("textlayer_pdf", False)))
+        self.v_layout = tk.StringVar(value=LAYOUT_LABELS.get(self.cfg.get("layout", "page"), LAYOUT_LABELS["page"]))
+        self.v_template = tk.StringVar(value=self.cfg.get("template", "") or "")
+        self.v_bold = tk.BooleanVar(value=bool(self.cfg.get("bold_split", True)))
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
@@ -1201,11 +1212,14 @@ class App(tk.Tk):
                   ("문맥 추정 밑줄 (확정 아님)", self.v_ctx, "빨간 〔a/b〕 안에서, 이 판독의 다른 대목(1차·2차가 같게 읽은 글)이 더 많이 쓰는 후보에 실선 밑줄을 긋습니다. "
                                                          "글자는 바꾸지 않고 두 후보도 그대로 둡니다(지침 2·7·19·21). 숫자·이체자·판독불명·자형이 다른 쌍에는 긋지 않습니다. "
                                                          "이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
-                  ("원본 쪽마다 쪽 나누기", self.v_pb, None), ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None))
+                  ("원본 쪽마다 쪽 나누기", self.v_pb, None), ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None),
+                  ("검색 가능한 PDF 도 만들기", self.v_tlpdf, "문서를 만들 때 원본 PDF 쪽 위에 판독한 글을 보이지 않는 글자층으로 넣은 사본(out\\<이름>_글자층.pdf)도 만듭니다. "
+                                                         "화면은 원본 그대로이고 PDF 뷰어에서 찾기·복사가 됩니다. 원본에 다른 OCR 의 숨은 글자층이 있으면 그 쪽에서는 지우고 넣습니다. "
+                                                         "원본 PDF 는 고치지 않으며 모델을 부르지 않습니다. 고급 도구의 [PDF 글자층 넣기]로 따로 만들 수도 있습니다."))
         for i, (t, v, tip) in enumerate(checks):
             cb_ = ttk.Checkbutton(b, text=t, variable=v); cb_.grid(row=i, column=0, sticky="w")
             if tip: Tip(cb_, tip, self)
-        cl = ttk.Frame(b, style="Panel.TFrame"); cl.grid(row=5, column=0, sticky="ew", pady=(P(8), 0)); cl.columnconfigure(1, weight=1)
+        cl = ttk.Frame(b, style="Panel.TFrame"); cl.grid(row=len(checks), column=0, sticky="ew", pady=(P(8), 0)); cl.columnconfigure(1, weight=1)
         ttk.Label(cl, text="메모", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, P(8)), pady=(0, P(4)))
         mc = ttk.Combobox(cl, textvariable=self.v_memo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(list(MEMO_LABELS.values()) + list(CHECK_LIST_LABELS.values())))
         mc.grid(row=0, column=1, sticky="w", pady=(0, P(4)))
@@ -1215,9 +1229,24 @@ class App(tk.Tk):
         cc = ttk.Combobox(cl, textvariable=self.v_chk, values=list(CHECK_LIST_LABELS.values()), state="readonly", width=self._cw(list(MEMO_LABELS.values()) + list(CHECK_LIST_LABELS.values())))
         cc.grid(row=1, column=1, sticky="w")
         Tip(cc, "문서 끝에 확인 목록을 넣을지. 기본은 넣지 않으며(문서에는 OCR 본문만), 전체 목록은 검수 화면에 있습니다.", self)
-        self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
-        self._hint(b, "자동 교정: 간체→번체 · 중문부호 규칙 · 云/雲 문맥 판별. 변경 내역은 출력 폴더의 교정 기록에 저장됩니다.").grid(row=8, column=0, sticky="ew", pady=(P(8), 0))
-        self._btn(b, "설정 저장", self.save_settings, tip="지금 설정을 저장합니다(실행할 때와 창을 닫을 때도 저절로 저장).").grid(row=7, column=0, sticky="e", pady=(P(8), 0))
+        ttk.Label(cl, text="문서 짜임", style="Field.TLabel").grid(row=2, column=0, sticky="w", padx=(0, P(8)), pady=(P(4), 0))
+        lc = ttk.Combobox(cl, textvariable=self.v_layout, values=list(LAYOUT_LABELS.values()), state="readonly", width=self._cw(list(MEMO_LABELS.values()) + list(CHECK_LIST_LABELS.values())))
+        lc.grid(row=2, column=1, sticky="w", pady=(P(4), 0))
+        Tip(lc, "원본 쪽대로: PDF 한 쪽을 한글 한 쪽에(쪽마다 기록 줄·쪽 나누기) — 원본과 대조할 때. "
+                "내용별: 쪽을 넘는 문단을 잇고 제목·약재명·조문·주석으로 나눠 이어 씁니다. 원본 쪽은 그 쪽이 시작되는 글자 자리의 책갈피(PDF 6쪽 · 인쇄 394쪽)로 남깁니다.", self)
+        ttk.Label(cl, text="양식 HWPX", style="Field.TLabel").grid(row=3, column=0, sticky="w", padx=(0, P(8)), pady=(P(4), 0))
+        tf = ttk.Frame(cl, style="Panel.TFrame"); tf.grid(row=3, column=1, sticky="ew", pady=(P(4), 0)); tf.columnconfigure(0, weight=1)
+        te = ttk.Entry(tf, textvariable=self.v_template); te.grid(row=0, column=0, sticky="ew")
+        self._btn(tf, "고르기…", self.pick_template, tip="내용별 문서를 채울 양식 HWPX 를 고릅니다(비우면 기본 모양).").grid(row=0, column=1, padx=(P(4), 0))
+        Tip(te, "내용별 문서는 이 양식의 쪽 설정과 스타일(제목-장·제목-절·제목-본초명+생약명·본경 원문·별록원문·주석·소주·출처·그림캡션)로 채웁니다. "
+                "양식의 본문 내용은 쓰지 않습니다. 한문 문단은 줄 나눔만 글자 단위로 바꿉니다(어절 단위면 줄 가운데 큰 빈칸이 생김).", self)
+        bc = ttk.Checkbutton(cl, text="本經(굵은 글씨)·別錄 획 굵기로 가르기", variable=self.v_bold); bc.grid(row=4, column=0, columnspan=2, sticky="w", pady=(P(4), 0))
+        Tip(bc, "내용별 문서에서 쪽 이미지의 획 굵기를 재어, 굵게 찍힌 조문은 '본경 원문', 보통 굵기는 '별록원문' 스타일로 넣습니다(모델 호출 없음). "
+                "한 문단에 섞여 있으면 굵은 범위만 '본경 조문' 글자 스타일로 둡니다.", self)
+        r0 = len(checks) + 1
+        self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=r0, column=0, sticky="ew", pady=(P(8), 0))
+        self._hint(b, "자동 교정: 간체→번체 · 중문부호 규칙 · 云/雲 문맥 판별. 변경 내역은 출력 폴더의 교정 기록에 저장됩니다.").grid(row=r0 + 2, column=0, sticky="ew", pady=(P(8), 0))
+        self._btn(b, "설정 저장", self.save_settings, tip="지금 설정을 저장합니다(실행할 때와 창을 닫을 때도 저절로 저장).").grid(row=r0 + 1, column=0, sticky="e", pady=(P(8), 0))
 
         # ---- 고급(접힘) ----
         self.v_adv = tk.BooleanVar(value=bool(self.cfg.get("advanced_open", False)))
@@ -1235,6 +1264,8 @@ class App(tk.Tk):
         tools = [("3차 글자 판별", self.do_adjudicate, "1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(앞뒤 글자는 글로 주지 않고 후보 차례는 섞음 · 8자리씩 묶어 한 호출, 쪽은 동시에)"),
                  ("혼동 장부", self.do_ledger, "어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(모델 호출 없음)"),
                  ("비교 다시 계산", self.do_remerge, "저장된 1차·2차 판독으로 확인 표시만 다시 계산합니다(모델 호출 없음). 프로그램을 새 판으로 바꾼 뒤에"),
+                 ("PDF 글자층 넣기", self.do_textlayer, "판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)를 만들고 엽니다"
+                                                    "(모델 호출 없음, 원본은 그대로). 원본에 있던 다른 OCR 의 숨은 글자층은 그 쪽에서 지웁니다"),
                  ("검수 결과 기록…", self.do_mark, "사람이 원본 대조를 마친 쪽에 '원본 대조 완료(사람)' 를 남깁니다"),
                  ("구성요소 점검" if is_frozen() else "패키지 설치·점검", self.install_packages,
                   "설치판에 포함된 구성요소를 점검합니다" if is_frozen() else "필요한 파이썬 패키지를 설치하거나 새 판으로 올립니다"),
@@ -1246,13 +1277,14 @@ class App(tk.Tk):
                 button.grid(row=r_, column=i + 1, sticky="ew", padx=P(3), pady=P(3))
                 if c == self.install_packages:
                     self.b_packages = button
-        for i in range(1, 7):
+        width = max(len(steps), len(tools))
+        for i in range(1, width + 1):
             g.columnconfigure(i, weight=1, uniform="tools")
         self._hint(g, "단추에 마우스를 올리면 하는 일이 나옵니다. 프로그램을 새 판으로 바꾼 뒤에는 [비교 다시 계산], 사람이 확인한 쪽은 [검수 결과 기록…].").grid(
-            row=2, column=0, columnspan=7, sticky="ew", pady=(P(6), 0))
+            row=2, column=0, columnspan=width + 1, sticky="ew", pady=(P(6), 0))
         self.v_auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
         ttk.Checkbutton(g, text="시작할 때 업데이트 확인", variable=self.v_auto_update,
-                        command=self._save_update_preference).grid(row=3, column=0, columnspan=7, sticky="w", pady=(P(8), 0))
+                        command=self._save_update_preference).grid(row=3, column=0, columnspan=width + 1, sticky="w", pady=(P(8), 0))
         self._apply_advanced()
 
         self._build_collate_tab(tab2)
@@ -1293,7 +1325,7 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y"); self.table.pack(side="left", fill="both", expand=True)
         nb.add(tc, text="쪽별 상태")
         self._reader_changed()
-        for variable in (self.v_provider, self.v_model, *self._mode_vars.values(), self.v_docx):
+        for variable in (self.v_provider, self.v_model, *self._mode_vars.values(), self.v_docx, self.v_tlpdf, self.v_layout, self.v_template):
             variable.trace_add("write", self._sync_settings_summary)
         self._inputs_ready = True
         self.select_tab(self._initial_input_tab)
@@ -1865,6 +1897,14 @@ class App(tk.Tk):
     def _build_opts(self) -> list[str]:
         o = []
         if self.v_docx.get(): o.append("--docx")
+        if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get(): o.append("--textlayer-pdf")
+        if getattr(self, "v_layout", None) is not None and self.layout_key() == "flow":
+            o += ["--layout", "flow"]
+            tpl = (self.v_template.get() if getattr(self, "v_template", None) is not None else "").strip()
+            if tpl:
+                o += ["--template", tpl]
+            if getattr(self, "v_bold", None) is not None and not self.v_bold.get():
+                o.append("--no-bold")
         if not self.v_join.get(): o.append("--no-join-pages")
         if not self.v_hl.get(): o.append("--no-highlight")
         if not self.v_ctx.get(): o.append("--no-context")
@@ -1874,6 +1914,16 @@ class App(tk.Tk):
 
     def memo_mode(self) -> str:
         return next((k for k, v in MEMO_LABELS.items() if v == self.v_memo.get()), "notice")
+
+    def layout_key(self) -> str:
+        return next((k for k, v in LAYOUT_LABELS.items() if v == self.v_layout.get()), "page")
+
+    def pick_template(self):
+        p = filedialog.askopenfilename(title="내용별 문서의 양식 HWPX", filetypes=[("HWPX", "*.hwpx"), ("모든 파일", "*.*")])
+        if p:
+            self.v_template.set(p)
+            if self.layout_key() != "flow":
+                self.v_layout.set(LAYOUT_LABELS["flow"])                # 양식은 내용별 문서에 쓰므로 함께 바꿔 둔다
 
     def collate_memo_mode(self) -> str:
         return next((k for k, v in MEMO_LABELS.items() if v == self.v_cmemo.get()), "notice")
@@ -2341,6 +2391,10 @@ class App(tk.Tk):
                          "page_thinking": self.page_think_key(), "page_media_res": self.page_mres_key()})
         if getattr(self, "v_suspects", None) is not None:
             self.cfg["suspects"] = self.v_suspects.get()
+        if getattr(self, "v_tlpdf", None) is not None:
+            self.cfg["textlayer_pdf"] = self.v_tlpdf.get()
+        if getattr(self, "v_layout", None) is not None:
+            self.cfg.update({"layout": self.layout_key(), "template": self.v_template.get().strip(), "bold_split": bool(self.v_bold.get())})
         mc = max_calls_value(self.v_maxcalls.get())
         self.cfg["max_calls"] = mc if mc is not None else self.cfg.get("max_calls", 0)     # 잘못 넣은 값은 저장하지 않는다(실행은 _prepare_env 가 막음)
         self._remember_inputs()
@@ -2522,6 +2576,13 @@ class App(tk.Tk):
         argv = ["adjudicate", self.pdf(), "--work", str(self.work()), "--reader", self.v_reader.get()] + self._pages() + (["--model", self.v_model.get().strip()] if self.v_model.get().strip() else [])
         argv += ["--workers", (self.v_workers.get().strip() or "8")] + self._glyph_opts(suspects=True) + self._cap_opts()
         self.start(argv, "3차 글자 판별")
+
+    def do_textlayer(self):
+        """검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 만들고 연다(모델 호출 없음)."""
+        if not self._need_records("PDF 글자층 넣기"): return
+        self.nb.select(0)
+        out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"          # textlayer.out_path 와 같은 규칙(창은 pymupdf 없이도 떠야 하므로 따로 셈)
+        self.start(["textlayer", self.pdf(), "--work", str(self.work())] + self._pages(), "PDF 글자층 넣기", open_after=out)
 
     def do_ledger(self):
         if not self._need_records("혼동 장부"): return

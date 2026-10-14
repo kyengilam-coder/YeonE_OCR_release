@@ -19,6 +19,12 @@ _IMG_CACHE: dict = {}            # 같은 이미지(들)로 만든 PDF 를 다�
 _TURN = {3: 180, 6: 270, 8: 90}  # EXIF 방향(순수 회전) → insert_image 의 rotate(시계 반대 방향 각도)
 
 PAGE_LABEL_RE = re.compile(r"^\s*[-–—ー一]\s*(\d{1,4})\s*[-–—ー一]\s*$")
+OWN_LAYER_FONT = "YeonEOCR-Glyphless"   # 연어OCR 이 넣은 글자층(textlayer)의 글꼴. 이 글자는 자기 판독이므로 기존 OCR(증인)로 읽지 않는다
+
+
+def is_own_span(span: dict) -> bool:
+    """연어OCR 자신이 넣은 글자층의 글자인가(textlayer 로 만든 PDF 를 다시 넣었을 때 판독을 판독과 대조하지 않게)."""
+    return OWN_LAYER_FONT in (span.get("font") or "")
 
 
 def parse_pages(spec: str | None, n: int) -> list[int]:
@@ -266,8 +272,22 @@ def _shown(page: pymupdf.Page):
     return box, way
 
 
-def text_layer(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0) -> TextLayer:
-    """기존 OCR 텍스트 레이어를 세로 열 단위로 모은다. 비교·보조 자료일 뿐 정답이 아니다(지침 20)."""
+def _spans(l: dict, own: bool) -> tuple[list[dict], list[float]]:
+    """줄의 글자 덩이와 그 상자. own=False 면 연어OCR 자신의 글자층은 뺀다(뺀 만큼 줄 상자도 줄인다)."""
+    if own or not any(is_own_span(s) for s in l["spans"]):
+        return l["spans"], list(l["bbox"])
+    spans = [s for s in l["spans"] if not is_own_span(s)]
+    if not spans:
+        return [], list(l["bbox"])
+    r = pymupdf.Rect(spans[0]["bbox"])
+    for s in spans[1:]:
+        r |= s["bbox"]
+    return spans, [r.x0, r.y0, r.x1, r.y1]
+
+
+def text_layer(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0, own: bool = False) -> TextLayer:
+    """기존 OCR 텍스트 레이어를 세로 열 단위로 모은다. 비교·보조 자료일 뿐 정답이 아니다(지침 20).
+    연어OCR 이 넣은 글자층(textlayer)은 자기 판독이라 빼고 읽는다(own=True 면 그것도)."""
     page = doc[pdf_page - 1]
     tl = TextLayer(page_width=page.rect.width, page_height=page.rect.height)
     d = page.get_text("dict")
@@ -277,13 +297,14 @@ def text_layer(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0) ->
         if b["type"] != 0:
             continue
         for l in b["lines"]:
-            txt = "".join(s["text"] for s in l["spans"])
+            spans, bbox = _spans(l, own)
+            txt = "".join(s["text"] for s in spans)
             if not txt.strip():
                 continue
             if way(l["dir"]) == (0.0, 1.0):
-                vlines.append((box(l["bbox"]), txt))
+                vlines.append((box(bbox), txt))
             else:
-                hlines.append((box(l["bbox"]), txt))
+                hlines.append((box(bbox), txt))
     tl.char_count = sum(len(t.strip()) for _, t in vlines + hlines)
     # 세로 줄을 x 중심으로 묶어 열을 만든다.
     vlines.sort(key=lambda v: -(v[0][0] + v[0][2]) / 2)
@@ -310,10 +331,11 @@ def text_layer(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0) ->
     return tl
 
 
-def layer_chars(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0) -> list[dict]:
+def layer_chars(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0, own: bool = False) -> list[dict]:
     """글자층을 글자 단위 상자까지 모은다(3차 글자 판별이 조각을 정확한 자리에서 자르는 데 쓴다).
     돌려주는 목록의 원소: {"dir": "v"|"h", "bbox": [x0,y0,x1,y1](pt), "chars": [[글자, [x0,y0,x1,y1]], …]}.
-    세로 줄(dir=(0,1))은 text_layer 처럼 x 중심으로 묶어 열 하나로(글자는 위→아래), 가로 줄은 y 중심으로 묶어 줄 하나로(왼→오른쪽)."""
+    세로 줄(dir=(0,1))은 text_layer 처럼 x 중심으로 묶어 열 하나로(글자는 위→아래), 가로 줄은 y 중심으로 묶어 줄 하나로(왼→오른쪽).
+    연어OCR 이 넣은 글자층은 text_layer 처럼 빼고 읽는다(own=True 면 그것도)."""
     page = doc[pdf_page - 1]
     d = page.get_text("rawdict")
     box, way = _shown(page)                                  # /Rotate 쪽: 쪽 이미지·page_frame 과 같은 틀로(3차 조각이 반대편 구석을 자르지 않게)
@@ -322,10 +344,11 @@ def layer_chars(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0) -
         if b["type"] != 0:
             continue
         for l in b["lines"]:
-            chars = [[c["c"], [round(v, 2) for v in box(c["bbox"])]] for s in l["spans"] for c in s["chars"] if c["c"] and not c["c"].isspace()]
+            spans, lb = _spans(l, own)
+            chars = [[c["c"], [round(v, 2) for v in box(c["bbox"])]] for s in spans for c in s["chars"] if c["c"] and not c["c"].isspace()]
             if not chars:
                 continue
-            bb = box(l["bbox"])
+            bb = box(lb)
             if way(l["dir"]) == (0.0, 1.0):
                 vparts.append(((bb[0] + bb[2]) / 2, chars))
             else:

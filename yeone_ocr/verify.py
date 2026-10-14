@@ -99,12 +99,18 @@ def check_hwpx_file(path: str) -> list[dict]:
             issues.append({"level": "error", "rule": "필수 항목", "where": path, "msg": f"{need} 없음"})
     if any(n.startswith("word/") for n in names):
         issues.append({"level": "error", "rule": "DOCX 구조", "where": path, "msg": "word/ 폴더가 있음 — DOCX 를 이름만 바꾼 파일"})
-    # 개요 스타일 문단이 있으면 한컴이 "가. 나. 다." 자동 번호를 붙여 원본에 없는 글자가 보인다
+    # 개요·번호 문단 모양이면 한컴이 "1. 가. 나." 자동 번호를 붙여 원본에 없는 글자가 보인다. 번호는 문단 모양(paraPr)의 머리 종류에서 오므로
+    # 그것을 본다 — 사용자 양식의 스타일(제목-장·본경 원문 …)은 번호가 없으면 써도 된다.
     import re
+    try:
+        head = z.read("Contents/header.xml").decode("utf-8", "replace")
+    except KeyError:
+        head = ""
+    numbered = {m.group(1) for m in re.finditer(r'<hh:paraPr id="(\d+)"(?:(?!</hh:paraPr>).)*?<hh:heading type="(?:OUTLINE|NUMBER|BULLET)"', head, re.S)}
     for n in names:
         if n.startswith("Contents/section") and n.endswith(".xml"):
             xml = z.read(n).decode("utf-8", "replace")
-            bad = [m for m in re.findall(r'<hp:p\b[^>]*styleIDRef="(\d+)"', xml) if m != "0"]
+            bad = [m for m in re.findall(r'<hp:p\b[^>]*paraPrIDRef="(\d+)"', xml) if m in numbered]
             if bad:
-                issues.append({"level": "error", "rule": "개요 문단", "where": n, "msg": f"바탕글이 아닌 스타일 문단 {len(bad)}개 — 자동 번호가 붙을 수 있음"})
+                issues.append({"level": "error", "rule": "개요 문단", "where": n, "msg": f"개요·번호 문단 모양 문단 {len(bad)}개 — 자동 번호가 붙을 수 있음"})
     return issues

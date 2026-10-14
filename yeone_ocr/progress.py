@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 
 STAGE_NAMES = {"prepare": "준비", "read": "판독", "adjudicate": "3차 판별", "build": "문서 만들기", "review": "검수 화면",
-               "report": "보고", "collate": "구획 대조", "remerge": "다시 계산",
+               "report": "보고", "collate": "구획 대조", "remerge": "다시 계산", "textlayer": "글자층 넣기",
                "resolve": "패키지 확인", "download": "내려받기", "setup": "설치"}
 UNITS = {"collate": "구획", "resolve": "개", "download": "개"}            # 나머지는 '쪽'
 # 남은 시간을 어림하지 않는 명령: pip 은 큰 파일(opencv·pymupdf 등)을 먼저 내려받아 개수로 어림하면 크게 빗나간다.
@@ -21,7 +21,7 @@ PLANS: dict[str, tuple[tuple[str, float], ...]] = {
     "run": (("prepare", 0.03), ("read", 0.75), ("adjudicate", 0.12), ("build", 0.07), ("review", 0.015), ("report", 0.015)),
     "read": (("read", 1.0),), "prepare": (("prepare", 1.0),), "adjudicate": (("adjudicate", 1.0),), "build": (("build", 1.0),),
     "remerge": (("remerge", 1.0),), "review": (("review", 1.0),), "report": (("report", 1.0),),
-    "collate": (("collate", 1.0),),
+    "collate": (("collate", 1.0),), "textlayer": (("textlayer", 1.0),),
     "install": (("resolve", 0.3), ("download", 0.55), ("setup", 0.15)),   # pip: 확인 → 내려받기 → 설치
 }
 # 한 단위(구획) 안에서 일어나는 하위 단계: 구획마다 쪽을 준비·판독하므로 그 진행을 구획 한 칸 안의 몫으로 본다.

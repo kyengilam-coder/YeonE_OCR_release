@@ -17,6 +17,7 @@
   collate  책갈피 교정: --hwpx 의 구획(책갈피·제목)마다 PDF 판독(없는 쪽은 판독)과 대조해 보고, --apply 면 고친 사본(<이름>_교정.hwpx)에 저장.
            자형 혼동 자리는 3차 판별로 가림(--no-glyph-check 면 안 함). --list 는 구획 짝 목록만
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
+  textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
@@ -1500,11 +1501,41 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     if normalize:
         from .normalization import normalize_blocks
         resolver, resolver_meta = _normalization_resolver(work, args)
+    layout = getattr(args, "layout", "page") or "page"
+    template = getattr(args, "template", None)
+    if layout == "page" and template:
+        log("주의: 양식 HWPX 는 내용별 문서(--layout flow)에만 씁니다 — 원본 쪽대로 만들고 양식은 쓰지 않습니다.")
+        template = None
+    if template and not Path(template).is_file():
+        log(f"오류: 양식 HWPX 가 없습니다: {template} — 양식 없이 만듭니다."); template = None
+    bold = None
+    if layout == "flow" and not interim and not getattr(args, "no_bold", False):
+        from .structure import measure_bold
+        from .pdfio import page_frame
+        state_mode = work.load_state().get("mode")
+
+        def pages_for_bold():
+            for rec in records:
+                n = rec["pdf_page"]
+                mode = rec.get("mode") if rec.get("mode") in ("vertical", "horizontal_zh") else state_mode
+                img, _ = _load_page_image(work, doc, n, args.dpi)
+                with DOC_LOCK:
+                    frame = page_frame(doc, n)
+                yield n, PageReading.model_validate(rec["merged"]), img, frame, mode != "horizontal_zh"
+        t0 = time.time()
+        bold, binfo = measure_bold(pages_for_bold(), log=log)
+        log(f"획 굵기: {binfo['pages']}쪽 {binfo['chars']:,}자 · 중앙값 {binfo['median']} · 굵은 글자가 있는 문단 {binfo['bold_paragraphs']}개 ({time.time() - t0:.0f}초)")
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
                                  context=ctx, memo_mode=getattr(args, "memo", "notice") or "notice",
-                                 legend=not args.no_highlight, stats=gstats)
+                                 legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold)
+        if layout == "flow" and not interim:
+            from .structure import apply_structure
+            blocks, roles = apply_structure(blocks, getattr(args, "structure", "auto") or "auto")
+            names = {"chapter": "장 제목", "section": "절 제목", "subsection": "소제목", "entry": "약재명", "body": "본문", "bonjing": "본경",
+                     "bielu": "별록", "commentary": "주석", "small": "소주", "caption": "그림·표 제목", "note": "작업 표시"}
+            log("내용별 짜임: " + " · ".join(f"{names.get(k, k)} {v}" for k, v in roles.items()))
         if not interim and args.append_report and ci == len(chunks) - 1:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
@@ -1529,8 +1560,15 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         elif not interim:
             norm_report = {"schema_version": 1, "enabled": False, "complete": True,
                            "output": out_h.name, "summary": {"changes": 0, "review": 0}}
-        st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                        highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
+        if template and not interim:
+            from .hwpx_template import build_hwpx_template
+            st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
+                                     highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline")
+            log(f"양식 {Path(template).name}: " + " · ".join(f"{k}→{v}" for k, v in st["styles"].items())
+                + (f" · 양식에 없어 바탕글로: {', '.join(st['missing'])}" if st["missing"] else "") + f" · 원본 쪽 책갈피 {st['bookmarks']}개")
+        else:
+            st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
         fissues = check_hwpx_file(str(out_h))
         want_imgs = sum(1 for b in blocks if b.type == "image")
         this_ok = not fissues and st.get("images_in_file") == want_imgs
@@ -1590,7 +1628,64 @@ def cmd_build(args, work: Work | None = None, doc=None):
         except OSError: pass
     if CANCEL.is_set():
         return 130
+    if getattr(args, "textlayer_pdf", False):                 # 문서와 함께 검색 가능한 PDF 도(실패해도 문서는 그대로 — 진행 기록의 '오류:' 줄로 알림)
+        try:
+            make_textlayer(args, work, pages, report=False)
+        except Exception as e:
+            log(f"오류: 검색 가능한 PDF 를 만들지 못했습니다({type(e).__name__}: {str(e)[:120]}). HWPX 는 그대로입니다.")
     return (5 if getattr(args, "_normalization_incomplete", False) else 0) if ok else 1
+
+
+# ---------- textlayer ----------
+def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = None, report: bool = True) -> int:
+    """검색 가능한 PDF: 판독 기록(merged)의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 새 PDF 로 저장한다(원본은 그대로, 모델 호출 없음).
+    글자 자리는 판독에 쓴 쪽 이미지에서 잰다(textlayer.plan_page). 판독 기록이 있는 쪽만 넣고, 그 쪽에 있던 다른 OCR 의 숨은 글자층은
+    지운다(--keep-old-layer 면 둠). report=False 면 진행 막대에 알리지 않는다(문서 만들기에 붙어 돌 때)."""
+    from .textlayer import searchable_pdf, out_path
+    from .pdfio import page_frame
+    records = {r["pdf_page"]: r for r in work.records(pages)}
+    if not records:
+        log("검색 가능한 PDF: 판독 기록이 없습니다. 먼저 [▶ 한 번에 인식](run) 이나 read 를 실행하십시오."); return 2
+    out = Path(out) if out else out_path(work.dir, args.pdf)
+    state_mode = work.load_state().get("mode")
+    dpi = getattr(args, "dpi", 300)
+    doc = open_pdf(args.pdf)                                  # 글자층을 넣을 새 사본: 다른 단계가 쓰는 문서 객체는 건드리지 않는다
+    try:
+        todo = [n for n in sorted(records) if n <= len(doc)]
+
+        def page_data(n: int):
+            rec = records[n]
+            mode = rec.get("mode") if rec.get("mode") in ("vertical", "horizontal_zh") else state_mode
+            img, _ = _load_page_image(work, doc, n, dpi)        # 판독에 쓴 쪽 이미지(영역 상자의 기준)
+            return PageReading.model_validate(rec["merged"]), img, page_frame(doc, n), mode != "horizontal_zh"
+        log(f"▶ 검색 가능한 PDF: 판독 기록이 있는 {len(todo)}쪽에 보이지 않는 글자층을 넣습니다 → {out}")
+        try:
+            st = searchable_pdf(doc, todo, page_data, out, strip_old=not getattr(args, "keep_old_layer", False), log=log,
+                                step=(lambda d, t: progress("textlayer", d, t)) if report else None)
+        except PermissionError:
+            log(f"오류: {out.name} 을(를) 저장하지 못했습니다 — PDF 뷰어에서 열려 있으면 닫고 다시 실행하십시오."); return 1
+    finally:
+        doc.close()
+    names = {"ink": "먹 실측", "ink/group": "먹 실측(획 묶음)", "ink/split": "먹 실측(붙은 글자 가름)", "layer": "기존 글자층 자리",
+             "ink~": "먹 범위 나눔", "uniform": "영역 균등 분할"}
+    how = " · ".join(f"{names.get(k, k)} {v}" for k, v in sorted(st["how"].items(), key=lambda kv: -kv[1]))
+    log(f"  글자 {st['chars']:,}자 · {st['pages']}쪽 · 줄 자리: {how or '없음'}"
+        + (f" · 원래 숨은 글자층(다른 OCR)을 지운 쪽 {st['stripped']}개" if st["stripped"] else ""))
+    if st["skipped"]:
+        log(f"  건너뛴 쪽: {', '.join(f'{n}쪽({why})' for n, why in sorted(st['skipped'].items()))}")
+    if st["mismatch"]:
+        log(f"주의: 다시 읽은 글이 넣은 글과 다른 쪽: {', '.join(map(str, st['mismatch']))} — 그 쪽의 검색·복사 결과를 확인하십시오.")
+    elif st["pages"]:
+        log("  확인: 저장한 PDF 를 다시 열어 넣은 글이 그대로 읽히는지 보았습니다(모든 쪽 같음).")
+    log(("끝. " if report else "  ") + f"검색 가능한 PDF: {out}")
+    return 0 if st["pages"] and not st["mismatch"] else (1 if st["mismatch"] else 2)
+
+
+@_document_command
+def cmd_textlayer(args, work: Work | None = None, doc=None):
+    work = work or Work(args.pdf, args.work)
+    work.ensure_source()                                      # 원본이 바뀌었으면 옛 판독 기록을 이 PDF 에 넣지 않는다(문서 만들기와 같은 규칙)
+    return make_textlayer(args, work, parse_pages(args.pages, len(doc)), out=getattr(args, "out", None))
 
 
 # ---------- adjudicate / ledger ----------
@@ -2062,6 +2157,14 @@ def build_parser():
                        help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
+        p.add_argument("--layout", choices=["page", "flow"], default="page",
+                       help="문서 짜임: page=원본 쪽마다 기록 줄·쪽 나누기(기본, 검수용) / flow=내용별(제목·문단으로 잇고 원본 쪽은 책갈피로)")
+        p.add_argument("--template", help="내용별 문서(--layout flow)를 채울 양식 HWPX — 그 스타일(제목-장·제목-절·본경 원문·주석…)과 쪽 설정을 쓴다")
+        p.add_argument("--structure", choices=["auto", "bencao", "none"], default="auto",
+                       help="내용별 짜임 규칙: auto(기본)=주석·출처는 늘, 약재명 떼기는 그런 문단이 셋 이상일 때 / bencao=本草 조문 규칙 늘 / none=영역 종류만")
+        p.add_argument("--no-bold", action="store_true", help="내용별 문서에서 획 굵기로 本經(굵은 글씨)·別錄을 가르지 않음")
+        p.add_argument("--textlayer-pdf", action="store_true",
+                       help="문서와 함께 검색 가능한 PDF(out/<이름>_글자층.pdf — 원본 쪽 위에 판독 글을 보이지 않는 글자층으로)도 만듦")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
@@ -2099,6 +2202,11 @@ def build_parser():
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")
     p.add_argument("--clear-check", action="store_true", help="'판독 확인 필요' 표시를 지움(사람이 확인한 뒤)"); p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("run"); common(p); read_opts(p); adjudicate_opts(p); build_opts(p); p.set_defaults(fn=cmd_run)
+    p = sub.add_parser("textlayer", help="검색 가능한 PDF: 판독 기록의 글을 원본 PDF 에 보이지 않는 글자층으로 넣어 새 PDF 로 저장(모델 호출 없음)"); common(p)
+    p.add_argument("--out", help="저장할 PDF 경로(기본 결과 폴더 out/<이름>_글자층.pdf)")
+    p.add_argument("--keep-old-layer", action="store_true",
+                   help="원본에 있던 숨은 글자층(다른 OCR)을 지우지 않고 둠. 기본은 판독 기록이 있는 쪽에서 지운다(검색이 두 번 걸리지 않게)")
+    p.set_defaults(fn=cmd_textlayer)
     p = sub.add_parser("collate", help="책갈피 교정: HWPX 구획을 PDF 판독과 대조해 고친 사본을 저장"); common(p, pages=False); read_opts(p); thinking_opt(p)
     p.add_argument("--hwpx", required=True, help="교정할 HWPX")
     p.add_argument("--list", action="store_true", help="HWPX 책갈피·제목과 PDF 책갈피의 짝 목록만 보여 줌")

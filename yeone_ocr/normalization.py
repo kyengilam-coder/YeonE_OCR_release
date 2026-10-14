@@ -470,6 +470,14 @@ def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | N
             block.memos = [(mapped[offset][0] if offset in mapped else
                             min(len(block.text) - 1, max(0, offset)), message)
                            for offset, message in block.memos]
+            cst = []                                                   # 쓰임별 글자 범위(내용별 문서)도 같은 방식으로
+            for begin, end, kind in getattr(block, "cstyles", ()):
+                covered = [new for source in range(begin, end) for new in mapped.get(source, [])]
+                if covered:
+                    cst.append((min(covered), max(covered) + 1, kind))
+            block.cstyles = cst
+            block.anchors = [(min((new for source, news in mapped.items() if source >= offset for new in news), default=len(block.text)), label)
+                             for offset, label in getattr(block, "anchors", ())]   # 책갈피: 그 글자(없으면 뒤 글자, 끝이면 끝)
             record(result, old, where)
         else:
             block.rows[cell[0]][cell[1]] = result.text
