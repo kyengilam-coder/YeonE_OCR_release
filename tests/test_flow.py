@@ -245,6 +245,21 @@ class Command(unittest.TestCase):
         self.assertNotIn("--layout", gui.App._build_opts(app))
         self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"]), ("page", "", True))
 
+    def test_window_greys_out_options_the_layout_does_not_use(self):
+        try:
+            from yeone_ocr import gui
+        except ImportError:
+            self.skipTest("tkinter 없음")
+        from unittest import mock
+        V = lambda v: SimpleNamespace(get=lambda: v)
+        app = SimpleNamespace(v_layout=V(gui.LAYOUT_LABELS["flow"]), cb_pb=mock.Mock(), te_template=mock.Mock(), cb_bold=mock.Mock())
+        app.layout_key = lambda: gui.App.layout_key(app)
+        gui.App._layout_changed(app)                                                # 내용별: 쪽 나누기만 흐리게
+        self.assertEqual([w.state.call_args.args[0] for w in (app.cb_pb, app.te_template, app.cb_bold)], [["disabled"], ["!disabled"], ["!disabled"]])
+        app.v_layout = V(gui.LAYOUT_LABELS["page"])
+        gui.App._layout_changed(app)                                                # 원본 쪽대로: 양식·획 굵기를 흐리게
+        self.assertEqual([w.state.call_args.args[0] for w in (app.cb_pb, app.te_template, app.cb_bold)], [["!disabled"], ["disabled"], ["disabled"]])
+
 
 if __name__ == "__main__":
     unittest.main()

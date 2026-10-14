@@ -300,7 +300,8 @@ def resolve_text_choices(reader, items: list[dict]) -> dict[str, str]:
     shadow = copy.copy(reader)
     shadow._system = TEXT_CHOICE_SYSTEM
     shadow.cache_name = None
-    prompt = json.dumps(items, ensure_ascii=False)
+    # 입력 글에도 'JSON' 을 적는다: OpenAI json_object 형식은 입력에 그 낱말이 없으면 400 으로 거절한다(instructions 는 세지 않음).
+    prompt = "아래 항목마다 candidates 에서 choice 를 골라 JSON 으로만 답하라.\n" + json.dumps(items, ensure_ascii=False)
     response = shadow._call(None, prompt, TextChoices, extra_parts=[prompt])
     out = {}; seen = set()
     for item in response.items:

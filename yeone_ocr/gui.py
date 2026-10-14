@@ -1212,13 +1212,15 @@ class App(tk.Tk):
                   ("문맥 추정 밑줄 (확정 아님)", self.v_ctx, "빨간 〔a/b〕 안에서, 이 판독의 다른 대목(1차·2차가 같게 읽은 글)이 더 많이 쓰는 후보에 실선 밑줄을 긋습니다. "
                                                          "글자는 바꾸지 않고 두 후보도 그대로 둡니다(지침 2·7·19·21). 숫자·이체자·판독불명·자형이 다른 쌍에는 긋지 않습니다. "
                                                          "이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
-                  ("원본 쪽마다 쪽 나누기", self.v_pb, None), ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None),
+                  ("원본 쪽마다 쪽 나누기", self.v_pb, "원본 쪽대로 만들 때 PDF 한 쪽마다 한글 쪽을 나눕니다. 내용별 문서에서는 쓰지 않습니다(원본 쪽은 책갈피로 남김)."),
+                  ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None),
                   ("검색 가능한 PDF 도 만들기", self.v_tlpdf, "문서를 만들 때 원본 PDF 쪽 위에 판독한 글을 보이지 않는 글자층으로 넣은 사본(out\\<이름>_글자층.pdf)도 만듭니다. "
                                                          "화면은 원본 그대로이고 PDF 뷰어에서 찾기·복사가 됩니다. 원본에 다른 OCR 의 숨은 글자층이 있으면 그 쪽에서는 지우고 넣습니다. "
                                                          "원본 PDF 는 고치지 않으며 모델을 부르지 않습니다. 고급 도구의 [PDF 글자층 넣기]로 따로 만들 수도 있습니다."))
         for i, (t, v, tip) in enumerate(checks):
             cb_ = ttk.Checkbutton(b, text=t, variable=v); cb_.grid(row=i, column=0, sticky="w")
             if tip: Tip(cb_, tip, self)
+            if v is self.v_pb: self.cb_pb = cb_
         cl = ttk.Frame(b, style="Panel.TFrame"); cl.grid(row=len(checks), column=0, sticky="ew", pady=(P(8), 0)); cl.columnconfigure(1, weight=1)
         ttk.Label(cl, text="메모", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, P(8)), pady=(0, P(4)))
         mc = ttk.Combobox(cl, textvariable=self.v_memo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(list(MEMO_LABELS.values()) + list(CHECK_LIST_LABELS.values())))
@@ -1243,6 +1245,8 @@ class App(tk.Tk):
         bc = ttk.Checkbutton(cl, text="本經(굵은 글씨)·別錄 획 굵기로 가르기", variable=self.v_bold); bc.grid(row=4, column=0, columnspan=2, sticky="w", pady=(P(4), 0))
         Tip(bc, "내용별 문서에서 쪽 이미지의 획 굵기를 재어, 굵게 찍힌 조문은 '본경 원문', 보통 굵기는 '별록원문' 스타일로 넣습니다(모델 호출 없음). "
                 "한 문단에 섞여 있으면 굵은 범위만 '본경 조문' 글자 스타일로 둡니다.", self)
+        self.te_template, self.cb_bold = te, bc
+        self.v_layout.trace_add("write", self._layout_changed); self._layout_changed()
         r0 = len(checks) + 1
         self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=r0, column=0, sticky="ew", pady=(P(8), 0))
         self._hint(b, "자동 교정: 간체→번체 · 중문부호 규칙 · 云/雲 문맥 판별. 변경 내역은 출력 폴더의 교정 기록에 저장됩니다.").grid(row=r0 + 2, column=0, sticky="ew", pady=(P(8), 0))
@@ -1917,6 +1921,14 @@ class App(tk.Tk):
 
     def layout_key(self) -> str:
         return next((k for k, v in LAYOUT_LABELS.items() if v == self.v_layout.get()), "page")
+
+    def _layout_changed(self, *_):
+        """짜임에 쓰이지 않는 칸은 흐리게: 내용별이면 '쪽마다 쪽 나누기', 원본 쪽대로면 양식 칸·획 굵기(값은 그대로 둔다).
+        양식 [고르기…]는 늘 눌리게 둔다 — 고르면 내용별로 바뀐다."""
+        flow = self.layout_key() == "flow"
+        for w, on in ((getattr(self, "cb_pb", None), not flow), (getattr(self, "te_template", None), flow), (getattr(self, "cb_bold", None), flow)):
+            if w is not None:
+                w.state(["!disabled"] if on else ["disabled"])
 
     def pick_template(self):
         p = filedialog.askopenfilename(title="내용별 문서의 양식 HWPX", filetypes=[("HWPX", "*.hwpx"), ("모든 파일", "*.*")])
