@@ -100,15 +100,16 @@ def stretch_size(radius: int, stretch: int) -> tuple[int, int]:
 
 
 def rounded_box(w: int, h: int, radius: float, fill: str | None, border: str | None = None, bw: float = 1.0,
-                corners: str = "lrtb", ring: str | None = None, ring_w: float = 0.0) -> str:
-    """둥근 사각형(단추·카드·막대). border 는 테두리 색(bw 두께), ring 은 바깥쪽 초점 고리(ring_w 두께, 테두리 바깥)."""
+                corners: str = "lrtb", ring: str | None = None, ring_w: float = 0.0, ring_gap: float = 0.0) -> str:
+    """둥근 사각형(단추·카드·막대). border 는 테두리 색(bw 두께), ring 은 바깥쪽 고리(ring_w 두께, 테두리 바깥에서 ring_gap 만큼 띄움 — 틈은 투명).
+    ring 이 없어도 ring_w·ring_gap 을 주면 그 자리를 비워 둔다(기본 단추가 바뀌어도 단추끼리 크기가 같게)."""
     f = hex_rgb(fill) + (255,) if fill else None
     bd = hex_rgb(border) + (255,) if border else None
     rg = hex_rgb(ring) + (255,) if ring else None
-    o = ring_w if ring else 0.0
+    o = ring_w + ring_gap if (ring or ring_gap) else 0.0
 
     def at(x: float, y: float):
-        if rg and _in_rrect(x, y, 0, 0, w, h, radius + o, corners) and not _in_rrect(x, y, o, o, w - o, h - o, radius, corners):
+        if rg and _in_rrect(x, y, 0, 0, w, h, radius + o, corners) and not _in_rrect(x, y, ring_w, ring_w, w - ring_w, h - ring_w, radius + ring_gap, corners):
             return rg
         if not _in_rrect(x, y, o, o, w - o, h - o, radius, corners):
             return None
@@ -186,3 +187,64 @@ def chevron(w: int, h: int, color: str, stroke: float = 1.6) -> str:
         return c if min(_seg_dist(x, y, *a, *m), _seg_dist(x, y, *m, *b)) <= stroke / 2 else None
 
     return png_b64(w, h, _render(w, h, at))
+
+
+def underline_box(w: int, h: int, fill: str, bar: str | None, bar_h: float) -> str:
+    """밑줄 탭의 판: fill 로 채우고 아래 bar_h 픽셀에 bar 색 막대(고른 탭). bar 가 없으면 판만(고르지 않은 탭)."""
+    f = hex_rgb(fill) + (255,)
+    b = hex_rgb(bar) + (255,) if bar else f
+    edge = h - bar_h
+    return png_b64(w, h, [[b if j >= edge else f] * w for j in range(h)])
+
+
+def _icon(size: int, color: str, stroke: float, paths: list[list[tuple[float, float]]], extra=None) -> str:
+    """16단위 격자에 그린 선 그림(시안의 svg 와 같은 좌표)을 size 픽셀로. paths 는 꺾은선(점 목록), extra(x, y) 는 그 밖의 모양(거리 → 선 위인가)."""
+    k = size / 16.0
+    c = hex_rgb(color) + (255,)
+    segs = [(a[0] * k, a[1] * k, b[0] * k, b[1] * k) for p in paths for a, b in zip(p, p[1:])]
+    half = stroke * k / 2
+
+    def at(x: float, y: float):
+        if any(_seg_dist(x, y, *s) <= half for s in segs):
+            return c
+        if extra is not None and extra(x / k, y / k, stroke / 2):
+            return c
+        return None
+
+    return png_b64(size, size, _render(size, size, at))
+
+
+def receipt(size: int, color: str, stroke: float = 1.4) -> str:
+    """영수증(돈이 드는 단계): 아래가 톱니인 세로 종이 + 줄 셋. 시안 gen_common.receipt 와 같은 모양."""
+    paper = [(3.5, 1.5), (12.5, 1.5), (12.5, 14.5), (11, 13.5), (9.5, 14.5), (8, 13.5), (6.5, 14.5), (5, 13.5), (3.5, 14.5), (3.5, 1.5)]
+    return _icon(size, color, stroke, [paper, [(6, 5.5), (10, 5.5)], [(6, 8.5), (10, 8.5)], [(6, 11), (8.5, 11)]])
+
+
+def lock(size: int, color: str, stroke: float = 1.6) -> str:
+    """자물쇠(실행 중 잠김): 둥근 몸통 + 위 고리."""
+    def shape(x: float, y: float, half: float) -> bool:
+        body = _in_rrect(x, y, 3 - half, 7 - half, 13 + half, 14.5 + half, 1.5 + half) and not _in_rrect(x, y, 3 + half, 7 + half, 13 - half, 14.5 - half, max(0.0, 1.5 - half))
+        arc = y <= 5 and abs(math.hypot(x - 8, y - 5) - 2.5) <= half
+        return body or arc
+    return _icon(size, color, stroke, [[(5.5, 7), (5.5, 5)], [(10.5, 7), (10.5, 5)]], extra=shape)
+
+
+def seal(size: int, fill: str, line: str, large: bool = True, scale: float = 1.0) -> str:
+    """도장 바탕: 인주색 둥근 사각(반지름 4, 작은 도장은 3) + 안쪽 가는 테(큰 도장은 3px, 작은 것은 2px 들여). 글자는 창이 그 위에 쓴다.
+    size 는 픽셀(배율을 곱한 값), large 는 48px 도장인가(34px 이하는 작은 도장)."""
+    s = float(size)
+    r = (4.0 if large else 3.0) * scale
+    inset = (3.0 if large else 2.0) * scale
+    lw = max(1.0, scale)
+    f = hex_rgb(fill) + (255,)
+    ln = hex_rgb(line) + (255,)
+    ri = 2.0 * scale
+
+    def at(x: float, y: float):
+        if not _in_rrect(x, y, 0, 0, s, s, r):
+            return None
+        if _in_rrect(x, y, inset, inset, s - inset, s - inset, ri) and not _in_rrect(x, y, inset + lw, inset + lw, s - inset - lw, s - inset - lw, max(0.0, ri - lw)):
+            return ln
+        return f
+
+    return png_b64(size, size, _render(size, size, at))

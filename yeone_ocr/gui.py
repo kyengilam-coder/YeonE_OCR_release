@@ -5,7 +5,7 @@
 [▸ 고급 → 패키지 설치·점검] 단추로 설치한다.
 """
 from __future__ import annotations
-import contextlib, copy, io, json, os, queue, re, subprocess, sys, threading, time, traceback, webbrowser
+import contextlib, copy, io, json, math, os, queue, re, subprocess, sys, threading, time, traceback, webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -468,6 +468,60 @@ def table_rows(w: Path) -> list[tuple]:
     return rows
 
 
+SCREENSHOT_NAME = re.compile(r"screenshot-([0-9a-fA-F]+)(_\d+)?\.png", re.IGNORECASE)
+
+
+def _is_han(c: str) -> bool:
+    return "\uac00" <= c <= "\ud7a3" or "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf" or "\uf900" <= c <= "\ufaff"
+
+
+def book_title(pdf: str) -> tuple[str, str, str]:
+    """원본 경로 → (책 제목, 도장 두 글자, 파일 이름 줄). 제목은 원본 이름에서 확장자와 끝의 '.ocr' 를 뗀 것(「개보본초」),
+    도장은 제목의 앞 두 한글·한자(둘이 안 되면 앞 두 글자 — 영문은 대문자). 스크린샷(screenshot-<지문>.png)은 제목 '스크린샷'·도장 '화면'·
+    파일 이름 줄 'screenshot-<지문 앞 8자>….png', 이미지 폴더는 폴더 이름이 제목."""
+    pdf = (pdf or "").strip()
+    if not pdf:
+        return "", "", ""
+    p = Path(pdf); name = p.name
+    m = SCREENSHOT_NAME.fullmatch(name)
+    if m:
+        fp = m.group(1)
+        return "스크린샷", "화면", (f"screenshot-{fp[:8]}….png" if len(fp) > 8 else name)
+    title = name if p.is_dir() else p.stem
+    if not p.is_dir() and title.lower().endswith(".ocr"):
+        title = title[:-4]
+    title = title or name
+    han = [c for c in title if _is_han(c)]
+    chars = "".join(han[:2]) if len(han) >= 2 else "".join(c for c in title if not c.isspace())[:2].upper()
+    return title, chars, name
+
+
+def work_area(widget) -> tuple[int, int]:
+    """창을 둘 수 있는 화면 크기(작업 표시줄을 뺀 것) — Windows 는 SPI_GETWORKAREA, 그 밖에는 화면 높이에서 작업 표시줄 몫을 뺀다."""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            from ctypes import wintypes
+            r = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0):
+                return r.right - r.left, r.bottom - r.top
+        except Exception:
+            pass
+    return widget.winfo_screenwidth(), widget.winfo_screenheight() - 48
+
+
+def place_over(win, app) -> None:
+    """작은 창을 앱 창 가운데(조금 위)에 둔다 — 작업 영역 밖으로 나가지 않게."""
+    win.update_idletasks()
+    w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+    aw, ah = work_area(win)
+    try:
+        x = app.winfo_rootx() + (app.winfo_width() - w) // 2; y = app.winfo_rooty() + max(0, (app.winfo_height() - h) // 3)
+    except tk.TclError:
+        x, y = (aw - w) // 2, (ah - h) // 3
+    win.geometry(f"+{max(0, min(x, aw - w))}+{max(0, min(y, ah - h))}")
+
+
 class QueueWriter(io.TextIOBase):
     """작업 스레드의 출력을 창으로 보낸다. '오류:'·'주의:' 로 시작하는 줄은 따로 모아 끝난 뒤 알림창에 보여 준다(finish_alert).
     줄은 스레드마다 따로 모아 끝난 줄만 한 번에(창·모음 함께, 잠금 안에서) 보낸다 — print 는 글과 줄바꿈을 따로 쓰므로(write 두 번) 그사이
@@ -594,18 +648,26 @@ class StylePicker(tk.Toplevel):
 
 class PlanWait(tk.Toplevel):
     """비용 어림 중(작업 스레드) 작은 창 — 단계 글과 막대(전체를 모르면 오가는 막대). [취소]·창 닫기는 cancel 을 세울 뿐이고,
-    어림 스레드가 단계·쪽 사이에서 멈춰 큐로 알리면 창(_plan_done)이 닫는다."""
+    어림 스레드가 단계·쪽 사이에서 멈춰 큐로 알리면 창(_plan_done)이 닫는다. 모양은 비용 창과 같은 종이 판·바탕 제목·먹 막대."""
     def __init__(self, app: "App", cancel: threading.Event):
         super().__init__(app)
         self.cancel = cancel
-        P = app.px
-        self.title("비용 어림 중"); self.resizable(False, False); self.configure(bg=app.colors["PANEL"])
-        f = ttk.Frame(self, style="Dialog.TFrame", padding=P(18)); f.pack(fill="both", expand=True)
+        C, P, F = app.colors, app.px, app.fonts
+        self.title("비용 어림 중"); self.resizable(False, False)
+        self.configure(bg=C["PANEL"], highlightthickness=1, highlightbackground=C["RULE"], highlightcolor=C["RULE"])
+        f = tk.Frame(self, bg=C["PANEL"], padx=P(24), pady=P(18)); f.pack(fill="both", expand=True)
+        tk.Label(f, text="비용 어림 중", font=F["DLG"], fg=C["INK"], bg=C["PANEL"], bd=0).pack(anchor="w")
+        tk.Label(f, text="판독 기록을 읽어 호출·토큰을 셉니다 — 모델은 부르지 않습니다.", font=F["CAP"], fg=C["MUTED"], bg=C["PANEL"], bd=0).pack(
+            anchor="w", pady=(P(2), P(12)))
         self.v_stage = tk.StringVar(value="판독 기록 읽는 중")
-        ttk.Label(f, textvariable=self.v_stage, style="Panel.TLabel", width=44).pack(anchor="w")
-        self.bar = ttk.Progressbar(f, length=P(360), maximum=1000, mode="indeterminate"); self.bar.pack(fill="x", pady=(P(10), P(10))); self.bar.start(15)
-        self.b_cancel = ttk.Button(f, text="취소", command=self.do_cancel); self.b_cancel.pack(anchor="e")
+        tk.Label(f, textvariable=self.v_stage, font=F["BODY"], fg=C["INK"], bg=C["PANEL"], bd=0, anchor="w", width=44).pack(anchor="w")
+        self.bar = ttk.Progressbar(f, style="Panel.Bar.Horizontal.TProgressbar", length=P(380), maximum=1000, mode="indeterminate")
+        self.bar.pack(fill="x", pady=(P(8), P(14))); self.bar.start(15)
+        row = tk.Frame(f, bg=C["PANEL"]); row.pack(fill="x")
+        self.b_cancel = ttk.Button(row, text="취소", command=self.do_cancel, cursor="hand2"); self.b_cancel.pack(side="right")
+        tk.Label(row, text="Esc · 취소", font=F["CAP"], fg=C["MUTED"], bg=C["PANEL"], bd=0).pack(side="right", padx=(0, P(10)))
         self.protocol("WM_DELETE_WINDOW", self.do_cancel); self.bind("<Escape>", lambda e: self.do_cancel())
+        place_over(self, app)
         self.transient(app); self.grab_set()
 
     def update_progress(self, done: int, total: int, stage: str):
@@ -624,125 +686,228 @@ class PlanWait(tk.Toplevel):
 
 
 class CostDialog(tk.Toplevel):
-    """실행 전 비용 한 창(costplan): 큰 글씨의 원화 → 단계별 표(판독·3차 판별·합의 의심·문맥 교정과 합계) → 다시 사지 않는 것·근거·어림하지 못한 것 → 단추.
+    """실행 전 비용 한 창(costplan): 도장·제목·명령 알약 → 큰 원화 금액과 달러 → 단계별 표 → 문맥 교정 건너뜀·어림하지 못한 것 → [아니요] 단락 →
+    (펼침) 근거·가정 · 단가·환율 → 바닥 줄(펼침 단추 · 단추와 그 아래 캡션).
+    표는 Label 격자다(Treeview 는 칸 안 줄바꿈·행 병합·꼬리표 그림을 못 그림): 묶음 머리(영수증 + 이름 + [아니요]면 뺌), costplan 의 한 줄을
+    '단계 — 대상' 으로 갈라 같은 단계의 두 줄은 단계 칸을 합치고, 호출 0 인 줄은 흐리게 '$0.00', 돈 드는 금액은 굵게. 머리 줄·합계 줄은 고정이고
+    몸통만 스크롤한다. 열 너비는 재서 정하고 근거가 남은 너비를 갖는다 — 창은 900 에서 필요한 만큼(작업 영역 − 80 까지) 넓어진다.
     단가·환율 고치기는 접어 두고, 고치면 다시 세지 않고 금액만 다시 낸다(price_plan). choice: 'all' | 'without' | None(취소·닫기).
-    기본 단추(Enter)는 costplan.default_choice — 어림이 실패한 단계가 있으면 모델 단계 없이(판독 어림 실패면 취소) 쪽이다."""
+    기본 단추(먹 고리 · 캡션 'Enter · …')는 costplan.default_choice — 금액을 모르거나 어림이 실패한 단계가 있으면 닫힌 쪽이고, 그때 돈 드는 단추는
+    인주 채움을 빼고 테두리만 둔다. Enter 는 창 하나에서만 받는다: 단가 칸이면 다시 계산만, 초점이 있는 단추면 그 단추, 창 자체면 기본 단추. Esc 는 늘 [취소]·[닫기]."""
     BUTTONS = {"run": (("all", "예 · 모두 실행"), ("without", "아니요 · 모델 단계 없이")), "build": (("all", "예 · 문맥 교정에 모델"), ("without", "아니요 · 모델 없이")),
                "read": (("all", "실행"),), "adjudicate": (("all", "실행"),)}
+    CAPTIONS = {"run": {"all": "모든 단계", "without": "판독·문서 만들기만"}, "build": {"all": "문맥 교정까지", "without": "규칙 변환만"},
+                "read": {"all": "판독"}, "adjudicate": {"all": "3차 판별"}}
+    PILLS = {"run": "한 번에 인식 · HWPX", "build": "④ 문서 만들기", "read": "③ 판독", "adjudicate": "3차 글자 판별"}
+    # 묶음: (이름, 부제, [아니요]면 뺌 꼬리표를 붙일 수 있나, 든 단계)
+    GROUPS = {"run": (("판독", "— [예]·[아니요] 어느 쪽이든 실행", False, ("read1", "read2")),
+                      ("모델 단계", "— 판독 뒤 모델을 더 부르는 단계", True, ("glyph", "suspect", "choice"))),
+              "build": (("문서 만들기", "— 문맥 교정(번체)", True, ("choice",)),),
+              "read": (("판독", "", False, ("read1", "read2")),),
+              "adjudicate": (("3차 판별 · 합의 의심", "— 판독 기록에서 갈린 자리를 묻습니다", False, ("glyph", "suspect")),)}
+    COLS = ("step", "scope", "model", "basis", "calls", "tin", "tout", "cost")
+    HEADS = {"step": "단계", "scope": "대상", "model": "모델", "basis": "근거", "calls": "호출", "tin": "입력 토큰", "tout": "출력 토큰", "cost": "비용"}
+    NUMERIC = ("calls", "tin", "tout", "cost")
     STEP_NAMES = {"read": "판독", "glyph": "3차 판별", "suspect": "합의 의심", "choice": "문맥 교정", "plan": "전체"}
-    WHY = ("3차 판별·합의 의심·문맥 교정은 판독 뒤 모델을 더 부르는 단계입니다. [아니요]면 이번 실행에서 그 단계 없이(판독·문서 만들기는 함) — "
-           "〔a/b〕 와 갈리는 번체 후보는 표시대로 남고 나중에 따로 할 수 있습니다.")
+    TAG = "[아니요]면 뺌"
+    TAG_TIP = "[아니요]면 뺌: 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 빠지는 단계"
+    WHY = ("3차 판별·합의 의심·문맥 교정은 판독 뒤 모델을 더 부르는 단계입니다. [아니요]면 이번 실행에서 그 단계 없이 판독·문서 만들기만 하고, "
+           "〔a/b〕와 갈리는 번체 후보는 표시대로 남아 나중에 따로 할 수 있습니다.")
+    WHY_PDF = ("3차 판별·합의 의심은 판독 뒤 모델을 더 부르는 단계입니다. [아니요]면 그 단계 없이 판독·문자 PDF 만들기만 하고, "
+               "〔a/b〕 자리는 1차 글자로 글자층에 들어갑니다(나중에 3차 판별 뒤 고급 도구의 [PDF 글자층 넣기]로 다시 만들 수 있음).")
     WHY_BUILD = ("문서 만들기에서 모델을 부르는 것은 문맥 교정(번체 후보)뿐입니다(판독·3차 판별은 하지 않음). [아니요]면 모델 없이 규칙 변환(간체→번체·부호)만 하고 "
                  "갈리는 후보는 원문대로 두어 교정 보고에 남깁니다.")
+    WHY_PREVIEW = "표는 실행할 때 이 창에서 [아니요]를 누르면 빠지는 단계입니다. 미리 보기는 아무것도 쓰지 않고 결과 폴더도 만들지 않습니다."
+    NOTE_PDF = ("문자 PDF는 문서를 만들지 않아 문맥 교정(번체) 줄이 없습니다 — 글자층에는 판독한 글을 인쇄된 그대로 넣습니다"
+                "(양식·짜임·자동 교정 없음).")
+    NOTE_PREVIEW = "실행은 [▶ 한 번에 인식]의 두 단추에서 — 누를 때 다시 어림해 이 창으로 묻습니다."
 
-    def __init__(self, app: "App", plan: dict, kind: str, preview: bool = False):
+    def __init__(self, app: "App", plan: dict, kind: str, preview: bool = False, pdf_only: bool = False):
         super().__init__(app)
+        from .costplan import without_flags
         self.app, self.plan, self.kind, self.choice = app, plan, kind, None
-        C, P, base = app.colors, app.px, app.font_base[0]
-        self.title("비용 미리 보기" if preview else "실행 전 비용 확인"); self.resizable(False, False); self.configure(bg=C["PANEL"])
-        f = ttk.Frame(self, padding=(P(20), P(16), P(20), P(14)), style="Panel.TFrame"); f.grid(sticky="nsew")
-        self.v_cap, self.v_head, self.v_usd, self.v_sub = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
-        tk.Label(f, textvariable=self.v_cap, font=app.font_small, fg=C["MUTED"], bg=C["PANEL"]).grid(row=0, column=0, columnspan=2, sticky="w")
-        tk.Label(f, textvariable=self.v_head, font=(base, 22, "bold"), fg=C["ACC"], bg=C["PANEL"], wraplength=P(880), justify="left").grid(row=1, column=0, sticky="w")
-        tk.Label(f, textvariable=self.v_usd, font=(base, 12), fg=C["MUTED"], bg=C["PANEL"]).grid(row=1, column=1, sticky="sw", padx=(12, 0), pady=(0, 5))
-        tk.Label(f, textvariable=self.v_sub, font=app.font_base, fg=C["INK"], bg=C["PANEL"], wraplength=P(900), justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 12))
-        cols = ("step", "model", "basis", "calls", "tin", "tout", "cost")
-        self.tv = ttk.Treeview(f, columns=cols, show="headings", height=3, selectmode="none")
-        for c, (t, w, a) in {"step": ("단계", 230, "w"), "model": ("모델", 150, "w"), "basis": ("근거", 250, "w"), "calls": ("호출", 80, "e"),
-                             "tin": ("입력 토큰", 110, "e"), "tout": ("출력 토큰", 100, "e"), "cost": ("비용", 120, "e")}.items():
-            self.tv.heading(c, text=t, anchor=a); self.tv.column(c, width=P(w), anchor=a, stretch=(c == "basis"))
-        self.tv.tag_configure("sum", font=app.font_h)
-        self.tv.grid(row=3, column=0, columnspan=2, sticky="we")
-        f.columnconfigure(0, weight=1)
-        self.v_skip, self.v_err, self.v_note, self.v_info = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
-        self.l_skip = ttk.Label(f, textvariable=self.v_skip, style="Panel.TLabel", wraplength=P(900), justify="left")
-        self.l_skip.grid(row=4, column=0, columnspan=2, sticky="w", pady=(P(8), 0))
-        self.l_err = tk.Label(f, textvariable=self.v_err, font=app.font_h, fg=C["RED"], bg=C["PANEL"], wraplength=P(900), justify="left")
-        self.l_err.grid(row=5, column=0, columnspan=2, sticky="w", pady=(P(4), 0))
-        if kind in ("run", "build") and not preview:
-            ttk.Label(f, text=self.WHY if kind == "run" else self.WHY_BUILD, style="Panel.TLabel", wraplength=P(900), justify="left").grid(
-                row=6, column=0, columnspan=2, sticky="w", pady=(P(8), 0))
-        # 근거·가정(접힘) — 줄마다의 자세한 수·어림의 가정·단가 출처. 단추 줄 아래에 펼쳐 작은 화면에서도 단추가 밀려나지 않게
-        self.more = ttk.Frame(f, style="Panel.TFrame", padding=(0, 10, 0, 0))
-        ttk.Label(self.more, textvariable=self.v_note, style="Hint.TLabel", wraplength=P(900), justify="left").grid(row=0, column=0, sticky="w")
-        ttk.Label(self.more, textvariable=self.v_info, style="Hint.TLabel", wraplength=P(900), justify="left").grid(row=1, column=0, sticky="w", pady=(P(4), 0))
-        self.more_shown = False
-        # 단가·환율 고치기(접힘) — 이 창에 나온 모델 아무것이나(단가 없는 모델을 앞에)
-        self.adj = ttk.Frame(f, style="Panel.TFrame", padding=(0, 10, 0, 0))
-        self.v_pm = tk.StringVar()
-        self.cb_model = ttk.Combobox(self.adj, textvariable=self.v_pm, state="readonly", width=28); self.cb_model.grid(row=0, column=0, sticky="w")
-        self.cb_model.bind("<<ComboboxSelected>>", lambda e: self._fill_price())
-        self.e_in = ttk.Entry(self.adj, width=7); self.e_out = ttk.Entry(self.adj, width=7); self.e_fx = ttk.Entry(self.adj, width=7)
-        ttk.Label(self.adj, style="Panel.TLabel", text="입력 $").grid(row=0, column=1, sticky="e", padx=(10, 2)); self.e_in.grid(row=0, column=2)
-        ttk.Label(self.adj, style="Panel.TLabel", text="출력 $").grid(row=0, column=3, sticky="e", padx=(10, 2)); self.e_out.grid(row=0, column=4)
-        ttk.Label(self.adj, style="Panel.TLabel", text="원·달러").grid(row=0, column=5, sticky="e", padx=(10, 2)); self.e_fx.grid(row=0, column=6)
-        ttk.Button(self.adj, text="이 값으로 다시 계산", command=self.save).grid(row=0, column=7, padx=(12, 4))
-        ttk.Button(self.adj, text="자동값으로", command=self.reset).grid(row=0, column=8)
-        ttk.Label(self.adj, text="100만 토큰당 미국 달러. 선택한 제공사의 API 요금표를 확인해 입력하십시오. 고친 값은 그 모델에 저장되고 내장 요금표보다 먼저 씁니다.",
-                  style="Hint.TLabel").grid(row=1, column=0, columnspan=9, sticky="w", pady=(4, 0))
-        self.adj_shown = False
         self.preview, self.default = preview, None
-        b = ttk.Frame(f, style="Panel.TFrame"); b.grid(row=7, column=0, columnspan=2, sticky="we", pady=(14, 0))
-        self.btns = btns = {}
-        for ch, text in (() if preview else self.BUTTONS.get(kind, (("all", "실행"),))):
-            btns[ch] = ttk.Button(b, text=text, command=lambda c=ch: self.done(c))
-            btns[ch].pack(side="left", padx=(0, 8))
-        btns[None] = ttk.Button(b, text="닫기" if preview else "취소", command=lambda: self.done(None))
-        btns[None].pack(side="left")
-        self.b_adj = ttk.Button(b, text="단가·환율 고치기 ▾", command=self.toggle_adj); self.b_adj.pack(side="right")
-        self.b_more = ttk.Button(b, text="근거·가정 ▾", command=self.toggle_more); self.b_more.pack(side="right", padx=(0, 6))
+        self.pdf_only = bool(pdf_only) and kind == "run"                 # [▶ 한 번에 인식 (문자 PDF 만들기)] — 계획·기본 단추는 run 그대로, 글만 바꾼다
+        self.no_flags = without_flags(kind, plan.get("context_model", True))    # [아니요]가 빼는 것(비면 [아니요] 단추·꼬리표가 없음)
+        C, P, F = app.colors, app.px, app.fonts
+        self.title("비용 미리 보기" if preview else "실행 전 비용 확인"); self.resizable(False, False)
+        self.configure(bg=C["PANEL"], highlightthickness=1, highlightbackground=C["RULE"], highlightcolor=C["RULE"])
+        bg = C["PANEL"]
+        label = lambda parent, **kw: tk.Label(parent, bg=kw.pop("bg", bg), bd=0, highlightthickness=0, **kw)
+        self._label = label
+        f = self.body = tk.Frame(self, bg=bg, padx=P(24), pady=0); f.pack(fill="both", expand=True, pady=(P(18), P(16)))
+        f.columnconfigure(0, weight=1)
+        # ---- 머리: 도장 · 제목 · 파일 이름 ········· 명령 알약 ----
+        top = tk.Frame(f, bg=bg); top.grid(row=0, column=0, sticky="ew")
+        _title, chars, fname = book_title(app.pdf() if hasattr(app, "pdf") else "")
+        if chars:
+            app._seal(top, chars, large=False).pack(side="left", padx=(0, P(10)))
+        label(top, text=self.title(), font=F["DLG"], fg=C["INK"]).pack(side="left")
+        label(top, text=fname, font=F["BODY"], fg=C["MUTED"]).pack(side="left", padx=(P(10), 0), pady=(P(4), 0))
+        pill = self.pill = "HWPX 만들기 어림" if preview else ("한 번에 인식 · 문자 PDF" if self.pdf_only else self.PILLS.get(kind, ""))
+        if pill:
+            ttk.Label(top, text=pill, style="Chip.TLabel").pack(side="right")
+        # ---- 금액: 왼쪽 원화(바탕 큰 글) · 오른쪽 달러와 대상 ----
+        amt = tk.Frame(f, bg=bg); amt.grid(row=1, column=0, sticky="ew", pady=(P(6), 0)); amt.columnconfigure(0, weight=1)
+        left = tk.Frame(amt, bg=bg); left.grid(row=0, column=0, sticky="sw")
+        self.v_cap, self.v_head, self.v_usd, self.v_sub = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
+        label(left, textvariable=self.v_cap, font=F["CAP"], fg=C["MUTED"], justify="left").pack(anchor="w")
+        self.l_head = label(left, textvariable=self.v_head, font=F["TITLE"], fg=C["INK"], justify="left"); self.l_head.pack(anchor="w")
+        self.warn = tk.Frame(left, bg=bg)                                # 금액을 모를 때: '단가 없는 모델: **…** — 아래 칸에 …'
+        self.v_missing = tk.StringVar()
+        label(self.warn, text="단가 없는 모델: ", font=F["BODY"], fg=C["WARN"]).pack(side="left")
+        label(self.warn, textvariable=self.v_missing, font=F["BODY_B"], fg=C["WARN"]).pack(side="left")
+        label(self.warn, text=" — 아래 칸에 단가를 넣으면 다시 계산합니다", font=F["BODY"], fg=C["WARN"]).pack(side="left")
+        right = tk.Frame(amt, bg=bg); right.grid(row=0, column=1, sticky="se", padx=(P(16), 0))
+        self.l_usd = label(right, textvariable=self.v_usd, font=F["USD"], fg=C["INK"]); self.l_usd.pack(anchor="e")
+        label(right, textvariable=self.v_sub, font=F["BODY"], fg=C["MUTED"]).pack(anchor="e")
+        tk.Frame(f, bg=C["LINE"], height=max(1, P(1))).grid(row=2, column=0, sticky="ew", pady=(P(8), 0))
+        # ---- 표(머리 줄 · 스크롤 몸통 · 합계 줄) ----
+        self.tbl = tk.Frame(f, bg=bg); self.tbl.grid(row=3, column=0, sticky="ew", pady=(P(8), 0))
+        # ---- 표 아래: 문맥 교정 건너뜀(문자 PDF 는 문맥 교정 줄이 없다는 안내) · 어림 실패 ----
+        self.v_skip, self.v_err, self.v_note, self.v_info = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
+        self.l_skip = label(f, textvariable=self.v_skip, font=F["BODY"], fg=C["MUTED"] if self.pdf_only else C["INK"], justify="left", anchor="w")
+        self.l_skip.grid(row=4, column=0, sticky="ew", pady=(P(8), 0))
+        self.l_err = label(f, textvariable=self.v_err, font=F["BODY_B"], fg=C["RED"], justify="left", anchor="w")
+        self.l_err.grid(row=5, column=0, sticky="ew", pady=(P(4), 0))
+        self.wrapped = [self.l_skip, self.l_err]
+        # ---- [아니요] 단락: 꼬리표 + 까닭(글 사이에 꼬리표를 넣으려고 읽기 전용 Text) ----
+        why = (self.WHY_PREVIEW if preview else self.WHY_PDF if self.pdf_only else self.WHY if kind == "run" else self.WHY_BUILD if kind == "build" else "")
+        self.why = None
+        if why and self.no_flags:
+            t = self.why = tk.Text(f, font=F["BODY"], fg=C["MUTED"] if preview else C["INK"], bg=bg, relief="flat", bd=0, highlightthickness=0, wrap="word",
+                                   padx=0, pady=0, height=2, width=1, cursor="arrow", takefocus=0, spacing1=0, spacing2=P(2))
+            tag = ttk.Label(t, text=self.TAG, style="Tag.TLabel"); Tip(tag, self.TAG_TIP, app)
+            t.window_create("end", window=tag, align="center", padx=0); t.insert("end", "  " + why)
+            t.configure(state="disabled")
+            t.grid(row=6, column=0, sticky="ew", pady=(P(6), 0))
+            t.bind("<Configure>", lambda e: self.after_idle(self._fit_why))
+        # ---- 펼침: 근거·가정(줄마다의 자세한 수·어림의 가정·단가 출처) ----
+        self.more = tk.Frame(f, bg=bg)
+        self.l_note = label(self.more, textvariable=self.v_note, font=F["CAP"], fg=C["MUTED"], justify="left", anchor="w"); self.l_note.grid(row=0, column=0, sticky="w")
+        self.l_info = label(self.more, textvariable=self.v_info, font=F["CAP"], fg=C["MUTED"], justify="left", anchor="w"); self.l_info.grid(row=1, column=0, sticky="w", pady=(P(4), 0))
+        self.wrapped += [self.l_note, self.l_info]
+        self.more_shown = False
+        # ---- 펼침: 단가·환율 고치기(조용한 판) — 이 창에 나온 모델 아무것이나(단가 없는 모델을 앞에) ----
+        self.adj = ttk.Frame(f, style="Quiet.TFrame", padding=(P(14), P(10)))
+        q = C["QUIET"]
+        row = tk.Frame(self.adj, bg=q); row.pack(fill="x")
+        self.v_pm = tk.StringVar()
+        cap = lambda text: label(row, text=text, font=F["BODY"], fg=C["MUTED"], bg=q)
+        cap("모델").pack(side="left", padx=(0, P(6)))
+        self.cb_model = ttk.Combobox(row, textvariable=self.v_pm, state="readonly", width=24, style="Quiet.TCombobox"); self.cb_model.pack(side="left")
+        self.cb_model.bind("<<ComboboxSelected>>", lambda e: self._fill_price())
+        self.e_in, self.e_out, self.e_fx = (ttk.Entry(row, width=w, style="Quiet.TEntry") for w in (7, 7, 7))
+        for text, ent in (("입력 $", self.e_in), ("출력 $", self.e_out), ("원·달러", self.e_fx)):
+            cap(text).pack(side="left", padx=(P(12), P(6))); ent.pack(side="left")
+        self.b_recalc = ttk.Button(row, text="이 값으로 다시 계산", command=self.save, style="QuietSmall.TButton", cursor="hand2")
+        self.b_recalc.pack(side="left", padx=(P(12), 0))
+        self.b_reset = ttk.Button(row, text="자동값으로", command=self.reset, style="QuietSmall.TButton", cursor="hand2")
+        self.b_reset.pack(side="left", padx=(P(6), 0))
+        hint = tk.Frame(self.adj, bg=q); hint.pack(fill="x", pady=(P(6), 0))
+        self.l_adj = label(hint, font=F["CAP"], fg=C["MUTED"], bg=q, justify="left", anchor="w",
+                           text="100만 토큰당 미국 달러. 선택한 제공사의 API 요금표를 확인해 입력하십시오. 고친 값은 그 모델에 저장되고 내장 요금표보다 먼저 씁니다. "
+                                "이 칸에서 Enter는 다시 계산만 합니다(창을 닫거나 실행하지 않음).")
+        self.l_adj.pack(fill="x")
+        self.v_recalc = tk.StringVar()                                   # 단가 칸 Enter 뒤: '다시 계산했습니다 — 실행하려면 단추를 누르십시오'
+        recalc = label(hint, textvariable=self.v_recalc, font=F["CAP_B"], fg=C["INK"], bg=q, anchor="w")
+        self.v_recalc.trace_add("write", lambda *_: recalc.pack(fill="x") if self.v_recalc.get() else recalc.pack_forget())
+        self.adj_shown = False
+        # ---- 바닥 줄: 왼쪽 펼침 단추(· 미리 보기 안내) · 오른쪽 단추와 그 아래 캡션 ----
+        tk.Frame(f, bg=C["LINE"], height=max(1, P(1))).grid(row=9, column=0, sticky="ew", pady=(P(12), 0))
+        foot = tk.Frame(f, bg=bg); foot.grid(row=10, column=0, sticky="ew", pady=(P(8), 0)); foot.columnconfigure(0, weight=1)
+        tog = tk.Frame(foot, bg=bg); tog.grid(row=0, column=0, sticky="nw", pady=(P(12), 0))
+        self.b_more = ttk.Button(tog, text="근거·가정 ▾", command=self.toggle_more, style="Toggle.TButton", cursor="hand2"); self.b_more.pack(side="left")
+        self.b_adj = ttk.Button(tog, text="단가·환율 고치기 ▾", command=self.toggle_adj, style="Toggle.TButton", cursor="hand2")
+        self.b_adj.pack(side="left", padx=(P(12), 0))
+        Tip(self.b_adj, "100만 토큰당 미국 달러 · 고친 값은 그 모델에 저장됩니다", app)
+        if preview:
+            label(tog, text=self.NOTE_PREVIEW, font=F["CAP"], fg=C["MUTED"], justify="left", wraplength=P(230)).pack(side="left", padx=(P(14), 0))
+        bf = tk.Frame(foot, bg=bg); bf.grid(row=0, column=1, sticky="e", padx=(P(12), 0))
+        self.btns, self.caps = {}, {}
+        spec = list(() if preview else self.BUTTONS.get(kind, (("all", "실행"),)))
+        if not self.no_flags:
+            spec = [(ch, text) for ch, text in spec if ch != "without"]   # 뺄 것이 없으면 [아니요]는 [예]와 같은 일 — 보이지 않는다
+        for ch, text in spec + [(None, "닫기" if preview else "취소")]:
+            col = tk.Frame(bf, bg=bg); col.pack(side="left", padx=(P(2), 0))
+            self.btns[ch] = ttk.Button(col, text=text, command=lambda c=ch: self.done(c), cursor="hand2", style="Dlg.TButton")
+            self.btns[ch].pack()
+            self.caps[ch] = label(col, text="", font=F["CAP"], fg=C["MUTED"]); self.caps[ch].pack(pady=(P(2), 0))
         self.render()
         if self.priced["totals"]["missing_prices"]:
             self.toggle_adj()                                           # 금액을 낼 수 없으면 단가 칸을 펼쳐 둔다(넣으면 다시 계산하고 기본 단추도 다시 정한다)
-        self.bind("<Return>", lambda e: self.done(self.default)); self.bind("<Escape>", lambda e: self.done(None))
+        self.bind("<Return>", self._on_return); self.bind("<KP_Enter>", self._on_return)
+        self.bind("<Escape>", lambda e: (self.done(None), "break")[1])   # Esc 는 늘 [취소]·[닫기]
         self.protocol("WM_DELETE_WINDOW", lambda: self.done(None))
-        self.transient(app); self.grab_set(); btns[self.default].focus_set()
+        self._place()
+        self.transient(app); self.grab_set(); self.btns[self.default].focus_set()
 
+    # ----- 기본 단추·Enter -----
     def _set_default(self):
-        """기본(Enter·강조) 단추를 costplan.default_choice 로 — 어림 실패·금액을 낼 수 없는 단계가 있으면 닫힌 쪽. 단가를 넣어 다시 계산하면 다시 정한다."""
+        """기본(Enter·고리) 단추를 costplan.default_choice 로 — 어림 실패·금액을 낼 수 없는 단계가 있으면 닫힌 쪽. 단가를 넣어 다시 계산하면 다시 정한다.
+        돈 드는 단추([예]·[실행])는 기본일 때(금액을 앎)만 인주 채움, 아니면 인주 테두리. 캡션 맨 앞 'Enter · ' 는 기본 단추에만."""
         from .costplan import default_choice
         default = default_choice(self.priced)
-        if self.kind not in ("run", "build") and default == "without":
-            default = "cancel"                                          # 판독·3차 판별에는 '모델 단계 없이' 가 없다 — 닫힌 쪽(취소)으로
+        if default == "without" and "without" not in self.btns:
+            default = "cancel"                                          # [아니요]가 없는 창(판독·3차 판별·뺄 것 없는 문서 만들기) — 닫힌 쪽(취소)으로
         self.default = None if self.preview or default == "cancel" else default
+        C = self.app.colors
         for ch, btn in self.btns.items():
-            btn.configure(style="Accent.TButton" if ch == self.default and not (self.preview and ch is None) else "TButton")
+            if ch == "all":
+                style = "DlgSealDef.TButton" if self.default == "all" else "DlgSealOut.TButton"
+            else:
+                style = "DlgDef.TButton" if ch == self.default else "Dlg.TButton"
+            btn.configure(style=style)
+            if ch is None:
+                base = "Esc 닫기" if self.preview else "Esc · 하지 않음"
+            else:
+                base = "판독·문자 PDF만" if (ch == "without" and self.pdf_only) else self.CAPTIONS.get(self.kind, {}).get(ch, "")
+            on = ch == self.default
+            self.caps[ch].configure(text=("Enter · " + base) if on else base, fg=C["INK"] if on else C["MUTED"])
+
+    def _on_return(self, e=None):
+        """Enter 는 창 하나에서만 받는다(단추마다 묶지 않음 — 펼침 단추에서 친 Enter 가 기본 단추까지 누르지 않게).
+        단가·환율 칸이면 다시 계산만(창을 닫거나 실행하지 않고 초점은 칸에), 모델 고르기 칸이면 아무것도, 초점이 단추면 그 단추, 창 자체면 기본 단추."""
+        w = self.focus_get()
+        if w in (self.e_in, self.e_out, self.e_fx):
+            self.save()                                                 # render() 가 _set_default() 를 다시 부름 — 기본 단추가 바뀔 수 있음
+            self.v_recalc.set("다시 계산했습니다 — 실행하려면 단추를 누르십시오")
+            return "break"
+        if w is self.cb_model:
+            return "break"
+        if isinstance(w, ttk.Button):
+            w.invoke(); return "break"
+        self.done(self.default)
+        return "break"
 
     # ----- 그리기 -----
     def render(self):
         from .costplan import price_plan, skipped_lines
-        from .estimate import PRICE_SOURCES, PRICES_DATE, PRICES_DATE_GEMINI, fmt_krw, fmt_tokens, resolve_price
+        from .estimate import PRICE_SOURCES, PRICES_DATE, PRICES_DATE_GEMINI, fmt_krw, resolve_price
         p = self.priced = price_plan(self.plan, self.app.cfg.get("prices") or {}, *self.app.fx_setting())
         t = p["totals"]
         self._set_default()
-        span = lambda v, f=lambda x: f"{x:,}": f(v[0]) if v[0] == v[1] else f"{f(v[0])}~{f(v[1])}"
         self.v_cap.set("예상 비용 (판독 + 모델 단계, 범위는 생각 토큰·재질문 편차)"
                        + (" — 어림하지 못한 단계(아래 빨간 줄)는 이 금액에 빠져 있습니다" if p["errors"] and p["rows"] else ""))
+        self.warn.pack_forget()
         if not p["rows"] and p["errors"]:
             self.v_head.set("비용을 어림하지 못했습니다"); self.v_usd.set("")
         elif t["usd"] is not None:
             self.v_head.set(f"약 {fmt_krw(p['krw'][0])} ~ {fmt_krw(p['krw'][1])}"); self.v_usd.set(f"$ {t['usd'][0]:.2f} ~ {t['usd'][1]:.2f}")
         else:
-            self.v_head.set("금액을 다 낼 수 없음 — 단가 없는 모델: " + ", ".join(t["missing_prices"]))
+            self.v_head.set("금액을 다 낼 수 없음")
+            self.v_missing.set(", ".join(t["missing_prices"])); self.warn.pack(anchor="w")
             k = t["usd_known"]
             self.v_usd.set(f"아는 부분만 약 {fmt_krw(p['krw_known'][0])}~{fmt_krw(p['krw_known'][1])} · $ {k[0]:.2f}~{k[1]:.2f}" if k[1] else "")
+        self.l_usd.configure(font=self.app.fonts["USD" if t["usd"] is not None else "BODY_B"])
         sub = [f"대상 {p['pages']:,}쪽", f"판독 기록 {p['records']:,}쪽"]
         if self.kind in ("run", "read"):
             sub.append(f"새로 읽을 {p['to_read']:,}쪽")
         if p.get("models"):
             sub.append("모델 " + ", ".join(p["models"]))
         self.v_sub.set(" · ".join(sub))
-        for i in self.tv.get_children():
-            self.tv.delete(i)
-        self.tv.configure(height=max(1, len(p["rows"]) + 1))
-        for r in p["rows"]:
-            cost = f"${r['usd'][0]:.2f}~{r['usd'][1]:.2f}" if r["usd"] is not None else "단가 미입력"
-            self.tv.insert("", "end", values=(r["label"], r["model"], r["basis"], span(r["calls"]), span(r["in"], fmt_tokens), span(r["out"], fmt_tokens), cost))
-        cost = (f"${t['usd'][0]:.2f}~{t['usd'][1]:.2f}" if t["usd"] is not None else
-                (f"${t['usd_known'][0]:.2f}~{t['usd_known'][1]:.2f}+" if t["usd_known"][1] else "단가 미입력"))
-        self.tv.insert("", "end", tags=("sum",), values=("합계", "", "", span(t["calls"]), span(t["in"], fmt_tokens), span(t["out"], fmt_tokens), cost))
-        self._fit_columns()
-        self.v_skip.set("\n".join(skipped_lines(p)))
+        self._draw_table(p)
+        self.v_skip.set(self.NOTE_PDF if self.pdf_only else "\n".join(skipped_lines(p)))
         self.v_err.set("\n".join(f"어림하지 못함: {self.STEP_NAMES.get(e['step'], e['step'])} — {e['reason']}" for e in p["errors"]))
         for lab, v in ((self.l_skip, self.v_skip), (self.l_err, self.v_err)):
             (lab.grid if v.get() else lab.grid_remove)()                # 빈 줄은 자리를 차지하지 않게
@@ -756,6 +921,215 @@ class CostDialog(tk.Toplevel):
         if models and self.v_pm.get() not in models:
             self.v_pm.set(models[0])
         self._fill_price(resolve_price)
+        self._fit()
+
+    def _cells(self, p: dict) -> list:
+        """표 몸통의 줄: ('group', 이름, 부제, 꼬리표) 또는 ('row', {칸: 값}, 꾸밈). 같은 단계가 이어지면 첫 줄만 단계 이름을 갖고 span 을 센다."""
+        from .estimate import fmt_tokens
+        span = lambda v, f=lambda x: f"{x:,}": f(v[0]) if v[0] == v[1] else f"{f(v[0])}~{f(v[1])}"
+        groups = self.GROUPS.get(self.kind, self.GROUPS["run"])
+        buckets = [[] for _ in groups]
+        for r in p["rows"]:
+            k = next((i for i, g in enumerate(groups) if r.get("step") in g[3]), len(groups) - 1)
+            buckets[k].append(r)
+        out = []
+        for (name, sub, can_tag, _steps), rows in zip(groups, buckets):
+            if not rows:
+                continue
+            out.append(("group", name, sub, bool(can_tag and self.no_flags)))
+            for i, r in enumerate(rows):
+                step, _, scope = r["label"].partition(" — ")
+                first = i == 0 or rows[i - 1]["label"].partition(" — ")[0] != step
+                n = 1
+                while first and i + n < len(rows) and rows[i + n]["label"].partition(" — ")[0] == step:
+                    n += 1
+                last = i + 1 == len(rows) or rows[i + 1]["label"].partition(" — ")[0] != step
+                zero = not r["calls"][1]
+                if r["usd"] is None:
+                    cost, look = "단가 미입력", "warn"
+                else:
+                    lo, hi = f"{r['usd'][0]:.2f}", f"{r['usd'][1]:.2f}"
+                    cost, look = (f"${lo}" if lo == hi else f"${lo}~{hi}"), ("zero" if zero else "money")
+                out.append(("row", {"step": step if first else None, "scope": scope, "model": r["model"], "basis": r["basis"], "calls": span(r["calls"]),
+                                    "tin": span(r["in"], fmt_tokens), "tout": span(r["out"], fmt_tokens), "cost": cost},
+                            {"zero": zero, "cost": look, "span": n if first else 0, "last": last}))
+        return out
+
+    def _total_cells(self, p: dict) -> dict:
+        from .estimate import fmt_tokens
+        t = p["totals"]
+        span = lambda v, f=lambda x: f"{x:,}": f(v[0]) if v[0] == v[1] else f"{f(v[0])}~{f(v[1])}"
+        if t["usd"] is not None:
+            cost = f"${t['usd'][0]:.2f}~{t['usd'][1]:.2f}"
+        elif t["usd_known"][1]:
+            cost = f"${t['usd_known'][0]:.2f}~{t['usd_known'][1]:.2f}+"
+        else:
+            cost = "단가 미입력"
+        return {"calls": span(t["calls"]), "tin": span(t["in"], fmt_tokens), "tout": span(t["out"], fmt_tokens), "cost": cost}
+
+    def _widths(self, cells: list, total: dict) -> dict:
+        """열 너비(SPEC §5.8): 머리 글(굵게)과 모든 칸 값을 재고 좌우 안쪽 5+5 를 더한다. 모델은 170 에서 접고, 근거는 남은 너비(최소 150)."""
+        from tkinter import font as tkfont
+        P, F = self.app.px, self.app.fonts
+        reg, bold = tkfont.Font(self, font=F["BODY"]), tkfont.Font(self, font=F["BODY_B"])
+        pad = P(10)
+        need = {c: bold.measure(self.HEADS[c]) for c in self.COLS}
+        for kind, *rest in cells:
+            if kind != "row":
+                continue
+            vals, look = rest
+            for c in self.COLS:
+                v = vals.get(c)
+                if v:
+                    f = bold if c == "step" or (c == "cost" and look["cost"] == "money") else reg
+                    need[c] = max(need[c], f.measure(str(v)))
+        need["step"] = max(need["step"], bold.measure("합계"))
+        for c, v in total.items():
+            need[c] = max(need[c], bold.measure(v))
+        w = {c: need[c] + pad for c in self.COLS}
+        w["model"] = min(w["model"], P(170))                            # 긴 모델 이름(claude-sonnet-4-5-20250929)은 170 에서 글자 단위로 접음
+        fixed = sum(v for c, v in w.items() if c != "basis")
+        self.gutter = P(14)                                             # 스크롤 막대 자리
+        avail = work_area(self)[0] - P(80)
+        dlg_w = min(max(P(900), fixed + P(150) + P(48) + self.gutter), avail)
+        basis = dlg_w - P(48) - self.gutter - fixed
+        for c in ("scope", "step"):                                     # 아주 좁은 화면: 대상 → 단계 순으로 두 줄 접기를 허락하고 다시 셈
+            if basis >= P(150):
+                break
+            give = min(w[c] - max(P(70), w[c] // 2 + pad), P(150) - basis)
+            if give > 0:
+                w[c] -= give; basis += give
+        w["basis"] = max(P(80), basis)
+        return w
+
+    def _draw_table(self, p: dict):
+        C, P, F = self.app.colors, self.app.px, self.app.fonts
+        for child in self.tbl.winfo_children():
+            child.destroy()
+        self.cv = self.inner = self.sb = None; self.grids = ()
+        if not p["rows"]:
+            self.tbl.grid_remove(); self.content_w = P(852); self._wrap_all(); return
+        self.tbl.grid()
+        cells, total = self._cells(p), self._total_cells(p)
+        w = self.col_w = self._widths(cells, total)
+        table_w = sum(w.values())
+        self.content_w = table_w + self.gutter
+        label = self._label
+        num = lambda c: c in self.NUMERIC
+        line = lambda parent, color, r, c0=0, h=1: tk.Frame(parent, bg=color, height=max(1, P(h))).grid(row=r, column=c0, columnspan=8 - c0, sticky="ew")
+
+        def columns(g):
+            for i, c in enumerate(self.COLS):
+                g.columnconfigure(i, minsize=w[c], weight=0)
+
+        def cell(parent, r, c, text, font, fg, bg, **kw):
+            lab = label(parent, text=text, font=font, fg=fg, bg=bg, anchor="e" if num(c) else "w", justify="left", padx=P(5), pady=P(4),
+                        wraplength=w[c] - P(10) if c in ("step", "scope", "model", "basis") else 0)
+            lab.grid(row=r, column=self.COLS.index(c), sticky="nsew", **kw)
+            return lab
+
+        # 머리 줄(고정)
+        head = tk.Frame(self.tbl, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="w")
+        hg = tk.Frame(head, bg=C["QUIET"]); hg.grid(row=0, column=0, sticky="w"); columns(hg)
+        for c in self.COLS:
+            label(hg, text=self.HEADS[c], font=F["CAP_B"], fg=C["MUTED"], bg=C["QUIET"], anchor="e" if num(c) else "w", padx=P(5), pady=P(5)).grid(
+                row=0, column=self.COLS.index(c), sticky="nsew")
+        line(hg, C["LINE"], 1)
+        # 몸통(넘치면 이것만 스크롤)
+        mid = tk.Frame(self.tbl, bg=C["PANEL"]); mid.grid(row=1, column=0, sticky="w")
+        cv = self.cv = tk.Canvas(mid, bg=C["PANEL"], highlightthickness=0, bd=0, width=table_w, height=P(100), yscrollincrement=P(20))
+        cv.grid(row=0, column=0, sticky="nw")
+        self.sb = ttk.Scrollbar(mid, orient="vertical", command=cv.yview); cv.configure(yscrollcommand=self.sb.set)
+        mid.columnconfigure(1, minsize=self.gutter)
+        g = self.inner = tk.Frame(cv, bg=C["PANEL"]); cv.create_window(0, 0, window=g, anchor="nw"); columns(g)
+        g.bind("<Configure>", lambda e: cv.configure(scrollregion=(0, 0, e.width, e.height)))
+        for wdg in (cv, g):
+            wdg.bind("<MouseWheel>", self._wheel); wdg.bind("<Button-4>", self._wheel); wdg.bind("<Button-5>", self._wheel)
+        r = 0
+        for item in cells:
+            if item[0] == "group":
+                _, name, sub, tag = item
+                gh = tk.Frame(g, bg=C["PANEL"]); gh.grid(row=r, column=0, columnspan=8, sticky="ew", padx=P(5), pady=(P(5), P(2)))
+                label(gh, image=self.app.icons["receipt"], text=" " + name, compound="left", font=F["BODY_B"], fg=C["INK"]).pack(side="left")
+                if tag:
+                    tg = ttk.Label(gh, text=self.TAG, style="Tag.TLabel"); tg.pack(side="left", padx=(P(6), 0)); Tip(tg, self.TAG_TIP, self.app)
+                if sub:
+                    label(gh, text=sub, font=F["CAP"], fg=C["MUTED"]).pack(side="left", padx=(P(6), 0))
+                line(g, C["LINE"], r + 1); r += 2
+                continue
+            _, vals, look = item
+            fg = C["MUTED"] if look["zero"] else C["INK"]
+            if vals["step"] is not None:
+                cell(g, r, "step", vals["step"], F["BODY_B"], C["INK"], C["PANEL"], rowspan=2 * look["span"] - 1).configure(anchor="nw")
+            for c in self.COLS[1:]:
+                if c == "cost":
+                    font = F["BODY_B"] if look["cost"] == "money" else F["BODY"]
+                    cfg = C["WARN"] if look["cost"] == "warn" else fg
+                    cell(g, r, c, vals[c], font, cfg, C["PANEL"])
+                else:
+                    cell(g, r, c, vals[c], F["BODY"], fg, C["PANEL"])
+            if look["last"]:
+                line(g, C["LINE"], r + 1)                               # 단계 사이: LINE 온 너비
+            else:
+                line(g, C["HAIR"], r + 1, c0=1)                         # 같은 단계 안: HAIR(단계 칸은 건너뜀)
+            r += 2
+        # 합계 줄(고정): 위 겹줄(먹 1px 둘, 사이 2px)
+        foot = tk.Frame(self.tbl, bg=C["PANEL"]); foot.grid(row=2, column=0, sticky="w")
+        tg = tk.Frame(foot, bg=C["QUIET"]); tg.grid(row=0, column=0, sticky="w"); columns(tg)
+        line(tg, C["INK"], 0); tk.Frame(tg, bg=C["QUIET"], height=P(2)).grid(row=1, column=0, columnspan=8, sticky="ew"); line(tg, C["INK"], 2)
+        label(tg, text="합계", font=F["BODY_B"], fg=C["INK"], bg=C["QUIET"], anchor="w", padx=P(5), pady=P(5)).grid(row=3, column=0, columnspan=4, sticky="nsew")
+        for c, v in total.items():
+            cell(tg, 3, c, v, F["BODY_B"], C["WARN"] if v == "단가 미입력" else C["INK"], C["QUIET"]).configure(pady=P(5))
+        self.grids = (hg, g, tg)                                        # 머리 줄 · 몸통 · 합계 줄(열 너비가 같아야 칸이 맞는다)
+        self._wrap_all()
+
+    def _wrap_all(self):
+        """표 아래 글·펼침 글을 창 안 너비에 맞춰 접는다."""
+        for lab in self.wrapped:
+            lab.configure(wraplength=self.content_w)
+        self.l_adj.configure(wraplength=self.content_w - self.app.px(28))
+        self.body.columnconfigure(0, minsize=self.content_w)
+
+    def _wheel(self, e):
+        if self.cv is None or self.sb is None or not self.sb.winfo_ismapped():
+            return "break"
+        step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+        self.cv.yview_scroll(step, "units"); return "break"
+
+    def _fit_why(self):
+        """[아니요] 단락(Text)의 높이를 접힌 줄 수에 맞춘다."""
+        t = self.why
+        if t is None or not t.winfo_exists():
+            return
+        try:
+            t.tk.call(t._w, "sync")
+            n = t.count("1.0", "end", "displaylines")
+            n = n[0] if isinstance(n, tuple) else int(n or 1)
+        except (tk.TclError, TypeError, IndexError):
+            return
+        if n and int(t.cget("height")) != n:
+            t.configure(height=n); self.after_idle(self._fit)
+
+    def _fit(self):
+        """표 몸통 높이: 다 보이면 그대로, 작업 영역 − 40 을 넘으면 몸통만 스크롤(머리·금액·단락·펼친 칸·바닥 단추 줄은 늘 보임)."""
+        if self.cv is None:
+            return
+        P = self.app.px
+        self.update_idletasks()
+        inner = self.inner.winfo_reqheight()
+        other = self.winfo_reqheight() - self.cv.winfo_reqheight()
+        room = work_area(self)[1] - P(40) - other
+        h = max(P(90), min(inner, room))
+        self.cv.configure(height=h)
+        if inner > h + 1:
+            self.sb.grid(row=0, column=1, sticky="ns", padx=(P(4), 0))
+        else:
+            self.sb.grid_remove(); self.cv.yview_moveto(0)
+
+    def _place(self):
+        self.update_idletasks()
+        self._fit_why()
+        place_over(self, self.app)
 
     def _fill_price(self, resolve=None):
         if resolve is None:
@@ -765,35 +1139,21 @@ class CostDialog(tk.Toplevel):
         for ent, v in ((self.e_in, f"{pr['in']:g}" if pr else ""), (self.e_out, f"{pr['out']:g}" if pr else ""), (self.e_fx, f"{fx:.0f}" if fx else "")):
             ent.delete(0, "end"); ent.insert(0, v)
 
-    def _fit_columns(self):
-        """칸 너비를 가장 긴 값(합계 줄은 굵은 글씨)에 맞춘다 — 화면 배율이 커도 '1,200만~1,800만' 이 잘리지 않게."""
-        try:
-            from tkinter import font as tkfont
-            reg, bold = tkfont.Font(self, font=self.app.font_base), tkfont.Font(self, font=self.app.font_h)
-            pad = self.app.px(22)
-            for k, c in enumerate(self.tv["columns"]):
-                need = bold.measure(self.tv.heading(c, "text"))
-                for it in self.tv.get_children():
-                    v = str(self.tv.item(it, "values")[k]); f = bold if "sum" in self.tv.item(it, "tags") else reg
-                    need = max(need, f.measure(v))
-                if need + pad > int(self.tv.column(c, "width")):
-                    self.tv.column(c, width=need + pad)
-        except (tk.TclError, IndexError):
-            pass
-
     def toggle_adj(self):
         self.adj_shown = not self.adj_shown
         if self.adj_shown:
-            self.adj.grid(row=9, column=0, columnspan=2, sticky="we"); self.b_adj.configure(text="단가·환율 접기 ▴")
+            self.adj.grid(row=8, column=0, sticky="ew", pady=(self.app.px(10), 0)); self.b_adj.configure(text="단가·환율 접기 ▴")
         else:
-            self.adj.grid_forget(); self.b_adj.configure(text="단가·환율 고치기 ▾")
+            self.adj.grid_remove(); self.b_adj.configure(text="단가·환율 고치기 ▾")
+        self._fit()
 
     def toggle_more(self):
         self.more_shown = not self.more_shown
         if self.more_shown:
-            self.more.grid(row=8, column=0, columnspan=2, sticky="we"); self.b_more.configure(text="근거·가정 접기 ▴")
+            self.more.grid(row=7, column=0, sticky="ew", pady=(self.app.px(10), 0)); self.b_more.configure(text="근거·가정 접기 ▴")
         else:
-            self.more.grid_forget(); self.b_more.configure(text="근거·가정 ▾")
+            self.more.grid_remove(); self.b_more.configure(text="근거·가정 ▾")
+        self._fit()
 
     # ----- 단추 -----
     def save(self):
@@ -811,6 +1171,7 @@ class CostDialog(tk.Toplevel):
         model = self.v_pm.get().strip()
         prices = dict(self.app.cfg.get("prices") or {}); prices.pop(model, None)
         self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = ""; write_config(self.app)
+        self.v_recalc.set("")
         self.render()
 
     def done(self, choice):
@@ -879,13 +1240,14 @@ class Tip:
         self.win = tw = tk.Toplevel(self.w); tw.wm_overrideredirect(True)
         try: tw.attributes("-topmost", True)
         except tk.TclError: pass
-        tk.Label(tw, text=self.text, bg=C["INK"], fg="#f7f1e6", font=self.app.font_small, justify="left", wraplength=P(380), padx=P(10), pady=P(6)).pack()
+        tk.Label(tw, text=self.text, bg=C["INK"], fg=C["PANEL"], font=self.app.font_small, justify="left", wraplength=P(380), padx=P(10), pady=P(6)).pack()
         tw.update_idletasks()
         x = min(self.w.winfo_rootx() + P(6), self.w.winfo_screenwidth() - tw.winfo_reqwidth() - 8)
         y = self.w.winfo_rooty() + self.w.winfo_height() + P(6)
         tw.geometry(f"+{max(0, x)}+{y}")
 
 
+ABOUT = "한자·한글 문헌 스캔 PDF·이미지를 지침대로 판독해 HWPX·문자 PDF로"     # 머리띠 이름의 풍선 도움말(창 제목에도)
 TAB_HINTS = ("스캔 PDF를 판독해 HWPX·문자 PDF로 만듭니다", "이미 입력된 HWPX를 PDF 원본과 대조해 고친 사본을 만듭니다",
              "이미지·화면 캡처를 붙여넣고 HWPX·문자 PDF로 만듭니다", "판독기·모델·자동 교정·문서 옵션을 설정합니다")
 
@@ -896,7 +1258,7 @@ class App(tk.Tk):
         set_windows_app_id()
         super().__init__()
         apply_window_icon(self)
-        self.title(f"{APP_NAME} · 연어OCR {__version__}")
+        self.title(f"{APP_NAME} · 연어OCR {__version__} — {ABOUT}")
         self.cfg = load_config()
         self._cfg_loaded = copy.deepcopy(self.cfg)             # 읽은 그대로 — 저장할 때 이 창이 바꾼 값만 파일에 얹는다(write_config)
         self._style()
@@ -932,6 +1294,16 @@ class App(tk.Tk):
     # ---------- 화면 ----------
     FONT_CANDIDATES = ("Pretendard", "Pretendard Variable", "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "나눔고딕")
     MONO_CANDIDATES = ("D2Coding", "D2Coding ligature", "Cascadia Mono", "Consolas", "Noto Sans Mono CJK KR", "Menlo", "DejaVu Sans Mono")
+    DISPLAY_CANDIDATES = ("바탕", "Batang", "Noto Serif CJK KR", "AppleMyungjo", "Nanum Myeongjo")    # 책 제목·금액·큰 숫자(16pt 이상에만 — 작은 굵은 바탕은 거칠다)
+    # 색 토큰(밝은 판, 대비는 WCAG 식으로 잰 값 — 디자인 명세 §2). 인주(SEAL)는 돈 드는 단추와 도장에만, 실패는 RED 테두리 + '!'(채우지 않음).
+    PALETTE = dict(BG="#f3eee3", PANEL="#fcfaf5", QUIET="#f6f1e6", FIELD="#ffffff", DIS_FIELD="#f0ebe1", LINE="#e2d9c8", HAIR="#efe8db",
+                   STRIPE="#faf7f0", RULE="#cbbfa9", EDGE="#8f8271", INK="#221c18", INK_HI="#3d342e", MUTED="#6b6054",
+                   SEAL="#b8391f", SEAL_HI="#93291a", SEAL_SOFT="#f5e2db", SEAL_LINE="#f0c9bd", BAND="#7f7262",
+                   GREEN="#2f6f4a", BLUE="#2b5a8c", RED="#8c1d18", WARN="#875a12", SEL="#f1e5c9")
+    # 예전 이름 → 새 토큰(아직 옛 이름을 쓰는 화면도 새 색으로). 옻칠(ACC)은 먹(INK)으로, 금빛 선(GOLD)은 없앰.
+    LEGACY_COLORS = {"HEAD": "QUIET", "DIS": "QUIET", "BTN_HI": "QUIET", "BTN": "FIELD", "BTN_DN": "LINE", "TRACK": "LINE", "DIS_LINE": "LINE",
+                     "FLINE": "RULE", "TRACK_HI": "RULE", "DIS_INK": "EDGE", "ACC": "INK", "FOCUS": "INK", "ACC_HI": "INK_HI", "ACC_DN": "SEAL_HI",
+                     "RED_SOFT": "SEAL_SOFT"}
 
     def _pick_font(self, candidates: tuple[str, ...], fallback: str) -> str:
         """설치된 글꼴 가운데 앞에서부터 처음 있는 것. Pretendard(또는 D2Coding)가 있으면 그것을, 없으면 시스템 한글 글꼴을 쓴다."""
@@ -946,8 +1318,9 @@ class App(tk.Tk):
         return fallback
 
     def _style(self):
-        """종이색 바탕에 옻칠색 강조. clam 테마 위에 둥근 단추·카드·입력칸, ✓ 체크 상자, 끝까지 차는 진행 막대를
-        그림(gui_art)으로 입힌다(0.6.3). 단추는 세 단계 위계 — 강조(실행) · 보통(테두리 단추) · 글자 단추(펼치기)."""
+        """서재(한지·먹·인주): 종이색 바탕에 먹 글자, 돈 드는 단추만 인주색. clam 테마 위에 둥근 단추·카드·입력칸, ✓ 체크 상자, 밑줄 탭,
+        끝까지 차는 진행 막대를 그림(gui_art)으로 입힌다. 단추 위계 — 주 실행(인주 채움) · 버금 실행(인주 테두리) · 먹 채움(돈 안 드는 주 단추) ·
+        강조(먹 테두리) · 보통(테두리 단추) · 글자 단추(밑줄)·펼침 단추(▾). 글꼴 이름(F_…)은 디자인 명세 §3."""
         from . import gui_art as A
         st = ttk.Style(self)
         try:
@@ -962,10 +1335,15 @@ class App(tk.Tk):
         sys_base = "맑은 고딕" if sys.platform.startswith("win") else ("Apple SD Gothic Neo" if sys.platform == "darwin" else "Noto Sans CJK KR")
         base = self._pick_font(self.FONT_CANDIDATES, sys_base)
         mono = self._pick_font(self.MONO_CANDIDATES, "Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono")
-        self.font_base, self.font_small, self.font_h = (base, 10), (base, 9), (base, 10, "bold")
-        self.font_title, self.font_sub, self.font_big = (base, 17, "bold"), (base, 10), (base, 12, "bold")
-        self.font_card, self.font_btn_h = (base, 11, "bold"), (base, 11, "bold")
-        self.font_mono = (mono, 10)
+        disp = self._pick_font(self.DISPLAY_CANDIDATES, base)       # 바탕이 없으면 본문 글꼴 굵게
+        F = self.fonts = {"APP": (disp, 16, "bold"), "TITLE": (disp, 21, "bold"), "BIG": (disp, 24, "bold"), "NUM": (disp, 16, "bold"), "DLG": (disp, 16, "bold"),
+                          "UNIT": (base, 12), "SECTION": (base, 11, "bold"), "SEAL": (base, 11, "bold"), "SEAL_S": (base, 9, "bold"), "USD": (base, 13, "bold"),
+                          "TAB": (base, 11), "TAB_ON": (base, 11, "bold"), "RUN": (base, 11, "bold"), "BTN_L": (base, 11), "BTN_L_B": (base, 11, "bold"),
+                          "BODY": (base, 10), "BODY_B": (base, 10, "bold"), "CAP": (base, 9), "CAP_B": (base, 9, "bold"), "MONO": (mono, 10), "MONO_L": (mono, 11)}
+        self.font_base, self.font_small, self.font_h = F["BODY"], F["CAP"], F["BODY_B"]
+        self.font_title, self.font_sub, self.font_big = F["APP"], F["BODY"], (base, 12, "bold")
+        self.font_card, self.font_btn_h = F["SECTION"], F["RUN"]
+        self.font_mono = F["MONO"]
         # 기본 글꼴을 한글 글꼴로 바꾼다. (option_add("*Font") 는 ttk 이름표의 스타일 글꼴까지 덮어써 카드 제목·안내 글의 굵기·크기가 사라졌다)
         try:
             from tkinter import font as tkfont
@@ -975,11 +1353,8 @@ class App(tk.Tk):
         except Exception:
             self.option_add("*Font", self.font_base)
         self.option_add("*TCombobox*Listbox.font", self.font_base)
-        C = self.colors = dict(BG="#f3efe7", PANEL="#fdfcf9", LINE="#e3dbcc", FLINE="#d0c6b4", EDGE="#9d917f", FOCUS="#9a7637", INK="#2a221d", MUTED="#6b6155",
-                               ACC="#3d1d16", ACC_HI="#5c2c21", ACC_DN="#2a130e", GOLD="#b8934e", RED="#b4271f", RED_SOFT="#fbeceb",
-                               GREEN="#2f6f4a", FIELD="#ffffff", BTN="#ffffff", BTN_HI="#f8f2e6", BTN_DN="#efe5d1",
-                               TRACK="#e7e0d1", TRACK_HI="#dcd2bf", SEL="#f1e5c9", STRIPE="#faf7f0", HEAD="#f4efe4",
-                               DIS="#f5f2ec", DIS_LINE="#e6e0d5", DIS_INK="#ada395")
+        C = self.colors = dict(self.PALETTE)
+        C.update({old: C[new] for old, new in self.LEGACY_COLORS.items()})
         self.configure(bg=C["BG"])
         self.option_add("*TCombobox*Listbox.background", C["FIELD"])
         self.option_add("*TCombobox*Listbox.selectBackground", C["SEL"])
@@ -990,131 +1365,192 @@ class App(tk.Tk):
             self._img[key] = tk.PhotoImage(master=self, data=b64)
             return self._img[key]
 
+        def box(key: str, r: float, fill, line=None, lw: float = 1.0, ring=None, ring_w: float = 0.0, gap: float = 0.0, stretch=(96, 24)):
+            """9칸 늘이기 둥근 판 그림과 그 테두리 폭(모서리 + 고리 자리)."""
+            b = int(math.ceil(r + ring_w + gap)) + 1
+            return img(key, A.rounded_box(2 * b + stretch[0], 2 * b + stretch[1], r, fill, line, lw, ring=ring, ring_w=ring_w, ring_gap=gap)), b
+
         bw = 1.0 * self.scale
         # ---- 바탕·글자 ----
-        st.configure(".", background=C["BG"], foreground=C["INK"], font=self.font_base, bordercolor=C["LINE"], troughcolor=C["TRACK"],
+        st.configure(".", background=C["BG"], foreground=C["INK"], font=F["BODY"], bordercolor=C["LINE"], troughcolor=C["LINE"],
                      focuscolor=C["BG"], selectbackground=C["SEL"], selectforeground=C["INK"], insertcolor=C["INK"])
         st.configure("TFrame", background=C["BG"]); st.configure("Panel.TFrame", background=C["PANEL"])
         st.configure("TLabel", background=C["BG"], foreground=C["INK"])
         st.configure("Panel.TLabel", background=C["PANEL"])
         st.configure("Field.TLabel", background=C["PANEL"], foreground=C["INK"])
-        st.configure("Hint.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=self.font_small)
-        st.configure("PageHint.TLabel", background=C["BG"], foreground=C["MUTED"], font=self.font_small)
-        st.configure("CardTitle.TLabel", background=C["PANEL"], foreground=C["ACC"], font=self.font_card)
-        st.configure("Section.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=self.font_h)
-        st.configure("Status.TLabel", background=C["BG"], foreground=C["ACC"], font=self.font_h)
-        st.configure("Prog.TLabel", background=C["BG"], foreground=C["MUTED"], font=self.font_base)
+        st.configure("Hint.TLabel", background=C["PANEL"], foreground=C["MUTED"], font=F["CAP"])
+        st.configure("PageHint.TLabel", background=C["BG"], foreground=C["MUTED"], font=F["CAP"])
+        st.configure("CardTitle.TLabel", background=C["PANEL"], foreground=C["INK"], font=F["SECTION"])
+        st.configure("Section.TLabel", background=C["PANEL"], foreground=C["INK"], font=F["SECTION"])
+        st.configure("Status.TLabel", background=C["BG"], foreground=C["INK"], font=F["BODY_B"])
+        st.configure("Prog.TLabel", background=C["BG"], foreground=C["MUTED"], font=F["BODY"])
         # 가는 선: clam 의 구분선은 홈 파인 두 줄(짙은 그림자)로 그려져 무거워 보이므로 한 줄짜리 그림으로 바꾼다
         lh = max(1, P(1))
         st.element_create("Rule.line", "image", img("rule", A.rounded_box(64, lh, 0, C["LINE"])), sticky="ew", height=lh)
         st.layout("TSeparator", [("Rule.line", {"sticky": "ew"})]); st.layout("Horizontal.TSeparator", [("Rule.line", {"sticky": "ew"})])
-        # ---- 카드(둥근 모서리 판) ----
-        r = P(10); nw, bd_ = A.stretch_size(r, 192); nh, _ = A.stretch_size(r, 64)
-        st.element_create("Card.border", "image", img("card", A.rounded_box(nw, nh, r, C["PANEL"], C["LINE"], bw)), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_)
+        # ---- 카드(반지름 10 · LINE 테두리) · 조용한 판(QUIET, 반지름 8, 테두리 없음) ----
+        im, b = box("card", P(10), C["PANEL"], C["LINE"], bw, stretch=(192, 64))
+        st.element_create("Card.border", "image", im, border=b, sticky="nsew", width=2 * b, height=2 * b)
         st.layout("Card.TFrame", [("Card.border", {"sticky": "nsew"})])
         st.configure("Card.TFrame", background=C["BG"])
+        im, b = box("quiet", P(8), C["QUIET"], stretch=(128, 48))
+        st.element_create("Quiet.border", "image", im, border=b, sticky="nsew", width=2 * b, height=2 * b)
+        st.layout("Quiet.TFrame", [("Quiet.border", {"sticky": "nsew"})])
+        st.configure("Quiet.TFrame", background=C["PANEL"])
+        # ---- 알약(판 번호·명령 이름)·꼬리표([아니요]면 뺌) — 글 길이에 맞춰 늘어나는 테두리 이름표 ----
+        im, b = box("chip", P(10), C["PANEL"], C["EDGE"], bw, stretch=(32, 2))
+        st.element_create("Chip.border", "image", im, border=b, sticky="nsew", width=2 * b, height=2 * b, padding=(P(8), P(1)))
+        st.layout("Chip.TLabel", [("Chip.border", {"sticky": "nsew", "children": [("Label.padding", {"sticky": "nsew", "children": [("Label.label", {"sticky": "nsew"})]})]})])
+        st.configure("Chip.TLabel", background=C["PANEL"], foreground=C["INK"], font=F["CAP"], padding=(P(0), 0), anchor="center")
+        im, b = box("tag", P(4), C["PANEL"], C["EDGE"], bw, stretch=(32, 8))
+        st.element_create("Tag.border", "image", im, border=b, sticky="nsew", width=2 * b, height=P(18), padding=(P(5), 0))
+        st.layout("Tag.TLabel", [("Tag.border", {"sticky": "nsew", "children": [("Label.padding", {"sticky": "nsew", "children": [("Label.label", {"sticky": "nsew"})]})]})])
+        st.configure("Tag.TLabel", background=C["PANEL"], foreground=C["INK"], font=F["CAP"], padding=(P(0), 0), anchor="center")
+        st.configure("QuietTag.TLabel", background=C["QUIET"])
 
-        # ---- 단추: 강조(실행) · 보통(테두리) · 중지 ----
-        def button_style(name: str, look: dict, pad, font, fg: str, fg_dis: str, on: str):
-            r = P(7); nw, bd_ = A.stretch_size(r, 96); nh, _ = A.stretch_size(r, 24)
-            ims = {k: img(f"{name}_{k}", A.rounded_box(nw, nh, r, fill, line, bw)) for k, (fill, line) in look.items()}
-            el = f"{name}.border"
-            st.element_create(el, "image", ims["normal"], ("disabled", ims["disabled"]), ("pressed", ims["pressed"]),
-                              ("active", ims["active"]), ("focus", ims["focus"]), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(2))
-            sname = "TButton" if name == "Btn" else f"{name}.TButton"
-            st.layout(sname, [(el, {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
-            st.configure(sname, padding=pad, font=font, foreground=fg, background=on, anchor="center")
-            st.map(sname, foreground=[("disabled", fg_dis)], background=[("active", on), ("pressed", on), ("disabled", on)])
+        # ---- 단추 ----
+        def button_style(sname: str, looks: dict, pad, font, fg: str, minh: int, r: float = 7, bg: str = C["PANEL"], fg_map=(),
+                         ring: str | None = None, space: float = 0.0, focus: str = C["INK"]):
+            """looks: 상태(normal·active·pressed·disabled) → (채움, 테두리, 테두리 두께). space 는 바깥 고리 자리(고리가 없어도 비워 둠)."""
+            rw = P(2) if space else 0.0
+            gap = space - rw if space else 0.0
+            ims = {}
+            for k, (fill, line, lw) in looks.items():
+                ims[k], b = box(f"{sname}_{k}", P(r), fill, line, lw * self.scale, ring=ring, ring_w=rw, gap=gap)
+            el = sname.replace(".TButton", "") + ".border" if sname != "TButton" else "Btn.border"
+            st.element_create(el, "image", ims["normal"], ("disabled", ims["disabled"]), ("pressed", ims["pressed"]), ("active", ims["active"]),
+                              border=b, sticky="nsew", width=2 * b, height=P(minh) + 2 * int(space), padding=P(2) + int(space))
+            st.layout(sname, [(el, {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [
+                ("Button.focus", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})]})])
+            st.configure(sname, padding=pad, font=font, foreground=fg, background=bg, anchor="center", focuscolor=focus, focusthickness=1, width=-6)
+            st.map(sname, foreground=[("disabled", C["EDGE"]), *fg_map], background=[("active", bg), ("pressed", bg), ("disabled", bg)])
 
-        button_style("Btn", {"normal": (C["BTN"], C["FLINE"]), "active": (C["BTN_HI"], C["GOLD"]), "pressed": (C["BTN_DN"], C["GOLD"]),
-                             "disabled": (C["DIS"], C["DIS_LINE"]), "focus": (C["BTN"], C["FOCUS"])}, (P(14), P(6)), self.font_base, C["INK"], C["DIS_INK"], C["PANEL"])
-        button_style("Accent", {"normal": (C["ACC"], None), "active": (C["ACC_HI"], None), "pressed": (C["ACC_DN"], None),
-                                "disabled": ("#c2b4a9", None), "focus": (C["ACC"], C["FOCUS"])}, (P(24), P(9)), self.font_btn_h, "#fff8ec", "#f7f1e8", C["PANEL"])
-        button_style("Stop", {"normal": (C["BTN"], "#e5c0bb"), "active": (C["RED_SOFT"], C["RED"]), "pressed": ("#f6dcd8", C["RED"]),
-                              "disabled": (C["DIS"], C["DIS_LINE"]), "focus": (C["BTN"], C["RED"])}, (P(18), P(9)), self.font_btn_h, C["RED"], C["DIS_INK"], C["PANEL"])
-        st.configure("TButton", width=-6)                            # clam 기본 최소 11글자 → 짧은 단추([전체]·[보기])가 지나치게 넓지 않게
-        st.configure("Tool.TButton", padding=(P(10), P(6)))
+        off = (C["QUIET"], C["LINE"], 1.0)                           # 꺼진 단추: QUIET 판 · LINE 테두리 · EDGE 글자
+        normal = {"normal": (C["FIELD"], C["EDGE"], 1.0), "active": (C["QUIET"], C["INK"], 1.0), "pressed": (C["LINE"], C["INK"], 1.0), "disabled": off}
+        seal = {"normal": (C["SEAL"], None, 1.0), "active": (C["SEAL_HI"], None, 1.0), "pressed": (C["SEAL_HI"], None, 1.0), "disabled": off}
+        seal_out = {"normal": (C["FIELD"], C["SEAL"], 1.5), "active": (C["SEAL_SOFT"], C["SEAL_HI"], 1.5), "pressed": (C["SEAL_SOFT"], C["SEAL_HI"], 1.5), "disabled": off}
+        ink_line = {"normal": (C["FIELD"], C["INK"], 1.5), "active": (C["QUIET"], C["INK"], 1.5), "pressed": (C["LINE"], C["INK"], 1.5), "disabled": off}
+        ink = {"normal": (C["INK"], None, 1.0), "active": (C["INK_HI"], None, 1.0), "pressed": (C["INK_HI"], None, 1.0), "disabled": off}
+        seal_fg = (("active", C["SEAL_HI"]), ("pressed", C["SEAL_HI"]))
+        button_style("TButton", normal, (P(14), P(4)), F["BODY"], C["INK"], 32)                                   # 보통(테두리)
+        button_style("Small.TButton", normal, (P(10), P(2)), F["CAP"], C["INK"], 28)                              # 판 안의 작은 단추
+        button_style("QuietSmall.TButton", normal, (P(10), P(2)), F["BODY"], C["INK"], 28, bg=C["QUIET"])        # 조용한 판(QUIET) 위의 작은 단추
+        button_style("Seal.TButton", seal, (P(18), P(6)), F["RUN"], "#ffffff", 48, r=8, focus="#ffffff")                            # 주 실행 — 돈이 듦(인주 채움)
+        button_style("SealOut.TButton", seal_out, (P(16), P(4)), F["BTN_L_B"], C["SEAL"], 40, r=8, fg_map=seal_fg)  # 버금 실행 — 돈이 들지만 주가 아님(인주 테두리)
+        button_style("Stop.TButton", ink_line, (P(16), P(4)), F["BTN_L_B"], C["INK"], 40, r=8)                    # 중지(실행 전에는 꺼진 모양)
+        button_style("Emph.TButton", ink_line, (P(14), P(4)), F["BODY_B"], C["INK"], 32)                          # 끝난 뒤 그 실행의 결과 단추
+        button_style("Ink.TButton", ink, (P(16), P(4)), F["BODY_B"], "#ffffff", 32, focus="#ffffff")                               # 먹 채움 — 돈이 들지 않는 주 단추
+        button_style("Accent.TButton", ink, (P(16), P(4)), F["BODY_B"], "#ffffff", 32, focus="#ffffff")                            # (작은 창의 주 단추 — 먹 채움과 같음)
+        # 비용 창 바닥 단추(높이 40): 기본 단추에만 먹 고리(2px, 틈 2px). 고리가 없는 단추도 같은 자리를 비워 두어 기본이 바뀌어도 단추 크기가 같다
+        sp = P(2) + P(2)
+        button_style("Dlg.TButton", normal, (P(16), P(4)), F["BTN_L"], C["INK"], 40, r=8, space=sp)
+        button_style("DlgDef.TButton", normal, (P(16), P(4)), F["BTN_L"], C["INK"], 40, r=8, space=sp, ring=C["INK"])
+        button_style("DlgSealDef.TButton", seal, (P(18), P(4)), F["BTN_L_B"], "#ffffff", 40, r=8, space=sp, ring=C["INK"], focus="#ffffff")
+        button_style("DlgSealOut.TButton", seal_out, (P(18), P(4)), F["BTN_L_B"], C["SEAL"], 40, r=8, space=sp, fg_map=seal_fg)
+        st.configure("Tool.TButton", padding=(P(10), P(3)))
         st.configure("Page.TButton", background=C["BG"]); st.map("Page.TButton", background=[("active", C["BG"]), ("pressed", C["BG"]), ("disabled", C["BG"])])
-        # 글자 단추(펼치기·접기): 테두리 없이 강조색 글자
-        for sname, bg in (("Link.TButton", C["PANEL"]), ("PageLink.TButton", C["BG"])):
-            st.layout(sname, [("Button.padding", {"sticky": "nsew", "children": [("Button.focus", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
-            st.configure(sname, background=bg, foreground=C["ACC"], font=self.font_h, padding=(P(4), P(3)), width=0, focuscolor=C["FOCUS"], focusthickness=max(1, P(1)))
-            st.map(sname, foreground=[("disabled", C["DIS_INK"]), ("active", C["ACC_HI"])], background=[("active", bg)],
-                   font=[("active", (self.font_h[0], self.font_h[1], "bold", "underline"))])
-        # ---- 체크 상자(✓)·라디오 ----
+        # 글자 단추(밑줄 — 탭을 옮기거나 여는 것)·펼침 단추(▾ — 밑줄 없음): 마우스를 올리면 QUIET 판
+        clear, b = box("link_n", P(4), None, stretch=(32, 8))
+        hover = img("link_h", A.rounded_box(2 * b + 32, 2 * b + 8, P(4), C["QUIET"]))
+        st.element_create("Link.border", "image", clear, ("active", hover), border=b, sticky="nsew", width=2 * b, height=2 * b, padding=0)
+        under = (F["BODY_B"][0], F["BODY_B"][1], "bold", "underline")
+        for sname, bg, font in (("Link.TButton", C["PANEL"], under), ("PageLink.TButton", C["BG"], under),
+                                ("Toggle.TButton", C["PANEL"], F["BODY_B"]), ("PageToggle.TButton", C["BG"], F["BODY_B"])):
+            st.layout(sname, [("Link.border", {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [
+                ("Button.focus", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})]})])
+            st.configure(sname, background=bg, foreground=C["INK"], font=font, padding=(P(4), P(2)), width=0, focuscolor=C["INK"], focusthickness=max(1, P(1)))
+            st.map(sname, foreground=[("disabled", C["EDGE"])], background=[("active", bg)], font=[("disabled", F["BODY_B"])])
+        # ---- 머리띠의 밑줄 탭: 고른 탭은 INK 굵게 + 아래 3px INK 막대, 보통은 MUTED, 실행 중 잠긴 탭은 EDGE ----
+        bar_h = max(2, P(3))
+        tab_n = img("tab_n", A.underline_box(24, 24, C["PANEL"], None, bar_h))
+        tab_s = img("tab_s", A.underline_box(24, 24, C["PANEL"], C["INK"], bar_h))
+        st.element_create("Tab.border", "image", tab_n, ("selected", tab_s), border=(2, 2, 2, bar_h + 2), sticky="nsew", padding=0)
+        st.layout("Tab.TRadiobutton", [("Tab.border", {"sticky": "nsew", "children": [("Radiobutton.padding", {"sticky": "nsew", "children": [
+            ("Radiobutton.focus", {"sticky": "", "children": [("Radiobutton.label", {"sticky": "nsew"})]})]})]})])
+        st.configure("Tab.TRadiobutton", background=C["PANEL"], foreground=C["MUTED"], font=F["TAB"], padding=(P(12), P(3), P(12), bar_h + P(3)),
+                     anchor="center", focuscolor=C["INK"], focusthickness=1)
+        st.map("Tab.TRadiobutton", foreground=[("selected", C["INK"]), ("disabled", C["EDGE"]), ("active", C["INK"])], font=[("selected", F["TAB_ON"])],
+               background=[("active", C["PANEL"]), ("disabled", C["PANEL"])])
+        # ---- 체크 상자(✓)·라디오: 켜면 먹 채움. 키보드 초점은 글자 둘레 점선(마우스로 누르면 초점을 돌려 보이지 않음) ----
         cs, gap = P(16), P(8)
-        G = C["FOCUS"]                                               # 초점 고리(바탕 대비 3:1 이상)
-        ck = {k: img("chk_" + k, A.checkbox(cs, on, acc, edge, gap=gap, hover=hv, disabled=ds, ring=rg))
-              for k, on, acc, edge, hv, ds, rg in (("off", False, C["ACC"], C["EDGE"], False, False, None), ("off_h", False, C["ACC"], C["EDGE"], True, False, None),
-                                                   ("off_f", False, C["ACC"], C["EDGE"], False, False, G), ("on", True, C["ACC"], C["EDGE"], False, False, None),
-                                                   ("on_h", True, C["ACC_HI"], C["EDGE"], False, False, None), ("on_f", True, C["ACC"], C["EDGE"], False, False, G),
-                                                   ("dis_off", False, C["ACC"], C["EDGE"], False, True, None), ("dis_on", True, C["ACC"], C["EDGE"], False, True, None))}
+        G = C["INK"]
+        ck = {k: img("chk_" + k, A.checkbox(cs, on, acc, C["EDGE"], gap=gap, hover=hv, disabled=ds, ring=rg))
+              for k, on, acc, hv, ds, rg in (("off", False, C["INK"], False, False, None), ("off_h", False, C["INK"], True, False, None),
+                                             ("off_f", False, C["INK"], False, False, G), ("on", True, C["INK"], False, False, None),
+                                             ("on_h", True, C["INK_HI"], False, False, None), ("on_f", True, C["INK"], False, False, None),
+                                             ("dis_off", False, C["INK"], False, True, None), ("dis_on", True, C["INK"], False, True, None))}
         st.element_create("Check.indicator", "image", ck["off"], ("disabled", "selected", ck["dis_on"]), ("disabled", ck["dis_off"]),
                           ("selected", "active", ck["on_h"]), ("selected", "focus", ck["on_f"]), ("selected", ck["on"]), ("active", ck["off_h"]), ("focus", ck["off_f"]), sticky="")
-        rd = {k: img("rad_" + k, A.radio(cs, on, acc, edge, gap=gap, hover=hv, disabled=ds, ring=rg))
-              for k, on, acc, edge, hv, ds, rg in (("off", False, C["ACC"], C["EDGE"], False, False, None), ("off_h", False, C["ACC"], C["EDGE"], True, False, None),
-                                                   ("off_f", False, C["ACC"], C["EDGE"], False, False, G), ("on", True, C["ACC"], C["EDGE"], False, False, None),
-                                                   ("on_f", True, C["ACC"], C["EDGE"], False, False, G), ("dis_off", False, C["ACC"], C["EDGE"], False, True, None),
-                                                   ("dis_on", True, C["ACC"], C["EDGE"], False, True, None))}
+        rd = {k: img("rad_" + k, A.radio(cs, on, C["INK"], C["EDGE"], gap=gap, hover=hv, disabled=ds, ring=rg))
+              for k, on, hv, ds, rg in (("off", False, False, False, None), ("off_h", False, True, False, None), ("off_f", False, False, False, G),
+                                        ("on", True, False, False, None), ("on_f", True, False, False, None), ("dis_off", False, False, True, None),
+                                        ("dis_on", True, False, True, None))}
         st.element_create("Radio.indicator", "image", rd["off"], ("disabled", "selected", rd["dis_on"]), ("disabled", rd["dis_off"]),
                           ("selected", "focus", rd["on_f"]), ("selected", rd["on"]), ("active", rd["off_h"]), ("focus", rd["off_f"]), sticky="")
         for w, ind in (("Checkbutton", "Check.indicator"), ("Radiobutton", "Radio.indicator")):
-            st.layout(f"T{w}", [(f"{w}.padding", {"sticky": "nswe", "children": [(ind, {"side": "left", "sticky": ""}), (f"{w}.label", {"side": "left", "sticky": "nswe"})]})])
-            st.configure(f"T{w}", background=C["PANEL"], foreground=C["INK"], padding=(0, P(3), P(4), P(3)))
-            st.map(f"T{w}", background=[("active", C["PANEL"]), ("disabled", C["PANEL"])], foreground=[("disabled", C["DIS_INK"])])
-        # ---- 두 갈래 고르기(탭 대신): 붙어 있는 알약 모양 ----
+            st.layout(f"T{w}", [(f"{w}.padding", {"sticky": "nswe", "children": [(ind, {"side": "left", "sticky": ""}),
+                                (f"{w}.focus", {"side": "left", "sticky": "", "children": [(f"{w}.label", {"sticky": "nswe"})]})]})])
+            st.configure(f"T{w}", background=C["PANEL"], foreground=C["INK"], padding=(0, P(3), P(4), P(3)), focuscolor=C["INK"], focusthickness=1)
+            st.map(f"T{w}", background=[("active", C["PANEL"]), ("disabled", C["PANEL"])], foreground=[("disabled", C["EDGE"])])
+        # ---- 두 갈래 고르기(진행 기록 | 쪽별 상태): 붙어 있는 알약 모양 ----
         r = P(9); nw, bd_ = A.stretch_size(r, 96); nh, _ = A.stretch_size(r, 16)
         for side, corners in (("L", "l"), ("M", ""), ("R", "r")):
-            on, off, hov, on_f, off_f = (img(f"seg{side}_{k}", A.rounded_box(nw, nh, r, fill, line, bw * 1.6, corners=corners))
-                                         for k, fill, line in (("on", C["ACC"], None), ("off", C["TRACK"], None), ("h", C["TRACK_HI"], None),
-                                                               ("on_f", C["ACC"], G), ("off_f", C["TRACK"], G)))
-            st.element_create(f"Seg{side}.border", "image", off, ("selected", "focus", on_f), ("selected", on), ("focus", off_f), ("active", hov),
+            on, off_, hov, on_f, off_f = (img(f"seg{side}_{k}", A.rounded_box(nw, nh, r, fill, line, bw * 1.6, corners=corners))
+                                          for k, fill, line in (("on", C["INK"], None), ("off", C["LINE"], None), ("h", C["RULE"], None),
+                                                                ("on_f", C["INK"], C["EDGE"]), ("off_f", C["LINE"], C["INK"])))
+            st.element_create(f"Seg{side}.border", "image", off_, ("selected", "focus", on_f), ("selected", on), ("focus", off_f), ("active", hov),
                               border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(2))
             sname = f"Seg{side}.TRadiobutton"
             st.layout(sname, [(f"Seg{side}.border", {"sticky": "nsew", "children": [("Radiobutton.padding", {"sticky": "nsew", "children": [("Radiobutton.label", {"sticky": "nsew"})]})]})])
-            st.configure(sname, background=C["BG"], foreground="#5f554a", font=self.font_h, padding=(P(24), P(8)), anchor="center")
-            st.map(sname, foreground=[("selected", "#fff8ec"), ("active", C["INK"]), ("focus", C["INK"])], background=[("active", C["BG"]), ("selected", C["BG"])])
-            st.configure(f"Small.{sname}", font=self.font_base, padding=(P(16), P(5)))
-        # ---- 진행 막대: 처음부터 끝까지 한 방향으로 찬다 ----
-        h = P(10); r = h // 2; nw, bd_ = A.stretch_size(r, 192)
-        st.element_create("Bar.trough", "image", img("bar_tr", A.rounded_box(nw, h, r, C["TRACK"])), border=(bd_, 0), sticky="nsew", width=2 * bd_, padding=0)
+            st.configure(sname, background=C["BG"], foreground=C["MUTED"], font=F["BODY_B"], padding=(P(24), P(8)), anchor="center")
+            st.map(sname, foreground=[("selected", "#ffffff"), ("active", C["INK"]), ("focus", C["INK"])], background=[("active", C["BG"]), ("selected", C["BG"])])
+            st.configure(f"Small.{sname}", font=F["BODY"], padding=(P(16), P(5)))
+        # ---- 진행 막대(6px): LINE 길 위에 먹으로 처음부터 끝까지 한 방향으로 찬다 ----
+        h = max(4, P(6)); r = h / 2; nw, bd_ = A.stretch_size(int(r), 192)
+        st.element_create("Bar.trough", "image", img("bar_tr", A.rounded_box(nw, h, r, C["LINE"])), border=(bd_, 0), sticky="nsew", width=2 * bd_, padding=0)
         self._bar_cap = 2 * bd_                                       # 막대가 이보다 짧으면 둥근 끝이 겹쳐 그려진다
-        st.element_create("Bar.pbar", "image", img("bar_pb", A.rounded_box(nw, h, r, C["GOLD"])), border=(bd_, 0), sticky="nsew", width=2 * bd_)
+        st.element_create("Bar.pbar", "image", img("bar_pb", A.rounded_box(nw, h, r, C["INK"])), border=(bd_, 0), sticky="nsew", width=2 * bd_)
         st.layout("Bar.Horizontal.TProgressbar", [("Bar.trough", {"sticky": "nsew", "children": [("Bar.pbar", {"side": "left", "sticky": "ns"})]})])
-        st.configure("Bar.Horizontal.TProgressbar", background=C["BG"])
-        # ---- 입력칸·고르기 칸(둥근 테두리, 초점이면 금빛) ----
-        r = P(5); nw, bd_ = A.stretch_size(r, 128); nh, _ = A.stretch_size(r, 20)
-        fld = {k: img("fld_" + k, A.rounded_box(nw, nh, r, fill, line, w))
-               for k, fill, line, w in (("n", C["FIELD"], C["EDGE"], bw), ("f", C["FIELD"], C["FOCUS"], bw * 1.6), ("d", C["DIS"], C["DIS_LINE"], bw), ("ro", "#faf8f3", C["FLINE"], bw))}
-        st.element_create("Field.field", "image", fld["n"], ("disabled", fld["d"]), ("focus", fld["f"]), ("readonly", fld["ro"]), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(3))
-        st.element_create("Pick.field", "image", fld["n"], ("disabled", fld["d"]), ("focus", fld["f"]), border=bd_, sticky="nsew", width=2 * bd_, height=2 * bd_, padding=P(3))
+        st.configure("Bar.Horizontal.TProgressbar", background=C["BG"], thickness=h)
+        st.configure("Panel.Bar.Horizontal.TProgressbar", background=C["PANEL"])
+        # ---- 입력칸·고르기 칸(반지름 6, EDGE 테두리 · 초점이면 먹 · 읽기 전용은 QUIET · 잠기면 DIS_FIELD) ----
+        fld = {}
+        for k, fill, line, lw in (("n", C["FIELD"], C["EDGE"], 1.0), ("f", C["FIELD"], C["INK"], 1.5), ("d", C["DIS_FIELD"], C["LINE"], 1.0), ("ro", C["QUIET"], C["LINE"], 1.0)):
+            fld[k], b = box("fld_" + k, P(6), fill, line, lw * self.scale, stretch=(128, 20))
+        for prefix, minh in (("", 30), ("Q", 28)):                   # 판 안(QUIET)의 칸은 28
+            st.element_create(f"{prefix}Field.field", "image", fld["n"], ("disabled", fld["d"]), ("focus", fld["f"]), ("readonly", fld["ro"]),
+                              border=b, sticky="nsew", width=2 * b, height=P(minh), padding=P(3))
+            st.element_create(f"{prefix}Pick.field", "image", fld["n"], ("disabled", fld["d"]), ("focus", fld["f"]), border=b, sticky="nsew", width=2 * b, height=P(minh), padding=P(3))
         st.element_create("Pick.downarrow", "image", img("chev", A.chevron(P(12), P(8), C["MUTED"], 1.6 * self.scale)),
-                          ("disabled", img("chev_d", A.chevron(P(12), P(8), C["DIS_INK"], 1.6 * self.scale))), sticky="", padding=(P(4), 0, P(2), 0))
-        st.layout("TEntry", [("Field.field", {"sticky": "nswe", "children": [("Entry.padding", {"sticky": "nswe", "children": [("Entry.textarea", {"sticky": "nswe"})]})]})])
-        st.configure("TEntry", padding=(P(6), P(4)), background=C["PANEL"], fieldbackground=C["FIELD"], foreground=C["INK"])
-        st.map("TEntry", foreground=[("disabled", C["DIS_INK"])])
-        st.layout("TCombobox", [("Pick.field", {"sticky": "nswe", "children": [("Pick.downarrow", {"side": "right", "sticky": ""}),
-                                ("Combobox.padding", {"sticky": "nswe", "children": [("Combobox.textarea", {"sticky": "nswe"})]})]})])
-        st.configure("TCombobox", padding=(P(6), P(4)), background=C["PANEL"], fieldbackground=C["FIELD"], foreground=C["INK"])
-        st.map("TCombobox", fieldbackground=[("readonly", C["FIELD"])], selectbackground=[("readonly", C["FIELD"])], selectforeground=[("readonly", C["INK"])],
-               foreground=[("disabled", C["DIS_INK"])], background=[("readonly", C["PANEL"]), ("active", C["PANEL"])])
+                          ("disabled", img("chev_d", A.chevron(P(12), P(8), C["EDGE"], 1.6 * self.scale))), sticky="", padding=(P(4), 0, P(2), 0))
+        for prefix, sname, bg in (("", "TEntry", C["PANEL"]), ("Q", "Quiet.TEntry", C["QUIET"])):
+            st.layout(sname, [(f"{prefix}Field.field", {"sticky": "nswe", "children": [("Entry.padding", {"sticky": "nswe", "children": [("Entry.textarea", {"sticky": "nswe"})]})]})])
+            st.configure(sname, padding=(P(7), P(3)), background=bg, fieldbackground=C["FIELD"], foreground=C["INK"])
+            st.map(sname, foreground=[("disabled", C["MUTED"])], fieldbackground=[("disabled", C["DIS_FIELD"]), ("readonly", C["QUIET"])])
+        for prefix, sname, bg in (("", "TCombobox", C["PANEL"]), ("Q", "Quiet.TCombobox", C["QUIET"])):
+            st.layout(sname, [(f"{prefix}Pick.field", {"sticky": "nswe", "children": [("Pick.downarrow", {"side": "right", "sticky": ""}),
+                              ("Combobox.padding", {"sticky": "nswe", "children": [("Combobox.textarea", {"sticky": "nswe"})]})]})])
+            st.configure(sname, padding=(P(7), P(3)), background=bg, fieldbackground=C["FIELD"], foreground=C["INK"])
+            st.map(sname, fieldbackground=[("readonly", C["FIELD"])], selectbackground=[("readonly", C["FIELD"])], selectforeground=[("readonly", C["INK"])],
+                   foreground=[("disabled", C["MUTED"])], background=[("readonly", bg), ("active", bg)])
         st.layout("TSpinbox", [("Field.field", {"side": "top", "sticky": "we", "children": [("null", {"side": "right", "sticky": "", "children": [
             ("Spinbox.uparrow", {"side": "top", "sticky": "e"}), ("Spinbox.downarrow", {"side": "bottom", "sticky": "e"})]}),
             ("Spinbox.padding", {"sticky": "nswe", "children": [("Spinbox.textarea", {"sticky": "nswe"})]})]})])
         st.configure("TSpinbox", padding=(P(6), P(3)), arrowsize=P(9), arrowcolor=C["MUTED"], background=C["PANEL"], fieldbackground=C["FIELD"],
                      bordercolor=C["FIELD"], lightcolor=C["FIELD"], darkcolor=C["FIELD"], foreground=C["INK"])
-        st.map("TSpinbox", background=[("active", C["BTN_HI"]), ("pressed", C["BTN_DN"])])
+        st.map("TSpinbox", background=[("active", C["QUIET"]), ("pressed", C["LINE"])])
         # ---- 표·글줄 ----
         st.configure("Treeview", background=C["FIELD"], fieldbackground=C["FIELD"], foreground=C["INK"], rowheight=P(28), bordercolor=C["LINE"],
                      lightcolor=C["FIELD"], darkcolor=C["FIELD"], borderwidth=0)
         st.map("Treeview", background=[("selected", C["SEL"])], foreground=[("selected", C["INK"])])
-        st.configure("Treeview.Heading", background=C["HEAD"], foreground=C["MUTED"], font=self.font_h, relief="flat", padding=(P(8), P(6)),
-                     bordercolor=C["LINE"], lightcolor=C["HEAD"], darkcolor=C["HEAD"])
-        st.map("Treeview.Heading", background=[("active", C["BTN_HI"])])
+        st.configure("Treeview.Heading", background=C["QUIET"], foreground=C["MUTED"], font=F["CAP_B"], relief="flat", padding=(P(8), P(6)),
+                     bordercolor=C["LINE"], lightcolor=C["QUIET"], darkcolor=C["QUIET"])
+        st.map("Treeview.Heading", background=[("active", C["LINE"])])
         for o in ("Vertical", "Horizontal"):
-            st.configure(f"{o}.TScrollbar", background=C["TRACK"], troughcolor=C["PANEL"], bordercolor=C["PANEL"], lightcolor=C["TRACK"],
-                         darkcolor=C["TRACK"], arrowcolor=C["MUTED"], gripcount=0, arrowsize=P(12))
-            st.map(f"{o}.TScrollbar", background=[("active", C["TRACK_HI"]), ("pressed", C["TRACK_HI"])])
+            st.configure(f"{o}.TScrollbar", background=C["RULE"], troughcolor=C["PANEL"], bordercolor=C["PANEL"], lightcolor=C["RULE"],
+                         darkcolor=C["RULE"], arrowcolor=C["MUTED"], gripcount=0, arrowsize=P(12))
+            st.map(f"{o}.TScrollbar", background=[("active", C["EDGE"]), ("pressed", C["EDGE"])], lightcolor=[("active", C["EDGE"]), ("pressed", C["EDGE"])],
+                   darkcolor=[("active", C["EDGE"]), ("pressed", C["EDGE"])])
         st.layout("Hidden.TNotebook.Tab", [])
         st.configure("Hidden.TNotebook", background=C["BG"], borderwidth=0, padding=0, tabmargins=0, bordercolor=C["BG"], lightcolor=C["BG"], darkcolor=C["BG"])
         # 대화 상자(별도 창)는 카드색 바탕
@@ -1123,9 +1559,12 @@ class App(tk.Tk):
         st.configure("Sash", sashthickness=P(10), gripcount=0, background=C["BG"], lightcolor=C["BG"], darkcolor=C["BG"], bordercolor=C["BG"])
         # 위·아래 칸 경계: 가운데 작은 손잡이(끌어서 높이를 나눌 수 있다는 표시). 마우스를 올리면 커서가 ↕ 로 바뀐다.
         gw, gh = P(44), max(3, P(4))
-        st.element_create("Grip.sash", "image", img("grip", A.rounded_box(gw, gh, gh / 2, C["FLINE"])), sticky="", width=gw, height=P(10))   # 그림은 얇게, 잡는 자리는 넉넉히
+        st.element_create("Grip.sash", "image", img("grip", A.rounded_box(gw, gh, gh / 2, C["RULE"])), sticky="", width=gw, height=P(10))   # 그림은 얇게, 잡는 자리는 넉넉히
         for o in ("Vertical", "Horizontal"):
             st.layout(f"{o}.Sash", [("Grip.sash", {"sticky": ""})])
+        # ---- 아이콘(배율별로 구움) ----
+        self.icons = {"receipt": img("ic_receipt", A.receipt(P(14), C["MUTED"], 1.4)), "lock": img("ic_lock", A.lock(P(13), C["INK"])),
+                      "lock_seal": img("ic_lock_seal", A.lock(P(13), C["SEAL_HI"]))}
 
     # ---------- 화면 부품 ----------
     def _card(self, parent, title: str | None = None, pad=None) -> ttk.Frame:
@@ -1162,6 +1601,43 @@ class App(tk.Tk):
             ttk.Radiobutton(f, text=text, value=val, variable=var, command=command, cursor="hand2",
                             style=("Small." if small else "") + f"Seg{side}.TRadiobutton").pack(side="left")
         return f
+
+    def _tabs(self, parent, items: list[tuple[str, int]], var: tk.IntVar, command) -> tk.Frame:
+        """머리띠의 밑줄 탭(라디오 단추: 고른 탭은 굵게 + 아래 3px 먹 막대). 굵게 바뀌어도 너비가 흔들리지 않게 굵은 글 너비로 잡고,
+        탭 소개(TAB_HINTS)는 풍선 도움말로 보인다."""
+        f = tk.Frame(parent, bg=self.colors["PANEL"])
+        try:
+            from tkinter import font as tkfont
+            bold, zero = tkfont.Font(self, font=self.fonts["TAB_ON"]), max(1, tkfont.Font(self, font=self.fonts["TAB"]).measure("0"))
+        except Exception:
+            bold = zero = None
+        for text, val in items:
+            width = -(-bold.measure(text) // zero) if bold else 0
+            rb = ttk.Radiobutton(f, text=text, value=val, variable=var, command=command, cursor="hand2", style="Tab.TRadiobutton", width=width)
+            rb.pack(side="left", fill="y", padx=(0, self.px(2)))
+            if 0 <= val < len(TAB_HINTS):
+                Tip(rb, TAB_HINTS[val], self)
+        return f
+
+    def _seal(self, parent, chars: str, large: bool = True, bg: str | None = None) -> tk.Canvas:
+        """도장: 인주색 둥근 사각 + 안쪽 가는 테(gui_art.seal) 위에 두 글자를 세로로(흰 맑은 고딕 굵게). large 는 48px, 아니면 34px."""
+        from . import gui_art as A
+        C, P = self.colors, self.px
+        size = P(48 if large else 34)
+        key = f"seal_{size}_{int(large)}"
+        if key not in self._img:
+            self._img[key] = tk.PhotoImage(master=self, data=A.seal(size, C["SEAL"], C["SEAL_LINE"], large=large, scale=self.scale))
+        cv = tk.Canvas(parent, width=size, height=size, bg=bg or C["PANEL"], highlightthickness=0, borderwidth=0)
+        cv.create_image(0, 0, image=self._img[key], anchor="nw")
+        font = self.fonts["SEAL" if large else "SEAL_S"]
+        try:
+            from tkinter import font as tkfont
+            step = tkfont.Font(self, font=font).measure("가") * 1.05        # 한 글자 높이 ≈ 한글 한 자 너비(시안의 줄 높이 1.05)
+        except Exception:
+            step = size * 0.32
+        for k, ch in enumerate((chars + "  ")[:2]):
+            cv.create_text(size / 2, size / 2 + (k - 0.5) * step, text=ch, fill="#ffffff", font=font)
+        return cv
 
     def _cw(self, values, extra: int = 3) -> int:
         """고르기 칸 너비(글자 '0' 단위): 가장 긴 값이 다 보이게."""
@@ -1235,26 +1711,31 @@ class App(tk.Tk):
 
     def _build(self):
         C = self.colors; P = self.px
-        # ---- 머리띠 ----
-        hd = tk.Frame(self, bg=C["ACC"], padx=P(20), pady=P(11)); hd.pack(fill="x")
-        tk.Frame(self, bg=C["GOLD"], height=max(2, P(2))).pack(fill="x")             # 머리띠 아래 금빛 선
+        # ---- 머리띠(54 · 종이 판 · 아래 LINE): 이름 · 밑줄 탭 · ……… 패키지 상태 · 판 번호 · [업데이트 확인] ----
+        hd = self._header = tk.Frame(self, bg=C["PANEL"], height=P(54)); hd.pack(fill="x"); hd.pack_propagate(False)
+        self._header_rule = tk.Frame(self, bg=C["LINE"], height=max(1, P(1))); self._header_rule.pack(fill="x")
         self.v_pkg = tk.StringVar(value="패키지 점검 중…")
-        # 제목·판 번호를 먼저 배치한다(pack 은 먼저 넣은 것에 자리를 먼저 주므로, 긴 안내 글이 제목을 밀어내지 않게).
-        tk.Label(hd, text=APP_NAME, font=self.font_title, bg=C["ACC"], fg="#f3e9d2").pack(side="left")
-        tk.Label(hd, text="연어OCR", font=self.font_big, bg=C["ACC"], fg="#d9c9a8").pack(side="left", padx=(P(10), 0), pady=(P(4), 0))
-        tk.Label(hd, text=f"v{__version__}", font=(self.font_small[0], 9, "bold"), bg="#5a2a20", fg="#f3e9d2", padx=P(8), pady=P(2)).pack(side="right", pady=(P(5), 0))
-        tk.Label(hd, textvariable=self.v_pkg, font=self.font_small, bg=C["ACC"], fg="#e8c99a").pack(side="right", padx=(0, P(14)), pady=(P(6), 0))
-        tk.Label(hd, text="한자·한글 문헌 스캔 PDF·이미지를 지침대로 판독해 HWPX로", font=self.font_sub, bg=C["ACC"], fg="#bfae8e").pack(side="left", padx=(P(16), 0), pady=(P(6), 0))
-
-        # ---- 작업 / 설정 탭 ----
-        bar = ttk.Frame(self, padding=(P(16), P(12), P(16), 0)); bar.pack(fill="x")
-        self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])
-        tabs = self._segmented(bar, [("일반 OCR", 0), ("책갈피 OCR", 1), ("이미지(스크린샷) OCR", 2), ("설정", 3)], self.v_tab, lambda: self.select_tab(self.v_tab.get()))
-        tabs.pack(side="left"); self._tab_buttons = list(tabs.winfo_children())
-        self.b_update = self._btn(bar, "업데이트 확인", self.check_updates, style="PageLink.TButton",
+        name = tk.Frame(hd, bg=C["PANEL"]); name.pack(side="left", padx=(P(24), P(28)))
+        for text, font, fg, pad in (("연어OCR", self.fonts["APP"], C["INK"], 0), (APP_NAME, self.fonts["CAP"], C["MUTED"], P(10))):
+            lab = tk.Label(name, text=text, font=font, bg=C["PANEL"], fg=fg, bd=0)
+            lab.pack(side="left", padx=(pad, 0), pady=(P(3) if pad else 0, 0))
+            Tip(lab, ABOUT, self)
+        right = tk.Frame(hd, bg=C["PANEL"]); right.pack(side="right", padx=(P(14), P(20)))
+        self.b_update = self._btn(right, "업데이트 확인", self.check_updates, style="Link.TButton",
                                   tip="GitHub 릴리스에서 새 버전을 확인합니다. 설치와 재시작은 확인 후 진행합니다.")
         self.b_update.pack(side="right")
-        self._hint(bar, textvariable=self.v_tabhint, page=True).pack(side="left", fill="x", expand=True, padx=(P(14), 0))
+        ttk.Label(right, text=f"v{__version__}", style="Chip.TLabel").pack(side="right", padx=(0, P(10)))
+        self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])     # 탭 소개는 탭마다 풍선 도움말로
+        tabs = self._tab_bar = self._tabs(hd, [("일반 OCR", 0), ("책갈피 OCR", 1), ("이미지(스크린샷) OCR", 2), ("설정", 3)], self.v_tab,
+                                          lambda: self.select_tab(self.v_tab.get()))
+        tabs.pack(side="left", fill="y"); self._tab_buttons = list(tabs.winfo_children())
+        tk.Label(hd, textvariable=self.v_pkg, font=self.fonts["CAP"], bg=C["PANEL"], fg=C["MUTED"], bd=0, anchor="e").pack(side="right", padx=(P(12), 0))
+        # 잠금 줄(실행 중에만): 탭이 왜 눌리지 않는지 — 끝나거나 [■ 중지]로 멈추면 풀린다
+        lk = self._lockline = tk.Frame(self, bg=C["QUIET"], height=P(30)); lk.pack_propagate(False)
+        tk.Frame(lk, bg=C["LINE"], height=max(1, P(1))).pack(side="bottom", fill="x")
+        self._lock_label = tk.Label(lk, image=self.icons["lock"], compound="left", bg=C["QUIET"], fg=C["INK"], font=self.fonts["BODY"], bd=0, padx=0,
+                                    text="  실행 중에는 다른 탭으로 옮길 수 없습니다. 끝나거나 [■ 중지]로 멈추면 풀립니다.")
+        self._lock_label.pack(side="left", padx=(P(24), 0))
         # 위(설정·실행)는 스크롤되는 칸, 아래(진행·기록)는 늘 보이는 칸. 가운데 경계를 끌어 높이를 나눈다.
         self.pane = ttk.PanedWindow(self, orient="vertical"); self.pane.pack(fill="both", expand=True)
         upper = ttk.Frame(self.pane)
@@ -1347,7 +1828,7 @@ class App(tk.Tk):
         foot = ttk.Frame(b, style="Panel.TFrame"); foot.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(P(6), 0))
         ttk.Checkbutton(foot, textvariable=self.v_force_scope, variable=self.v_force).pack(side="left")
         self.v_details = tk.BooleanVar(value=bool(self.cfg.get("details_open", False)))
-        self.b_details = ttk.Button(foot, text="", command=self.toggle_details, style="Link.TButton", cursor="hand2")
+        self.b_details = ttk.Button(foot, text="", command=self.toggle_details, style="Toggle.TButton", cursor="hand2")
         self.b_details.pack(side="right")
         d = self.details = ttk.Frame(b, style="Panel.TFrame"); d.columnconfigure(1, weight=1)
         ttk.Separator(d).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(P(8), P(6)))
@@ -1494,7 +1975,7 @@ class App(tk.Tk):
         # ---- 고급(접힘) ----
         self.v_adv = tk.BooleanVar(value=bool(self.cfg.get("advanced_open", False)))
         advbar = ttk.Frame(common); advbar.pack(fill="x", pady=(P(8), 0))
-        self.b_adv = ttk.Button(advbar, text="", command=self.toggle_advanced, style="PageLink.TButton", cursor="hand2"); self.b_adv.pack(side="left")
+        self.b_adv = ttk.Button(advbar, text="", command=self.toggle_advanced, style="PageToggle.TButton", cursor="hand2"); self.b_adv.pack(side="left")
         ttk.Label(advbar, text="보통은 필요 없습니다. 일부 단계만 다시 하거나 기록을 손볼 때 펼치십시오.", style="PageHint.TLabel").pack(side="left", padx=(P(10), 0))
         sf = self.adv_frame = self._card(common)
         g = sf.body
@@ -1713,9 +2194,9 @@ class App(tk.Tk):
         act = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
         a = act.body
         runrow = ttk.Frame(a, style="Panel.TFrame"); runrow.pack(fill="x")
-        self._btn(runrow, "▶  한 번에 인식 (HWPX 만들기)", self.do_run, style="Accent.TButton",
+        self._btn(runrow, "▶  한 번에 인식 (HWPX 만들기)", self.do_run, style="Seal.TButton",
                   tip="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. 먼저 판독·모델 단계의 예상 비용을 한 창에 보여 주고 묻습니다.").pack(side="left")
-        self._btn(runrow, "▶  한 번에 인식 (문자 PDF 만들기)", self.do_run_pdf, style="Accent.TButton",
+        self._btn(runrow, "▶  한 번에 인식 (문자 PDF 만들기)", self.do_run_pdf, style="SealOut.TButton",
                   tip="원본을 판독한 뒤 검색·복사 가능한 PDF를 만듭니다. 원본 모양을 유지하고 판독한 글을 숨은 글자층에 넣습니다. HWPX 문서용 자동 교정은 적용하지 않습니다.").pack(side="left", padx=(P(8), 0))
         self.b_stop = ttk.Button(runrow, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop.pack(side="left", padx=(P(8), 0))
         Tip(self.b_stop, "지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 이어서 합니다.", self)
@@ -1727,7 +2208,7 @@ class App(tk.Tk):
         self._hint(a, "멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.").pack(side="left", fill="x", expand=True, padx=(P(14), P(8)))
         act2 = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
         a = act2.body
-        self._btn(a, "▶  HWPX 전체 교정", self.do_collate_all, style="Accent.TButton",
+        self._btn(a, "▶  HWPX 전체 교정", self.do_collate_all, style="Seal.TButton",
                   tip="구획을 차례로 전부 대조해 HWPX 사본(<이름>_교정.hwpx) 하나에 고쳐 넣고 요약(_전체_요약.html)을 남깁니다").pack(side="left")
         self.b_stop2 = ttk.Button(a, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop2.pack(side="left", padx=(P(8), 0))
         Tip(self.b_stop2, "지금 구획이 끝나면 멈춥니다. 고친 내용은 교정본에 남습니다.", self)
@@ -1741,7 +2222,7 @@ class App(tk.Tk):
         self._btn(r4, "이 구획 대조만", lambda: self.do_collate(apply=False), tip="표에서 고른 구획만 대조해 보고를 만듭니다(문서는 고치지 않음). 표에서 두 번 눌러도 됩니다").pack(side="right", padx=(0, P(6)))
         ttk.Label(r4, text="표에서 고른 구획:", style="Field.TLabel").pack(side="right", padx=(0, P(8)))
         settings = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
-        self._btn(settings.body, "설정 저장", self.save_settings, style="Accent.TButton").pack(side="left")
+        self._btn(settings.body, "설정 저장", self.save_settings, style="Ink.TButton").pack(side="left")
         self._btn(settings.body, "OCR로 돌아가기", self.return_to_ocr).pack(side="left", padx=(P(8), 0))
         self.b_stop3 = ttk.Button(settings.body, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
         self.b_stop3.pack(side="left", padx=(P(8), 0))
@@ -2423,10 +2904,26 @@ class App(tk.Tk):
         for b in (self.b_stop, getattr(self, "b_stop2", None), getattr(self, "b_stop3", None)):
             if b is not None:
                 b.configure(state="normal" if on and command != "update" else "disabled")
+        App._show_lockline(self, on)
         if on:
             self.tracker = Tracker(command)
             self.progress.configure(value=0); self._prog_shown = 0.0
             self.v_prog.set("0%" if self.tracker.plan else "")
+
+    def _show_lockline(self, on: bool):
+        """잠금 줄(머리띠 아래, 실행 중에만): 글은 탭 줄과 같은 x 에서 시작한다."""
+        line = getattr(self, "_lockline", None)
+        if line is None:
+            return
+        if on:
+            try:
+                x = self._tab_bar.winfo_x() + self.px(12)
+            except (AttributeError, tk.TclError):
+                x = self.px(24)
+            self._lock_label.pack_configure(padx=(max(self.px(24), x), 0))
+            line.pack(fill="x", after=self._header_rule)
+        else:
+            line.pack_forget()
 
     def _bar_value(self, f: float) -> int:
         """0~1 → 막대 값(0~1000). 0 보다 크면 둥근 끝 두 개가 들어갈 만큼은 보이게 한다(겹쳐 그려지는 모양 방지)."""
@@ -3030,7 +3527,7 @@ class App(tk.Tk):
                 res = ("cancelled", None)
             except Exception as e:
                 res = ("error", f"{type(e).__name__}: {str(e)[:160]}")
-            self.q.put(("plan", seq, kind, res, go))                     # 결과는 큐로만 — 창은 _poll 이 그린다
+            self.q.put(("plan", seq, "run-pdf" if pdf_only else kind, res, go))   # 결과는 큐로만 — 창은 _poll 이 그린다(문자 PDF 는 창의 글만 다름)
         threading.Thread(target=work, daemon=True, name="cost-plan").start()
 
     def _plan_done(self, seq: int, kind: str, res: tuple, go) -> None:
@@ -3040,6 +3537,9 @@ class App(tk.Tk):
         if seq != self._plan_seq:
             return
         from . import costplan
+        pdf_only = kind == "run-pdf"                                       # [▶ 한 번에 인식 (문자 PDF 만들기)]: 계산은 run 그대로, 창의 알약·캡션·단락만 다름
+        if pdf_only:
+            kind = "run"
         self._planning = False
         wait, self._plan_wait = self._plan_wait, None
         if wait is not None:
@@ -3063,7 +3563,7 @@ class App(tk.Tk):
             if go is not None and not costplan.needs_confirm(priced):
                 extra = []
             else:
-                d = CostDialog(self, plan, kind, preview=go is None); self.wait_window(d)
+                d = CostDialog(self, plan, kind, preview=go is None, **({"pdf_only": True} if pdf_only else {})); self.wait_window(d)
                 if go is None or d.choice not in ("all", "without"):
                     return
                 extra = [] if d.choice == "all" else costplan.without_flags(kind, plan.get("context_model", True))
