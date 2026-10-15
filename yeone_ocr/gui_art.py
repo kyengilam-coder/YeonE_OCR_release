@@ -255,6 +255,11 @@ def folder(size: int, color: str, stroke: float = 1.4) -> str:
     return _icon(size, color, stroke, [[(1.5, 4.5), (1.5, 13), (14.5, 13), (14.5, 5.5), (7.5, 5.5), (6, 3.5), (1.5, 3.5), (1.5, 4.5)]])
 
 
+def file_doc(size: int, color: str, stroke: float = 1.4) -> str:
+    """파일(설정 탭 양식 HWPX 이름 앞): 오른쪽 위 귀가 접힌 종이. 시안 gen_common.filei 와 같은 모양."""
+    return _icon(size, color, stroke, [[(3.5, 1.5), (9.5, 1.5), (12.5, 4.5), (12.5, 14.5), (3.5, 14.5), (3.5, 1.5)], [(9.5, 1.5), (9.5, 4.5), (12.5, 4.5)]])
+
+
 def check(size: int, color: str, stroke: float = 2.0) -> str:
     """✓(저장됨)."""
     return _icon(size, color, stroke, [[(3, 8.5), (6, 11.5), (13, 4)]])
