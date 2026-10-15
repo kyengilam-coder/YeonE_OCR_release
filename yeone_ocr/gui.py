@@ -11,12 +11,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from . import __version__
-from .progress import Tracker, fmt_duration
+from .progress import STAGE_NAMES, Tracker, fmt_duration
 from .providers import DEFAULT_MODELS, PROVIDER_LABELS, ENV_KEYS, KEY_URLS
 from .presets import (ALIASES, BUILTIN, DEFAULT_PRESET, PresetError, export_builtin, load_preset, preset_choices, preset_label,   # 표준 라이브러리만 — 창이 바로 뜬다
                       resolve_preset, template_suggests)
 from .runtime import is_frozen, is_installed_bundle, can_replace_executable, safe_output_path, external_dll_search
-from .state import BOOK_SETTINGS, clean_book_values, load_book_settings, save_book_settings   # 표준 라이브러리만(무거운 모듈은 그 안에서 늦게 부른다)
+from .state import BOOK_SETTINGS, LAST_COST, book_counts, clean_book_values, load_book_settings, save_book_settings, write_atomic   # 표준 라이브러리만(무거운 모듈은 그 안에서 늦게 부른다)
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".jp2", ".j2k", ".jpx")   # pdfio.IMAGE_EXTS 와 같게(창은 pymupdf 없이도 떠야 하므로 따로 둠)
 
@@ -82,7 +82,8 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
     [▶ 한 번에 인식 (문자 PDF 만들기)]는 새 원본의 판독부터 검색·복사 가능한 PDF 생성까지 이어서 합니다.
     문자 PDF는 원본 모양과 글자 위치를 유지하며 HWPX용 자동 교정을 적용하지 않습니다. HWPX 양식도 필요 없습니다.
- 5. 끝나면 [HWPX 바로 열기] 또는 [문자 PDF 열기]로 결과를 엽니다. [결과 저장]에 실제 저장 폴더가 표시되며 [저장 폴더]로 탐색기에서 확인합니다.
+ 5. 끝나면 실행 카드의 [HWPX 열기]·[문자 PDF 열기]·[검수 화면]으로 결과를 엽니다(실행 중에는 지난 결과의 읽기용 사본을 엽니다).
+    책 카드의 [결과 저장]에 실제 저장 폴더가 표시되며 [저장 폴더]로 탐색기에서 확인합니다. 장부에는 마지막 비용 어림과 이번 실행의 호출 수가 남습니다.
     검수 화면에서 원본과 대조합니다. 〔 〕로 남은 자리만 사람이 보면 됩니다.
  6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
     사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
@@ -494,6 +495,64 @@ def book_title(pdf: str) -> tuple[str, str, str]:
     han = [c for c in title if _is_han(c)]
     chars = "".join(han[:2]) if len(han) >= 2 else "".join(c for c in title if not c.isspace())[:2].upper()
     return title, chars, name
+
+
+def elide_middle(text: str, font, px: int) -> str:
+    """글이 px 보다 넓으면 가운데를 '…' 로 줄인다(앞은 드라이브, 뒤는 파일 이름이 보이게 — 뒤를 조금 더 남긴다). font 는 measure 가 있는 tkfont.Font."""
+    text = text or ""
+    if px <= 0 or font.measure(text) <= px:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:                                                       # 남길 글자 수 k 의 가장 큰 값(이분 탐색)
+        k = (lo + hi + 1) // 2
+        head = k * 2 // 5
+        if font.measure(text[:head] + "…" + text[len(text) - (k - head):]) <= px:
+            lo = k
+        else:
+            hi = k - 1
+    head = lo * 2 // 5
+    return text[:head] + "…" + text[len(text) - (lo - head):] if lo else "…"
+
+
+# 이 책의 설정 판: 짜임 규칙 이름 아래 한 줄 설명(예전 이름은 그 내장의 설명, 규칙 파일은 파일 이름)
+PRESET_HINTS = {"basic": "대제목·중제목·소제목 · 문단-1~5", "regions": "제목 1~3단계 · 본문 · 소주 · 그림 제목", "kaibao": "약재명 제목 · 주석 · 출처 · 本經/別錄"}
+# 실행 카드(디자인 명세 §6.1): 두 실행은 모두 판독부터 해서 돈이 든다(인주) — HWPX 가 주(채움 48), 문자 PDF 가 버금(테두리 40), [■ 중지]는 둘 아래 하나
+RUN_TEXT, RUN_PDF_TEXT = "▶  한 번에 인식 (HWPX 만들기)", "▶  한 번에 인식 (문자 PDF 만들기)"
+RUN_TIP = ("준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. "
+           "먼저 판독·모델 단계의 예상 비용을 한 창에 보여 주고 묻습니다.")
+RUN_PDF_TIP = ("판독(1차·2차) → 3차 글자 판별 → 원본 모양 그대로 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)까지 이어서 합니다. "
+               "양식·짜임·HWPX 자동 교정은 쓰지 않습니다. 먼저 예상 비용을 한 창에 보여 주고 묻습니다.")
+STOP_TIP = "두 실행 모두 같은 단추로 멈춥니다 — 지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다."
+READY_CAP = "누르면 먼저 예상 비용을 보여 주고 묻습니다. 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다."
+RUN_CAP = "지금 쪽이 끝나면 멈춥니다 · 끝난 쪽은 남습니다."
+EMPTY_CAP = "원본을 고르면 누를 수 있습니다. 누르면 먼저 예상 비용을 보여 주고 묻습니다."
+COPY_NOTE = "실행 중에는 지난 결과의 읽기용 사본을 엽니다."
+CLEARED_STATUS = "새 이미지나 스크린샷을 입력하십시오"                 # [입력 비우기] 뒤 실행 카드의 상태 줄
+COPY_TIP = "실행 중에는 읽기용 사본을 엽니다 — 실행이 끝날 때 이 파일을 다시 쓰는데, 한글·PDF 뷰어가 쥐고 있으면 저장이 막히기 때문입니다."
+TAG_TIP = "[아니요]면 뺌: 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 빠지는 단계"
+LEDGER_GROUPS = (("판독", "1차·2차", ("read1", "read2")), ("모델 단계", "", ("glyph", "suspect", "choice")))   # 장부 묶음(비용 창의 run 묶음과 같은 단계)
+
+
+def finish_caption(rc, cmd: str, failed: bool) -> str:
+    """끝난 뒤 실행 카드의 캡션(디자인 명세 §7.3). cmd 는 끝난 명령(run · run-pdf · 그 밖), failed 는 끝 코드 3 이 쪽 판독 실패 때문인지."""
+    kind = finish_words(rc)[0]
+    pdf = cmd == "run-pdf"
+    again = "[문자 PDF 만들기]" if pdf else "[HWPX 만들기]"
+    if cmd not in ("run", "run-pdf"):
+        return READY_CAP
+    if kind == "ok":
+        return "끝났습니다. 문자 PDF를 열었습니다 — 〔 〕 자리는 검수 화면에서 보십시오." if pdf else "끝났습니다. 결과는 HWPX와 검수 화면에서 보십시오."
+    if rc == 3 and failed:
+        return (f"{again}를 다시 누르면 실패한 쪽만 다시 판독하고 " + ("문자 PDF를" if pdf else "문서를") + " 새로 만듭니다. 누르면 먼저 예상 비용을 묻습니다.")
+    if rc == 3:
+        return "진행 기록의 주의 줄을 확인하십시오."
+    if rc == 4:
+        return f"{again}를 다시 누르면 3차 판별을 이어서 합니다."
+    if rc == 5:
+        return "교정 기록은 [결과 폴더]의 out 폴더에 있습니다."
+    if kind == "stopped":
+        return ("판독 기록은 보존 — PDF 저장·검증 전에 멈추면 이전 완성 PDF를 그대로 둡니다. " if pdf else "") + f"멈춘 곳부터 이어서 합니다. {again}를 다시 누르면 남은 쪽부터."
+    return "진행 기록의 오류: 줄을 확인하십시오."
 
 
 def work_area(widget) -> tuple[int, int]:
@@ -1234,7 +1293,7 @@ class Tip:
 
     def _show(self):
         self.job = None
-        if self.win is not None or not self.w.winfo_exists():
+        if self.win is not None or not self.text or not self.w.winfo_exists():
             return
         C, P = self.app.colors, self.app.px
         self.win = tw = tk.Toplevel(self.w); tw.wm_overrideredirect(True)
@@ -1263,7 +1322,7 @@ class App(tk.Tk):
         self._cfg_loaded = copy.deepcopy(self.cfg)             # 읽은 그대로 — 저장할 때 이 창이 바꾼 값만 파일에 얹는다(write_config)
         self._style()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w, h = min(self.px(1180), sw - 40), min(self.px(980), sh - 80)
+        w, h = min(self.px(1280), sw - 40), min(self.px(980), sh - 80)          # 너비 1280: 작업 탭이 두 단(논리 1200 이상)으로 보이게
         self.geometry(f"{w}x{h}"); self.minsize(min(self.px(960), w), min(self.px(640), h))
         self.q: queue.Queue = queue.Queue()
         self.running = False
@@ -1273,6 +1332,7 @@ class App(tk.Tk):
         self._update_prompt_open = False
         self.open_after: Path | None = None
         self.buttons: list[ttk.Button] = []
+        self._lock_entries: list = []                                  # 실행 중에 잠그는 입력 칸(이 책의 설정 판의 쪽 범위)
         self._planning = False; self._plan_seq = 0; self._plan_wait = None     # 비용 어림(작업 스레드) — 한 번에 하나, 늦은 결과는 번호로 버림
         self.tracker = Tracker()
         self._prog_shown = 0.0
@@ -1438,9 +1498,15 @@ class App(tk.Tk):
         button_style("Seal.TButton", seal, (P(18), P(6)), F["RUN"], "#ffffff", 48, r=8, focus="#ffffff")                            # 주 실행 — 돈이 듦(인주 채움)
         button_style("SealOut.TButton", seal_out, (P(16), P(4)), F["BTN_L_B"], C["SEAL"], 40, r=8, fg_map=seal_fg)  # 버금 실행 — 돈이 들지만 주가 아님(인주 테두리)
         button_style("Stop.TButton", ink_line, (P(16), P(4)), F["BTN_L_B"], C["INK"], 40, r=8)                    # 중지(실행 전에는 꺼진 모양)
+        # 도는 실행의 자리(눌리지 않음 — disabled 로 두고 그 모양까지 잠긴 인주 판): SEAL_SOFT 판 · SEAL_LINE 테두리 · SEAL_HI 글자와 자물쇠
+        busy = {k: (C["SEAL_SOFT"], C["SEAL_LINE"], 1.0) for k in ("normal", "active", "pressed", "disabled")}
+        for sname, font, minh, pad in (("SealBusy.TButton", F["RUN"], 48, (P(18), P(6))), ("SealOutBusy.TButton", F["BTN_L_B"], 40, (P(16), P(4)))):
+            button_style(sname, busy, pad, font, C["SEAL_HI"], minh, r=8)
+            st.map(sname, foreground=[("disabled", C["SEAL_HI"])], background=[("disabled", C["PANEL"])])
         button_style("Emph.TButton", ink_line, (P(14), P(4)), F["BODY_B"], C["INK"], 32)                          # 끝난 뒤 그 실행의 결과 단추
         button_style("Ink.TButton", ink, (P(16), P(4)), F["BODY_B"], "#ffffff", 32, focus="#ffffff")                               # 먹 채움 — 돈이 들지 않는 주 단추
         button_style("Accent.TButton", ink, (P(16), P(4)), F["BODY_B"], "#ffffff", 32, focus="#ffffff")                            # (작은 창의 주 단추 — 먹 채움과 같음)
+        button_style("QuietInk.TButton", ink, (P(16), P(4)), F["BODY_B"], "#ffffff", 32, bg=C["QUIET"], focus="#ffffff")           # 빈 이미지 상자(QUIET) 안의 [이미지 붙여넣기]
         # 비용 창 바닥 단추(높이 40): 기본 단추에만 먹 고리(2px, 틈 2px). 고리가 없는 단추도 같은 자리를 비워 두어 기본이 바뀌어도 단추 크기가 같다
         sp = P(2) + P(2)
         button_style("Dlg.TButton", normal, (P(16), P(4)), F["BTN_L"], C["INK"], 40, r=8, space=sp)
@@ -1454,6 +1520,13 @@ class App(tk.Tk):
         hover = img("link_h", A.rounded_box(2 * b + 32, 2 * b + 8, P(4), C["QUIET"]))
         st.element_create("Link.border", "image", clear, ("active", hover), border=b, sticky="nsew", width=2 * b, height=2 * b, padding=0)
         under = (F["BODY_B"][0], F["BODY_B"][1], "bold", "underline")
+        hover_q = img("link_hq", A.rounded_box(2 * b + 32, 2 * b + 8, P(4), C["LINE"]))
+        st.element_create("QLink.border", "image", clear, ("active", hover_q), border=b, sticky="nsew", width=2 * b, height=2 * b, padding=0)
+        for sname, font in (("QLink.TButton", under), ("QToggle.TButton", F["BODY_B"])):
+            st.layout(sname, [("QLink.border", {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [
+                ("Button.focus", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})]})])
+            st.configure(sname, background=C["QUIET"], foreground=C["INK"], font=font, padding=(P(4), P(2)), width=0, focuscolor=C["INK"], focusthickness=max(1, P(1)))
+            st.map(sname, foreground=[("disabled", C["EDGE"])], background=[("active", C["QUIET"])], font=[("disabled", F["BODY_B"])])
         for sname, bg, font in (("Link.TButton", C["PANEL"], under), ("PageLink.TButton", C["BG"], under),
                                 ("Toggle.TButton", C["PANEL"], F["BODY_B"]), ("PageToggle.TButton", C["BG"], F["BODY_B"])):
             st.layout(sname, [("Link.border", {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [
@@ -1564,7 +1637,11 @@ class App(tk.Tk):
             st.layout(f"{o}.Sash", [("Grip.sash", {"sticky": ""})])
         # ---- 아이콘(배율별로 구움) ----
         self.icons = {"receipt": img("ic_receipt", A.receipt(P(14), C["MUTED"], 1.4)), "lock": img("ic_lock", A.lock(P(13), C["INK"])),
-                      "lock_seal": img("ic_lock_seal", A.lock(P(13), C["SEAL_HI"]))}
+                      "lock_seal": img("ic_lock_seal", A.lock(P(13), C["SEAL_HI"])),
+                      "folder": img("ic_folder", A.folder(P(14), C["INK"])), "folder_dis": img("ic_folder_dis", A.folder(P(14), C["EDGE"])),
+                      "folder_muted": img("ic_folder_muted", A.folder(P(14), C["MUTED"])), "check": img("ic_check", A.check(P(13), C["GREEN"])),
+                      "clip": img("ic_clip", A.clip(P(14), "#ffffff")), "clip_dis": img("ic_clip_dis", A.clip(P(14), C["EDGE"])),
+                      "expand": img("ic_expand", A.expand(P(12), C["MUTED"]))}
 
     # ---------- 화면 부품 ----------
     def _card(self, parent, title: str | None = None, pad=None) -> ttk.Frame:
@@ -1674,6 +1751,12 @@ class App(tk.Tk):
             elif self._inputs_ready:
                 App._sync_book_label(self)
             self._sync_output_location()
+        work = vars(self).get("_work")                     # 일반·이미지 OCR 의 두 단(그 왼쪽 단에 탭 틀 0·2 가 든다)
+        if work is not None:
+            if i in (0, 2):
+                work.pack(fill="x")
+            else:
+                work.pack_forget()
         for k, f in enumerate(self.tab_frames):
             if k == i:
                 f.pack(fill="x")
@@ -1687,11 +1770,18 @@ class App(tk.Tk):
                 a.pack(fill="x")
             else:
                 a.pack_forget()
+        bars = vars(self).get("actbars")                   # 아래 칸의 실행 줄(책갈피·설정 탭) — 일반·이미지 OCR 의 실행 카드는 오른쪽 단에 있어 비므로 숨긴다
+        if bars is not None:                               # (Tk 는 자식을 모두 뺀 틀의 크기를 줄이지 않아 빈 띠가 남는다)
+            if i in (0, 2):
+                bars.pack_forget()
+            else:
+                bars.pack(fill="x", before=self._actbars_next)
         if hasattr(self, "pane"):
             self.after_idle(self._fit_sash)
         if self._inputs_ready:
             self._sync_settings_summary()
             self.refresh_table()
+        App._schedule_cards(self)
 
     def return_to_ocr(self):
         self.select_tab(self._last_ocr_tab)
@@ -1742,17 +1832,20 @@ class App(tk.Tk):
         cv = self._canvas = tk.Canvas(upper, bg=C["BG"], highlightthickness=0, borderwidth=0, yscrollincrement=P(20))
         cv.pack(fill="both", expand=True)
         self._vsb = ttk.Scrollbar(upper, orient="vertical", command=cv.yview); cv.configure(yscrollcommand=self._vsb.set)
-        host = self._host = ttk.Frame(cv, padding=(P(16), P(10), P(16), P(8)))
+        host = self._host = ttk.Frame(cv, padding=(P(24), P(16), P(24), P(14)))
         win = cv.create_window(0, 0, window=host, anchor="nw")
         host.bind("<Configure>", lambda e: (cv.configure(scrollregion=(0, 0, e.width, e.height)), self._update_scroll()))
-        cv.bind("<Configure>", lambda e: (cv.itemconfigure(win, width=e.width), self._update_scroll()))
+        cv.bind("<Configure>", lambda e: (cv.itemconfigure(win, width=e.width), self._update_scroll(), self._layout_work()))
         self.bind_all("<MouseWheel>", self._wheel, add="+"); self.bind_all("<Button-4>", self._wheel, add="+"); self.bind_all("<Button-5>", self._wheel, add="+")
         for cls in ("TCombobox", "TSpinbox"):                      # 휠로 위 칸을 굴리다 고르기 칸 위를 지나면 값이 몰래 바뀌던 문제
             for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<Shift-MouseWheel>"):
                 self.bind_class(cls, ev, "")
         self.bind_all("<<TraverseIn>>", self._focus_into_view, add="+")   # Tab 으로 옮길 때만(마우스로 누를 때 위 칸이 튀어 클릭이 씹히지 않게)
         self.pane.add(upper, weight=0)
-        root = ttk.Frame(host); tab2 = ttk.Frame(host); image_tab = ttk.Frame(host)
+        # 일반·이미지 OCR 탭: 두 단(왼쪽 책 카드 · 오른쪽 340 실행·장부) — 논리 너비 1200 미만이면 한 단(_layout_work). 탭 틀 0·2 는 왼쪽 단에 든다
+        self._work = ttk.Frame(host); self._work_left = ttk.Frame(self._work); self._work_right = ttk.Frame(self._work)
+        self._book_cards: dict[int, dict] = {}
+        root = ttk.Frame(self._work_left); tab2 = ttk.Frame(host); image_tab = ttk.Frame(self._work_left)
         self._common_frame = common = ttk.Frame(host)
         self.tab_frames = [root, tab2, image_tab, common]
         self._inputs_ready = False; self._selected_tab = 0; self._active_input = 0; self._last_ocr_tab = 0
@@ -1763,11 +1856,12 @@ class App(tk.Tk):
         self._input_force = {tab: state["force"] for tab, state in states.items()}
         variables = self._input_vars[0]
         self.v_pdf, self.v_pages, self.v_off = variables["pdf"], variables["pages"], variables["print_offset"]
-        self.v_output_dir = tk.StringVar(value="원본을 불러오면 저장 폴더가 표시됩니다")
+        self.v_output_dir = tk.StringVar(value="")                       # 결과 저장(읽기 전용 칸) — 원본이 없으면 비움
         self.v_settings_summary = tk.StringVar()
         self.v_force_scope = tk.StringVar()
-        self._build_input_card(root, 0)
-        self._build_input_card(image_tab, 2)
+        self.v_status = tk.StringVar(value="준비됨"); self.v_prog = tk.StringVar(value="")
+        self._mode_vars = {tab: tk.StringVar(value=MODE_LABELS[mode]) for tab, mode in ocr_mode_config(self.cfg).items()}
+        self.v_mode = self._mode_vars[0]
         for variables in self._input_vars.values():
             variables["pdf"].trace_add("write", self._sync_output_location)
 
@@ -1805,8 +1899,6 @@ class App(tk.Tk):
         self.v_blind = tk.BooleanVar(value=bool(self.cfg.get("adjudicate_blind", False)))
         self.v_chunk = tk.StringVar(value=str(self.cfg.get("chunk_lines", 8)))
         self.v_mres = tk.StringVar(value=MRES_LABELS.get(self.cfg.get("media_res", "high"), MRES_LABELS["high"]))
-        self._mode_vars = {tab: tk.StringVar(value=MODE_LABELS[mode]) for tab, mode in ocr_mode_config(self.cfg).items()}
-        self.v_mode = self._mode_vars[0]
         b = c2.body; b.columnconfigure(1, weight=1)
         self._field_label(b, "판독기", 0)
         rr = ttk.Frame(b, style="Panel.TFrame"); rr.grid(row=0, column=1, columnspan=2, sticky="w", pady=P(3))
@@ -2019,17 +2111,18 @@ class App(tk.Tk):
         Tip(self.e_print_offset, "책에 적힌 쪽수와 파일 쪽수를 맞춰 검수 기록에 표시합니다. 원본 파일과 실제 쪽 순서는 바뀌지 않습니다.", self)
         self._apply_advanced()
 
+        self._build_book_card(root, 0)
+        self._build_book_card(image_tab, 2)
         self._build_collate_tab(tab2)
         self._build_collate_settings(common)
         self._build_settings_summary(tab2)
         self.select_tab(0)
 
         # ---- 진행(공통): 상태 글 · 진행 글 / 끝까지 차는 막대 ----
-        bottom = self._bottom = ttk.Frame(self.pane, padding=(P(16), P(8), P(16), P(14))); self.pane.add(bottom, weight=1)
+        bottom = self._bottom = ttk.Frame(self.pane, padding=(P(24), P(8), P(24), P(14))); self.pane.add(bottom, weight=1)
         self._build_actions(bottom)
         # 한 줄에 [진행 기록|쪽별 상태] 고르기 · 상태 글 · 진행 글, 그 아래 막대(낮은 화면에서 기록 칸에 한 줄이라도 더 주려고)
-        pf = ttk.Frame(bottom); pf.pack(fill="x", pady=(P(10), 0))
-        self.v_status = tk.StringVar(value="준비됨"); self.v_prog = tk.StringVar(value="")
+        pf = self._actbars_next = ttk.Frame(bottom); pf.pack(fill="x", pady=(P(10), 0))
         self.v_nb = tk.IntVar(value=0)
         self._segmented(pf, [("진행 기록", 0), ("쪽별 상태", 1)], self.v_nb, lambda: self.nb.select(self.v_nb.get()), small=True).pack(side="left")
         ttk.Label(pf, textvariable=self.v_prog, style="Prog.TLabel").pack(side="right", padx=(P(12), 0))
@@ -2060,6 +2153,14 @@ class App(tk.Tk):
         for variable in (self.v_provider, self.v_model, *self._mode_vars.values(), self.v_docx, self.v_tlpdf, self.v_layout, self.v_template):
             variable.trace_add("write", self._sync_settings_summary)
         self._inputs_ready = True
+        self._cards_ready = True                                            # 이제부터 칸이 바뀌면 책 카드·실행 카드·장부를 다시 그린다(_schedule_cards)
+        watched = [v for t in self._input_vars.values() for v in t.values()] + list(self._mode_vars.values()) + [
+            self.v_force, self.v_layout, self.v_template, self.v_preset, self.v_bold, self.v_provider, self.v_model, self.v_reader, self.v_model2,
+            self.v_traditional, self.v_yun, self.v_punctuation, self.v_punctuation_rules, self.v_docx, self.v_tlpdf, self.v_ctxmodel, self.v_status,
+            self.v_second, self.v_suspects, self.v_blind, self.v_skipany, self.v_up, self.v_cache, self.v_join]
+        for variable in watched:
+            variable.trace_add("write", self._schedule_cards)
+        self.v_output_dir.trace_add("write", lambda *_: self.after_idle(self._scroll_out_ends))
         self.select_tab(self._initial_input_tab)
         self.update_idletasks()
         mid.columnconfigure(1, minsize=c3.winfo_reqwidth())           # 문서 카드는 줄어도 글자가 잘리지 않게
@@ -2141,71 +2242,1077 @@ class App(tk.Tk):
             return variable is None or bool(variable.get())
         return enabled("v_ctxmodel") and (enabled("v_traditional") or enabled("v_yun"))
 
-    def _build_input_card(self, parent, tab: int) -> None:
-        """탭별 입력과 결과 열기. 판독기·문서 옵션은 설정 탭에서 고른다."""
-        P = self.px; images = tab == 2; variables = self._input_vars[tab]
-        card = self._card(parent, "이미지 · 스크린샷" if images else "PDF"); card.pack(fill="x")
-        body = card.body; body.columnconfigure(1, weight=1)
-        self._field_label(body, "원본", 0)
+    # ---------- 작업 탭: 책 카드 · 이 책의 설정 · 실행 카드 · 장부(디자인 명세 §6.1·§6.5·§5.6·§5.7) ----------
+    def _lab(self, parent, text: str = "", font: str = "BODY", fg: str = "INK", bg: str = "PANEL", wrap: bool = False, **kw) -> tk.Label:
+        """색 토큰·글꼴 이름(self.fonts 의 열쇠)으로 만드는 tk.Label. wrap 이면 차지한 너비에 맞춰 줄을 바꾼다(width=1 — 글이 칸 너비를 정하지 않게)."""
+        C = self.colors
+        lab = tk.Label(parent, text=text, font=self.fonts.get(font, font), fg=C.get(fg, fg), bg=C.get(bg, bg), bd=0, highlightthickness=0,
+                       padx=0, pady=0, **kw)
+        if wrap:
+            lab.configure(width=1, justify="left", anchor="w")
+
+            def fit(e):
+                w = max(self.px(40), e.width - 2)
+                if abs(int(str(lab.cget("wraplength") or 0)) - w) > 3:
+                    lab.configure(wraplength=w)
+            lab.bind("<Configure>", fit, add="+")
+        return lab
+
+    def _counts_line(self, parent, bg: str = "PANEL") -> dict:
+        """'대상 46쪽 · 판독 기록 1쪽 · 새로 읽을 45쪽' 한 줄(접힌 책 줄·이미지 탭) — 수만 먹 굵게."""
+        f = tk.Frame(parent, bg=self.colors[bg]); out = {"frame": f}
+        for key, text in (("target", "대상 "), ("records", " · 판독 기록 "), ("to_read", " · 새로 읽을 ")):
+            self._lab(f, text, "BODY", "MUTED", bg).pack(side="left")
+            out[key] = self._lab(f, "—", "BODY_B", "INK", bg); out[key].pack(side="left")
+            out[key + "_u"] = self._lab(f, "", "BODY", "MUTED", bg); out[key + "_u"].pack(side="left")
+        return out
+
+    def _build_book_card(self, parent, tab: int) -> None:
+        """일반·이미지 OCR 탭의 책 카드. 펼친 카드 = 정체 열(도장·제목·수치·원본 경로·단추·결과 저장 — 이미지 탭은 제목 한 줄 + 큰 원본 상자 + 수치 한 줄)
+        | '이 책의 설정' 판(책별 설정 state.BOOK_KEYS 그대로: 쪽 범위·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기, 인쇄 쪽수는 값이 있을 때만)
+        + 모든 책 공통 줄 + 저장 상태. 안 너비가 730 보다 좁으면 판이 정체 아래로. 실행 중에는 한 줄로 접는다(도장·제목·수치 · 이 책의 설정 · 잠김 ▸ ·
+        [원본 보기]). 글·상태는 _sync_cards 가 채운다."""
+        C, P = self.colors, self.px
+        images = tab == 2; variables = self._input_vars[tab]
+        L = self._lab; Q = C["QUIET"]
+        w: dict = {"tab": tab, "expanded": False}
+        self._book_cards[tab] = w
+        # ---- 접힌 한 줄(실행 중): 도장 34 · 제목 · 파일 이름 · 수치 ……… 자물쇠 이 책의 설정 · 잠김 ▸ · [원본 보기] ----
+        row = w["row"] = ttk.Frame(parent, style="Card.TFrame", padding=(P(20), P(9)))
+        rb = tk.Frame(row, bg=C["PANEL"]); rb.pack(fill="x")
+        w["row_seal"] = tk.Frame(rb, bg=C["PANEL"]); w["row_seal"].pack(side="left", padx=(0, P(12)))
+        w["row_title"] = L(rb, "", "NUM"); w["row_title"].pack(side="left")
+        w["row_fname"] = L(rb, "", "CAP", "MUTED"); w["row_fname"].pack(side="left", padx=(P(10), P(16)), pady=(P(4), 0))
+        w["row_counts"] = self._counts_line(rb); w["row_counts"]["frame"].pack(side="left", pady=(P(3), 0))
+        rr = tk.Frame(rb, bg=C["PANEL"]); rr.pack(side="right")
+        self._btn(rr, "원본 보기", self.open_source, lock=False, tip="원본을 엽니다 — 열기만 하므로 실행 중에도 눌립니다.").pack(side="right")
+        w["row_toggle"] = ttk.Button(rr, text=" 이 책의 설정 · 잠김 ▸", image=self.icons["lock"], compound="left", style="Toggle.TButton", cursor="hand2",
+                                     command=lambda: App._toggle_locked_book(self, tab))
+        w["row_toggle"].pack(side="right", padx=(0, P(12)))
+        Tip(w["row_toggle"], "실행 중에는 고칠 수 없습니다 — 펼치면 이 책의 설정을 읽기 전용으로 봅니다", self)
+        # ---- 펼친 카드 ----
+        card = w["card"] = ttk.Frame(parent, style="Card.TFrame", padding=(P(20), P(16)))
+        card.pack(fill="x")
+        body = w["body"] = tk.Frame(card, bg=C["PANEL"]); body.pack(fill="both", expand=True)
+        ident = w["ident"] = tk.Frame(body, bg=C["PANEL"]); ident.columnconfigure(0, weight=1)
+        panel = w["panel"] = ttk.Frame(body, style="Quiet.TFrame", padding=(P(14), P(12)))
+        body.bind("<Configure>", lambda e: App._layout_book(self, w, e.width))
+        App._layout_book(self, w, 10 ** 6)
+        gap = P(10) if images else P(12)
+        # 정체 열 · 머리: 도장 + 제목 + 파일 이름(원본이 없으면 '원본을 고르십시오' + 안내)
+        top = tk.Frame(ident, bg=C["PANEL"]); top.grid(row=0, column=0, sticky="ew")
+        w["seal"] = tk.Frame(top, bg=C["PANEL"]); w["seal"].pack(side="left", padx=(0, P(10) if images else P(14)))
         if images:
-            from .gui_preview import ImageInputPreview
-            self.image_preview = ImageInputPreview(body, variable=variables["pdf"], paste=self.paste_screenshot,
-                                                   open_source=self.open_source, height=P(180))
-            self.image_preview.grid(row=0, column=1, columnspan=2, sticky="ew", pady=P(3))
+            w["title"] = L(top, "", "NUM"); w["title"].pack(side="left")
+            w["fname"] = L(top, "", "CAP", "MUTED", wrap=True); w["fname"].pack(side="left", fill="x", expand=True, padx=(P(10), 0), pady=(P(4), 0))
+            w["sub"] = L(ident, "이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다.", "BODY", "MUTED", wrap=True)
         else:
-            ttk.Entry(body, textvariable=variables["pdf"], state="readonly").grid(row=0, column=1, columnspan=2, sticky="ew", pady=P(3))
-        controls = ttk.Frame(body, style="Panel.TFrame")
-        controls.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
-        self._btn(controls, "이미지 고르기…" if images else "PDF 고르기…", self.choose_images if images else self.choose_pdf,
-                  tip="이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다." if images else "판독할 스캔 PDF를 고릅니다.").pack(side="left")
-        if not images:
-            self._btn(controls, "원본 보기", self.open_source,
-                      tip="선택한 원본 PDF를 엽니다.").pack(side="left", padx=(P(6), 0))
+            tt = tk.Frame(top, bg=C["PANEL"]); tt.pack(side="left", fill="x", expand=True)
+            w["title"] = L(tt, "", "TITLE", wrap=True); w["title"].pack(fill="x")
+            w["fname"] = L(tt, "", "BODY", "MUTED", wrap=True); w["fname"].pack(fill="x")
+        w["title_tip"] = Tip(w["fname"], "", self)
         if images:
-            self._btn(controls, "입력 비우기", self.clear_image_input,
-                      tip="불러온 이미지 선택과 쪽 범위를 모두 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 보존합니다.").pack(side="left", padx=(P(14), 0))
-            self._hint(body, "Win+Shift+S로 캡처 → 위 상자에서 Ctrl+V → [한 번에 인식]. 이미지를 두 번 클릭하면 원본을 크게 봅니다. 여러 장은 첫 쪽을 미리 보여 줍니다.").grid(
-                row=2, column=1, columnspan=2, sticky="ew", pady=(P(4), P(3)))
-        self._field_label(body, "쪽 범위", 3, top=6)
-        row = ttk.Frame(body, style="Panel.TFrame"); row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
-        ttk.Entry(row, textvariable=variables["pages"], width=12).pack(side="left")
-        self._btn(row, "전체", lambda: variables["pages"].set(""), tip="비우면 원본 전체를 판독합니다.").pack(side="left", padx=(P(6), 0))
-        ttk.Label(row, text="비우면 전체 · 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
-        self._field_label(body, "결과 저장", 4, top=6)
-        ttk.Entry(body, textvariable=self.v_output_dir, state="readonly").grid(row=4, column=1, sticky="ew", pady=(P(6), P(3)))
-        actions = ttk.Frame(body, style="Panel.TFrame"); actions.grid(row=4, column=2, sticky="w", padx=(P(8), 0), pady=(P(6), P(3)))
-        self._btn(actions, "HWPX 바로 열기", self.open_hwpx,
-                  tip="현재 원본의 가장 최근 완성된 HWPX를 바로 엽니다. 중간 저장본은 제외합니다.").pack(side="left")
-        self._btn(actions, "문자 PDF 열기", self.open_textlayer,
-                  tip="현재 원본에서 마지막으로 만든 검색·복사 가능한 PDF를 엽니다.").pack(side="left", padx=(P(6), 0))
-        self._btn(actions, "저장 폴더", self.open_output_folder,
-                  tip="HWPX가 저장되는 out 폴더를 탐색기로 엽니다.").pack(side="left", padx=(P(6), 0))
-        self._build_settings_summary(parent)
+            # 큰 원본 상자(168): 누르면 초점 → Ctrl+V · 오른쪽 메뉴 · 두 번 누르면 원본. 빈 상자 가운데 먹 단추 [이미지 붙여넣기](마우스만 쓰는 길)
+            from .gui_preview import ImageInputPreview
+            pv = self.image_preview = ImageInputPreview(ident, variable=variables["pdf"], paste=self.paste_screenshot, open_source=self.open_source,
+                                                        height=P(168), colors=self.colors, fonts=self.fonts, scale=self.scale, zoom_icon=self.icons["expand"])
+            pv.grid(row=2, column=0, sticky="ew", pady=(gap, 0))
+            pb = self._btn(pv.canvas, " 이미지 붙여넣기", lambda: (self.paste_screenshot(), pv.canvas.focus_set()), style="QuietInk.TButton",
+                           image=(self.icons["clip"], "disabled", self.icons["clip_dis"]), compound="left",
+                           tip="Win+Shift+S로 캡처한 이미지를 붙여 넣습니다(상자를 누르고 Ctrl+V와 같음)")
+            pv.set_empty_widget(pb)
+            w["counts_line"] = self._counts_line(ident); w["counts_line"]["frame"].grid(row=3, column=0, sticky="w", pady=(gap, 0))
+        else:
+            # 수치 3칸(위아래 LINE · 칸 사이 LINE 세로줄)
+            cf = tk.Frame(ident, bg=C["PANEL"]); cf.grid(row=1, column=0, sticky="ew", pady=(gap, 0))
+            hl = max(1, P(1))
+            tk.Frame(cf, bg=C["LINE"], height=hl).grid(row=0, column=0, columnspan=5, sticky="ew")
+            tk.Frame(cf, bg=C["LINE"], height=hl).grid(row=2, column=0, columnspan=5, sticky="ew")
+            w["counts"] = []
+            for i, name in enumerate(("대상", "판독 기록", "새로 읽을")):
+                if i:
+                    tk.Frame(cf, bg=C["LINE"], width=hl).grid(row=1, column=2 * i - 1, sticky="ns")
+                cell = tk.Frame(cf, bg=C["PANEL"]); cell.grid(row=1, column=2 * i, sticky="nsew", padx=(P(14) if i else 0, 0), pady=P(6))
+                L(cell, name, "CAP", "MUTED").pack(anchor="w")
+                vf = tk.Frame(cell, bg=C["PANEL"]); vf.pack(anchor="w")
+                num = L(vf, "—", "NUM"); num.pack(side="left")
+                unit = L(vf, "", "BODY"); unit.pack(side="left", anchor="s", padx=(P(2), 0), pady=(0, P(3)))
+                w["counts"].append((num, unit))
+                cf.columnconfigure(2 * i, weight=1, uniform="counts")
+            # 원본 경로(가운데 줄임 · 풍선 전체 경로 · 오른쪽 클릭 '경로 복사')
+            pr = w["path_row"] = tk.Frame(ident, bg=C["PANEL"]); pr.grid(row=2, column=0, sticky="ew", pady=(gap, 0))
+            L(pr, image=self.icons["folder_muted"]).pack(side="left", padx=(0, P(7)))
+            w["path"] = L(pr, "", "CAP", "MUTED", anchor="w", width=1); w["path"].pack(side="left", fill="x", expand=True)
+            w["path"].bind("<Configure>", lambda _e: App._fit_path(self, w), add="+")
+            w["path_tip"] = Tip(w["path"], "", self)
+            menu = tk.Menu(pr, tearoff=False)
+            menu.add_command(label="경로 복사", command=lambda v=variables["pdf"]: App._copy_text(self, v.get().strip()))
+            w["path"].bind("<Button-3>", lambda e: App._popup(menu, e))
+        br = tk.Frame(ident, bg=C["PANEL"]); br.grid(row=4, column=0, sticky="w", pady=(gap, 0))
+        if images:
+            w["pick"] = self._btn(br, "이미지 고르기…", self.choose_images, tip="이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다.")
+            w["clear"] = self._btn(br, "입력 비우기", self.clear_image_input,
+                                   tip="불러온 이미지 선택과 쪽 범위를 모두 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·결과는 보존합니다.")
+            w["pick"].pack(side="left"); w["clear"].pack(side="left", padx=(P(8), 0))
+        else:
+            w["pick"] = self._btn(br, "PDF 고르기…", self.choose_pdf, tip="판독할 스캔 PDF를 고릅니다.")
+            w["source"] = self._btn(br, "원본 보기", self.open_source, lock=False, tip="고른 원본 PDF를 엽니다 — 열기만 하므로 실행 중에도 눌립니다.")
+            w["pick"].pack(side="left"); w["source"].pack(side="left", padx=(P(8), 0))
+        # 결과 저장(읽기 전용 — 전체 경로를 끝으로 굴려 보이고 Ctrl+C 는 진짜 경로를 복사) + [저장 폴더]. 결과를 여는 단추는 실행 카드에
+        w["out_label"] = L(ident, "", "CAP", "MUTED", wrap=True); w["out_label"].grid(row=5, column=0, sticky="ew", pady=(gap, P(3)))
+        orow = tk.Frame(ident, bg=C["PANEL"]); orow.grid(row=6, column=0, sticky="ew")
+        out = w["out"] = ttk.Entry(orow, textvariable=self.v_output_dir, state="readonly", width=1)
+        out.pack(side="left", fill="x", expand=True)
+        out.bind("<Configure>", lambda _e: out.xview_moveto(1.0), add="+")
+        Tip(out, "HWPX·문자 PDF가 저장되는 out 폴더 — 전체 경로(Ctrl+C 로 복사)", self)
+        w["outdir"] = self._btn(orow, " 저장 폴더", self.open_output_folder, lock=False, image=(self.icons["folder"], "disabled", self.icons["folder_dis"]),
+                                compound="left", tip="HWPX·문자 PDF가 저장되는 out 폴더를 탐색기로 엽니다.")
+        w["outdir"].pack(side="left", padx=(P(8), 0))
+        # ---- '이 책의 설정' 판(QUIET): 머리 · 6행(+ 인쇄 쪽수) · 바닥(모든 책 공통 · 저장 상태) ----
+        ph = tk.Frame(panel, bg=Q); ph.pack(fill="x")
+        L(ph, "이 책의 설정", "SECTION", bg="QUIET").pack(side="left")
+        w["panel_cap"] = L(ph, "", "CAP", "MUTED", bg="QUIET"); w["panel_cap"].pack(side="left", padx=(P(10), 0), pady=(P(2), 0))
+        w["fix"] = self._btn(ph, "설정에서 고치기", lambda: self.select_tab(3), style="QLink.TButton",
+                             tip="설정 탭에서 이 책의 설정(쪽 범위·인쇄 쪽수·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기)을 고칩니다.")
+        w["fix"].pack(side="right")
+        w["fold"] = ttk.Button(ph, text=" 잠김 · 접기 ▴", image=self.icons["lock"], compound="left", style="QToggle.TButton", cursor="hand2",
+                               command=lambda: App._toggle_locked_book(self, tab))
+        foot = tk.Frame(panel, bg=Q); foot.pack(side="bottom", fill="x", pady=(P(8), 0))
+        g = tk.Frame(panel, bg=Q); g.pack(fill="x", pady=(P(8), 0))
+        g.columnconfigure(0, minsize=P(72)); g.columnconfigure(1, weight=1)
+
+        def name(r: int, text: str, sticky: str = "w"):
+            lab = L(g, text, "BODY", "MUTED", bg="QUIET"); lab.grid(row=r, column=0, sticky=sticky, padx=(0, P(10)), pady=P(2))
+            return lab
+        name(0, "쪽 범위")
+        pf = w["pages_row"] = tk.Frame(g, bg=Q); pf.grid(row=0, column=1, sticky="ew", pady=P(2))
+        e = ttk.Entry(pf, textvariable=variables["pages"], width=11, style="Quiet.TEntry"); e.grid(row=0, column=0, sticky="w")
+        self._lock_entries.append(e)
+        Tip(e, "판독할 쪽. 비우면 원본 전체 · 예 1-5, 8", self)
+        allb = self._btn(pf, "전체", lambda v=variables["pages"]: v.set(""), style="QuietSmall.TButton", tip="비우면 원본 전체를 판독합니다.")
+        allb.configure(width=0)
+        allb.grid(row=0, column=1, padx=(P(6), 0))
+        w["pages_hint"] = L(pf, "비우면 전체 · 예 1-5, 8", "CAP", "MUTED", bg="QUIET")
+        w["pages_parts"] = (e, allb)
+        pf.bind("<Configure>", lambda ev: App._fit_pages_hint(self, w, ev.width))
+        App._fit_pages_hint(self, w, 10 ** 6)
+        w["off_name"] = L(g, "인쇄 쪽수", "BODY", "MUTED", bg="QUIET")
+        of = w["off_row"] = tk.Frame(g, bg=Q)
+        L(of, "원본 쪽수 ", "BODY", bg="QUIET").pack(side="left")
+        w["off_val"] = L(of, "", "BODY_B", bg="QUIET"); w["off_val"].pack(side="left")
+        w["off_link"] = L(of, "· [설정] → 고급에서 고침", "CAP", "MUTED", bg="QUIET", cursor="hand2")
+        w["off_link"].pack(side="left", padx=(P(6), 0), pady=(P(2), 0))
+        w["off_link"].bind("<Button-1>", lambda _e: App._goto_print_offset(self))
+        Tip(w["off_link"], "인쇄 쪽수 보정은 [설정]의 고급에 있습니다(비우면 자동 판정). 누르면 그 칸으로 갑니다.", self)
+        for r, (text, key) in enumerate((("읽기 방향", "mode"), ("문서 짜임", "layout"), ("양식", "template"), ("짜임 규칙", "preset"), ("획 굵기", "bold")), start=2):
+            name(r, text, "nw" if key == "preset" else "w")
+            if key == "preset":
+                pr_ = tk.Frame(g, bg=Q); pr_.grid(row=r, column=1, sticky="ew", pady=P(2))
+                w["v_preset"] = L(pr_, "", "BODY_B", bg="QUIET", wrap=True); w["v_preset"].pack(fill="x")
+                w["v_preset_hint"] = L(pr_, "", "CAP", "MUTED", bg="QUIET", wrap=True); w["v_preset_hint"].pack(fill="x")
+            else:
+                w["v_" + key] = L(g, "", "BODY", bg="QUIET", wrap=True); w["v_" + key].grid(row=r, column=1, sticky="ew", pady=P(2))
+        w["tip_template"] = Tip(w["v_template"], "", self); w["tip_preset"] = Tip(w["v_preset"], "", self)
+        tk.Frame(foot, bg=C["LINE"], height=max(1, P(1))).pack(fill="x", pady=(0, P(7)))
+        w["common"] = L(foot, "", "CAP", "MUTED", bg="QUIET", wrap=True); w["common"].pack(fill="x")
+        sv = w["save_row"] = tk.Frame(foot, bg=Q); sv.pack(fill="x", pady=(P(1), 0)); sv.columnconfigure(2, weight=1)
+        w["save_icon"] = L(sv, "", bg="QUIET"); w["save_icon"].grid(row=0, column=0, sticky="w")
+        w["save_state"] = L(sv, "", "CAP_B", bg="QUIET"); w["save_state"].grid(row=0, column=1, sticky="w")
+        w["save_path"] = L(sv, "", "CAP", "MUTED", bg="QUIET", wrap=True)
+        sv.bind("<Configure>", lambda ev: App._fit_save_row(self, w, ev.width))
+
+    def _layout_book(self, w: dict, width: int) -> None:
+        """책 카드 안 두 열(정체 330 : 판 380, 사이 20) ↔ 판을 정체 아래로(안 너비 < 730)."""
+        stacked = width < self.px(730)
+        if stacked == w.get("stacked"):
+            return
+        w["stacked"] = stacked; body, P = w["body"], self.px
+        if stacked:
+            body.columnconfigure(0, weight=1, uniform=""); body.columnconfigure(1, weight=0, uniform="")
+            w["ident"].grid(row=0, column=0, sticky="nsew"); w["panel"].grid(row=1, column=0, sticky="nsew", padx=0, pady=(P(16), 0))
+        else:
+            body.columnconfigure(0, weight=100, uniform="book"); body.columnconfigure(1, weight=115, uniform="book")
+            w["ident"].grid(row=0, column=0, sticky="nsew"); w["panel"].grid(row=0, column=1, sticky="nsew", padx=(P(20), 0), pady=0)
+
+    def _fit_pages_hint(self, w: dict, width: int) -> None:
+        """쪽 범위 줄의 힌트: 칸·[전체] 옆에 들어가지 않으면 아래 줄로."""
+        e, allb = w["pages_parts"]; hint = w["pages_hint"]; P = self.px
+        need = e.winfo_reqwidth() + allb.winfo_reqwidth() + hint.winfo_reqwidth() + P(14)
+        below = width < need
+        if below == w.get("hint_below"):
+            return
+        w["hint_below"] = below
+        if below:
+            hint.grid(row=1, column=0, columnspan=3, sticky="w", padx=0, pady=(P(2), 0))
+        else:
+            hint.grid(row=0, column=2, sticky="w", padx=(P(8), 0), pady=0)
+
+    def _fit_path(self, w: dict) -> None:
+        """원본 경로 줄: 차지한 너비에 맞춰 가운데를 '…' 로(전체 경로는 풍선 도움말·'경로 복사')."""
+        lab = w.get("path")
+        if lab is None:
+            return
+        pdf = self._input_vars[w["tab"]]["pdf"].get().strip()
+        try:
+            from tkinter import font as tkfont
+            f = vars(self).get("_cap_font") or tkfont.Font(self, font=self.fonts["CAP"])
+            self._cap_font = f
+            text = elide_middle(pdf, f, max(self.px(20), lab.winfo_width() - 4))
+        except tk.TclError:
+            text = pdf
+        if lab.cget("text") != text:
+            lab.configure(text=text)
+        w["path_tip"].text = pdf
+
+    def _copy_text(self, text: str) -> None:
+        if text:
+            self.clipboard_clear(); self.clipboard_append(text)
+
+    @staticmethod
+    def _popup(menu, e) -> None:
+        try:
+            menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            menu.grab_release()
+
+    def _toggle_locked_book(self, tab: int) -> None:
+        """실행 중 접힌 책 줄의 '이 책의 설정 · 잠김 ▸': 펼친 카드를 잠긴 모양으로 보이거나(▴) 다시 접는다. 값은 고칠 수 없다(칸·단추가 잠김)."""
+        w = self._book_cards.get(tab)
+        if w is not None:
+            w["expanded"] = not w["expanded"]
+            App._sync_book_card(self, tab)
+
+    def _goto_print_offset(self) -> None:
+        """판의 '인쇄 쪽수 · [설정] → 고급에서 고침': 설정 탭을 열고 고급을 펼쳐 그 칸으로 간다(실행 중에는 탭을 옮기지 않는다)."""
+        if self.running:
+            return
+        self.select_tab(3)
+        if not self.v_adv.get():
+            self.toggle_advanced()
+        self.after(120, lambda: (self._reveal(self.e_print_offset), self.e_print_offset.focus_set()))
+
+    def _set_seal(self, w: dict, key: str, chars: str, large: bool) -> None:
+        """도장 자리(w[key] 틀)를 chars 로 다시 그린다(같으면 그대로). 글자가 없으면 비우고 옆 여백도 뺀다."""
+        holder = w[key]
+        if w.get(key + "_chars") == chars:
+            return
+        w[key + "_chars"] = chars
+        for c in holder.winfo_children():
+            c.destroy()
+        if chars:
+            self._seal(holder, chars, large=large).pack()
+        pad = holder.pack_info().get("padx") if holder.winfo_manager() == "pack" else None
+        if pad is not None:
+            w.setdefault(key + "_pad", pad)
+            holder.pack_configure(padx=w[key + "_pad"] if chars else 0)
+
+    @staticmethod
+    def _preset_view(ref: str) -> tuple[str, str, bool, str]:
+        """짜임 규칙 줄: (값, 설명 줄, 설명이 경고인가, 풍선 글). 내장·예전 이름은 PRESET_HINTS, 규칙 파일은 그 안의 이름과 파일 이름(읽지 못하면 경고)."""
+        ref = (ref or "").strip() or DEFAULT_PRESET
+        if ref in BUILTIN:
+            return preset_label(ref), PRESET_HINTS.get(ref, ""), False, ""
+        if ref in ALIASES:
+            return preset_label(ref), PRESET_HINTS.get(ALIASES[ref][0], ""), False, ""
+        try:
+            p = resolve_preset(ref)
+        except PresetError:
+            return preset_label(ref).replace(" (읽지 못함)", ""), "읽지 못함 — [설정]에서 다시 고르십시오", True, ref
+        return p.label or preset_label(ref), Path(ref).name, False, ref
+
+    def _bold_view(self, flow: bool, tpl: str, ref: str) -> tuple[str, bool]:
+        """획 굵기 줄: (글, 흐리게) — 설정 탭이 칸을 흐리게 하는 조건(_layout_changed)과 같다."""
+        if not flow:
+            return "재지 않음 — 원본 쪽대로", True
+        if not tpl:
+            return "재지 않음 — 양식이 없음", True
+        try:
+            p = resolve_preset(ref)
+        except PresetError:
+            return "재지 않음 — 짜임 규칙을 읽지 못함", True
+        if p.entry is None:
+            return "재지 않음 — 짜임 규칙에 약재명 떼기가 없음", True
+        if not self.v_bold.get():
+            return "굵은·보통 글씨 가르기 끔", False
+        return "굵은·보통 글씨 가르기 켬" + (" (本經·別錄)" if p.id == "kaibao" else ""), False
+
+    def _book_save_state(self) -> str:
+        """이 책의 설정이 결과 폴더(book_settings.json)에 남았는지: 'none'(원본 없음) · 'pending'(결과 폴더가 아직 없음 — 첫 실행 때 저장)
+        · 'unsaved'(폴더는 있지만 설정 파일이 없음) · 'changed'(파일에 남긴 뒤 칸을 고침) · 'saved'."""
+        d = (vars(self).get("_book") or {}).get("dir")
+        if not self.pdf() or d is None or d != self._book_dir():
+            return "none"
+        if not d.is_dir():
+            return "pending"
+        if not (d / BOOK_SETTINGS).is_file():
+            return "unsaved"
+        return "changed" if self._book_values() != self._book.get("loaded") else "saved"
+
+    def _common_line(self) -> str:
+        """'모든 책 공통: ChatGPT (OpenAI) gpt-4.1 · 자동 교정 3가지' (+ HWPX와 함께 만드는 것)."""
+        on = [n for n, v in (("간체→번체", self.v_traditional), ("云/雲", self.v_yun), ("중문부호", self.v_punctuation)) if v.get()]
+        fix = "자동 교정 3가지" if len(on) == 3 else ("자동 교정: " + " · ".join(on) if on else "자동 교정 끔")
+        also = [n for n, v in (("DOCX", self.v_docx), ("검색 가능한 PDF", self.v_tlpdf)) if v.get()]
+        return (f"모든 책 공통: {self.v_provider.get()} {self.v_model.get().strip()} · {fix}"
+                + (" · HWPX와 함께 " + " · ".join(also) if also else ""))
+
+    # ---- 다시 그리기 ----
+    def _schedule_cards(self, *_):
+        """책 카드·실행 카드·장부를 다음 한가할 때 한 번 다시 그린다(칸이 여럿 바뀌어도 한 번). 창이 다 만들어지기 전·시험의 가짜 창에서는 아무것도 하지 않는다."""
+        d = vars(self)
+        if not d.get("_cards_ready") or d.get("_cards_job"):
+            return
+        try:
+            self._cards_job = self.after_idle(self._sync_cards)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _sync_cards(self) -> None:
+        self._cards_job = None
+        try:
+            key = (self._active_input, self.pdf())
+            if key != vars(self).get("_cards_key"):                # 다른 원본·탭: 끝난 실행 표시를 거두고 그 책의 장부(last_cost.json)를 읽는다
+                self._cards_key = key
+                if not self.running:
+                    self._run_result = None; self._ledger_live = False
+                App._load_ledger(self)
+            App._sync_book_card(self, self._active_input)
+            App._sync_run_card(self)
+            App._sync_ledger(self)
+            App._apply_source_lock(self)
+            App._request_counts(self)
+        except tk.TclError:
+            pass
+
+    def _sync_book_card(self, tab: int) -> None:
+        d = vars(self); w = (d.get("_book_cards") or {}).get(tab)
+        if w is None:
+            return
+        F = self.fonts
+        images = tab == 2
+        pdf = self._input_vars[tab]["pdf"].get().strip()
+        title, chars, fname = book_title(pdf)
+        locked = self.running and d.get("_running_cmd") not in (None, "", "update")
+        if not locked:
+            w["expanded"] = False
+        collapsed = locked and not w["expanded"]
+        if collapsed != w.get("collapsed"):
+            w["collapsed"] = collapsed
+            if collapsed:
+                w["card"].pack_forget(); w["row"].pack(fill="x")
+            else:
+                w["row"].pack_forget(); w["card"].pack(fill="x")
+            if hasattr(self, "pane"):
+                self.after_idle(self._fit_sash)
+        App._set_seal(self, w, "seal", chars, large=not images)
+        App._set_seal(self, w, "row_seal", chars, large=False)
+        if pdf:
+            w["title"].configure(text=title, font=F["NUM" if images else "TITLE"]); w["fname"].configure(text=fname)
+        else:
+            w["title"].configure(text="원본을 고르십시오", font=F["TITLE"]); w["fname"].configure(text="" if images else "PDF 한 권 또는 이미지 파일·폴더")
+        w["title_tip"].text = pdf
+        if images:
+            if pdf:
+                w["sub"].grid_remove()
+            else:
+                w["sub"].grid(row=1, column=0, sticky="ew")
+            (w["fname"].pack_forget if not pdf else lambda: w["fname"].pack(side="left", fill="x", expand=True, padx=(self.px(10), 0), pady=(self.px(4), 0)))()
+        w["row_title"].configure(text=title or "원본 없음"); w["row_fname"].configure(text=fname)
+        counts = d.get("_counts") if tab == self._active_input else None
+        vals = [counts.get(k) for k in ("target", "records", "to_read")] if counts and pdf else [None] * 3
+        for line in [w["row_counts"]] + ([w["counts_line"]] if images else []):
+            for k, v in zip(("target", "records", "to_read"), vals):
+                line[k].configure(text="—" if v is None else f"{v:,}"); line[k + "_u"].configure(text="" if v is None else "쪽")
+        for (num, unit), v in zip(w.get("counts", ()), vals):
+            num.configure(text="—" if v is None else f"{v:,}"); unit.configure(text="" if v is None else "쪽")
+        if not images:
+            if pdf:
+                w["path_row"].grid(); App._fit_path(self, w)
+            else:
+                w["path_row"].grid_remove()
+            w["pick"].configure(style="TButton" if pdf else "Ink.TButton")
+        w["out_label"].configure(text="결과 저장 (읽기 전용 · HWPX·문자 PDF가 저장되는 out 폴더)" if pdf else "결과 저장 (읽기 전용 · 원본을 고르면 정해짐)")
+        # 이 책의 설정 판
+        if locked:
+            cap = "실행 중에는 잠김 · 끝나면 고칠 수 있음"
+            if w["fold"].winfo_manager() != "pack":
+                w["fix"].pack_forget(); w["fold"].pack(side="right")
+        else:
+            cap = "바꾸면 다음 실행에 적용" if pdf else "원본을 고르면 그 책의 값으로 바뀜"
+            if w["fix"].winfo_manager() != "pack":
+                w["fold"].pack_forget(); w["fix"].pack(side="right")
+        w["panel_cap"].configure(text=cap)
+        App._sync_panel(self, tab, w)
+
+    def _sync_panel(self, tab: int, w: dict) -> None:
+        """'이 책의 설정' 판의 값(책별 설정 일곱 가지 — 인쇄 쪽수는 값이 있을 때만)·모든 책 공통 줄·저장 상태."""
+        C, F = self.colors, self.fonts
+        flow = self.layout_key() == "flow"
+        w["v_mode"].configure(text=self._mode_vars[2 if tab == 2 else 0].get() + (" (이미지 몫)" if tab == 2 else ""))
+        w["v_layout"].configure(text=self.v_layout.get())
+        tpl = self.v_template.get().strip()
+        if tpl:
+            w["v_template"].configure(text=Path(tpl).name, font=F["BODY_B"], fg=C["INK"] if flow else C["MUTED"])
+        else:
+            w["v_template"].configure(text="없음 — 기본 모양", font=F["BODY"], fg=C["MUTED"])
+        w["tip_template"].text = tpl
+        ref = App.preset_ref(self)
+        val, hint, bad, tip = App._preset_view(ref)
+        w["v_preset"].configure(text=val, fg=C["INK"] if flow else C["MUTED"])
+        w["v_preset_hint"].configure(text=hint if flow else "원본 쪽대로라 쓰지 않음", fg=C["WARN"] if bad and flow else C["MUTED"])
+        w["tip_preset"].text = tip
+        text, muted = App._bold_view(self, flow, tpl, ref)
+        w["v_bold"].configure(text=text, fg=C["MUTED"] if muted else C["INK"])
+        off = self._input_vars[tab]["print_offset"].get().strip()
+        if off:
+            sign = "−" if off.startswith("-") else "+"
+            w["off_val"].configure(text=f"{sign} {off.lstrip('+-')}" if off.lstrip("+-").isdigit() else off)
+            w["off_name"].grid(row=1, column=0, sticky="w", padx=(0, self.px(10)), pady=self.px(2)); w["off_row"].grid(row=1, column=1, sticky="w", pady=self.px(2))
+        else:
+            w["off_name"].grid_remove(); w["off_row"].grid_remove()
+        w["common"].configure(text=App._common_line(self))
+        state = App._book_save_state(self) if tab == self._active_input else "none"
+        d = self._book.get("dir")
+        where = f"— {d.name}{os.sep}{BOOK_SETTINGS}" if d is not None and state in ("saved", "changed", "unsaved") else ""
+        look = {"saved": ("결과 폴더에 저장됨", "GREEN", "CAP_B", True), "changed": ("바뀜 — 실행하거나 [설정 저장]하면 남김", "WARN", "CAP_B", False),
+                "unsaved": ("아직 저장 안 함 — 실행하거나 [설정 저장]하면 남김", "MUTED", "CAP", False),
+                "pending": ("결과 폴더가 생기면(첫 실행) 저장", "MUTED", "CAP", False),
+                "none": ("원본이 없어 아직 저장할 곳이 없습니다", "MUTED", "CAP", False)}[state]
+        w["save_icon"].configure(image=self.icons["check"] if look[3] else "")
+        w["save_icon"].grid_configure(padx=(0, self.px(5)) if look[3] else 0)
+        w["save_state"].configure(text=look[0], fg=C[look[1]], font=F[look[2]])
+        w["save_path"].configure(text=where)
+        w["save_fit"] = None
+        App._fit_save_row(self, w, w["save_row"].winfo_width())
+
+    def _fit_save_row(self, w: dict, width: int) -> None:
+        """저장 상태 줄: '✓ 결과 폴더에 저장됨 — …\\book_settings.json' — 경로가 같은 줄에 들어가지 않으면 다음 줄로."""
+        path = w["save_path"]; P = self.px
+        text = path.cget("text")
+        try:
+            from tkinter import font as tkfont
+            need = (w["save_icon"].winfo_reqwidth() + w["save_state"].winfo_reqwidth() + P(5)
+                    + tkfont.Font(self, font=self.fonts["CAP"]).measure(text) + P(4))
+        except tk.TclError:
+            need = 0
+        fit = ("none" if not text else "below" if width > 1 and need > width else "beside")
+        if fit == w.get("save_fit"):
+            return
+        w["save_fit"] = fit
+        if fit == "none":
+            path.grid_remove()
+        elif fit == "below":
+            path.grid(row=1, column=0, columnspan=3, sticky="ew", padx=0)
+        else:
+            path.grid(row=0, column=2, sticky="ew", padx=(P(5), 0))
+
+    def _scroll_out_ends(self) -> None:
+        """결과 저장 칸은 전체 경로를 두고 끝('…\\개보본초.ocr_YeonE_OCR\\out')이 보이게 굴린다."""
+        for w in (vars(self).get("_book_cards") or {}).values():
+            try:
+                w["out"].xview_moveto(1.0)
+            except (KeyError, tk.TclError):
+                pass
+
+    # ---- 수치(대상 · 판독 기록 · 새로 읽을) ----
+    def _request_counts(self, refresh: bool = False) -> None:
+        """원본·쪽 범위·다시 판독이 바뀌면(또는 refresh — 실행이 끝난 뒤) 작업 스레드에서 state.book_counts 로 센다. 결과는 큐 ('counts', 번호, 값)."""
+        d = vars(self)
+        if not d.get("_cards_ready"):
+            return
+        pdf = self.pdf(); key = (pdf, self.v_pages.get().strip(), bool(self.v_force.get()))
+        if not refresh and key == d.get("_counts_key"):
+            return
+        self._counts_key = key; self._counts = None
+        self._counts_seq = seq = d.get("_counts_seq", 0) + 1
+        if not pdf:
+            return
+        work = self.work()
+
+        def count():
+            try:
+                res = book_counts(pdf, work, key[1], key[2])
+            except Exception:
+                res = None                                              # 쪽 범위를 읽지 못함·원본을 열지 못함 — 수치는 '—'(실행하면 명령이 까닭을 알린다)
+            self.q.put(("counts", seq, res))
+        threading.Thread(target=count, daemon=True, name="book-counts").start()
+
+    def _counts_done(self, seq: int, res: dict | None) -> None:
+        if seq == vars(self).get("_counts_seq"):
+            self._counts = res
+            App._sync_book_card(self, self._active_input)
+
+    def _plan_counts(self, priced: dict, sig: dict | None) -> None:
+        """어림(미리 보기·실행)이 오면 그 계획의 대상·기록·새로 읽을 쪽으로 바꾼다 — 원본이 바뀌어 옮겨질 낡은 기록까지 센 값이라 더 맞다."""
+        if not vars(self).get("_cards_ready") or not sig:
+            return
+        if (sig.get("pdf"), sig.get("pages"), bool(sig.get("force"))) != (self.pdf(), self.v_pages.get().strip(), bool(self.v_force.get())):
+            return
+        if priced.get("errors") and not priced.get("pages"):
+            return
+        self._counts = {"target": priced.get("pages", 0), "records": priced.get("records", 0), "to_read": priced.get("to_read", 0)}
+        self._counts_key = (self.pdf(), self.v_pages.get().strip(), bool(self.v_force.get()))
+        App._schedule_cards(self)
+
+    # ---- 단추 잠금 ----
+    def _apply_source_lock(self) -> None:
+        """원본이 없으면 실행 단추 둘·[비용 미리 보기]·열기 단추 넷·[원본 보기]·[저장 폴더]·[입력 비우기]를 끈다(키보드로도 실행되지 않게).
+        실행·어림 중에는 잠긴 단추(self.buttons)를 건드리지 않는다 — 열기만 하는 단추(lock=False)만 원본에 따라."""
+        d = vars(self)
+        if "_src_locked" not in d:
+            return
+        has = bool(self.pdf())
+        busy = bool(d.get("running") or d.get("_planning"))
+        for b in d.get("_src_open", ()):
+            b.configure(state="normal" if has else "disabled")
+        if not busy:
+            for b in d.get("_src_locked", ()):
+                b.configure(state="normal" if has else "disabled")
+        for tab, w in (d.get("_book_cards") or {}).items():
+            mine = bool(self._input_vars[tab]["pdf"].get().strip())
+            for k in ("source", "outdir"):
+                if k in w:
+                    w[k].configure(state="normal" if mine else "disabled")
+            if "clear" in w and not busy:
+                w["clear"].configure(state="normal" if mine else "disabled")
 
     def _build_settings_summary(self, parent):
         row = ttk.Frame(parent); row.pack(fill="x", pady=(self.px(8), 0))
         self._btn(row, "설정 바꾸기", lambda: self.select_tab(3), style="PageLink.TButton").pack(side="right")
         self._hint(row, textvariable=self.v_settings_summary, page=True).pack(side="left", fill="x", expand=True)
 
+    # ---- 실행 카드 · 장부(오른쪽 단) ----
+    def _build_run_column(self, parent) -> ttk.Frame:
+        """오른쪽 단(340): 실행 카드 — '실행 · 둘 다 판독부터 · 호출 듦' · 판독기·모델 한 줄 · [▶ 한 번에 인식 (HWPX 만들기)](인주 채움 48) ·
+        [▶ 한 번에 인식 (문자 PDF 만들기)](인주 테두리 40) · [■ 중지](둘이 함께, 온 너비) · 상태 줄 · 캡션 · 열기 2×2([HWPX 열기][문자 PDF 열기] /
+        [검수 화면][결과 폴더]) · 실행 중 사본 안내. 그 아래 장부 — 마지막 비용 어림(costplan)과 이번 실행의 호출."""
+        C, P = self.colors, self.px
+        L = self._lab
+        col = ttk.Frame(parent)
+        run = ttk.Frame(col, style="Card.TFrame", padding=(P(18), P(16))); run.pack(fill="x")
+        b = tk.Frame(run, bg=C["PANEL"]); b.pack(fill="both", expand=True); b.columnconfigure(0, weight=1)
+        head = tk.Frame(b, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
+        L(head, "실행", "SECTION").pack(side="left")
+        L(head, "둘 다 판독부터 · 호출 듦", "CAP", "MUTED").pack(side="left", padx=(P(8), 0), pady=(P(2), 0))
+        self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton",
+                  tip="판독기·모델·자동 교정·문서 옵션(모든 책 공통)과 이 책의 설정을 설정 탭에서 고칩니다.").pack(side="right")
+        self.l_run_summary = L(b, "", "BODY_B", wrap=True); self.l_run_summary.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
+        self.b_run = self._btn(b, RUN_TEXT, self.do_run, style="Seal.TButton", tip=RUN_TIP)
+        self.b_run.grid(row=2, column=0, sticky="ew", pady=(P(8), 0))
+        self.b_run_pdf = self._btn(b, RUN_PDF_TEXT, self.do_run_pdf, style="SealOut.TButton", tip=RUN_PDF_TIP)
+        self.b_run_pdf.grid(row=3, column=0, sticky="ew", pady=(P(6), 0))
+        self.b_stop = ttk.Button(b, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
+        self.b_stop.grid(row=4, column=0, sticky="ew", pady=(P(6), 0))
+        Tip(self.b_stop, STOP_TIP, self)
+        self.t_run_status = App._rich_line(self, b)                        # 중지를 누른 뒤·끝난 뒤(·입력을 비운 뒤의 안내)만 — v_status
+        self.l_run_cap = L(b, "", "CAP", "MUTED", wrap=True); self.l_run_cap.grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
+        opens = tk.Frame(b, bg=C["PANEL"]); opens.grid(row=7, column=0, sticky="ew", pady=(P(8), 0))
+        opens.columnconfigure(0, weight=1, uniform="open"); opens.columnconfigure(1, weight=1, uniform="open")
+        self.b_open_hwpx = self._btn(opens, "HWPX 열기", self.open_hwpx, lock=False, tip="이 원본의 가장 최근 완성 HWPX를 엽니다(중간 저장본은 제외). " + COPY_TIP)
+        self.b_open_pdf = self._btn(opens, "문자 PDF 열기", self.open_textlayer, lock=False, tip="이 원본에서 마지막으로 만든 찾기·복사가 되는 PDF를 엽니다. " + COPY_TIP)
+        self.b_open_review = self._btn(opens, "검수 화면", self.open_review, lock=False, tip="원본 위에 영역 상자를 그린 검수 화면(review.html)을 엽니다(열기만 함).")
+        self.b_open_work = self._btn(opens, "결과 폴더", self.open_work, lock=False, tip="결과 폴더(쪽 이미지·판독 기록·문서·검수 화면·교정 기록)를 엽니다.")
+        for k, btn in enumerate((self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work)):
+            btn.configure(padding=(P(6), P(4)))
+            btn.grid(row=k // 2, column=k % 2, sticky="ew", padx=(0, P(3)) if k % 2 == 0 else (P(3), 0), pady=(P(6), 0) if k >= 2 else 0)
+        self.l_copy_note = L(b, COPY_NOTE, "CAP", "MUTED", wrap=True)      # 실행 중에만
+        # ---- 장부 ----
+        led = ttk.Frame(col, style="Card.TFrame", padding=(P(18), P(16))); led.pack(fill="x", pady=(P(14), 0))
+        lb = self._led_body = tk.Frame(led, bg=C["PANEL"]); lb.pack(fill="both", expand=True); lb.columnconfigure(0, weight=1)
+        head = tk.Frame(lb, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
+        L(head, "장부", "SECTION").pack(side="left")
+        self.l_led_cap = L(head, "", "CAP", "MUTED"); self.l_led_cap.pack(side="left", padx=(P(8), 0), pady=(P(2), 0))
+        self.b_estimate = self._btn(head, "비용 미리 보기", self.do_estimate, style="Link.TButton",
+                                    tip="[▶ 한 번에 인식 (HWPX 만들기)]의 판독·3차 판별·합의 의심·문맥 교정 호출·토큰·금액을 한 창에 어림합니다"
+                                        "(기록 있는 쪽은 정확히, 새로 읽을 쪽은 이 책 평균으로). 아무것도 쓰지 않고 결과 폴더도 만들지 않습니다.")
+        self.b_estimate.pack(side="right")
+        ch = self._led_choice = tk.Frame(lb, bg=C["PANEL"])               # '이번 실행: **예 · 모두 실행** · HWPX'(굵은 데가 있는 짧은 줄)
+        self._led_choice_parts = [L(ch, "", "CAP", "MUTED"), L(ch, "", "BODY_B"), L(ch, "", "CAP", "MUTED")]
+        for part in self._led_choice_parts:
+            part.pack(side="left", anchor="s")
+        self.l_led_note = L(lb, "", "CAP", "MUTED", wrap=True)              # 그 밖의 안내 한 줄(좁으면 줄바꿈)
+        self.l_led_amount = L(lb, "—", "NUM"); self.l_led_amount.grid(row=2, column=0, sticky="w", pady=(P(6), 0))
+        self.l_led_usd = L(lb, "", "CAP", "MUTED", wrap=True); self.l_led_usd.grid(row=3, column=0, sticky="ew")
+        bar = self._led_bar = tk.Frame(lb, bg=C["PANEL"])                  # 호출 막대(어림이 있을 때)
+        bt = tk.Frame(bar, bg=C["PANEL"]); bt.pack(fill="x")
+        self._led_used = (L(bt, "이번 실행 호출 ", "CAP", "MUTED"), L(bt, "—", "CAP_B"))
+        for part in self._led_used:
+            part.pack(side="left")
+        self._led_range = (L(bt, "", "CAP_B"), L(bt, "어림 ", "CAP", "MUTED"))
+        for part in self._led_range:
+            part.pack(side="right")
+        self.c_led_bar = tk.Canvas(bar, height=P(8), bg=C["PANEL"], highlightthickness=0, bd=0, width=P(40))
+        self.c_led_bar.pack(fill="x", pady=(P(4), 0))
+        self.c_led_ticks = tk.Canvas(bar, height=P(16), bg=C["PANEL"], highlightthickness=0, bd=0, width=P(40))
+        self.c_led_ticks.pack(fill="x")
+        for cv in (self.c_led_bar, self.c_led_ticks):
+            cv.bind("<Configure>", lambda _e: App._draw_calls_bar(self), add="+")
+        self._led_bar_vals = None
+        self._led_groups = tk.Frame(lb, bg=C["PANEL"]); self._led_groups.grid(row=5, column=0, sticky="ew", pady=(P(8), 0))
+        self._led_groups.columnconfigure(0, weight=1)
+        self._led_view = None
+        tot = tk.Frame(lb, bg=C["PANEL"]); tot.grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
+        hl = max(1, P(1))
+        tk.Frame(tot, bg=C["INK"], height=hl).pack(fill="x"); tk.Frame(tot, bg=C["PANEL"], height=P(2)).pack(fill="x"); tk.Frame(tot, bg=C["INK"], height=hl).pack(fill="x")
+        tr = tk.Frame(tot, bg=C["PANEL"]); tr.pack(fill="x", pady=(P(4), 0))
+        self.l_led_total_name = L(tr, "합계", "BODY_B"); self.l_led_total_name.pack(side="left")
+        self.l_led_total = L(tr, "—", "BODY_B"); self.l_led_total.pack(side="right")
+        # 원본이 있어야 눌리는 단추: 실행 둘·[비용 미리 보기](실행 중에도 잠김), 열기 넷(열기만 함 — 실행 중에도 눌림)
+        self._src_locked = [self.b_run, self.b_run_pdf, self.b_estimate]
+        self._src_open = [self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work]
+        return col
+
+    def _sync_run_card(self) -> None:
+        """실행 카드의 글: 판독기·모델 한 줄, 상태 줄(중지를 누른 뒤·끝난 뒤·원본이 없을 때만), 캡션(실행 전·실행 중·원본 없음·끝난 뒤),
+        끝난 뒤 그 실행의 결과 단추 강조(HWPX → [HWPX 열기], 문자 PDF → [문자 PDF 열기], rc 5 → [결과 폴더]), 실행 중 사본 안내."""
+        d = vars(self)
+        if "l_run_summary" not in d:
+            return
+        P = self.px
+        running = bool(self.running); has = bool(self.pdf()); res = d.get("_run_result")
+        self.l_run_summary.configure(text=f"{self.v_provider.get()} · {self.v_model.get().strip() or '(모델 없음)'}")
+        parts = []
+        if running and d.get("_stop_requested"):
+            parts = [(self.v_status.get(), "plain")]
+        elif not running and res and self.v_status.get().startswith(res.get("label", "")):
+            tail = self.v_status.get()[len(res.get("label", "")):]
+            look = {"error": "red", "partial": "red" if res.get("rc") == 3 and res.get("failed") else "warn"}.get(res.get("kind"), "plain")
+            parts = [(res.get("label", ""), "bold"), (tail, look)]
+        elif not running and not has and self.v_status.get() == CLEARED_STATUS:
+            parts = [(CLEARED_STATUS, "plain")]
+        if parts:
+            App._set_rich(self, self.t_run_status, parts); self.t_run_status.grid(row=5, column=0, sticky="ew", pady=(P(8), 0))
+        else:
+            self.t_run_status.grid_remove()
+        if running:
+            cap = RUN_CAP
+        elif not has:
+            cap = EMPTY_CAP
+        elif res:
+            cap = finish_caption(res.get("rc"), res.get("cmd", ""), bool(res.get("failed")))
+        else:
+            cap = READY_CAP
+        self.l_run_cap.configure(text=cap)
+        target = None
+        if not running and res and res.get("kind") in ("ok", "partial"):
+            if res.get("cmd") == "run":
+                target = self.b_open_work if res.get("rc") == 5 else self.b_open_hwpx
+            elif res.get("cmd") == "run-pdf":
+                target = self.b_open_pdf
+        for btn in (self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work):
+            want = "Emph.TButton" if btn is target else "TButton"
+            if str(btn.cget("style")) != want:
+                btn.configure(style=want)
+        if running:
+            self.l_copy_note.grid(row=8, column=0, sticky="ew", pady=(P(6), 0))
+        else:
+            self.l_copy_note.grid_remove()
+
+    def _rich_line(self, parent) -> tk.Text:
+        """굵은 글·빨강·주의 글을 한 문단에 섞어 차지한 너비대로 줄을 바꾸는 읽기 전용 글줄(높이는 줄 수에 맞춤)."""
+        C, F = self.colors, self.fonts
+        t = tk.Text(parent, height=1, width=1, wrap="word", bd=0, highlightthickness=0, bg=C["PANEL"], fg=C["INK"], font=F["BODY"],
+                    padx=0, pady=0, cursor="arrow", takefocus=0, relief="flat", spacing1=0, spacing2=self.px(2))
+        t.tag_configure("bold", font=F["BODY_B"]); t.tag_configure("red", foreground=C["RED"]); t.tag_configure("warn", foreground=C["WARN"])
+        t.tag_configure("plain", foreground=C["INK"])
+        t.configure(state="disabled")
+        t.bind("<Configure>", lambda _e: App._fit_rich(self, t), add="+")
+        return t
+
+    def _set_rich(self, t: tk.Text, parts: list) -> None:
+        t.configure(state="normal"); t.delete("1.0", "end")
+        for text, tag in parts:
+            t.insert("end", text, tag)
+        t.configure(state="disabled")
+        App._fit_rich(self, t)
+
+    @staticmethod
+    def _fit_rich(_self, t: tk.Text) -> None:
+        try:
+            n = t.count("1.0", "end", "displaylines")
+            n = max(1, int(n[0] if isinstance(n, tuple) else n or 1))
+        except (tk.TclError, TypeError, ValueError):
+            n = 1
+        if int(t.cget("height")) != n:
+            t.configure(height=n)
+
+    def _sync_run_slot(self) -> None:
+        """도는 실행의 자리만 잠긴 모양(SEAL_SOFT · 자물쇠 · '… · {단계} 중'), 다른 실행은 꺼짐 — 단추 자리는 바뀌지 않는다(디자인 명세 §5.2·§7.1·§7.2).
+        한 번에 인식이 아닌 명령(start)은 주 실행 자리에 '{명령} 중'. 키 확인·이미지 묶기처럼 명령이 없는 잠금은 둘 다 꺼진 모양으로 둔다."""
+        d = vars(self); b1, b2 = d.get("b_run"), d.get("b_run_pdf")
+        if b1 is None or b2 is None:
+            return
+        if not self.running:
+            b1.configure(style="Seal.TButton", text=RUN_TEXT, image="")
+            b2.configure(style="SealOut.TButton", text=RUN_PDF_TEXT, image="")
+            return
+        cmd = d.get("_running_cmd") or ""
+        stage = getattr(d.get("tracker"), "stage", "") or ""
+        doing = (STAGE_NAMES.get(stage, stage) if stage else "시작") + " 중"
+        lock = self.icons["lock_seal"]
+        if cmd == "run":
+            b1.configure(style="SealBusy.TButton", image=lock, compound="left", text=f"  한 번에 인식 (HWPX) · {doing}")
+        elif cmd == "run-pdf":
+            b2.configure(style="SealOutBusy.TButton", image=lock, compound="left", text=f"  한 번에 인식 (문자 PDF) · {doing}")
+        elif cmd and cmd != "update":
+            label = d.get("_run_label") or {"install": "패키지 설치·점검"}.get(cmd, cmd)
+            try:
+                from tkinter import font as tkfont
+                label = elide_middle(f"{label} 중", tkfont.Font(self, font=self.fonts["RUN"]), max(self.px(80), b1.winfo_width() - self.px(70)))
+            except tk.TclError:
+                label = f"{label} 중"
+            b1.configure(style="SealBusy.TButton", image=lock, compound="left", text="  " + label)
+
+    # ---- 장부 ----
+    @staticmethod
+    def _sig_of(inp) -> dict:
+        """비용 어림 입력(PlanInput)의 지문 — 설정이 바뀌었는지(어림 다시 필요) 견줄 때. JSON 으로 한 번 오간 꼴(파일에서 읽은 것과 같게)."""
+        from dataclasses import asdict
+        return json.loads(json.dumps(asdict(inp), ensure_ascii=False))
+
+    @staticmethod
+    def _pdf_input(inp):
+        """[▶ 한 번에 인식 (문자 PDF 만들기)]의 어림 입력: 문서를 만들지 않으므로 문맥 교정·자동 교정·짜임은 쓰지 않는 셈(계획은 run 그대로)."""
+        from dataclasses import replace
+        return replace(inp, context_model=False, normalize=False, layout="page", preset=DEFAULT_PRESET, punctuation_rules="")
+
+    def _ledger_sig(self, action: str) -> dict:
+        inp = self._plan_input("run")
+        return App._sig_of(App._pdf_input(inp) if action == "pdf" else inp)
+
+    @staticmethod
+    def _src_stamp(pdf: str | None):
+        """원본 파일의 (크기, 고친 시각) — 같은 이름으로 원본을 바꿔 넣으면 장부의 어림이 낡은 것으로 보이게."""
+        try:
+            st = Path(pdf).stat() if pdf else None
+            return [st.st_size, st.st_mtime_ns] if st else None
+        except OSError:
+            return None
+
+    @staticmethod
+    def _ledger_summary(priced: dict, action: str, choice: str | None, sig: dict | None, src) -> dict:
+        """장부에 남길 어림 요약(last_cost.json): 줄마다 단계·대상·호출·달러, 합계·원화·모델·환율, 지문(sig)·선택(choice)·실행(action: hwpx|pdf)."""
+        t = priced.get("totals") or {}
+        span = lambda v: list(v) if v is not None else None
+        return {"v": 1, "kind": "run", "action": action, "choice": choice, "saved": False, "sig": sig, "src": src,
+                "time": time.strftime("%Y-%m-%d %H:%M"), "model": priced.get("model", ""), "models": list(priced.get("models") or []),
+                "context_model": bool(priced.get("context_model", True)),
+                "pages": priced.get("pages", 0), "records": priced.get("records", 0), "to_read": priced.get("to_read", 0),
+                "rows": [{"step": r.get("step"), "scope": r.get("scope"), "calls": list(r.get("calls") or [0, 0]), "usd": span(r.get("usd"))}
+                         for r in priced.get("rows") or []],
+                "totals": {"calls": list(t.get("calls") or [0, 0]), "usd": span(t.get("usd")), "usd_known": list(t.get("usd_known") or [0.0, 0.0]),
+                           "missing_prices": list(t.get("missing_prices") or [])},
+                "krw": span(priced.get("krw")), "krw_known": span(priced.get("krw_known")), "fx": priced.get("fx"),
+                "errors": [e.get("step") for e in priced.get("errors") or []]}
+
+    def _remember_plan(self, kind: str, pdf_only: bool, priced: dict, choice: str | None, preview: bool) -> None:
+        """한 번에 인식의 어림(미리 보기·실행)만 장부에 — 판독·문서 만들기·3차 판별 단독 어림은 일부 줄뿐이라 넣지 않는다.
+        미리 보기는 메모리에만(저장 안 함), 실행은 go() 안에서 _save_ledger 가 결과 폴더(last_cost.json)에 쓴다."""
+        if kind != "run":
+            return
+        d = vars(self)
+        sig = d.get("_plan_sig")
+        led = App._ledger_summary(priced, "pdf" if pdf_only else "hwpx", choice, sig, App._src_stamp((sig or {}).get("pdf")))
+        if preview:
+            self._ledger = led; self._ledger_live = False
+            App._plan_counts(self, priced, sig)
+            App._schedule_cards(self)
+        else:
+            self._ledger_pending = led
+            App._plan_counts(self, priced, sig)
+
+    def _save_ledger(self) -> None:
+        """실행 직전(go 안 — 비용 창에서 고른 뒤, 책별 설정을 결과 폴더에 남긴 다음): 이번 어림을 결과 폴더의 last_cost.json 에 남기고 장부로 삼는다."""
+        d = vars(self)
+        led = d.pop("_ledger_pending", None)
+        if not led:
+            return
+        try:
+            path = self.work() / LAST_COST
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(path, json.dumps(dict(led, saved=True), ensure_ascii=False, indent=1))
+            led["saved"] = True
+        except Exception as e:
+            self._append(f"주의: 비용 어림을 결과 폴더에 남기지 못했습니다({LAST_COST}): {type(e).__name__}: {e}\n")
+        self._ledger = led
+        self._ledger_for = "run-pdf" if led.get("action") == "pdf" else "run"
+        App._schedule_cards(self)
+
+    def _load_ledger(self) -> None:
+        """책을 고르면 그 결과 폴더의 last_cost.json(마지막 실행 전 어림)을 읽어 장부를 채운다. 없거나 깨졌으면 '어림 전'."""
+        self._ledger = None; self._ledger_live = False
+        pdf = self.pdf()
+        if not pdf:
+            return
+        try:
+            data = json.loads((self.work() / LAST_COST).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(data, dict) and data.get("kind") == "run" and isinstance(data.get("rows"), list) and isinstance(data.get("totals"), dict):
+            data["saved"] = True
+            self._ledger = data
+
+    def _ledger_stale(self, led: dict) -> bool:
+        """지금 칸으로 다시 어림하면 다른 입력인가(쪽 범위·모델·짜임·자동 교정·다시 판독 …) 또는 원본 파일이 바뀌었나."""
+        try:
+            return App._ledger_sig(self, led.get("action", "hwpx")) != led.get("sig") or App._src_stamp(self.pdf()) != led.get("src")
+        except Exception:
+            return True
+
+    @staticmethod
+    def _call_count() -> int | None:
+        """이번 명령의 모델 호출 수(재시도 포함) — 판독기를 불러온 뒤에만(창이 판독기 모듈을 일부러 불러오지 않는다)."""
+        mod = sys.modules.get(f"{__package__}.reader_gemini") if __package__ else None
+        cap = getattr(mod, "CALL_CAP", None)
+        return int(getattr(cap, "used", 0)) if cap is not None else None
+
+    def _poll_calls(self) -> bool:
+        """실행 중 호출 수를 읽어 지금 단계 몫에 더한다(판독 → 판독 묶음, 3차 판별·문서 만들기 → 모델 단계 묶음). 바뀌었으면 True."""
+        d = vars(self)
+        used = App._call_count()
+        if used is None or not d.get("running"):
+            return False
+        seen = d.get("_calls_seen", 0)
+        if used < seen:                                                 # 명령이 시작하며 0 으로 돌렸다(앞 명령의 남은 수)
+            seen = 0
+        if used == seen:
+            return False
+        stage = getattr(d.get("tracker"), "stage", "") or ""
+        group = "read" if stage in ("prepare", "read") else "model" if stage in ("adjudicate", "build") else "other"
+        by = d.setdefault("_calls_by", {}); by[group] = by.get(group, 0) + used - seen
+        self._calls_seen = used; self._calls_used = sum(by.values())
+        return True
+
+    def _sync_ledger(self) -> None:
+        """장부: 머리 캡션(마지막 어림 · HWPX 만들기/문자 PDF · 미리 보기 어림 · 어림 다시 필요 · 어림 전 · 실행 중 '금액은 실행 전 어림 · 호출은 실제'),
+        이번 실행 줄, 원화·달러, 호출 막대(어림 범위 BAND · 실제 INK), 묶음(판독 · 모델 단계 [아니요]면 뺌)과 줄, 합계."""
+        d = vars(self)
+        if "l_led_cap" not in d:
+            return
+        from .estimate import fmt_krw
+        C, F = self.colors, self.fonts
+        led = d.get("_ledger"); has = bool(self.pdf())
+        running = bool(self.running); cmd = (d.get("_running_cmd") or "") if running else ""
+        res = d.get("_run_result")
+        live = bool(d.get("_ledger_live")) and led is not None
+        other = running and cmd not in ("", "run", "run-pdf", "update")
+        stale = led is not None and not live and not running and App._ledger_stale(self, led)
+        pdf_act = bool(led) and led.get("action") == "pdf"
+        # 머리 캡션
+        cap_fg = C["MUTED"]
+        if other:
+            cap = "이 명령은 따로 셈 — 아래 금액은 마지막 한 번에 인식 어림"
+        elif live:
+            cap = "금액은 실행 전 어림 · 호출은 실제"
+        elif led is None:
+            cap = "어림 전"
+        elif stale:
+            cap, cap_fg = "어림 다시 필요 — 설정이 바뀜", C["WARN"]
+        elif led.get("saved"):
+            cap = "마지막 어림 · " + ("문자 PDF" if pdf_act else "HWPX 만들기")
+        else:
+            cap = "미리 보기 어림 · 저장 안 함"
+        self.l_led_cap.configure(text=cap, fg=cap_fg)
+        # 이번 실행 줄
+        if live:
+            tail = ""
+            if not running and res:
+                tail = {"ok": " · 끝", "partial": " · 끝", "stopped": " · 중지됨"}.get(res.get("kind"), " · 오류로 멈춤")
+            parts = ("이번 실행: ", "예 · 모두 실행" if led.get("choice") != "without" else "아니요 · 모델 단계 없이",
+                     " · " + ("문자 PDF" if pdf_act else "HWPX") + tail)
+        elif led is None:
+            parts = ("[비용 미리 보기]로 어림할 수 있습니다 — 실행 단추를 눌러도 먼저 어림해 묻습니다" if has
+                     else "원본을 고르면 [비용 미리 보기]로 어림할 수 있습니다", "", "")
+        else:
+            parts = ("이번 실행: 누르면 비용 창에서 [예]·[아니요]를 고릅니다", "", "")
+        if parts[1]:
+            for lab, text in zip(self._led_choice_parts, parts):
+                lab.configure(text=text)
+            self.l_led_note.grid_remove(); self._led_choice.grid(row=1, column=0, sticky="ew", pady=(self.px(6), 0))
+        else:
+            self.l_led_note.configure(text=parts[0])
+            self._led_choice.grid_remove(); self.l_led_note.grid(row=1, column=0, sticky="ew", pady=(self.px(6), 0))
+        # 금액
+        model_now = self.v_model.get().strip()
+        amt_fg = C["MUTED"] if stale else C["INK"]
+        if led is None:
+            amount, usd = "—", f"$ — · {model_now}"
+        else:
+            t = led.get("totals") or {}
+            models = ", ".join(led.get("models") or [led.get("model", "")])
+            if t.get("usd") is not None and led.get("krw"):
+                amount = f"약 {fmt_krw(led['krw'][0])} ~ {fmt_krw(led['krw'][1])}"
+                usd = f"$ {t['usd'][0]:.2f} ~ {t['usd'][1]:.2f} · {models}"
+            else:
+                amount = "금액을 다 낼 수 없음"
+                known = t.get("usd_known") or [0, 0]
+                usd = (f"아는 부분만 $ {known[0]:.2f} ~ {known[1]:.2f} · " if known[1] else "") + f"단가 없는 모델: {', '.join(t.get('missing_prices') or [])}"
+        self.l_led_amount.configure(text=amount, fg=amt_fg, font=F["NUM"] if led is None or amount.startswith("약") else F["BODY_B"])
+        self.l_led_usd.configure(text=usd)
+        # 호출 막대
+        used = d.get("_calls_used") if (live or other) else None
+        if live and not running and res:
+            used = res.get("calls", used)
+        if led is not None or other:
+            calls = (led.get("totals") or {}).get("calls") if led is not None and not other else None
+            self._led_used[0].configure(text="이번 명령 호출 " if other else "이번 실행 호출 ")
+            over = bool(calls and used is not None and used > calls[1])
+            self._led_used[1].configure(text="—" if used is None else (f"어림보다 많음 · {used:,}회" if over else f"{used:,}회"), fg=C["WARN"] if over else C["INK"])
+            if calls:
+                self._led_range[0].configure(text=f"{calls[0]:,}~{calls[1]:,}회" if calls[0] != calls[1] else f"{calls[1]:,}회")
+                self._led_range[1].configure(text="어림 ")
+            else:
+                for part in self._led_range:
+                    part.configure(text="")
+            self._led_bar_vals = (calls, used or 0)
+            self._led_bar.grid(row=4, column=0, sticky="ew", pady=(self.px(8), 0))
+            show_canvas = bool(calls)
+            for cv in (self.c_led_bar, self.c_led_ticks):
+                if show_canvas and cv.winfo_manager() != "pack":
+                    cv.pack(fill="x")
+                elif not show_canvas:
+                    cv.pack_forget()
+            App._draw_calls_bar(self)
+        else:
+            self._led_bar.grid_remove(); self._led_bar_vals = None
+        # 묶음과 줄
+        view = App._ledger_rows(self, led, live, running, other, stale, used)
+        if view != d.get("_led_view"):
+            self._led_view = view
+            App._draw_ledger_rows(self, view)
+        total, total_name = view[-1]
+        self.l_led_total.configure(text=total, fg=amt_fg if total != "—" else C["INK"])
+        self.l_led_total_name.configure(text=total_name)
+
+    def _ledger_rows(self, led: dict | None, live: bool, running: bool, other: bool, stale: bool, used) -> tuple:
+        """장부 몸통의 그림 값(바뀌었을 때만 다시 그린다): 묶음마다 (이름, 부제, 꼬리표, 오른쪽 글, [(줄 이름, 금액 글, 꾸밈)]) + (합계 글, 합계 이름)."""
+        from .costplan import LABELS, without_flags
+        def money(v):
+            return "단가 미입력" if v is None else (f"${v[0]:.2f}" if abs(v[0] - v[1]) < 0.005 else f"${v[0]:.2f}~{v[1]:.2f}")
+        span = lambda c: f"{c[0]:,}" if c[0] == c[1] else f"{c[0]:,}~{c[1]:,}"
+        without = bool(led) and led.get("choice") == "without" and live
+        by = vars(self).get("_calls_by") or {}
+        groups = []
+        tot_lo = tot_hi = 0.0; tot_missing = False
+        for gi, (name, sub, steps) in enumerate(LEDGER_GROUPS):
+            tag = gi == 1 and bool(without_flags("run", bool((led or {}).get("context_model", True))))
+            rows = []; calls = [0, 0]
+            for step in steps:
+                mine = [r for r in (led or {}).get("rows", []) if r.get("step") == step]
+                if not mine:
+                    continue
+                c = [sum(r["calls"][0] for r in mine), sum(r["calls"][1] for r in mine)]
+                calls = [calls[0] + c[0], calls[1] + c[1]]
+                usd = None if any(r.get("usd") is None for r in mine) else [sum(r["usd"][0] for r in mine), sum(r["usd"][1] for r in mine)]
+                skip = without and gi == 1
+                if skip:
+                    rows.append((LABELS.get(step, step), "이번엔 뺌", "muted"))
+                    continue
+                if usd is None and c[1]:
+                    rows.append((LABELS.get(step, step), "단가 미입력", "warn")); tot_missing = True
+                elif not c[1]:
+                    rows.append((LABELS.get(step, step), "$0.00", "muted"))
+                else:
+                    rows.append((LABELS.get(step, step), money(usd), "stale" if stale else "money"))
+                    tot_lo += usd[0]; tot_hi += usd[1]
+            if led is None or other:
+                right = "—"
+            elif without and gi == 1:
+                right = "이번엔 뺌"
+            elif live:
+                got = by.get("read" if gi == 0 else "model", 0)
+                right = (f"호출 {got:,}회 / 예상 {span(calls)}회" if got else f"아직 · 예상 {span(calls)}회")
+            else:
+                right = f"예상 {span(calls)}회"
+            groups.append((name, sub, tag, right, tuple(rows)))
+        if led is None:
+            total = ("—", "합계")
+        elif tot_missing:
+            total = ("단가 미입력", "합계(이번 실행)" if without else "합계")
+        else:
+            total = (money([tot_lo, tot_hi]), "합계(이번 실행)" if without else "합계")
+        return tuple(groups) + (total,)
+
+    def _draw_ledger_rows(self, view: tuple) -> None:
+        C, P = self.colors, self.px
+        L = self._lab
+        box = self._led_groups
+        for c in box.winfo_children():
+            c.destroy()
+        r = 0
+        for name, sub, tag, right, rows in view[:-1]:
+            h = tk.Frame(box, bg=C["PANEL"]); h.grid(row=r, column=0, sticky="ew", pady=(P(6) if r else 0, 0)); r += 1
+            L(h, image=self.icons["receipt"]).pack(side="left", padx=(0, P(5)))
+            L(h, name, "CAP_B").pack(side="left")
+            if sub:
+                L(h, sub, "CAP", "MUTED").pack(side="left", padx=(P(5), 0))
+            if tag:
+                t = ttk.Label(h, text=CostDialog.TAG, style="Tag.TLabel"); t.pack(side="left", padx=(P(6), 0)); Tip(t, TAG_TIP, self)
+            L(h, right, "CAP", "MUTED").pack(side="right")
+            tk.Frame(box, bg=C["LINE"], height=max(1, P(1))).grid(row=r, column=0, sticky="ew", pady=(P(2), P(2))); r += 1
+            for label, amount, look in rows:
+                row = tk.Frame(box, bg=C["PANEL"]); row.grid(row=r, column=0, sticky="ew", pady=(P(1), P(1))); r += 1
+                fg = C["MUTED"] if look in ("muted", "stale") else C["WARN"] if look == "warn" else C["INK"]
+                L(row, label, "BODY", fg="MUTED" if look == "muted" else "INK").pack(side="left")
+                L(row, amount, "BODY_B" if look in ("money", "stale") else "BODY", fg=fg).pack(side="right")
+                App._leader(self, row).pack(side="left", fill="x", expand=True, padx=P(8))
+
+    def _leader(self, parent) -> tk.Canvas:
+        """장부 줄의 이름과 금액 사이 점선(RULE, 1px 긋고 2px 띄우는 조각을 손으로 — Tk dash 는 Windows 에서 몇 가지 펜 모양뿐)."""
+        C, P = self.colors, self.px
+        try:
+            from tkinter import font as tkfont
+            h = tkfont.Font(self, font=self.fonts["BODY"]).metrics("linespace")
+        except tk.TclError:
+            h = P(16)
+        cv = tk.Canvas(parent, height=h, width=P(12), bg=C["PANEL"], highlightthickness=0, bd=0)
+
+        def draw(_e=None):
+            cv.delete("all"); y = cv.winfo_height() - P(4); x = 0; W = cv.winfo_width()
+            while x < W:
+                cv.create_line(x, y, x + max(1, P(1)), y, fill=C["RULE"]); x += P(3)
+        cv.bind("<Configure>", draw)
+        return cv
+
+    def _draw_calls_bar(self) -> None:
+        """호출 막대(8px): LINE 길 위에 어림 범위(lo/끝 ~ 끝, BAND)와 실제 호출(0 ~ 실제/끝, INK)을 겹쳐 그리고, 눈금 '0 · lo · 끝'."""
+        d = vars(self); vals = d.get("_led_bar_vals")
+        cv, tk_ = d.get("c_led_bar"), d.get("c_led_ticks")
+        if cv is None or not vals:
+            return
+        from .gui_preview import clip_x, rounded_path
+        C, P = self.colors, self.px
+        calls, used = vals
+        W, H = cv.winfo_width(), cv.winfo_height()
+        cv.delete("all"); tk_.delete("all")
+        if W <= 2 or not calls:
+            return
+        track = rounded_path(0, 0, W, H, H / 2)
+        flat = lambda pts: [c for pt in pts for c in pt]
+        cv.create_polygon(flat(track), fill=C["LINE"], outline="")
+        top = max(calls[1], used, 1)
+        bx = W * calls[0] / top
+        band = clip_x(track, bx, W * calls[1] / top)
+        if len(band) >= 3:
+            cv.create_polygon(flat(band), fill=C["BAND"], outline="")
+        if used:
+            ink = clip_x(track, 0, W * min(used, top) / top)
+            if len(ink) >= 3:
+                cv.create_polygon(flat(ink), fill=C["INK"], outline="")
+        font = self.fonts["CAP"]; y = tk_.winfo_height() // 2
+        tk_.create_text(0, y, text="0", anchor="w", fill=C["MUTED"], font=font)
+        end = tk_.create_text(W, y, text=f"{top:,}", anchor="e", fill=C["MUTED"], font=font)
+        mid = tk_.create_text(bx, y, text=f"{calls[0]:,}", anchor="center", fill=C["MUTED"], font=font)
+        x0, _, x1, _ = tk_.bbox(mid)
+        if x0 < P(14) or x1 > tk_.bbox(end)[0] - P(6):
+            tk_.delete(mid)                                              # 범위 시작이 끝·0 과 겹치면 빼고 위 줄의 '어림 lo~hi'가 말함
+
     def _build_actions(self, host) -> None:
-        """실행 줄 — 진행 막대 바로 위, 늘 보이는 자리. 탭마다 그 탭의 실행 단추를 보여 준다(실행 중에도 [중지]가 가려지지 않게)."""
+        """탭마다의 실행 자리(act_cards — select_tab 이 그 탭의 것만 보인다): 일반·이미지 OCR 은 오른쪽 단의 실행 카드·장부(_build_run_column),
+        책갈피 OCR·설정은 아래 칸(진행 막대 바로 위, 늘 보이는 자리 — 실행 중에도 [중지]가 가려지지 않게)."""
         P = self.px
         self.actbars = ttk.Frame(host); self.actbars.pack(fill="x")
-        act = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
-        a = act.body
-        runrow = ttk.Frame(a, style="Panel.TFrame"); runrow.pack(fill="x")
-        self._btn(runrow, "▶  한 번에 인식 (HWPX 만들기)", self.do_run, style="Seal.TButton",
-                  tip="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. 먼저 판독·모델 단계의 예상 비용을 한 창에 보여 주고 묻습니다.").pack(side="left")
-        self._btn(runrow, "▶  한 번에 인식 (문자 PDF 만들기)", self.do_run_pdf, style="SealOut.TButton",
-                  tip="원본을 판독한 뒤 검색·복사 가능한 PDF를 만듭니다. 원본 모양을 유지하고 판독한 글을 숨은 글자층에 넣습니다. HWPX 문서용 자동 교정은 적용하지 않습니다.").pack(side="left", padx=(P(8), 0))
-        self.b_stop = ttk.Button(runrow, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop.pack(side="left", padx=(P(8), 0))
-        Tip(self.b_stop, "지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 이어서 합니다.", self)
-        a = ttk.Frame(a, style="Panel.TFrame"); a.pack(fill="x", pady=(P(7), 0))
-        for t, c, tip in (("HWPX 열기", self.open_hwpx, "가장 최근에 만든 HWPX 를 한컴오피스로 엽니다"),
-                          ("결과 폴더", self.open_work, "결과 폴더(쪽 이미지·판독 기록·문서·검수 화면)를 엽니다"),
-                          ("비용 미리 보기", self.do_estimate, "판독·3차 판별·합의 의심·문맥 교정의 호출·토큰·금액을 한 창에 어림합니다(기록 있는 쪽은 정확히, 새로 읽을 쪽은 이 책 평균으로)")):
-            self._btn(a, t, c, tip=tip).pack(side="right", padx=(P(6), 0))
-        self._hint(a, "멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.").pack(side="left", fill="x", expand=True, padx=(P(14), P(8)))
+        act = self._build_run_column(self._work_right)
         act2 = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
         a = act2.body
         self._btn(a, "▶  HWPX 전체 교정", self.do_collate_all, style="Seal.TButton",
@@ -2229,6 +3336,32 @@ class App(tk.Tk):
         Tip(self.b_stop3, "고급 도구에서 시작한 판독을 중지합니다. 끝난 쪽의 기록은 보존됩니다.", self)
         self._hint(settings.body, "바꾼 설정은 다음 실행에 적용됩니다. [설정 저장]으로 다음 시작에도 유지할 수 있습니다.").pack(side="left", fill="x", expand=True, padx=(P(14), 0))
         self.act_cards = [act, act2, settings]
+
+    def _layout_work(self, *_):
+        """일반·이미지 OCR 의 두 단 ↔ 한 단: 캔버스 너비 ÷ 배율이 1200 이상이면 두 단(왼쪽 무게 1·최소 796 | 오른쪽 340 고정),
+        아니면 실행 카드·장부를 책 카드 아래로(실행·중지가 위에 남게)."""
+        d = vars(self); work = d.get("_work")
+        if work is None:
+            return
+        try:
+            width = self._canvas.winfo_width()
+        except tk.TclError:
+            return
+        if width <= 1:
+            return
+        two = width / getattr(self, "scale", 1.0) >= 1200
+        if two == d.get("_two_col"):
+            return
+        self._two_col = two
+        P, left, right = self.px, self._work_left, self._work_right
+        if two:
+            work.columnconfigure(0, weight=1, minsize=P(796)); work.columnconfigure(1, weight=0, minsize=P(340))
+            left.grid(row=0, column=0, sticky="nsew"); right.grid(row=0, column=1, sticky="nsew", padx=(P(16), 0), pady=0)
+        else:
+            work.columnconfigure(0, weight=1, minsize=0); work.columnconfigure(1, weight=0, minsize=0)
+            left.grid(row=0, column=0, sticky="nsew"); right.grid(row=1, column=0, sticky="nsew", padx=0, pady=(P(14), 0))
+        if hasattr(self, "pane"):
+            self.after_idle(self._fit_sash)
 
     def _update_scroll(self):
         """위 칸 내용이 넘칠 때만 스크롤 막대를 오른쪽 여백 위에 띄운다(카드 너비는 그대로)."""
@@ -2613,10 +3746,13 @@ class App(tk.Tk):
         if out.exists(): open_path(out)
         else: messagebox.showinfo(APP_NAME, f"교정본이 아직 없습니다: {out.name}")
 
-    def _btn(self, parent, text, cmd, tip: str | None = None, **kw) -> ttk.Button:
-        """작업 중에는 잠기는 단추. 너비는 글자에 맞춘다(고정 너비로 글자가 잘리던 문제). tip 은 마우스를 올리면 보이는 설명."""
+    def _btn(self, parent, text, cmd, tip: str | None = None, lock: bool = True, **kw) -> ttk.Button:
+        """작업 중에는 잠기는 단추(lock=False 면 잠그지 않음 — 원본 보기·결과 열기처럼 열기만 하는 단추). 너비는 글자에 맞춘다(고정 너비로 글자가 잘리던 문제).
+        tip 은 마우스를 올리면 보이는 설명."""
         kw.pop("width", None)
-        b = ttk.Button(parent, text=text, command=cmd, cursor="hand2", **kw); self.buttons.append(b)
+        b = ttk.Button(parent, text=text, command=cmd, cursor="hand2", **kw)
+        if lock:
+            self.buttons.append(b)
         if tip:
             Tip(b, tip, self)
         return b
@@ -2629,14 +3765,14 @@ class App(tk.Tk):
         return work_dir_for(self.pdf())
 
     def _sync_output_location(self, *_):
-        self.v_output_dir.set(str((self.work() / "out").resolve()) if self.pdf()
-                              else "원본을 불러오면 저장 폴더가 표시됩니다")
+        """결과 저장 칸(읽기 전용): out 폴더의 전체 경로. 원본이 없으면 비운다(이름표가 '원본을 고르면 정해짐')."""
+        self.v_output_dir.set(str((self.work() / "out").resolve()) if self.pdf() else "")
 
     def _need_pdf(self) -> bool:
         if getattr(self, "_selected_tab", None) == 3 and not self.running:
             self.select_tab(self._active_input)  # 고급 도구의 원본과 그 원본용 읽기 방향을 함께 복원한다.
         if not self.pdf() or not Path(self.pdf()).exists():
-            messagebox.showinfo(APP_NAME, "일반 OCR의 [PDF 고르기…] 또는 이미지 OCR의 [이미지 고르기…]·[스크린샷 붙여넣기]로 원본을 불러오십시오."); return False
+            messagebox.showinfo(APP_NAME, "일반 OCR의 [PDF 고르기…] 또는 이미지 OCR의 [이미지 고르기…]·[이미지 붙여넣기]로 원본을 불러오십시오."); return False
         return True
 
     def _pages(self) -> list[str]:
@@ -2894,8 +4030,20 @@ class App(tk.Tk):
         self.log.see("end-2c"); self.log.configure(state="disabled")    # 끝의 빈 줄 대신 마지막 글줄이 보이게
 
     def _set_running(self, on: bool, command: str = ""):
-        """작업 중에는 단추를 잠그고, 진행 막대를 0 에서 새로 시작한다(좌우로 오가는 막대 대신 끝까지 차는 막대)."""
+        """작업 중에는 단추를 잠그고, 진행 막대를 0 에서 새로 시작한다(좌우로 오가는 막대 대신 끝까지 차는 막대).
+        실행 카드: 도는 실행의 자리만 잠긴 모양, [■ 중지]는 살리고, 이 책의 설정 판의 쪽 범위 칸도 잠근다. 끝나면 원본이 없을 때 꺼 두는 단추를 다시 끈다."""
         self.running = on
+        d = vars(self)
+        if on:
+            self._running_cmd = command; self._stop_requested = False; self._run_result = None
+            self._ledger_live = d.get("_ledger_for") == command and command in ("run", "run-pdf")   # 이번 실행의 어림이 장부에 있음(go 안에서 남김)
+            self._ledger_for = None
+            self._calls_seen = App._call_count() or 0; self._calls_by = {}; self._calls_used = 0
+        else:
+            self._run_label = None                                      # start() 가 정한 명령 이름은 그 실행 동안만
+            for b in (d.get("b_stop"), d.get("b_stop2")):
+                if b is not None:
+                    b.configure(text="■  중지")                          # '멈추는 중…' 을 되돌린다
         for b in self.buttons:
             b.configure(state="disabled" if on else "normal")
         for button in getattr(self, "_tab_buttons", []):
@@ -2905,10 +4053,16 @@ class App(tk.Tk):
             if b is not None:
                 b.configure(state="normal" if on and command != "update" else "disabled")
         App._show_lockline(self, on)
+        for e in d.get("_lock_entries", ()):
+            e.state(["disabled"] if on else ["!disabled"])
         if on:
             self.tracker = Tracker(command)
             self.progress.configure(value=0); self._prog_shown = 0.0
             self.v_prog.set("0%" if self.tracker.plan else "")
+        else:
+            App._apply_source_lock(self)
+        App._sync_run_slot(self)
+        App._schedule_cards(self)
 
     def _show_lockline(self, on: bool):
         """잠금 줄(머리띠 아래, 실행 중에만): 글은 탭 줄과 같은 x 에서 시작한다."""
@@ -2934,7 +4088,11 @@ class App(tk.Tk):
         return min(1000, v)
 
     def _on_progress(self, stage: str, done: int, total: int):
+        before = self.tracker.stage
+        App._poll_calls(self)                                           # 앞 단계에서 쓴 호출은 앞 단계 몫으로
         f = self.tracker.update(stage, done, total)
+        if self.tracker.stage != before:
+            App._sync_run_slot(self)
         self.progress.configure(value=self._bar_value(f)); self._prog_shown = time.time()
         self.v_prog.set(self.tracker.live_text())
 
@@ -2945,6 +4103,7 @@ class App(tk.Tk):
         cmd = argv[0] if argv else ""
         if cmd == "run" and "--pdf-only" in argv:
             cmd = "run-pdf"
+        self._run_label = label                                         # 한 번에 인식이 아닌 명령은 실행 단추 자리에 '{label} 중'
         self._set_running(True, cmd); self.v_status.set(label + " 중…")
         self.q.put(("log", f"\n▶ {label}\n   yeone-ocr {' '.join(argv)}\n"))
         def target():
@@ -3006,6 +4165,8 @@ class App(tk.Tk):
                     self._bundle_msg(*item[1:])
                 elif item[0] == "table":
                     self._fill_table(*item[1:])
+                elif item[0] == "counts":
+                    App._counts_done(self, *item[1:])
                 elif item[0] == "fx":
                     self._fx_fetched(item[1], item[2])
                 elif item[0] == "update_check":
@@ -3023,16 +4184,22 @@ class App(tk.Tk):
             return
         if self.running and time.time() - self._prog_shown > 1.0:
             self.v_prog.set(self.tracker.live_text()); self._prog_shown = time.time()      # 남은 시간(또는 지난 시간) 글을 1초마다 새로
+        if self.running and App._poll_calls(self):
+            App._sync_ledger(self)                                      # 장부의 이번 실행 호출(재시도 포함)
         self.after(100, self._poll)
 
     def _finish(self, rc, label):
+        App._poll_calls(self)                                           # 마지막 호출 수(끝난 뒤 장부에 남김)
         self._set_running(False)
         if getattr(self, "_closing", False):             # 닫는 중에 끝났으면 알림창 없이 조용히
             self._last_writer = None; return
         w = getattr(self, "_last_writer", None)
         kind, status, head = finish_words(rc, w.problems if w is not None else None)    # [중지]로 멈춘 명령은 130(멈추기 전에 일을 다 끝냈으면 0), 실패한 쪽이 있으면 3, 3차 판별을 못 마치면 4
         ok, partial = kind == "ok", kind == "partial"
+        self._run_result = {"rc": rc, "label": label, "kind": kind, "cmd": getattr(self.tracker, "command", ""),     # 실행 카드·장부의 끝난 모양(§7.3)
+                            "failed": rc == 3 and _pages_failed(w.problems if w is not None else None), "calls": vars(self).get("_calls_used")}
         self.v_status.set(f"{label} {status}")
+        App._request_counts(self, refresh=True)                         # 판독 기록이 늘었다 — 책 카드의 수치를 다시 센다
         took = "걸린 시간 " + fmt_duration(time.time() - self.tracker.t0)
         if ok or partial:
             self.tracker.finish(); self.progress.configure(value=1000); self.v_prog.set(f"{head} · {took}")
@@ -3073,7 +4240,7 @@ class App(tk.Tk):
         self.refresh_table()
         self.open_after = None
         self.progress.configure(value=0); self.v_prog.set("")
-        self.v_status.set("새 이미지나 스크린샷을 입력하십시오")
+        self.v_status.set(CLEARED_STATUS)
         self._append("이미지 입력을 비웠습니다. 저장된 원본과 결과 파일은 보존됩니다. 새 이미지를 고르거나 스크린샷을 붙여넣으십시오.\n")
 
     def paste_screenshot(self, event=None):
@@ -3265,6 +4432,7 @@ class App(tk.Tk):
                     pend.pop(k)
         except Exception as e:                                           # 읽기 전용·네트워크 폴더 등
             self._append(f"주의: 책별 설정을 저장하지 못했습니다({d / BOOK_SETTINGS}): {type(e).__name__}: {e}\n")
+        App._schedule_cards(self)                                        # 이 책의 설정 판의 저장 상태
 
     @staticmethod
     def _bundle_path(srcs: list[Path], progress=None) -> Path:
@@ -3443,6 +4611,7 @@ class App(tk.Tk):
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}" + ("" if d is None else
                               f" · 「{Path(self.pdf()).name}」의 책별 설정 → " + (str(d / BOOK_SETTINGS) if d.is_dir() else "처음 실행할 때 결과 폴더에(그때까지 이 창이 기억)")))
             App._sync_book_label(self)
+        App._schedule_cards(self)                              # 이 책의 설정 판의 저장 상태
 
     def _fetch_fx(self):
         """환율 자동 조회(작업 스레드). 받은 값은 큐로 넘겨 창 스레드가 설정에 남긴다(하루 한 번만 묻게). 실패하면 있던 값(지난날 값) 그대로."""
@@ -3489,6 +4658,8 @@ class App(tk.Tk):
     def _lock_for_plan(self, on: bool):
         for b in self.buttons:
             b.configure(state="disabled" if on or self.running else "normal")
+        if not on:
+            App._apply_source_lock(self)
 
     def _with_plan(self, kind: str, go) -> None:
         """비용 한 창: 판독·3차 판별·합의 의심·문맥 교정의 어림(costplan.count_plan)을 작업 스레드에서 세고(462쪽이면 몇 초 — 창이 멈추지 않게
@@ -3509,8 +4680,8 @@ class App(tk.Tk):
         try:
             inp = self._plan_input(kind)
             if pdf_only:
-                from dataclasses import replace
-                inp = replace(inp, context_model=False, normalize=False, layout="page", preset=DEFAULT_PRESET, punctuation_rules="")
+                inp = App._pdf_input(inp)
+            self._plan_sig = App._sig_of(inp)                              # 장부가 '어림 다시 필요'를 가릴 지문(_remember_plan)
             cancel = threading.Event()
             wait = PlanWait(self, cancel)
         except Exception as e:                                             # 어림을 시작하지 못하면 실행하지 않는다(닫힌 쪽으로)
@@ -3561,12 +4732,18 @@ class App(tk.Tk):
                                     + "".join("\n" + x for x in costplan.skipped_lines(plan)))
                 return
             if go is not None and not costplan.needs_confirm(priced):
-                extra = []
+                extra, choice = [], "all"
             else:
                 d = CostDialog(self, plan, kind, preview=go is None, **({"pdf_only": True} if pdf_only else {})); self.wait_window(d)
-                if go is None or d.choice not in ("all", "without"):
+                priced = getattr(d, "priced", None) or priced                # 창에서 단가를 고쳤으면 그 금액으로 장부에
+                if go is None:
+                    App._remember_plan(self, kind, pdf_only, priced, None, preview=True)   # 미리 보기: 장부에 보이기만(결과 폴더에 쓰지 않음)
                     return
+                if d.choice not in ("all", "without"):
+                    return
+                choice = d.choice
                 extra = [] if d.choice == "all" else costplan.without_flags(kind, plan.get("context_model", True))
+            App._remember_plan(self, kind, pdf_only, priced, choice, preview=False)   # 실행: go() 안에서 결과 폴더에 남긴다(_save_ledger)
         except Exception as e:
             messagebox.showerror(APP_NAME, f"비용 창을 보이지 못해 실행하지 않습니다: {type(e).__name__}: {str(e)[:160]}"); return
         go(extra)
@@ -3616,6 +4793,7 @@ class App(tk.Tk):
             def go(extra):                                                 # extra: [아니요 · 모델 단계 없이] 면 --no-adjudicate(문맥 교정 모델이 켜져 있으면 + --no-context-model)
                 self.nb.select(0)
                 self._save_book(create=True)                               # 실행 직전(비용 확인을 받은 뒤): 이 책의 설정을 결과 폴더에
+                App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
                 pages = self.v_pages.get().strip()
                 self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True)
                            + self._answered_opts() + extra + self._build_opts(), "한 번에 인식 (전체 → HWPX)" if not pages else f"한 번에 인식 ({pages}쪽 → HWPX)")
@@ -3627,6 +4805,7 @@ class App(tk.Tk):
             def go(extra):
                 self.nb.select(0)
                 self._save_book(create=True)
+                App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
                 out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
                 argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
                 argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra
@@ -3634,11 +4813,17 @@ class App(tk.Tk):
             self._with_plan("run-pdf", go)
 
     def do_stop(self):
+        """[■ 중지](두 실행이 함께 씀): 지금 쪽이 끝나면 멈춘다. 누른 뒤 끝날 때까지 '멈추는 중…' 이고 다시 눌리지 않는다."""
         try:
             from . import cli
             cli.CANCEL.set(); self.v_status.set("중지 요청 — 지금 쪽이 끝나면 멈춥니다")
         except Exception:
-            pass
+            return
+        self._stop_requested = True
+        for b in (vars(self).get("b_stop"), vars(self).get("b_stop2")):
+            if b is not None:
+                b.configure(text="멈추는 중…", state="disabled")
+        App._schedule_cards(self)
 
     def do_mark(self):
         if self._need_pdf(): MarkDialog(self)
@@ -3685,6 +4870,19 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "아직 결과 폴더가 없습니다. 먼저 [▶ 한 번에 인식] 을 누르십시오."); return
         open_path(w)
 
+    def _open_result(self, path: Path) -> None:
+        """결과 파일을 연다. 실행 중이면 읽기용 사본(%TEMP%\\YeonE_OCR\\보기\\{이름}_보기_{시각})을 연다 — 실행이 끝날 때 이 파일을 다시 쓰는데
+        한글·PDF 뷰어가 원본을 쥐고 있으면 저장이 막히기 때문이다(판독·3차 판별에 낸 돈이 끝의 저장 실패로 헛되지 않게)."""
+        if vars(self).get("running"):
+            import shutil, tempfile
+            folder = Path(tempfile.gettempdir()) / APP_NAME / "보기"
+            folder.mkdir(parents=True, exist_ok=True)
+            copy = folder / f"{path.stem}_보기_{time.strftime('%H%M%S')}{path.suffix}"
+            shutil.copy2(path, copy)
+            self._append(f"실행 중이라 읽기용 사본을 열었습니다: {copy}\n")
+            path = copy
+        open_path(path)
+
     def open_hwpx(self):
         if not self._need_pdf(): return
         try:
@@ -3692,7 +4890,7 @@ class App(tk.Tk):
             if path is None:
                 messagebox.showinfo(APP_NAME, f"이 원본의 완성된 HWPX가 아직 없습니다. [한 번에 인식]으로 문서를 만든 뒤 누르십시오.\n\n저장 위치: {self.work() / 'out'}")
                 return
-            open_path(path)
+            App._open_result(self, path)
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"HWPX를 열지 못했습니다. [저장 폴더]에서 파일을 확인하거나 HWPX를 지원하는 프로그램의 파일 연결을 확인하십시오.\n{exc}")
 
@@ -3702,7 +4900,23 @@ class App(tk.Tk):
         if not out.is_file():
             messagebox.showinfo(APP_NAME, f"문자 PDF가 아직 없습니다. [한 번에 인식 (문자 PDF 만들기)]를 먼저 실행하십시오.\n\n저장 위치: {out}")
             return
-        open_path(out)
+        try:
+            App._open_result(self, out)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"문자 PDF를 열지 못했습니다. [저장 폴더]에서 파일을 확인하거나 PDF 뷰어의 파일 연결을 확인하십시오.\n{exc}")
+
+    def open_review(self):
+        """[검수 화면]: 결과 폴더의 review.html 을 연다(열기만 함 — 만들려면 한 번에 인식 또는 고급의 [⑤ 검수 화면])."""
+        if not self._need_pdf(): return
+        rv = self.work() / "review.html"
+        if not rv.is_file():
+            messagebox.showinfo(APP_NAME, "아직 검수 화면이 없습니다. [▶ 한 번에 인식] 또는 고급의 [⑤ 검수 화면]으로 만드십시오.\n\n"
+                                          f"저장 위치: {rv}")
+            return
+        try:
+            open_path(rv)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"검수 화면을 열지 못했습니다.\n{rv}\n{exc}")
 
     def open_output_folder(self):
         if not self._need_pdf(): return

@@ -248,3 +248,27 @@ def seal(size: int, fill: str, line: str, large: bool = True, scale: float = 1.0
         return f
 
     return png_b64(size, size, _render(size, size, at))
+
+
+def folder(size: int, color: str, stroke: float = 1.4) -> str:
+    """폴더(원본 경로 줄 · [저장 폴더])."""
+    return _icon(size, color, stroke, [[(1.5, 4.5), (1.5, 13), (14.5, 13), (14.5, 5.5), (7.5, 5.5), (6, 3.5), (1.5, 3.5), (1.5, 4.5)]])
+
+
+def check(size: int, color: str, stroke: float = 2.0) -> str:
+    """✓(저장됨)."""
+    return _icon(size, color, stroke, [[(3, 8.5), (6, 11.5), (13, 4)]])
+
+
+def clip(size: int, color: str, stroke: float = 1.5) -> str:
+    """클립보드(빈 이미지 상자의 [이미지 붙여넣기]): 둥근 판 + 위 집게 + 줄 둘."""
+    def board(x: float, y: float, half: float) -> bool:
+        return (_in_rrect(x, y, 3 - half, 3 - half, 13 + half, 14.5 + half, 1.5 + half)
+                and not _in_rrect(x, y, 3 + half, 3 + half, 13 - half, 14.5 - half, max(0.0, 1.5 - half)))
+    return _icon(size, color, stroke, [[(6, 3), (6, 1.8), (10, 1.8), (10, 3)], [(5.8, 7.5), (10.2, 7.5)], [(5.8, 10.5), (8.8, 10.5)]], extra=board)
+
+
+def expand(size: int, color: str, stroke: float = 1.5) -> str:
+    """두 번 눌러 크게 보기(원본 열기) 표지: 바깥으로 벌어지는 두 화살."""
+    return _icon(size, color, stroke, [[(9.5, 2.5), (13.5, 2.5), (13.5, 6.5)], [(13.5, 2.5), (8.5, 7.5)],
+                                       [(6.5, 13.5), (2.5, 13.5), (2.5, 9.5)], [(2.5, 13.5), (7.5, 8.5)]])
