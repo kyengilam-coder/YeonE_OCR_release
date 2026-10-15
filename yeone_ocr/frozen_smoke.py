@@ -49,6 +49,7 @@ def run(report_path: Path) -> int:
         from .normalization import rule_data
         from .prompts import load_guide
         from .collate.reading import reading
+        from .presets import resolve_preset, BUILTIN
         from opencc import OpenCC
         import certifi
         guide = load_guide()
@@ -61,7 +62,9 @@ def run(report_path: Path) -> int:
         assert korean == "대계", korean
         rules = rule_data()
         assert len(rules["rules"]) >= 100
-        return {"guide_chars": len(guide), "msr_rules": len(rules["rules"]), "hanja": korean, "opencc": "漢書"}
+        assert all(resolve_preset(i).label for i in BUILTIN)                # 짜임 규칙 내장 파일(data/preset_*.json)이 꾸러미에 — 없으면 本草 짜임을 잃는다
+        assert resolve_preset("kaibao").source_re.search("所在有之。　唐附")
+        return {"guide_chars": len(guide), "msr_rules": len(rules["rules"]), "hanja": korean, "opencc": "漢書", "presets": list(BUILTIN)}
     check("bundled-data", data_probe)
 
     def sdk_probe():

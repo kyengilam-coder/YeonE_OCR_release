@@ -50,8 +50,9 @@ class ScreenshotGui(unittest.TestCase):
                               _remember_inputs=mock.Mock(),
                               _bundle_images=mock.Mock(), do_run=mock.Mock(), start=mock.Mock(),
                               _set_running=mock.Mock(), v_status=Var("working"), v_prog=Var(""), progress=mock.Mock(),
-                              mode_key=lambda: "horizontal_zh")
-        app.work = lambda: self.gui.work_dir_for(app.v_pdf.get())
+                              mode_key=lambda: "horizontal_zh",
+                              _book={"dir": None, "loaded": {}}, _save_book=mock.Mock(), _load_book=mock.Mock())   # 책별 설정(결과 폴더 없음)
+        app.work = lambda: self.gui.work_dir_for(app.v_pdf.get()); app.pdf = self.gui.App.pdf.__get__(app)
         app._reset_screenshot_pages = self.gui.App._reset_screenshot_pages.__get__(app)
         app._use_pdf = mock.Mock(wraps=self.gui.App._use_pdf.__get__(app))
         return app

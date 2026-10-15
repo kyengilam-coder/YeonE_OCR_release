@@ -18,10 +18,10 @@ from typing import Callable
 import unicodedata
 
 from .blocks import Block
+from .marks import MARK_RE
 
 RULE_FILE = Path(__file__).with_name("data") / "normalization_260929.json"
 RULE_VERSION = "260929"
-MARK_RE = re.compile(r"〔[^〔〕]*〕")
 # 匹配大小寫는 원본 매크로가 0으로 지정: O뿐 아니라 o도 대상이다.
 _SAFE_FLAGS = {
     "MatchCase": 0, "AllWordForms": 0, "SeveralWords": 0, "UseWildCards": 0,
@@ -463,28 +463,7 @@ def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | N
 
     for block, cell, result, old, where in prepared:
         if cell is None:
-            block.text = result.text
-            # 같은 원문 글자에서 나온 출력 범위를 모두 포함시킨다.
-            mapped = {}
-            for new, source in enumerate(result.origins):
-                mapped.setdefault(source, []).append(new)
-            spans = []
-            for begin, end, kind in block.spans:
-                covered = [new for source in range(begin, end) for new in mapped.get(source, [])]
-                if covered:
-                    spans.append((min(covered), max(covered) + 1, kind))
-            block.spans = spans
-            block.memos = [(mapped[offset][0] if offset in mapped else
-                            min(len(block.text) - 1, max(0, offset)), message)
-                           for offset, message in block.memos]
-            cst = []                                                   # 쓰임별 글자 범위(내용별 문서)도 같은 방식으로
-            for begin, end, kind in getattr(block, "cstyles", ()):
-                covered = [new for source in range(begin, end) for new in mapped.get(source, [])]
-                if covered:
-                    cst.append((min(covered), max(covered) + 1, kind))
-            block.cstyles = cst
-            block.anchors = [(min((new for source, news in mapped.items() if source >= offset for new in news), default=len(block.text)), label)
-                             for offset, label in getattr(block, "anchors", ())]   # 책갈피: 그 글자(없으면 뒤 글자, 끝이면 끝)
+            block.remap(result.text, result.origins)                   # 같은 원문 글자에서 나온 출력 범위를 모두 덮게 등급·메모·쓰임 범위·책갈피를 옮긴다
             record(result, old, where)
         else:
             block.rows[cell[0]][cell[1]] = result.text

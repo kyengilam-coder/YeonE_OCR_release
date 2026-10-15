@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "regions",
+  "label": "영역 종류만 (제목·문단·소주)",
+  "description": "판독의 영역 종류(제목 1·2·3단계, 본문, 소주, 그림·표 제목)만으로 짠다. 책별 규칙(약재명·주석·출처·굵은 글씨)은 쓰지 않는다 — 어느 책에나 안전한 기본값.",
+  "entry": null, "commentary": null, "source": null, "emphasis": null,
+  "styles": {
+    "paragraph": {"chapter": ["제목-장", "편명"], "section": ["제목-절"], "subsection": ["제목-본초명(소)", "제목-절"],
+                  "body": ["본문"], "small": ["본문"], "caption": ["그림캡션", "캡션"], "note": ["바탕글"]},
+    "character": {"small": ["소주"]}
+  }
+}

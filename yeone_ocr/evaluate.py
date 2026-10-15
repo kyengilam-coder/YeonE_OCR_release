@@ -12,7 +12,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from . import merge
-from .merge import MARK_RE, INVISIBLE, strip_marks_for_compare, _fold, columns_in_reading_order, nfc_text
+from .merge import INVISIBLE, strip_marks_for_compare, _fold, columns_in_reading_order, nfc_text
+from .marks import MARK_RE, mark_kind, mark_reading
 from .schema import PageReading, RegionReread, Paragraph, Column, TEXT_KINDS
 from .collate.run import index_both, trim_to_section, reading_text
 from .collate.collate import hwpx_cells, ocr_cells, note_spans
@@ -72,7 +73,7 @@ def flatten(paras: list[tuple[int, str]], expand: bool = True) -> Flat:
             seg = m.group(0)
             if m.group(2) and expand:
                 inner = seg[1:-1]; seg = WS_RE.sub("", strip_marks_for_compare(m.group(2)))
-                cands = [inner[2:].strip(), ""] if inner.startswith("疑:") else ([c.strip() for c in inner.split("/")] if seg else [""])
+                cands = [mark_reading(inner, work_notes=True), ""] if mark_kind(inner, work_notes=True) == "doubt" else ([c.strip() for c in inner.split("/")] if seg else [""])
                 f.marks.append({"start": n, "end": n + len(seg), "mark": m.group(2), "cands": [WS_RE.sub("", c) for c in cands], "entry": entry, "page": pg}); entry = None
             out.append(seg); f.page += [pg] * len(seg); f.cov += [covered] * len(seg); n += len(seg)
     f.text = "".join(out)

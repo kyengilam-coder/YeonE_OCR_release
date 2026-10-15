@@ -3,18 +3,14 @@ import contextlib
 import io
 import json
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from PIL import Image
 from yeone_ocr import cli, estimate
+from yeone_ocr.costplan import PlanInput, count_plan
 from yeone_ocr.state import Work
-try:
-    from yeone_ocr import gui
-except ImportError:                           # tkinter 없는 CI 에서는 명령줄 미리보기를 계속 검증한다
-    gui = None
 
 
 def snapshot(root):
@@ -31,17 +27,16 @@ def cli_preview(source, folder, dpi=300):
 
 
 def gui_preview(source, folder):
-    value = lambda x: types.SimpleNamespace(get=lambda: x)
-    app = types.SimpleNamespace(pdf=lambda: str(source), work=lambda: folder, fx_setting=lambda: (1300, "fixture"), cfg={},
-                                v_pages=value(""), v_up=value("1"), v_second=value(False), v_model=value("gemini-2.5-pro"),
-                                v_model2=value(""), v_cache=value(False), v_force=value(False), v_reader=value("gemini"))
-    return gui.App.estimate_data(app)
+    """창의 [비용 미리 보기]·실행 전 비용 창이 쓰는 어림(costplan, [③ 판독] 기준) — 명령줄 estimate 와 같은 꼴로 줄여 견준다."""
+    plan = count_plan(PlanInput(kind="read", pdf=str(source), work_dir=str(folder), upscale=1.0, second_pass=False, model="gemini-2.5-pro",
+                                second_model="", use_cache=False, reader="gemini"))
+    assert plan["errors"] == [], plan["errors"]
+    return {"already_read": plan["pages"] - plan["to_read"], "calls": sum(r["calls"][0] for r in plan["rows"]), "notes": plan["notes"]}
 
 
 def previews(source, folder):
     yield cli_preview(source, folder)
-    if gui is not None:
-        yield gui_preview(source, folder)
+    yield gui_preview(source, folder)
 
 
 class PreviewSource(unittest.TestCase):

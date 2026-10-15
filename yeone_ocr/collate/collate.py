@@ -15,6 +15,7 @@ from __future__ import annotations
 import difflib, re, unicodedata
 from dataclasses import dataclass, field
 from . import zh
+from ..marks import MARK_RE, mark_reading
 
 LONG = 20                      # 이 길이 이상이 한쪽에만 있으면 글자 오탈이 아니라 구조 차이(C)로 본다
 CTX = 6                        # 보고에 보여 줄 앞뒤 글자 수
@@ -38,7 +39,6 @@ CJK_NUM_RE = re.compile(r"^[一二三四五六七八九十〇零百千兩两]+$"
 HANGUL_RE = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
 FOOTNOTE_RE = re.compile(r"^[注註]\s*[0-9０-９一二三四五六七八九十]+")
 TITLE_RE = re.compile(r"[『《〈「]([^』》〉」]{2,14})[』》〉」]")
-MARK_RE = re.compile(r"〔[^〔〕]*〕")
 PUNCT_RE = re.compile(r"[\s　·ㆍ・•\.。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥]+")
 # 부호를 버리기 전에 확실한 번호 표기만 구별한다. '10毫升'·'2024年'처럼 문장 속 수치는 남긴다.
 NUMBER_NOTATION_RE = re.compile(
@@ -85,13 +85,7 @@ def strip_marks(text: str) -> tuple[str, list[tuple[int, int]]]:
     돌려주는 구간은 지운 자리 앞뒤 1자까지 '불확실'로 볼 범위."""
     pieces: list[str] = []; spans: list[tuple[int, int]] = []; last = 0; n = 0
     for m in MARK_RE.finditer(text):
-        inner = m.group(0)[1:-1]
-        if inner.startswith("疑:"):
-            core = inner[2:].strip()
-        elif "/" in inner and not inner.startswith(("→", "소주", "작업", "판독 메모", "도판", "이어짐", "원본")):
-            core = inner.split("/")[0]
-        else:
-            core = ""
+        core = mark_reading(m.group(0)[1:-1], work_notes=True)
         pieces.append(text[last:m.start()]); n += m.start() - last
         pieces.append(core); spans.append((n - 1, n + len(core) + 1)); n += len(core)
         last = m.end()
@@ -236,7 +230,7 @@ def apply_structural_rules(items: list["Item"], titles: set[str] | None = None) 
         if it.action == "delete" and titles and 1 <= len(hw) <= 4:
             cand = {hw + post[:k] for k in (1, 2, 3)} | {pre[-k:] + hw for k in (1, 2, 3) if pre[-k:]}
             if any(c in t for c in cand for t in titles):
-                _mark(it, "C", f"서명(『』) 일부로 보임 — 책이 줄여 적은 자리일 수 있어 자동 삭제하지 않음", notice=True); continue
+                _mark(it, "C", "서명(『』) 일부로 보임 — 책이 줄여 적은 자리일 수 있어 자동 삭제하지 않음", notice=True); continue
 
 
 def promote_repeated(items: list["Item"], min_count: int = REPEAT_MIN, policy: str = "all") -> int:
@@ -325,7 +319,7 @@ def collate(hw: list[Char], oc: list[Char], *, policy: str = "all", titles: set[
         if op == "equal":
             continue
         hw_span, oc_span = hw[i1:i2], oc[j1:j2]
-        hw_text = "".join(c.ch for c in hw_span); oc_text = "".join(c.ch for c in oc_span)
+        oc_text = "".join(c.ch for c in oc_span)
         uncertain = any(c.uncertain for c in oc_span) or (not oc_span and j1 < len(oc) and oc[min(j1, len(oc) - 1)].uncertain)
         # 1차만 읽은 영역 끝에서 빠진 글자(그 뒤가 다른 영역·판독 끝)도 그 영역의 판독 — 앞 글자가 once 면 지우지 않는다
         once = any(c.once for c in oc_span) or (not oc_span and ((j1 < len(oc) and oc[j1].once) or (0 < j1 <= len(oc) and oc[j1 - 1].once)))

@@ -115,11 +115,130 @@ class BuildNormalization(unittest.TestCase):
         with patch.object(cli, "create_reader", return_value=Reader()) as factory:
             first, _ = cli._normalization_resolver(self.work, self.args())
             self.assertEqual(first([item]), {"1": "臟"})
-            other_args = self.args(); other_args.reader = "anthropic"; other_args.model = "claude-test"
+            other_args = self.args("--skip-answered", "same-model"); other_args.reader = "anthropic"; other_args.model = "claude-test"   # 이번 모델로 다시 묻기
             second, metadata = cli._normalization_resolver(self.work, other_args)
             self.assertEqual(second([item]), {"1": "臟"})
             self.assertEqual(factory.call_count, 2)
             self.assertEqual(metadata["cache_hits"], 0)
+
+    def other_args(self, value):
+        args = self.args("--skip-answered", value); args.reader = "anthropic"; args.model = "claude-test"
+        return args
+
+    def cache(self) -> dict:
+        return json.loads((self.work.dir / "normalization_cache.json").read_text(encoding="utf-8"))
+
+    def test_other_models_answers_are_reused_when_any_model(self):
+        """--skip-answered any-model(기본): 다른 모델이 고른 답은 그대로 쓰고 못 고른 후보는 묻지 않는다 — 판독기를 바꿔도 1만여 건을 다시 사지 않게.
+        다른 모델의 답은 이 모델의 열쇠로 옮겨 적지 않으므로 same-model 이면 이번 모델로 정말 다시 묻는다."""
+        items = [dict(id="1", context="甲云乙", source="云", candidates=["云", "雲"], target_offset=1),
+                 dict(id="2", context="丙云丁", source="云", candidates=["云", "雲"], target_offset=1)]
+        class Gpt:
+            model = "gpt-test"; usage = {}
+            def resolve_text_choices(self, xs):
+                return {x["id"]: ("雲" if x["id"] == "1" else "") for x in xs}         # 1 은 고름, 2 는 못 고름
+        with patch.object(cli, "create_reader", return_value=Gpt()):
+            resolver, _ = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(resolver(items), {"1": "雲"})
+        before = self.cache()
+        self.assertEqual(before["askers"], [["openai", "gpt-test"]])
+        with patch.object(cli, "create_reader") as factory:
+            resolver, meta = cli._normalization_resolver(self.work, self.other_args("any-model"))
+            self.assertEqual(resolver(items), {"1": "雲"})
+            factory.assert_not_called()
+        self.assertEqual((meta["cache_hits"], meta["other_hits"], meta["remembered"], meta["other_remembered"], meta["asked"]), (1, 1, 1, 1, 0))
+        after = self.cache()
+        self.assertEqual(after["schema_version"], 1)
+        self.assertEqual((set(after["choices"]), set(after["undecided"])), (set(before["choices"]), set(before["undecided"])))   # 남의 답을 내 열쇠로 적지 않음
+        self.assertIn(["openai", "gpt-test"], after["askers"])
+        asked = []
+        class Claude:
+            model = "claude-test"; usage = {}
+            def resolve_text_choices(self, xs):
+                asked.extend(x["id"] for x in xs); return {x["id"]: "云" for x in xs}
+        with patch.object(cli, "create_reader", return_value=Claude()) as factory:
+            resolver, meta = cli._normalization_resolver(self.work, self.other_args("same-model"))
+            self.assertEqual(resolver(items), {"1": "云", "2": "云"})
+            self.assertEqual(factory.call_count, 1)
+        self.assertEqual((sorted(asked), meta["other_hits"], meta["cache_hits"]), (["1", "2"], 0, 0))
+        self.assertEqual(self.cache()["askers"], [["anthropic", "claude-test"], ["openai", "gpt-test"]])
+
+    def test_old_cache_without_askers_finds_other_model_from_report_and_remembers_it(self):
+        """0.7.4 까지의 재사용 기록에는 askers 가 없다: out/*_normalization.json 의 reader 로 찾고(깨진·모델을 끈 보고는 건너뜀), 찾으면 askers 에 적어 둔다
+        — 보고는 다음 문서 만들기에서 이번 모델로 덮이므로."""
+        item = dict(id="1", context="甲云乙", source="云", candidates=["云", "雲"], target_offset=1)
+        class Gpt:
+            model = "gpt-test"; usage = {}
+            def resolve_text_choices(self, xs):
+                return {"1": "雲"}
+        with patch.object(cli, "create_reader", return_value=Gpt()):
+            resolver, _ = cli._normalization_resolver(self.work, self.args())
+            self.assertEqual(resolver([item]), {"1": "雲"})
+        old = self.cache(); del old["askers"]
+        (self.work.dir / "normalization_cache.json").write_text(json.dumps(old), encoding="utf-8")
+        out = self.work.out_dir
+        (out / "a_normalization.json").write_text("{깨짐", encoding="utf-8")
+        (out / "b_normalization.json").write_text("[1, 2]", encoding="utf-8")
+        (out / "c_normalization.json").write_text(json.dumps({"reader": "gpt"}), encoding="utf-8")
+        (out / "d_normalization.json").write_text(json.dumps({"reader": {"provider": "gemini", "model": "gemini-x", "disabled": True}}), encoding="utf-8")
+        class Claude:
+            model = "claude-test"; usage = {}
+            def resolve_text_choices(self, xs):
+                return {x["id"]: "云" for x in xs}
+        self.assertEqual(cli._normalization_askers(self.work, "anthropic", "claude-test", {}, []), [])   # 깨진 보고·모델을 끈 보고는 건너뜀
+        with patch.object(cli, "create_reader", return_value=Claude()) as factory:   # 찾을 길이 없으면 이번 모델로 묻는다(호출이 들 뿐 틀리지 않음)
+            resolver, _ = cli._normalization_resolver(self.work, self.other_args("any-model"))
+            self.assertEqual(resolver([item]), {"1": "云"})
+            self.assertEqual(factory.call_count, 1)
+        (self.work.dir / "normalization_cache.json").write_text(json.dumps(old), encoding="utf-8")   # 그 답은 지우고 옛 기록으로 되돌림
+        (out / "source_normalization.json").write_text(json.dumps({"reader": {"provider": "openai", "model": "gpt-test"}}), encoding="utf-8")
+        self.assertEqual(cli._normalization_askers(self.work, "anthropic", "claude-test", {}, [["x"], "y", None]), [("openai", "gpt-test")])
+        with patch.object(cli, "create_reader") as factory:
+            resolver, meta = cli._normalization_resolver(self.work, self.other_args("any-model"))
+            self.assertEqual(resolver([item]), {"1": "雲"})
+            factory.assert_not_called()
+        self.assertEqual(meta["other_hits"], 1)
+        self.assertIn(["openai", "gpt-test"], self.cache()["askers"])                    # 물을 것이 없어도 적어 둔다
+        (out / "source_normalization.json").unlink()                                     # 보고가 덮이거나 지워져도
+        with patch.object(cli, "create_reader") as factory:
+            resolver, meta = cli._normalization_resolver(self.work, self.other_args("any-model"))
+            self.assertEqual(resolver([item]), {"1": "雲"})
+            factory.assert_not_called()
+        undecided_only = {"k": "gpt-4.1", "j": "알 수 없는 모델", "i": 3}               # 못 고른 기록의 모델 이름으로도 찾는다(제공사는 이름으로 짐작)
+        self.assertEqual(cli._normalization_askers(self.work, "openai", "gpt-test", undecided_only, []), [("openai", "gpt-4.1")])
+
+    def test_plan_counts_other_models_and_matches_the_build(self):
+        """실행 전 어림(normalization_plan)도 같은 규칙으로 센다: any-model 이면 다른 모델이 고른 답·못 고른 후보를 빼고, same-model 이면 모두 새로 묻는다.
+        어림의 '새로 물을 것' = 실제 문서 만들기에서 물은 수."""
+        paras = [Paragraph(columns=[Column(col_from_right=1, text=f"甲{i:03d}云乙。")]) for i in range(1, 4)]
+        reading = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[0, 0, 1000, 1000], paragraphs=paras)])
+        self.work.save_record(1, {"file": self.pdf.name, "pdf_page": 1, "pass1": reading.model_dump(), "merged": reading.model_dump(), "crops": {}})
+        recs = self.work.records([1])
+        class Gpt:
+            model = "gpt-test"; usage = {}
+            def resolve_text_choices(self, xs):                                          # 001 은 고름, 002 는 못 고름, 003 은 답에서 빠짐(다시 물을 것)
+                return {x["id"]: ("雲" if "001" in x["context"] else "") for x in xs if "003" not in x["context"]}
+        with patch.object(cli, "create_reader", return_value=Gpt()):
+            self.run_build(self.args())
+        plan = cli.normalization_plan(self.work, recs, "anthropic", "claude-test")
+        self.assertEqual({k: plan[k] for k in ("total", "reused", "remembered", "ask", "calls", "other_reused", "other_remembered")},
+                         {"total": 3, "reused": 1, "remembered": 1, "ask": 1, "calls": 1, "other_reused": 1, "other_remembered": 1})
+        self.assertGreater(plan["ask_chars"], len("甲003云乙"))
+        same = cli.normalization_plan(self.work, recs, "anthropic", "claude-test", any_model=False)
+        self.assertEqual((same["ask"], same["reused"], same["other_reused"], same["other_remembered"]), (3, 0, 0, 0))
+        self.assertGreater(same["ask_chars"], plan["ask_chars"])
+        calls = []
+        class Claude:
+            model = "claude-test"; usage = {}
+            def resolve_text_choices(self, xs):
+                calls.append(len(xs)); return {x["id"]: "云" for x in xs}
+        with patch.object(cli, "create_reader", return_value=Claude()):
+            self.assertEqual(self.run_build(self.other_args("any-model")), 5)                # 못 고른 후보는 원문 유지 → 확인 필요(같은 모델이 못 고른 것과 같게)
+        audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
+        self.assertEqual((audit["reader"]["asked"], calls), (plan["ask"], [1]))
+        self.assertEqual((audit["reader"]["other_hits"], audit["reader"]["other_remembered"]), (1, 1))
+        html = (self.work.out_dir / "source_normalization.html").read_text(encoding="utf-8")
+        self.assertIn("다른 모델이 앞서 고른 답을 그대로 씀 1건", html); self.assertIn("--skip-answered same-model", html)
 
     def test_simplified_original_cannot_be_accepted_as_final_traditional(self):
         item = dict(id="1", context="发展", source="发", candidates=["发", "發", "髮"],
@@ -316,7 +435,36 @@ class BuildNormalization(unittest.TestCase):
             self.assertEqual(cli.cmd_run(run_args, self.work, document), 2)
         self.assertIn("양식 HWPX 가 없습니다", buf.getvalue())
         self.assertFalse(any(self.work.pages_dir.iterdir()))                            # 준비(쪽 꺼내기)도 하지 않았다
-        self.assertIsNone(cli._check_template(self.args("--layout", "flow", "--template", str(self.pdf))))   # 있는 파일 + 내용별이면 통과
+        self.assertIsNone(cli._check_document(self.args("--layout", "flow", "--template", str(self.pdf))))   # 있는 파일 + 내용별이면 통과
+
+    def test_unusable_preset_stops_before_any_model_work(self):
+        """내용별 문서의 짜임 규칙 파일이 없거나 --preset 과 예전 --structure 를 함께 주면 모델을 부르기 전에 끝 코드 2(run 도 판독 전에).
+        원본 쪽대로에서는 짜임 규칙을 보지 않는다(쓰지 않는 규칙 파일이 없어도 막지 않음)."""
+        import io, contextlib
+        missing = str(self.root / "missing.json")
+        for flags, want in ((("--layout", "flow", "--preset", "missing.json"), "짜임 규칙 파일이 없습니다: missing.json"),
+                            (("--layout", "flow", "--preset", missing), f"짜임 규칙 파일이 없습니다: {missing}"),
+                            (("--layout", "flow", "--preset", "honzo"), "짜임 규칙 'honzo' 를 모릅니다"),
+                            (("--layout", "flow", "--preset", "kaibao", "--structure", "none"), "--preset 과 예전 이름 --structure 를 함께")):
+            buf = io.StringIO()
+            with patch.object(cli, "create_reader", side_effect=AssertionError("모델을 만들면 안 된다")) as factory, contextlib.redirect_stdout(buf):
+                self.assertEqual(self.run_build(self.args(*flags)), 2)
+            factory.assert_not_called(); self.assertIn(want, buf.getvalue())
+            self.assertFalse((self.work.out_dir / "source.hwpx").exists())
+        run_args = cli.build_parser().parse_args(["run", str(self.pdf), "--work", str(self.work.dir), "--reader", "mock", "--layout", "flow", "--preset", missing])
+        buf = io.StringIO()
+        with patch.object(cli, "cmd_read", side_effect=AssertionError("판독이 시작되면 안 된다")), contextlib.redirect_stdout(buf), fitz.open(self.pdf) as document:
+            self.assertEqual(cli.cmd_run(run_args, self.work, document), 2)
+        self.assertIn("짜임 규칙 파일이 없습니다", buf.getvalue())
+        self.assertFalse(any(self.work.pages_dir.iterdir()))
+        self.assertIsNone(cli._check_document(self.args("--preset", missing)))                  # 원본 쪽대로는 규칙을 보지 않는다
+        for ref in ("kaibao", "regions"):
+            self.assertIsNone(cli._check_document(self.args("--layout", "flow", "--preset", ref)))
+        self.assertIsNone(cli._check_document(self.args("--layout", "flow", "--structure", "bencao")))   # 예전 이름만 주면 별칭
+        buf = io.StringIO()                                                               # 시작 검사 뒤 규칙 파일이 없어졌으면: 다른 규칙으로 만들지 않고 모델도 부르지 않는다
+        with patch.object(cli, "create_reader", side_effect=AssertionError("모델을 만들면 안 된다")), contextlib.redirect_stdout(buf), fitz.open(self.pdf) as document:
+            self.assertFalse(cli.build_outputs(self.work, document, self.work.records([1]), self.args("--layout", "flow", "--preset", missing)))
+        self.assertIn("문서를 만들지 않았습니다(판독 기록은 그대로)", buf.getvalue()); self.assertFalse(any(self.work.out_dir.glob("*.hwpx")))
 
     def test_textlayer_refuses_changed_source_without_archiving_records(self):
         """검색 가능한 PDF 는 결과 폴더를 읽기만 한다: 원본 PDF 의 바이트가 바뀌었으면(다시 저장·만든 PDF 를 원본 이름으로 둠) 기록을 보관함으로 옮기지 않고 끝 코드 2."""

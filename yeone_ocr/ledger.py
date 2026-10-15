@@ -13,8 +13,8 @@
 from __future__ import annotations
 import json, re, collections
 from pathlib import Path
+from .marks import MARK_AB
 
-MARK_AB = re.compile(r"〔([^〔〕/]{1,2})/([^〔〕]{1,2})〕")
 CJK = re.compile(r"[一-鿿㐀-䶿豈-﫿]")
 
 

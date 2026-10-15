@@ -9,9 +9,9 @@ class ProviderEstimates(unittest.TestCase):
         return estimate("unused.pdf", [1, 2], page_size_px=(900, 1300), guide_chars=13000, **kwargs)
 
     def test_other_provider_unknown_prices_have_no_gemini_fallback(self):
-        result = self.estimate(reader="openai", model="gpt-4.1", second_model="auto")
+        result = self.estimate(reader="openai", model="gpt-test", second_model="auto")       # 요금표에 없는 OpenAI 모델
         self.assertIsNone(result["usd_low"])
-        self.assertEqual(result["second_model"], "gpt-4.1")
+        self.assertEqual(result["second_model"], "gpt-test")
         self.assertEqual(len(result["rows"]), 2)
         self.assertTrue(all(row["usd_low"] is None for row in result["rows"]))
         self.assertFalse(result["use_cache"])

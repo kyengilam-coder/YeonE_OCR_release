@@ -128,3 +128,24 @@ def test_prepare_covers_every_published_payload_with_checksums(tmp_path, monkeyp
     with zipfile.ZipFile(output / "YeonE_OCR-0.7.1-licenses.zip") as archive:
         assert "THIRD_PARTY_LICENSES/dependency/LICENSE" in archive.namelist()
         assert archive.read("DISTRIBUTION_NOTICE.txt") == b"distribution notice"
+
+
+import unittest  # noqa: E402  (unittest discover 도 거두게 — 위의 시험은 pytest 꼴)
+
+
+class PresetPackaging(unittest.TestCase):
+    """짜임 규칙 내장 파일(yeone_ocr/data/preset_*.json)이 pip 꾸러미(pyproject package-data)와 Windows 실행 파일(PyInstaller spec)에 다 든다
+    — 빠지면 실행 파일에서 本草 조문(kaibao)을 찾지 못해 내용별 문서가 막힌다."""
+    def test_every_builtin_preset_is_packaged(self):
+        import ast, fnmatch, re, tomllib
+        from yeone_ocr.presets import BUILTIN, DATA
+        root = Path(__file__).resolve().parents[1]
+        files = sorted(p.relative_to(root / "yeone_ocr").as_posix() for p in DATA.glob("preset_*.json"))
+        self.assertEqual(files, sorted(f"data/preset_{i}.json" for i in BUILTIN))
+        package_data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]["yeone_ocr"]
+        m = re.search(r'collect_data_files\("yeone_ocr",\s*includes=(\[[^\]]*\])\)', (root / "packaging" / "YeonE_OCR.spec").read_text(encoding="utf-8"))
+        self.assertIsNotNone(m)
+        spec_includes = ast.literal_eval(m.group(1))
+        for f in files:
+            self.assertTrue(any(fnmatch.fnmatch(f, g) for g in package_data), (f, package_data))
+            self.assertTrue(any(fnmatch.fnmatch(f, g) for g in spec_includes), (f, spec_includes))

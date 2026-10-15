@@ -2,6 +2,7 @@
 import contextlib
 import io
 import re
+import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -16,18 +17,11 @@ from yeone_ocr.pdfio import images_to_pdf, page_frame, page_image
 from yeone_ocr.schema import PageReading, frac_bbox
 from yeone_ocr.structure import apply_structure, bold_spans, measure_bold
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hwpx_fixtures import make_template, make_template2, rec, text_region   # noqa: E402  양식 흉내·판독 기록 도우미(골든 시험과 같이 씀)
+
 HW = "{http://www.hancom.co.kr/hwpml/2011/head}"
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
-
-
-def rec(page: int, regions: list[dict], print_page: str = "") -> dict:
-    pr = PageReading.model_validate({"pdf_page": page, "print": print_page, "regions": regions}).model_dump()
-    return {"file": "책.pdf", "pdf_page": page, "merged": pr, "pass1": pr, "pass2": {}, "crops": {}, "verify": []}
-
-
-def text_region(rid: str, lines: list[str], kind: str = "본문", cont: bool = False, box=(0.1, 0.1, 0.9, 0.9)) -> dict:
-    return {"id": rid, "k": kind, "bbox": frac_bbox(box), "dir": "가로(좌→우)",
-            "paras": [{"cols": [{"n": i + 1, "t": t} for i, t in enumerate(lines)], "cont": cont}]}
 
 
 class FlowAssembly(unittest.TestCase):
@@ -204,7 +198,8 @@ class Structure(unittest.TestCase):
     def test_other_books_do_not_get_herb_entries_and_entry_paths_agree(self):
         """범용성 검토에서 잡힌 것: 방제서의 약재 목록(수량사)·허사 첫머리·序例 목록은 약재명이 아니고, 굵은 글자가 없는 책은 모두 본문,
         제목으로 읽힌 약재명 뒤 조문은 떼어 낸 조문과 같은 규칙, 긴 주석 표지와 開寶의 今詳·今據, 출처 新補·陳藏器余(간체 今余 는 아님)."""
-        from yeone_ocr.structure import COMMENT_RE, SOURCE_RE
+        from yeone_ocr.presets import resolve_preset
+        p = resolve_preset("kaibao"); COMMENT_RE, SOURCE_RE = p.comment_re, p.source_re                     # 예전 structure 상수 → 짜임 규칙
         recipe = [self.para("桂枝三兩 生薑三兩 大棗十二枚"), self.para("桂枝三兩 味辛"), self.para("麻黃三錢 性溫"),
                   self.para("凡藥 性有宜丸者"), self.para("吐唾血　生地黃　大黃")]
         out, st = apply_structure(recipe, "bencao")
@@ -292,43 +287,6 @@ class Bold(unittest.TestCase):
         blocks = assemble_blocks([rec(1, [r.model_dump() for r in pr.regions])], grades=False, layout="flow", bold=bold)
         out, _ = apply_structure(blocks, "bencao")
         self.assertEqual([(b.role, b.text[:3]) for b in out if b.type == "para"], [("bielu", "味辛微"), ("bonjing", "味苦寒"), ("bielu", "味辛温")])
-
-
-def make_template(path: Path) -> None:
-    """양식 흉내: '제목-절'(가운데)·'주석' 스타일과 본문 글·그림이 든 HWPX. '본문'은 줄 나눔이 어절 단위(KEEP_WORD)."""
-    from hwpx import HwpxDocument
-    doc = HwpxDocument.new()
-    h = doc.oxml.headers[0]
-    center = h.ensure_paragraph_format(base_para_pr_id=1, alignment="CENTER")
-    big = doc.ensure_run_style(size=16, bold=True)
-    h.ensure_style("제목-절", style_type="PARA", para_pr_id_ref=center, char_pr_id_ref=big)
-    h.ensure_style("주석", style_type="PARA", para_pr_id_ref=1, char_pr_id_ref=doc.ensure_run_style(size=9))
-    h.ensure_style("출처", style_type="CHAR", para_pr_id_ref=0, char_pr_id_ref=doc.ensure_run_style(size=8, italic=True))
-    doc.add_paragraph("양식 본문 — 쓰지 않는다")
-    d = pymupdf.open(); pg = d.new_page(width=40, height=40); pg.draw_rect(pymupdf.Rect(5, 5, 35, 35), fill=(0, 0, 0))
-    doc.add_picture(pg.get_pixmap().tobytes("png"), "png", width_mm=10, height_mm=10); d.close()
-    doc.save_to_path(str(path)); doc.close()
-
-
-def make_template2(path: Path, page_number: bool = False) -> None:
-    """양식 흉내 2: 구역이 둘, 본문에 그림, 글이 든 머리말·꼬리말(page_number 면 꼬리말은 쪽 번호), '제목-절'(가운데·줄 간격 130%)과
-    굵은 글자의 '본경 원문' 스타일이 든 HWPX."""
-    from hwpx import HwpxDocument
-    doc = HwpxDocument.new()
-    h = doc.oxml.headers[0]
-    center = h.ensure_paragraph_format(base_para_pr_id=1, alignment="CENTER", line_spacing_percent=130)
-    h.ensure_style("제목-절", style_type="PARA", para_pr_id_ref=center, char_pr_id_ref=doc.ensure_run_style(size=16, bold=True))
-    h.ensure_style("본경 원문", style_type="PARA", para_pr_id_ref=1, char_pr_id_ref=doc.ensure_run_style(size=11, bold=True))
-    doc.add_paragraph("양식 본문 — 쓰지 않는다")
-    d = pymupdf.open(); pg = d.new_page(width=40, height=40); pg.draw_rect(pymupdf.Rect(5, 5, 35, 35), fill=(0, 0, 0))
-    doc.add_picture(pg.get_pixmap().tobytes("png"), "png", width_mm=10, height_mm=10); d.close()
-    doc.page.set_header(text="본초학 양식")
-    if page_number:
-        doc.set_page_number(position="BOTTOM_CENTER")
-    else:
-        doc.page.set_footer(text="— 양식 꼬리말 —")
-    doc.add_section(); doc.add_paragraph("둘째 구역 — 쓰지 않는다", section=doc.sections[1])
-    doc.save_to_path(str(path)); doc.close()
 
 
 class Template(unittest.TestCase):
@@ -498,13 +456,51 @@ class Command(unittest.TestCase):
             self.assertEqual(rc, 0, log.getvalue()[-800:])
             self.assertIn("원본 쪽 책갈피 1개", log.getvalue()); self.assertIn("내용별 짜임", log.getvalue())
             self.assertTrue((tmp / "w" / "out" / "내용별.hwpx").exists())
+            self.assertIn("짜임 규칙: 영역 종류만 (제목·문단·소주) (regions)", log.getvalue())               # 명령줄 기본은 regions
+
+    def test_bold_is_measured_only_when_the_preset_interprets_it(self):
+        """획 굵기(쪽마다 그려 재는 몇 분)는 내용별 + 양식 + 짜임 규칙에 약재명 떼기(entry — 굵기 해석이 없어도 빠뜨린 빈칸을 잼)가 있을 때만 잰다 — 아니면 까닭을 로그에."""
+        from unittest import mock
+        from yeone_ocr import cli, structure
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td); tpl = tmp / "양식.hwpx"; make_template(tpl)
+            pdf, _ = bold_scan(tmp); w = str(tmp / "w")
+            import json
+            from yeone_ocr.presets import DATA
+            only = json.loads((DATA / "preset_kaibao.json").read_text(encoding="utf-8"))   # 굵기 해석 없이 약재명 떼기만 — 빠뜨린 빈칸(gap)을 재려고 잰다
+            only.update(emphasis=None, label="약재명만"); only["styles"]["character"].pop("bonjing")
+            (tmp / "약재명만.json").write_text(json.dumps(only, ensure_ascii=False), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(["run", str(pdf), "--work", w, "--reader", "mock", "--checkpoint", "0", "--mode", "horizontal_zh", "--no-normalize"])
+            for flags, called, why in ((["--preset", "regions"], False, "짜임 규칙 '영역 종류만 (제목·문단·소주)' 에는 굵은 글씨 해석이 없어 재지 않습니다"),
+                                       (["--preset", str(tmp / "약재명만.json")], True, "판독이 빠뜨린 약재명 뒤 빈칸을 쪽 이미지에서 재려고 잽니다"),
+                                       (["--preset", str(tmp / "약재명만.json"), "--no-bold"], False, ""),
+                                       ([], False, "굵은 글씨 해석이 없어"),                                                       # 기본 regions
+                                       (["--preset", "kaibao", "--no-bold"], False, ""),
+                                       (["--structure", "none"], False, "굵은 글씨 해석이 없어"),
+                                       (["--preset", "kaibao"], True, "짜임 규칙: 本草 조문 (開寶本草·證類 계열) (kaibao)"),
+                                       (["--structure", "auto"], True, "(auto)")):
+                log = io.StringIO()
+                with self.subTest(flags=flags), mock.patch.object(structure, "measure_bold", side_effect=RuntimeError("재면 안 됨") if not called else
+                                                                  (lambda pages, log=None: ({}, {"pages": 0, "chars": 0, "median": 0.0, "bold_paragraphs": 0}))) as mb, \
+                        contextlib.redirect_stdout(log):
+                    rc = cli.main(["build", str(pdf), "--work", w, "--layout", "flow", "--template", str(tpl), "--no-normalize", "--out", "x"] + flags)
+                    self.assertEqual((rc, mb.called), (0, called), log.getvalue()[-600:]); self.assertIn(why, log.getvalue())
+            log = io.StringIO()
+            with mock.patch.object(structure, "measure_bold", side_effect=RuntimeError("재면 안 됨")), contextlib.redirect_stdout(log):
+                self.assertEqual(cli.main(["build", str(pdf), "--work", w, "--layout", "flow", "--preset", "kaibao", "--no-normalize", "--out", "y"]), 0)
+            self.assertIn("양식 없이 만드는 문서에는 굵은 글씨 구분이 보이지 않아", log.getvalue())
 
     def test_cli_options_and_window_command(self):
+        from yeone_ocr import cli
         from yeone_ocr.cli import build_parser
-        a = build_parser().parse_args(["build", "x.pdf", "--layout", "flow", "--template", "t.hwpx", "--structure", "bencao", "--no-bold"])
-        self.assertEqual((a.layout, a.template, a.structure, a.no_bold), ("flow", "t.hwpx", "bencao", True))
+        a = build_parser().parse_args(["build", "x.pdf", "--layout", "flow", "--template", "t.hwpx", "--preset", "kaibao", "--no-bold"])
+        self.assertEqual((a.layout, a.template, a.preset, a.no_bold, cli.preset_ref(a)), ("flow", "t.hwpx", "kaibao", True, "kaibao"))
+        a = build_parser().parse_args(["build", "x.pdf", "--layout", "flow", "--structure", "bencao"])        # 예전 이름도 받는다(도움말에는 숨김)
+        self.assertEqual((a.preset, a.structure, cli.preset_ref(a)), (None, "bencao", "bencao"))
         a = build_parser().parse_args(["run", "x.pdf"])
-        self.assertEqual((a.layout, a.template, a.structure, a.no_bold), ("page", None, "auto", False))
+        self.assertEqual((a.layout, a.template, a.preset, a.structure, a.no_bold, cli.preset_ref(a)), ("page", None, None, None, False, "regions"))
+        self.assertNotIn("--structure", build_parser()._subparsers._group_actions[0].choices["build"].format_help())
         try:
             from yeone_ocr import gui
         except ImportError:
@@ -512,16 +508,18 @@ class Command(unittest.TestCase):
         V = lambda v: SimpleNamespace(get=lambda: v)
         app = SimpleNamespace(v_docx=V(False), v_join=V(True), v_hl=V(True), v_ctx=V(True), v_pb=V(True), v_tlpdf=V(False),
                               v_layout=V(gui.LAYOUT_LABELS["flow"]), v_template=V(" C:/양식.hwpx "), v_bold=V(False), v_ctxmodel=V(False),
-                              check_list_mode=lambda: "none", memo_mode=lambda: "notice")
+                              check_list_mode=lambda: "none", memo_mode=lambda: "notice", _preset_ref="kaibao")
         app.layout_key = lambda: gui.App.layout_key(app)
         o = gui.App._build_opts(app)
         a = build_parser().parse_args(["build", "x.pdf"] + o)
-        self.assertEqual((a.layout, a.template, a.no_bold, a.no_context_model, a.structure), ("flow", "C:/양식.hwpx", True, True, "auto"))
-        app.v_structure = V(gui.STRUCTURE_LABELS["none"]); app.structure_key = lambda: gui.App.structure_key(app)
-        self.assertEqual(build_parser().parse_args(["build", "x.pdf"] + gui.App._build_opts(app)).structure, "none")       # 창의 짜임 규칙 선택
+        self.assertEqual((a.layout, a.template, a.no_bold, a.no_context_model, a.preset, a.structure), ("flow", "C:/양식.hwpx", True, True, "kaibao", None))
+        app._preset_ref = "D:/책/규칙.json"
+        self.assertEqual(build_parser().parse_args(["build", "x.pdf"] + gui.App._build_opts(app)).preset, "D:/책/규칙.json")   # 창의 짜임 규칙 선택(늘 넘긴다)
         app.v_layout = V(gui.LAYOUT_LABELS["page"])
-        self.assertNotIn("--layout", gui.App._build_opts(app)); self.assertNotIn("--structure", gui.App._build_opts(app))
-        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["structure"]), ("page", "", True, "auto"))
+        o = gui.App._build_opts(app)
+        self.assertEqual(o[:2], ["--layout", "page"]); self.assertNotIn("--preset", o); self.assertNotIn("--template", o)
+        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("page", "", True, "regions"))
+        self.assertNotIn("structure", gui.DEFAULTS)
 
     def test_window_greys_out_options_the_layout_does_not_use(self):
         try:
@@ -530,12 +528,28 @@ class Command(unittest.TestCase):
             self.skipTest("tkinter 없음")
         from unittest import mock
         V = lambda v: SimpleNamespace(get=lambda: v)
-        app = SimpleNamespace(v_layout=V(gui.LAYOUT_LABELS["flow"]), cb_pb=mock.Mock(), te_template=mock.Mock(), cb_bold=mock.Mock(), cb_structure=mock.Mock())
+        app = SimpleNamespace(v_layout=V(gui.LAYOUT_LABELS["flow"]), cb_pb=mock.Mock(), te_template=mock.Mock(), cb_bold=mock.Mock(), cb_preset=mock.Mock(),
+                              _preset_ref="kaibao", v_template=V("C:/양식.hwpx"))
         app.layout_key = lambda: gui.App.layout_key(app)
-        ws = (app.cb_pb, app.te_template, app.cb_bold, app.cb_structure)
+        ws = (app.cb_pb, app.te_template, app.cb_bold, app.cb_preset)
         gui.App._layout_changed(app)                                                # 내용별: 쪽 나누기만 흐리게
         self.assertEqual([w.state.call_args.args[0] for w in ws], [["disabled"], ["!disabled"], ["!disabled"], ["!disabled"]])
-        app.v_layout = V(gui.LAYOUT_LABELS["page"])
+        for ref in ("regions", "없는/규칙.json"):                                     # 약재명 떼기·굵은 글씨 해석이 없는(·쓸 수 없는) 규칙이면 획 굵기도 흐리게
+            app._preset_ref = ref
+            gui.App._layout_changed(app)
+            self.assertEqual([w.state.call_args.args[0] for w in ws], [["disabled"], ["!disabled"], ["disabled"], ["!disabled"]], ref)
+        app._preset_ref = "kaibao"; app.v_template = V("  ")                       # 양식이 없으면(기본 모양) 재지 않으므로 흐리게(README 대로)
+        gui.App._layout_changed(app)
+        self.assertEqual(app.cb_bold.state.call_args.args[0], ["disabled"])
+        import json, tempfile
+        from yeone_ocr.presets import DATA
+        with tempfile.TemporaryDirectory() as td:                                   # 굵기 해석 없이 약재명 떼기만 있는 규칙: 빠뜨린 빈칸을 재므로 켠다
+            only = json.loads((DATA / "preset_kaibao.json").read_text(encoding="utf-8")); only["emphasis"] = None; only["styles"]["character"].pop("bonjing")
+            path = Path(td) / "약재명만.json"; path.write_text(json.dumps(only, ensure_ascii=False), encoding="utf-8")
+            app._preset_ref = str(path); app.v_template = V("C:/양식.hwpx")
+            gui.App._layout_changed(app)
+        self.assertEqual(app.cb_bold.state.call_args.args[0], ["!disabled"])
+        app.v_layout = V(gui.LAYOUT_LABELS["page"]); app._preset_ref = "kaibao"
         gui.App._layout_changed(app)                                                # 원본 쪽대로: 양식·획 굵기·짜임 규칙을 흐리게
         self.assertEqual([w.state.call_args.args[0] for w in ws], [["!disabled"], ["disabled"], ["disabled"], ["disabled"]])
 

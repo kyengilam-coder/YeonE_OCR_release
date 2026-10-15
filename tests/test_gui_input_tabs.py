@@ -1,6 +1,7 @@
 """PDF·이미지 입력은 따로 보관하고 판독 설정은 공유한다(화면·개인 설정·API 불필요)."""
 import contextlib
 import copy
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -52,6 +53,8 @@ class InputTabs(unittest.TestCase):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.gui = self.stack.enter_context(gui_module())
+        here = os.getcwd(); os.chdir(self.stack.enter_context(tempfile.TemporaryDirectory()))   # 상대 경로 원본(book.pdf)의 결과 폴더가 저장소에 생기지 않게
+        self.stack.callback(os.chdir, here)
         self.saved = []
         self.save = self.stack.enter_context(mock.patch.object(
             self.gui, "save_config", side_effect=lambda cfg: self.saved.append(copy.deepcopy(cfg))))
@@ -76,8 +79,11 @@ class InputTabs(unittest.TestCase):
             cfg={"last_pdf": "book.pdf", "reader": "anthropic", "model": "claude-test", "api_key": "synthetic-test-key"},
             tab_frames=frames, _common_frame=common, act_cards=cards, layout=layout, actions=actions,
             _sync_output_location=mock.Mock(), _sync_settings_summary=mock.Mock(), refresh_table=mock.Mock(), _append=mock.Mock(),
-            _bundle_images=mock.Mock())
-        for name in ("select_tab", "return_to_ocr", "_remember_inputs", "_reset_screenshot_pages", "pdf", "pdf2", "mode_key"):
+            _bundle_images=mock.Mock(),
+            _book={"dir": None, "loaded": {}}, _preset_ref="regions", v_preset=Var(""), cb_preset=mock.Mock(), _layout_changed=mock.Mock(),   # 책별 설정 칸
+            v_layout=Var(self.gui.LAYOUT_LABELS["page"]), v_template=Var(""), v_bold=Var(True), v_ctxmodel=Var(True))
+        for name in ("select_tab", "return_to_ocr", "_remember_inputs", "_reset_screenshot_pages", "pdf", "pdf2", "mode_key",
+                     "_book_dir", "_book_values", "_apply_book", "_load_book", "_save_book", "layout_key", "preset_ref", "_preset_values"):
             setattr(app, name, getattr(self.gui.App, name).__get__(app))
         app.work = lambda: self.gui.work_dir_for(app.pdf())
         app._use_pdf = mock.Mock(wraps=self.gui.App._use_pdf.__get__(app))
@@ -266,8 +272,8 @@ class InputTabs(unittest.TestCase):
                 app = self.app(); app.select_tab(tab); app.select_tab(3)
                 app._need_pdf = lambda: True; app._prepare_env = lambda: True
                 app._pages = self.gui.App._pages.__get__(app)
-                app._build_opts = lambda: []; app._cap_opts = lambda: []
-                app._confirm_model_steps = lambda adjudicate=False: []          # 문맥 교정으로 물을 것 없음
+                app._build_opts = lambda: []; app._cap_opts = lambda: []; app._answered_opts = lambda: ["--skip-answered", "any-model"]
+                app._with_plan = lambda kind, go: go([])                        # 비용 창: 물을 것 없음
                 app.start = mock.Mock()
                 self.gui.App.do_build(app)
                 argv = app.start.call_args.args[0]

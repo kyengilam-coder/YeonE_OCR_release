@@ -21,7 +21,8 @@
 from __future__ import annotations
 import re, time, unicodedata
 from dataclasses import dataclass, field
-from .merge import MARK_RE, _PUNCT_FOLD, LONG_SEG_NO_P2, LONG_SEG_DIFFER
+from .merge import _PUNCT_FOLD, LONG_SEG_NO_P2, LONG_SEG_DIFFER
+from .marks import MARK_RE, MARK_AB
 from .schema import PageReading, TEXT_KINDS
 
 S_MIN, S_MIN_WEAK, RATIO = 3, 6, 4
@@ -30,7 +31,6 @@ PAGE_MARKS_MIN, PAGE_MARK_RATIO = 3, 0.05   # 표시가 3개 이상이면서 글
 LAYER_RATIO_MIN = 0.5           # 판독과 PDF 글자층의 일치율이 이보다 낮은 쪽(판독이 크게 흔들린 쪽)
 LEDGER_SOURCES = ("판독↔글자층", "HWPX↔판독")   # 자형 쌍 거름에 쓰는 장부 출처('1차↔2차'는 지금 판정하는 표시 자체라 뺀다)
 LONG_SEG_NOTES = (LONG_SEG_NO_P2, LONG_SEG_DIFFER)   # merge.LONG_SEGMENT 확인 항목: 표시 없이 1차만 들어간 긴 구간(글 머리를 merge 와 같이 쓴다)
-MARK_AB = re.compile(r"〔([^〔〕/]{1,2})/([^〔〕]{1,2})〕")
 NUMERALS = set("0123456789０１２３４５６７８９〇零一二三四五六七八九十百千萬万兩两廿卅")
 GANZHI = set("甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥")
 SEQ_NEIGHBORS = GANZHI | NUMERALS | set("東西南北中乾坤震巽坎離艮兌东离兑")
@@ -260,12 +260,12 @@ def _exclusion(a: str, b: str, left: str, right: str, conf_sets, fold) -> str:
 
 def page_sites(rec: dict, fold, conf_sets) -> list[Site]:
     """한 쪽의 문맥 추정 대상: 남은 〔a/b〕(미정) 자리와 3차가 고른 자리."""
-    from .grades import _plain_map
+    from . import marks                                               # 이 함수의 fold 는 자형 접기 인자라 marks.fold 를 모듈째 부른다
     from .schema import RegionReread
     out: list[Site] = []
     paras = _paragraphs(rec)
     n_marks = sum(1 for p in paras for _ in MARK_RE.finditer(p.text))
-    plain_chars = sum(len(_plain_map(p.text)[0]) for p in paras) or 1
+    plain_chars = sum(len(marks.fold(p.text)) for p in paras) or 1
     td = rec.get("textlayer_diff") or {}
     noisy = ""
     if n_marks >= PAGE_MARKS_MIN and n_marks / plain_chars > PAGE_MARK_RATIO:

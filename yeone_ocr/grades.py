@@ -8,9 +8,9 @@
 다시 찾고, 그 자리 글자가 고른 글자와 같을 때만 확정 글자로 본다. 못 찾으면 칠하지 않고 '못 찾은 자리'로 센다.
 """
 from __future__ import annotations
-import re
 from dataclasses import dataclass
-from .merge import MARK_RE, columns_in_reading_order
+from .merge import columns_in_reading_order
+from .marks import MARK_RE, NOTE_PREFIXES, split_marks, fold_map   # NOTE_PREFIXES·split_marks 는 예전 이름(grades.*)으로도 쓰인다(hwpx_builder·collate·시험)
 from .schema import PageReading, TEXT_KINDS
 from .adjudicate import SUSPECT_NOTE, suspect_uncertain
 
@@ -24,24 +24,7 @@ GRADE_STYLE: dict[str, dict] = {
 }
 STYLE_ALIAS = {"mark": "red"}          # split_marks 의 mark(〔〕 표시) = 빨강
 
-# ---------- 글자 모양 나누기(문서 조립 공용) ----------
-SPLIT_RE = re.compile(r"(〔[^〔〕]*〕)")
-NOTE_PREFIXES = ("〔→", "〔소주〕", "〔작업 메모〕", "〔판독 메모〕", "〔도판 미삽입", "〔이어짐〕", "〔고지: ")   # 〔고지/구자〕 같은 두 글자 후보 표시와 겹치지 않게 쌍점까지
-
-
-def split_marks(text: str) -> list[tuple[str, str]]:
-    """글을 (조각, 종류) 로 나눈다. 종류: body | mark(의심 자리) | note(작업 표시)."""
-    out = []
-    for seg in SPLIT_RE.split(text):
-        if not seg:
-            continue
-        if seg.startswith("〔") and seg.endswith("〕"):
-            out.append((seg, "note" if seg.startswith(NOTE_PREFIXES) else "mark"))
-        else:
-            out.append((seg, "body"))
-    return out
-
-
+# ---------- 글자 모양 나누기(문서 조립 공용) — 표시 나누기는 marks.split_marks ----------
 def styled_runs(text: str, spans=(), memos=()) -> list[tuple[str, str, list[str]]]:
     """글 → [(조각, 모양, 그 조각에 걸 메모들)]. 기본 모양은 split_marks(body·mark·note), spans 의 (시작, 끝, 모양) 이 덮어쓴다.
     메모는 글자 하나에 건다: 메모 자리의 글자는 따로 조각이 된다(한컴에서 메모 범위가 글자 하나만 물들게)."""
@@ -71,21 +54,6 @@ def styled_runs(text: str, spans=(), memos=()) -> list[tuple[str, str, list[str]
     return out
 
 
-def _plain_map(text: str) -> tuple[str, list[int | None]]:
-    """열 글 → (표시를 1차 글자로 접은 글, 접은 글의 글자마다 원래 글에서의 위치). 표시 안에서 온 글자는 위치가 None."""
-    out: list[str] = []; pos: list[int | None] = []; last = 0
-    for m in MARK_RE.finditer(text):
-        for i in range(last, m.start()):
-            out.append(text[i]); pos.append(i)
-        inner = m.group(0)[1:-1]
-        core = inner[2:].strip() if inner.startswith("疑:") else (inner.split("/")[0] if "/" in inner else "")
-        out.extend(core); pos.extend([None] * len(core))
-        last = m.end()
-    for i in range(last, len(text)):
-        out.append(text[i]); pos.append(i)
-    return "".join(out), pos
-
-
 def locate_choice(col_text: str, char_index: int, choice: str, pre: str = "", post: str = "", near: int = 3) -> int | None:
     """3차가 고른 글자(choice)가 열 글의 어느 위치(원래 글의 글자 번호)에 들어 있는지. 표시 밖의 보통 글자여야 하고,
     제자리(char_index) 가까이(±near)에서 앞뒤 글자가 가장 잘 맞는 자리를 고른다. 없으면 None.
@@ -96,7 +64,7 @@ def locate_choice(col_text: str, char_index: int, choice: str, pre: str = "", po
     (이웃 표시를 b 로 정했거나 사람이 고친 뒤에 근처의 같은 글자 — 1차·2차가 같게 읽은 글자 — 를 잡지 않게)."""
     if not choice:
         return None
-    plain, pos = _plain_map(col_text)
+    plain, pos = fold_map(col_text, inner_pos=False)              # 표시를 1차 글자로 접은 글(3차 글자 번호와 같은 셈), 표시 안 글자는 자리 None
     best: tuple | None = None; best_at: int | None = None
     for i in range(max(0, char_index - near), min(len(plain) - len(choice), char_index + near) + 1):
         if plain[i:i + len(choice)] != choice:

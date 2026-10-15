@@ -309,17 +309,31 @@ class Estimate(unittest.TestCase):
         self.assertEqual(default_price("models/gemini-2.5-flash-lite-preview-06-17")["key"], "gemini-2.5-flash-lite")
         self.assertEqual(default_price("gemini-3-flash-preview")["in"], 0.50); self.assertIsNone(default_price("my-model"))
         self.assertEqual(resolve_price("gemini-3.1-pro-preview", {"gemini-3.1-pro-preview": {"in": 9, "out": 9}})["source"], "직접 입력")
-        self.assertEqual(guess_second_model("gemini-3.1-pro-preview", "auto"), "gemini-3-flash")
+        self.assertEqual(guess_second_model("gemini-3.1-pro-preview", "auto"), "gemini-3.1-pro-preview")   # 실행 때(pick_second_model)처럼: 같은 세대 flash 가 없으면 1차 그대로
+        self.assertEqual(guess_second_model("gemini-3-pro-preview", "auto"), "gemini-3-flash")
         self.assertEqual(guess_second_model("gemini-2.5-pro", "auto"), "gemini-2.5-flash")
+        from yeone_ocr.estimate import PRICES
+        from yeone_ocr.reader_gemini import pick_second_model
+        for m in ("gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-2.5-pro", "gemini-2.0-pro-exp"):
+            self.assertEqual(guess_second_model(m, "auto"), pick_second_model(list(PRICES), m), m)      # 어림과 실행이 같은 규칙
+        for alias in ("gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"):
+            self.assertIsNone(default_price(alias), alias)                                              # 가리키는 모델이 바뀌는 별칭은 옛 단가로 셈하지 않는다
+        self.assertEqual(resolve_price("gemini-2.5-pro", {})["source"], "내장 요금표 2026-10")          # 확인한 날을 제공사마다
+        self.assertEqual(resolve_price("claude-sonnet-4-6", {})["source"], "내장 요금표 2026-10-15")
         self.assertEqual(guess_second_model("gemini-3-flash-preview", "auto"), "gemini-3-flash-preview")
         self.assertEqual(guess_second_model("gemini-3.1-pro-preview", ""), "gemini-3.1-pro-preview")
         self.assertEqual(guess_second_model("gemini-3.1-pro-preview", "gemini-2.5-flash"), "gemini-2.5-flash")
         # 단가·환율을 넣지 않아도 금액이 나온다(내장 요금표 + 기본 환율), 2차는 flash 단가라 1차만 pro 로 읽을 때보다 싸다
-        e = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="auto", page_size_px=(894, 1261), guide_chars=13000)
+        e = estimate("x.pdf", [1, 2], model="gemini-3-pro-preview", second_model="auto", page_size_px=(894, 1261), guide_chars=13000)
         self.assertIsNotNone(e["usd_low"]); self.assertEqual(e["fx"], DEFAULT_FX_KRW); self.assertEqual(len(e["price_lines"]), 2)
-        e_pro = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="", page_size_px=(894, 1261), guide_chars=13000)
+        e_pro = estimate("x.pdf", [1, 2], model="gemini-3-pro-preview", second_model="", page_size_px=(894, 1261), guide_chars=13000)
         self.assertLess(e["usd_high"], e_pro["usd_high"])
-        e_nc = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="auto", use_cache=False, page_size_px=(894, 1261), guide_chars=13000)
+        e31 = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="auto", page_size_px=(894, 1261), guide_chars=13000)
+        e31_pro = estimate("x.pdf", [1, 2], model="gemini-3.1-pro-preview", second_model="", page_size_px=(894, 1261), guide_chars=13000)
+        self.assertEqual(e31["rows"][1]["model"], "gemini-3.1-pro-preview (auto)")                       # 3.1 pro 의 2차는 3.1 pro 단가(아래 세대 flash 로 싸게 보이지 않게)
+        self.assertEqual((e31["usd_low"], e31["usd_high"]), (e31_pro["usd_low"], e31_pro["usd_high"]))
+        self.assertTrue(any(n.startswith("2차 auto: 요금표에 1차와 같은 세대") for n in e31["notes"]))
+        e_nc = estimate("x.pdf", [1, 2], model="gemini-3-pro-preview", second_model="auto", use_cache=False, page_size_px=(894, 1261), guide_chars=13000)
         self.assertGreater(e_nc["usd_low"], e["usd_low"])                       # 캐시를 끄면 지침이 전액 과금
         txt = format_estimate(e); self.assertIn("내장 요금표", txt); self.assertIn("auto 추정", txt)
         # 모델별 실측이 있으면 모델마다 제 단가로

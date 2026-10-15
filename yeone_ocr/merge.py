@@ -1,7 +1,8 @@
 """1차(쪽 전체) 판독과 2차(영역 확대) 독립 판독의 비교·병합, 기존 텍스트 레이어와의 대조."""
 from __future__ import annotations
 import difflib, re, unicodedata
-from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_columns, region_text, duplicate_region_ids
+from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_text, duplicate_region_ids
+from .marks import MARK_RE, fold
 
 WS = re.compile(r"\s+")
 INVISIBLE = re.compile(r"[\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufe00-\ufe0f\ufeff]")   # 폭 없는 글자·이체자 선택자 등
@@ -65,7 +66,6 @@ def _pos(i: int, n: int) -> str:
     return "위" if r < 0.34 else ("중간" if r < 0.67 else "아래")
 
 
-MARK_RE = re.compile(r"〔[^〔〕]*〕")
 _TOK, _TOK_N = 0xD800, 0x800      # 표시 토큰: 짝 없는 대리 부호값 U+D800~DFFF. 글자가 아니고 UTF-8 로 쓸 수도 없어 판독 글에 나오지 않는다
 _TOK_RE = re.compile("[\ud800-\udfff]")
 
@@ -421,15 +421,8 @@ def _apply_edits(text: str, edits: list[tuple[int, int, str]], table: dict[str, 
 
 
 def strip_marks_for_compare(s: str) -> str:
-    """〔a/b〕 → a(1차), 〔疑: x〕 → x, 그 밖의 표시(〔판독불명〕·작업 표시) → 빈 글. 글자층과 비교할 때 표시 글자가 차이로 잡히지 않게."""
-    def rep(m):
-        inner = m.group(0)[1:-1]
-        if inner.startswith("疑:"):
-            return inner[2:].strip()
-        if "/" in inner and not inner.startswith(("→", "소주", "작업", "판독 메모", "도판", "이어짐", "원본")):
-            return inner.split("/")[0]
-        return ""
-    return MARK_RE.sub(rep, s)
+    """〔a/b〕 → a(1차), 〔疑: x〕 → x, 그 밖의 표시(〔판독불명〕·작업 표시 — 〔→PDF 2쪽/인쇄 3쪽〕 도) → 빈 글. 글자층과 비교할 때 표시 글자가 차이로 잡히지 않게(marks.fold)."""
+    return fold(s, work_notes=True)
 
 
 def compare_textlayer(reading: PageReading, layer_plain: str, max_items: int = 60) -> dict:

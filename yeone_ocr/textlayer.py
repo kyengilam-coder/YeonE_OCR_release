@@ -24,11 +24,11 @@ from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, SKIP_KINDS, bbox_frac
 from .merge import columns_in_reading_order
 from .layout import ink_runs, merge_glyph_runs
 from .pdfio import OWN_LAYER_FONT as FONT_NAME, is_own_span, layer_chars
+from .marks import MARK_RE, mark_kind, mark_reading
 
 FONT_KEY = "FYeonEOCR"               # 쪽 자원(/Font) 안의 이름
 ASC, DESC = 0.88, -0.12              # 글꼴의 위·아래 범위(em). 글자 상자 = 1em 정사각형(가운데에 맞춘다)
 INK_THR = 110                        # 먹으로 칠 밝기(layout·adjudicate 와 같은 값)
-MARK_RE = re.compile(r"〔([^〔〕]*)〕")
 
 
 @dataclass
@@ -52,12 +52,10 @@ def token_positions(text: str) -> list[tuple[str | None, int]]:
     out: list[tuple[str | None, int]] = []; pos = 0
     for m in MARK_RE.finditer(text):
         out.extend((c, pos + k) for k, c in enumerate(text[pos:m.start()]) if not c.isspace())
-        inner = m.group(1).strip()
-        if inner.startswith("疑:") or inner.startswith("疑："):
-            out.extend((c, m.start()) for c in inner[2:] if not c.isspace())
-        elif "/" in inner:
-            out.extend((c, m.start()) for c in inner.split("/")[0] if not c.isspace())
-        elif inner == "판독불명":
+        inner = m.group(0)[1:-1]; kind = mark_kind(inner)
+        if kind in ("doubt", "ab"):
+            out.extend((c, m.start()) for c in mark_reading(inner) if not c.isspace())
+        elif kind == "unknown":
             out.append((None, m.start()))
         pos = m.end()
     out.extend((c, pos + k) for k, c in enumerate(text[pos:]) if not c.isspace())
