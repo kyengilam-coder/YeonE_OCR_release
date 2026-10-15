@@ -30,20 +30,39 @@ LAYOUTS = ("page", "flow")   # page = 원본 쪽마다 기록 줄·쪽 나누기
 
 _MARK = re.compile(r"〔([^〔〕]*)〕")
 _VOLUME = re.compile(r"卷\s*第?\s*([一二三四五六七八九十百千〇零\d]+)")
+# 제목에서 뜻을 가르는 토막: 권 번호, 품급(上品·中品·下品·之上·之下), 부 이름(木部·草部 — 部 앞 한 글자). 하나라도 다르면 다른 장이다.
+_GRADE = re.compile(r"卷\s*第?\s*[一二三四五六七八九十百千〇零\d]+|第\s*[一二三四五六七八九十百千〇零\d]+|[上中下]品|之[上中下]|[上中下]$|[㐀-䶿一-鿿]部")   # 장을 가르는 표지: 권·第N·품급·之上下·끝의 上中下(…并治上/中/下)·部
 RUNNING_TOP = 0.15        # 쪽 위 이 비율 안에서 시작하는 제목만 머리말 후보
 RUNNING_SIMILAR = 0.6     # 앞서 남긴 쪽머리 제목과 이만큼 비슷하면 머리말(잘못 읽은 변형 포함)
 
 
+def mark_reading(inner: str) -> str:
+    """판독 표시 〔…〕 안 글의 1차 글자: 疑: X → X, a/b → a, 판독불명 → 빈 글, 그 밖은 그대로."""
+    inner = inner.strip()
+    if inner.startswith(("疑:", "疑：")):
+        return inner[2:].strip()
+    if "/" in inner:
+        return inner.split("/")[0]
+    return "" if inner == "판독불명" else inner
+
+
 def first_reading(text: str) -> str:
     """판독 표시를 1차 글자로: 〔疑: X〕→X, 〔a/b〕→a, 〔판독불명〕→빈 글. 그 밖의 〔…〕는 괄호만 뗀다."""
-    def rep(m):
-        inner = m.group(1).strip()
-        if inner.startswith(("疑:", "疑：")):
-            return inner[2:].strip()
-        if "/" in inner:
-            return inner.split("/")[0]
-        return "" if inner == "판독불명" else inner
-    return _MARK.sub(rep, text or "")
+    return _MARK.sub(lambda m: mark_reading(m.group(1)), text or "")
+
+
+def fold_marks(text: str) -> tuple[str, list[int]]:
+    """first_reading 과 같은 글에, 접은 글의 자리 k 가 원글 어디서 왔는지(pos[k]) 를 함께. 표시에서 나온 글자는 그 표시의 시작 자리,
+    pos[len(접은 글)] = len(원글). 접은 글에 맞춘 정규식의 자리를 원글 자리로 되돌릴 때 쓴다."""
+    out: list[str] = []; pos: list[int] = []; i = 0
+    for m in _MARK.finditer(text or ""):
+        out.extend(text[i:m.start()]); pos.extend(range(i, m.start()))
+        rep = mark_reading(m.group(1))
+        out.extend(rep); pos.extend([m.start()] * len(rep))
+        i = m.end()
+    out.extend((text or "")[i:]); pos.extend(range(i, len(text or "")))
+    pos.append(len(text or ""))
+    return "".join(out), pos
 
 
 def _title_key(text: str) -> str:
@@ -53,15 +72,14 @@ def _title_key(text: str) -> str:
 
 def is_running_head(text: str, kept: list[str]) -> bool:
     """쪽 맨 위 제목이 쪽마다 찍힌 머리말(書眉)을 제목으로 읽은 것인지: 앞서 남긴 쪽머리 제목과 비슷하면 그렇다.
-    권 번호(卷第五·卷第六)가 서로 다르면 새 장이므로 아니다. 처음 나온 장 제목은 남는다."""
+    권 번호·품급·부 이름(_GRADE)이 하나라도 다르면 새 장이다(木部上品 → 木部中品 은 비슷해 보여도 다른 장). 처음 나온 장 제목은 남는다."""
     from difflib import SequenceMatcher
     key = _title_key(text)
     if len(key) < 4:
         return False
-    vol = _VOLUME.search(key)
+    marks = _GRADE.findall(key)
     for old in kept:
-        ov = _VOLUME.search(old)
-        if vol and ov and vol.group(1) != ov.group(1):
+        if _GRADE.findall(old) != marks:
             continue
         if SequenceMatcher(None, key, old).ratio() >= RUNNING_SIMILAR:
             return True
@@ -127,8 +145,9 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
     pending: tuple[str, list[str]] | None = None    # 내용별: 아직 글자 자리를 못 찾은 이 쪽의 책갈피(이름, 메모들)
     top_titles: list[str] = []                      # 내용별: 쪽 맨 위에서 남긴 제목(최근 셋) — 쪽마다 찍힌 머리말을 가린다
     vol_titles: list[str] = []                      # 권 이름(卷)이 든 제목 가운데 남긴 것(최근 셋) — 장 안의 소제목에 밀려나지 않게 따로
+    prev_header = ""                                # 앞 쪽의 머리말 칸(판독이 적은 것) — 이 쪽 제목이 그것과 같으면 되풀이된 머리말
     if stats is not None and flow:
-        stats.setdefault("running_heads", 0)
+        stats.setdefault("running_heads", 0); stats.setdefault("running_head_texts", [])
     pending_list: list[tuple[str, list[str]]] = []  # 글 없는 쪽(그림만 등)이 이어질 때 앞 쪽들의 것
 
     def place(b: Block, offset: int) -> None:
@@ -189,20 +208,23 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
             if reg.kind in TITLE_KINDS:
                 lvl = reg.title_level if reg.title_level in (1, 2, 3) else (2 if reg.kind == "제목" else 3)
                 hb = Block(type="heading", text=reg.title_text.strip(), level=lvl, kind=reg.kind, page=n)
-                if flow and hb.text and reg.kind == "제목":
+                if flow and not hb.text:
+                    continue                                    # 글 없는 제목 영역은 문단을 만들지 않는다(책갈피는 다음 글로)
+                if flow and reg.kind == "제목":
                     y0 = bbox_frac(reg.bbox)[1]
                     key = _title_key(hb.text); vol = "卷" in key
                     at_top = y0 < RUNNING_TOP and y0 <= page_top + 0.02          # 쪽에서 가장 위 영역
-                    same_as_header = bool(pr.running_header.strip()) and is_running_head(hb.text, [_title_key(pr.running_header)])
+                    same_as_header = bool(prev_header) and is_running_head(hb.text, [prev_header])   # 앞 쪽 머리말과 같음(이 쪽 머리말과 같은 것은 새 장일 수 있다)
                     if same_as_header or ((at_top or vol) and is_running_head(hb.text, vol_titles + top_titles)):
                         if stats is not None:                   # 쪽마다 찍힌 머리말을 판독이 제목으로 읽은 것 — 내용별에서는 글을 끊지 않게 뺀다
                             stats["running_heads"] = stats.get("running_heads", 0) + 1
+                            stats.setdefault("running_head_texts", []).append((n, hb.text))
                         continue
                     if vol:
                         vol_titles[:] = (vol_titles + [key])[-3:]
                     elif at_top:
                         top_titles[:] = (top_titles + [key])[-3:]
-                if flow and hb.text:
+                if flow:
                     place(hb, 0)
                 blocks.append(hb)
             elif reg.kind in TEXT_KINDS:
@@ -217,8 +239,11 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     t = prefix + t
                     joinable = (i == 0 and not first_text_done) if not flow else True    # 내용별은 쪽 안의 영역 사이도 잇는다
                     if join_pages and joinable and p.continues_from_previous:
-                        prev = blocks[-1] if flow and blocks and blocks[-1].type == "para" else \
-                            (next((b for b in reversed(blocks) if b.type == "para"), None) if not flow else None)
+                        if flow:                                # 바로 앞 글 블록(쪽 끝 확인 목록은 건너뜀)에, 소주는 소주끼리·본문은 본문끼리만 잇는다
+                            last = next((b for b in reversed(blocks) if b.type != "uncertain"), None)
+                            prev = last if last is not None and last.type == "para" and (last.kind == "소주") == (reg.kind == "소주") else None
+                        else:
+                            prev = next((b for b in reversed(blocks) if b.type == "para"), None)
                         if prev is not None:
                             boundary = "" if flow else f"〔→PDF {n}쪽" + (f"/인쇄 {pr.print_page}쪽" if pr.print_page else "") + "〕"
                             base = len(prev.text) + len(boundary)
@@ -275,6 +300,8 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 items.append(f"구조 검사: {iss['rule']} ({iss['where']}) — {iss['msg']}")
         if check_list != "none" and items:
             blocks.append(Block(type="uncertain", items=items, page=n, text=CHECK_HEADER[check_list]))
+        if pr.running_header.strip():
+            prev_header = _title_key(pr.running_header)    # 다음 쪽의 되풀이 머리말 판정에
     if flow and (pending or pending_list):         # 끝 쪽들에 글이 없으면 마지막 글 끝에
         last = next((b for b in reversed(blocks) if b.type in ("para", "heading") and b.text), None)
         if last is not None:

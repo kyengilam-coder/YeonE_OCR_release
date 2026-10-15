@@ -277,7 +277,8 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
         names = ", ".join(sorted(missing_prices))
         out["notes"].append(f"단가를 모르는 모델({names})이 있어 총금액을 내지 못했습니다. 해당 모델의 입력·출력 단가(USD/100만 토큰)를 직접 넣으면 계산합니다.")
     out["notes"].append("추정치입니다. 제공사별 이미지 처리·추론 토큰·캐시 정책에 따라 실제 청구액은 달라지며, 캐시 보관료는 넣지 않았습니다.")
-    out["notes"].append("최종 HWPX·DOCX의 한자 문맥 교정에는 추가 모델 호출이 생길 수 있으며, 그 비용은 이 OCR 어림에 포함되지 않습니다.")
+    out["notes"].append("판독 뒤 이어지는 3차 글자 판별(〔a/b〕 자리마다 자형 조각·합의 의심)과 최종 HWPX·DOCX 의 한자 문맥 교정에는 추가 모델 호출이 생기며, "
+                        "그 비용은 이 OCR 어림에 포함되지 않습니다. 이미 판독한 쪽에서는 실행 전 확인 창이 그 수를 따로 보이고, 둘 다 [설정]에서 끌 수 있습니다.")
     return out
 
 

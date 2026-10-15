@@ -1414,14 +1414,24 @@ def clip_choice_item(item: dict, window: int = CHOICE_WINDOW) -> dict:
     return out
 
 
-def _normalization_keys(item: dict, provider: str, model: str, rules_hash: str) -> tuple[str, str]:
-    """(예전 열쇠: 문서 쪽이 준 항목 그대로 — 0.7.4 까지의 재사용 기록, 새 열쇠: 모델에 보내는 작은 꼴 — 앞뒤 몇십 자만 같으면 같은 후보)."""
+def _normalization_keys(item: dict, provider: str, model: str, rules_hash: str) -> tuple[str, ...]:
+    """(예전 열쇠: 문서 쪽이 준 항목 그대로 + 판 번호 — 0.7.4 까지의 재사용 기록을 읽기 위해 그대로 둔다,
+    새 열쇠: 모델에 보내는 작은 꼴 — 앞뒤 몇십 자만 같으면 같은 후보).
+    새 열쇠에는 판 번호를 넣지 않는다 — 판이 바뀔 때마다 고른 답·못 고른 기억이 모두 버려져 수천 건을 다시 사게 된다.
+    답이 달라질 수 있는 것만 넣는다: 제공사·모델·규칙 파일·앞뒤 글자 수·모델에 주는 지시문(TEXT_CHOICE_SYSTEM)."""
     import hashlib
-    def h(d):
+    from .readers import TEXT_CHOICE_SYSTEM
+    def h(d, **more):
         d = {k: v for k, v in d.items() if k != "id"}
-        d.update(provider=provider, model=model, rules=rules_hash, version=__version__)
+        d.update(provider=provider, model=model, rules=rules_hash, **more)
         return hashlib.sha256(json.dumps(d, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-    return h(item), h({**clip_choice_item(item), "clip": CHOICE_WINDOW})
+    prompt = hashlib.sha256(TEXT_CHOICE_SYSTEM.encode("utf-8")).hexdigest()
+    small = clip_choice_item(item)
+    return (h(item, version=__version__), h(small, clip=CHOICE_WINDOW, prompt=prompt),
+            *(h(small, clip=CHOICE_WINDOW, version=v) for v in _CLIP_KEY_VERSIONS))   # 판 번호가 든 작은 열쇠(0.7.4 의 #9~#11 판) — 이미 산 답을 버리지 않는다
+
+
+_CLIP_KEY_VERSIONS = ("0.7.4",)   # 작은 열쇠에 판 번호를 넣던 판들(그 기록을 읽기 위한 호환 열쇠)
 
 
 def _load_normalization_cache(work: Work) -> tuple[dict, dict]:
@@ -1436,7 +1446,7 @@ def _load_normalization_cache(work: Work) -> tuple[dict, dict]:
         return {}, {}
 
 
-def _cached_choice(item: dict, keys: tuple[str, str], choices: dict):
+def _cached_choice(item: dict, keys: tuple[str, ...], choices: dict):
     for key in keys:
         c = choices.get(key)
         if c in (item.get("candidates") or []) and (item.get("source_is_valid_traditional", True) or c != item.get("source")):
@@ -1444,16 +1454,17 @@ def _cached_choice(item: dict, keys: tuple[str, str], choices: dict):
     return None
 
 
-def normalization_plan(work: Work, records: list[dict], provider: str, model: str, layout: str = "page") -> dict:
+def normalization_plan(work: Work, records: list[dict], provider: str, model: str, layout: str = "page",
+                       join_pages: bool = True, structure: str = "auto") -> dict:
     """문맥 교정에서 모델에 새로 물을 후보 수 어림(모델 호출 없음). 문서 조립·규칙 변환까지 해 보고 재사용 기록과 견준다.
-    실제 문서와 표시·조문 나누기가 조금 달라 앞뒤 글이 다를 수 있으므로 '약' 이다.
+    문서를 만들 때와 같은 조건(짜임·쪽 잇기·짜임 규칙)으로 조립해야 앞뒤 60자 열쇠가 같다 — 그래도 등급 표시·굵기 범위는 글을 바꾸지 않으므로 '약' 이다.
     돌려주는 값: {total, reused, remembered, ask, calls}."""
     import hashlib
     from .normalization import normalize_blocks, RULE_FILE
-    blocks = assemble_blocks(records, grades=False, layout=layout)
+    blocks = assemble_blocks(records, grades=False, layout=layout, join_pages=join_pages)
     if layout == "flow":
         from .structure import apply_structure
-        blocks, _ = apply_structure(blocks, "auto")
+        blocks, _ = apply_structure(blocks, structure or "auto", bold_measured=False)
     seen: list[dict] = []
     def capture(items):
         seen.extend(items); return {}
@@ -1466,7 +1477,7 @@ def normalization_plan(work: Work, records: list[dict], provider: str, model: st
         keys = _normalization_keys(item, provider, model, rules_hash)
         if _cached_choice(item, keys, cache) is not None:
             reused += 1
-        elif keys[1] in undecided:
+        elif any(k in undecided for k in keys[1:]):
             remembered += 1
         else:
             ask.add(keys[1])
@@ -1477,6 +1488,8 @@ def _normalization_resolver(work: Work, args):
     """실제로 문맥 후보가 있을 때만 모델을 만들고, 같은 근거의 확정 답은 재사용한다.
     - 모델에는 후보마다 앞뒤 CHOICE_WINDOW 자만 보내고 CHOICE_BATCH 건씩 묻는다(clip_choice_item).
     - 앞뒤 글이 같은 후보는 한 번만 묻고, 모델이 고르지 못한 후보도 기억해 다시 묻지 않는다(같은 제공사·모델일 때).
+    - 판독기는 생각을 줄여(thinking=low) 만든다 — 객관식 글자 고르기라 깊은 생각이 필요 없다.
+    - 재사용 기록(normalization_cache.json)을 쓰지 못하면 한 번만 알리고 더 묻지 않는다(기억 못 하는 답을 사면 다음 실행에서 또 산다).
     - --no-context-model 이면 모델을 부르지 않는다(규칙 변환은 그대로, 갈리는 후보는 원문 유지·보고)."""
     import hashlib
     from .normalization import RULE_FILE
@@ -1506,8 +1519,8 @@ def _normalization_resolver(work: Work, args):
             got = _cached_choice(item, keys, cache)
             if got is not None:
                 answers[item["id"]] = got; meta["cache_hits"] += 1
-            elif keys[1] in undecided:
-                meta["remembered"] += 1                                   # 이 모델이 앞서 물어 고르지 못한 후보 — 다시 사지 않는다
+            elif any(k in undecided for k in keys[1:]):
+                meta["remembered"] += 1                                   # 이 모델이 앞서 물어 고르지 못한 후보 — 다시 사지 않는다(호환 열쇠 포함)
             else:
                 groups.setdefault(keys[1], []).append(item)
         meta["deduped"] += sum(len(g) - 1 for g in groups.values())     # 앞뒤 글이 같은 후보는 하나만 묻는다
@@ -1522,9 +1535,9 @@ def _normalization_resolver(work: Work, args):
                 break
             chunk = order[at:at + CHOICE_BATCH]
             try:
-                if active is None:
-                    active = create_reader(provider, model=model, use_cache=False)
-                    log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} — 한자 치환 후보와 云/雲을 문맥으로 확인"
+                if active is None:                                    # 객관식 글자 고르기 — 3차 판별처럼 생각을 줄인다(OpenAI·Anthropic 판독기는 이 선택지를 무시)
+                    active = create_reader(provider, model=model, use_cache=False, thinking="low")
+                    log(f"문맥 교정: {provider} / {getattr(active, 'model', model)} (생각 줄임) — 한자 치환 후보와 云/雲을 문맥으로 확인"
                         f"(후보마다 앞뒤 {CHOICE_WINDOW}자 · 한 호출에 {CHOICE_BATCH}건 · 새로 물을 것 {len(order):,}건)")
                 chosen = active.resolve_text_choices([clip_choice_item(groups[k][0]) for k in chunk])
                 meta["usage"] = dict(getattr(active, "usage", {}) or {})
@@ -1542,9 +1555,11 @@ def _normalization_resolver(work: Work, args):
                         undecided[key] = getattr(active, "model", model)
                 try:
                     write_atomic(cache_path, json.dumps({"schema_version": 1, "choices": cache, "undecided": undecided}, ensure_ascii=False, indent=1))
-                except OSError:
-                    meta["cache_error"] = "문맥 판단 재사용 기록을 저장하지 못했습니다. 이번 판단은 문서와 변환 보고에 반영합니다."
-                    log("주의: " + meta["cache_error"])
+                except OSError as exc:                                # 기억하지 못하면 다음 실행에서 같은 후보를 다시 사게 된다 — 한 번만 알리고 더 묻지 않는다
+                    failure = (f"문맥 판단 재사용 기록을 저장하지 못했습니다({type(exc).__name__}: {str(exc)[:80]}). "
+                               "지금까지의 판단은 문서와 변환 보고에 반영하고, 남은 후보는 묻지 않고 변환 보고에 남깁니다.")
+                    meta["cache_error"] = meta["error"] = failure
+                    log("주의: " + failure)
             except Exception as exc:
                 failure = str(exc) if isinstance(exc, ReaderError) else f"{type(exc).__name__}: 문맥 교정 모델을 사용할 수 없습니다."
                 meta["error"] = failure
@@ -1618,9 +1633,20 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         log("주의: 양식 HWPX 는 내용별 문서(--layout flow)에만 씁니다 — 원본 쪽대로 만들고 양식은 쓰지 않습니다.")
         template = None
     if template and not Path(template).is_file():
-        log(f"오류: 양식 HWPX 가 없습니다: {template} — 양식 없이 만듭니다."); template = None
-    bold = None
-    if layout == "flow" and not interim and not getattr(args, "no_bold", False):
+        log(f"오류: 양식 HWPX 가 없습니다: {template} — 양식 없이 만듭니다."); template = None; ok = False
+    if template:                                                        # 비싼 획 굵기 재기 전에 양식이 HWPX 꾸러미인지 싸게 본다
+        import zipfile
+        try:
+            with zipfile.ZipFile(template) as z:
+                missing = [n for n in ("Contents/header.xml", "Contents/section0.xml") if n not in z.namelist()]
+        except Exception as e:
+            missing = [f"zip 으로 열리지 않음({type(e).__name__})"]
+        if missing:
+            log(f"오류: 양식 HWPX 가 아닙니다: {template} ({', '.join(missing)}) — 양식 없이 만듭니다."); template = None; ok = False
+    bold = None; bold_measured = False
+    if layout == "flow" and not interim and not getattr(args, "no_bold", False) and not template:
+        log("획 굵기: 양식 없이 만드는 문서에는 本經·別錄 구분이 보이지 않아 재지 않습니다(양식 HWPX 를 고르면 잽니다).")   # 기본 모양은 쓰임별 스타일이 없다 — 쪽 그림을 다 그려 재는 몇 분을 아낀다
+    if layout == "flow" and not interim and not getattr(args, "no_bold", False) and template:
         from .structure import measure_bold
         from .pdfio import page_frame
         state_mode = work.load_state().get("mode")
@@ -1636,6 +1662,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         t0 = time.time()
         bold, binfo = measure_bold(pages_for_bold(), log=log)
         log(f"획 굵기: {binfo['pages']}쪽 {binfo['chars']:,}자 · 중앙값 {binfo['median']} · 굵은 글자가 있는 문단 {binfo['bold_paragraphs']}개 ({time.time() - t0:.0f}초)")
+        bold_measured = bool(bold) and binfo.get("chars", 0) > 0        # 재지 못했으면(글자층 없음 등) '굵은 글자 없음' 을 본경 아님으로 읽지 않는다
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
@@ -1643,11 +1670,17 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                                  legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold)
         if layout == "flow" and not interim:
             from .structure import apply_structure
-            blocks, roles = apply_structure(blocks, getattr(args, "structure", "auto") or "auto")
+            blocks, roles = apply_structure(blocks, getattr(args, "structure", "auto") or "auto", bold_measured=bold_measured)
             names = {"chapter": "장 제목", "section": "절 제목", "subsection": "소제목", "entry": "약재명", "body": "본문", "bonjing": "본경",
-                     "bielu": "별록", "commentary": "주석", "small": "소주", "caption": "그림·표 제목", "note": "작업 표시"}
+                     "bielu": "별록", "commentary": "주석", "small": "소주", "caption": "그림·표 제목", "note": "작업 표시",
+                     "page_split": "쪽 첫머리에서 가른 조문"}
             log("내용별 짜임: " + " · ".join(f"{names.get(k, k)} {v}" for k, v in roles.items())
                 + (f" · 쪽 머리말로 보고 뺀 제목 {gstats['running_heads']}" if gstats.get("running_heads") else ""))
+            heads = gstats.get("running_head_texts") or []               # 어떤 글을 머리말로 보고 뺐는지 — 장 제목을 잘못 뺐으면 여기서 보인다
+            if heads:
+                from collections import Counter
+                top = Counter(t for _, t in heads).most_common(6)
+                log("뺀 머리말 글: " + " · ".join(f"{t}×{c}" if c > 1 else t for t, c in top) + (" …" if len(set(t for _, t in heads)) > 6 else ""))
         if not interim and args.append_report and ci == len(chunks) - 1:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
@@ -1673,16 +1706,28 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         elif not interim:
             norm_report = {"schema_version": 1, "enabled": False, "complete": True,
                            "output": out_h.name, "summary": {"changes": 0, "review": 0}}
+        st = None
         if template and not interim:
             from .hwpx_template import build_hwpx_template
-            st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                                     highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline")
-            log(f"양식 {Path(template).name}: " + " · ".join(f"{k}→{v}" for k, v in st["styles"].items())
-                + (f" · 양식에 없어 바탕글로: {', '.join(st['missing'])}" if st["missing"] else "") + f" · 원본 쪽 책갈피 {st['bookmarks']}개")
-        else:
+            try:
+                st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
+                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline")
+            except Exception as e:
+                log(f"오류: 양식 HWPX 를 쓸 수 없습니다({type(e).__name__}: {str(e)[:120]}) — 양식 없이 만듭니다"); ok = False
+            else:
+                log(f"양식 {Path(template).name}: " + " · ".join(f"{k}→{v}" for k, v in st["styles"].items())
+                    + (f" · 양식에 없어 바탕글로: {', '.join(st['missing'])}" if st["missing"] else "") + f" · 원본 쪽 책갈피 {st['bookmarks']}개")
+                td = st.get("template_dropped") or {}
+                if any(td.get(k) for k in ("headers", "footers", "sections")):
+                    log(f"양식에서 뺀 것: 머리말 {td.get('headers', 0)}·꼬리말 {td.get('footers', 0)}·구역 {td.get('sections', 0)}")
+        if st is None:
             st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
                             highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
         fissues = check_hwpx_file(str(out_h))
+        vi = st.get("validate_issues")
+        if isinstance(vi, int) and vi > 0:                              # python-hwpx 스키마·꾸러미 검증(양식으로 만든 파일만 값이 있음)
+            fissues.append({"level": "error", "rule": "python-hwpx 검증", "where": str(out_h),
+                            "msg": f"{vi}건: " + " / ".join(st.get("validate_messages") or [])[:300]})
         want_imgs = sum(1 for b in blocks if b.type == "image")
         this_ok = not fissues and st.get("images_in_file") == want_imgs
         ok = ok and this_ok
@@ -1727,8 +1772,24 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     return ok
 
 
+def _check_template(args) -> str | None:
+    """--template 을 모델을 부르기 전에 검사한다: 양식 파일이 없거나 원본 쪽대로(--layout page)와 함께 주었으면 오류 글, 괜찮으면 None.
+    (전에는 문서 조립 단계에서 알리고 양식 없이 계속 만들었다 — 문맥 교정 호출을 다 쓴 뒤에 원하지 않은 문서가 나온다.)"""
+    template = getattr(args, "template", None)
+    if not template:
+        return None
+    if (getattr(args, "layout", "page") or "page") == "page":
+        return f"오류: 양식 HWPX 는 내용별 문서(--layout flow)에만 씁니다 — 짜임을 내용별로 바꾸거나 양식 칸을 비우십시오: {template}"
+    if not Path(template).is_file():
+        return f"오류: 양식 HWPX 가 없습니다: {template}"
+    return None
+
+
 @_document_command
 def cmd_build(args, work: Work | None = None, doc=None):
+    bad = _check_template(args)
+    if bad:
+        log(bad); return 2
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     work.ensure_source()
@@ -1785,21 +1846,31 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
              "ink~": "먹 범위 나눔", "uniform": "영역 균등 분할"}
     how = " · ".join(f"{names.get(k, k)} {v}" for k, v in sorted(st["how"].items(), key=lambda kv: -kv[1]))
     log(f"  글자 {st['chars']:,}자 · {st['pages']}쪽 · 줄 자리: {how or '없음'}"
-        + (f" · 원래 숨은 글자층(다른 OCR)을 지운 쪽 {st['stripped']}개" if st["stripped"] else ""))
+        + (f" · 원래 숨은 글자층(다른 OCR)을 지운 쪽 {st['stripped']}개" if st["stripped"] else "")
+        + (f" · 이전에 넣은 이 글자층을 지운 쪽 {st['own_stripped']}개" if st.get("own_stripped") else "")
+        + (f" · 지우면서 다시 넣은 링크 {st['links_kept']}개" if st.get("links_kept") else ""))
+    if st.get("bad_chars"):
+        log(f"  주의: 글꼴에 넣을 수 없는 글자(깨진 유니코드 대리 코드) {st['bad_chars']}자는 자리만 두고 글은 넣지 않았습니다 — 판독 기록을 확인하십시오.")
     if st["skipped"]:
         log(f"  건너뛴 쪽: {', '.join(f'{n}쪽({why})' for n, why in sorted(st['skipped'].items()))}")
+    if not st["pages"]:                                       # 넣은 쪽이 없으면 searchable_pdf 가 저장하지 않는다 — 파일이 생긴 듯 적지 않는다
+        log(("끝. " if report else "  ") + "검색 가능한 PDF: 글자층을 넣은 쪽이 없어 만들지 않았습니다.")
+        return 2
     if st["mismatch"]:
         log(f"주의: 다시 읽은 글이 넣은 글과 다른 쪽: {', '.join(map(str, st['mismatch']))} — 그 쪽의 검색·복사 결과를 확인하십시오.")
-    elif st["pages"]:
+    else:
         log("  확인: 저장한 PDF 를 다시 열어 넣은 글이 그대로 읽히는지 보았습니다(모든 쪽 같음).")
     log(("끝. " if report else "  ") + f"검색 가능한 PDF: {out}")
-    return 0 if st["pages"] and not st["mismatch"] else (1 if st["mismatch"] else 2)
+    return 0 if not st["mismatch"] else 1
 
 
 @_document_command
 def cmd_textlayer(args, work: Work | None = None, doc=None):
-    work = work or Work(args.pdf, args.work)
-    work.ensure_source()                                      # 원본이 바뀌었으면 옛 판독 기록을 이 PDF 에 넣지 않는다(문서 만들기와 같은 규칙)
+    """결과 폴더는 읽기만 한다 — ensure_source 는 원본이 바뀌었으면 readings/ 를 archives/ 로 옮기므로 부르지 않는다
+    (원본을 다시 저장했거나 만들어진 검색 가능한 PDF 를 원본 이름으로 두면 기록이 통째로 옮겨졌다). 다르면 알리고 멈춘다."""
+    work = work or Work(args.pdf, args.work, initialize=False)
+    if not work.source_matches() and any(work.readings_dir.glob("p*.json")):
+        log("오류: 원본 PDF 가 판독 기록의 원본과 다릅니다(바이트가 바뀜) — 기록을 만든 원본 PDF 로 실행하십시오"); return 2
     return make_textlayer(args, work, parse_pages(args.pages, len(doc)), out=getattr(args, "out", None))
 
 
@@ -1914,6 +1985,15 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
     smax = max(0, int(SUSPECT_MAX if getattr(args, "suspect_max", None) is None else args.suspect_max)) if sus else 0
     sforce = bool(getattr(args, "force_suspects", False)); freq = suspect_freq(work.dir) if smax else None
     skip = glyph_skip_models(args); again = bool(getattr(args, "readjudicate", False))
+    reader = fallback = None; readers: list = []
+    if args.reader != "mock":                                            # 판독기를 세기 전에 만든다 — auto 의 flash 처럼 만들어야 아는 모델 이름도 '다시 묻지 않을' 집합에 넣고 세게(전에는 세고 나서 더해 〔a/b〕 수가 많이 찍혔다)
+        try:
+            reader, fallback = make_glyph_readers(args)
+        except Exception as e:
+            log(f"오류: {e}"); return 1
+        readers = [r for r in (reader, fallback) if r is not None]
+        if not again:
+            skip |= {r.model for r in readers if getattr(r, "model", "")}
     todo = []                                                            # (기록, 〔a/b〕 자리 수, 물을 합의 의심 수(어림), 글자층 글)
     already = 0                                                          # 같은 모델이 앞 차례에 결론 낸 미정 자리(다시 사지 않음)
     for rec in records:
@@ -1930,15 +2010,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
             + skip_note); return 0
     if args.reader == "mock":
         log(f"mock 판독기는 자형을 보지 못합니다. 〔a/b〕 자리 {total_sites}곳" + (f" · 합의 판독 의심 {total_sus}곳" if smax else "") + "만 셌습니다."); return 0
-    from .reader_gemini import ReaderError
     from .pdfio import layer_chars, page_frame
-    try:
-        reader, fallback = make_glyph_readers(args)
-    except Exception as e:
-        log(f"오류: {e}"); return 1
-    readers = [r for r in (reader, fallback) if r is not None]
-    if not again:
-        skip |= {r.model for r in readers if getattr(r, "model", "")}
     ceiling = max(1, int(getattr(args, "workers", 6) or 1)); start = max(1, min(ceiling, int(getattr(args, "workers_start", 4) or ceiling)))
     log(f"adjudicate: 판독기 {reader.model}" + (f" → 못 가리면 {fallback.model}" if fallback else "") + (" (생각 줄임)" if getattr(reader, "thinking", None) == "low" else "")
         + f" · {len(todo)}쪽 · 〔a/b〕 {total_sites}곳" + (f" · 합의 의심 {total_sus}곳(쪽당 최대 {smax})" if total_sus else "")
@@ -1983,7 +2055,7 @@ def cmd_adjudicate(args, work: Work | None = None, doc=None, standalone: bool = 
             if used:
                 rec["usage"] = usage
         try:
-            if n:
+            if n and pending_sites(rec, skip, min_px)[0]:            # 물을 자리가 정말 남은 쪽만 — 없는 쪽을 보내면 앞 실행의 adjudicate_stats 가 0 으로 덮인다
                 rec = adjudicate_page(rec, img, reader, horizontal, max_sites=max_sites, zoom=zoom, batch=batch, fallback_reader=fallback,
                                       layer_lines=lines, frame=frame, should_stop=CANCEL.is_set, min_px=min_px, blind=blind, skip_models=skip)
             if smax and layer and not CANCEL.is_set():                  # 〔a/b〕 를 정한 뒤의 글로(3차가 정한 글자와 그 곁은 묻지 않는다)
@@ -2123,6 +2195,9 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
 def cmd_run(args, work: Work | None = None, doc=None):
     """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
     사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
+    bad = _check_template(args)                               # 판독·판별에 돈을 쓰기 전에 — 끝의 문서 만들기에서 막히면 그 호출이 헛된다
+    if bad:
+        log(bad); return 2
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     work.ensure_source(args.dpi)

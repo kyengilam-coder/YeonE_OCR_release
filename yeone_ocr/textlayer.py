@@ -13,6 +13,7 @@
 원본 PDF 는 고치지 않고 새 파일로 저장한다. 판독 기록이 있는 쪽에서만, 원본의 숨은 글자층(다른 OCR)은 지우고(검색이 두 번 걸리지 않게) 넣는다.
 보이는 글자가 있는 쪽(스캔이 아닌 쪽)은 건너뛴다. 도판·표 영역의 글자는 아직 넣지 않는다."""
 from __future__ import annotations
+import base64
 import re, unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -318,9 +319,38 @@ def _u16(c: str) -> str:
     return c.encode("utf-16-be").hex().upper()
 
 
+def drop_bad_chars(lines: list[Line]) -> int:
+    """홀로 남은 UTF-16 대리 코드(\ud800~\udfff: 판독 JSON 에서 반 쪽만 남은 이모지 등)는 utf-16 으로 적을 수 없어 글꼴에 못 넣는다.
+    판독불명처럼 자리(상자)만 두고 글자는 None 으로 바꾼다. 돌려주는 값: 바꾼 글자 수."""
+    bad = 0
+    for ln in lines:
+        for k, (c, b) in enumerate(ln.chars):
+            if c and "\ud800" <= c <= "\udfff":
+                ln.chars[k] = (None, b); bad += 1
+    return bad
+
+
+# 글리프 하나(.notdef, 빈 모양)만 든 768바이트 TrueType — 글꼴을 내장하지 않은 Identity 인코딩 CID 글꼴은 Acrobat 이 열 때마다
+# "글꼴을 찾거나 만들 수 없습니다" 창을 띄우므로(검토에서 지적) Tesseract 처럼 빈 글꼴을 내장하고 모든 CID 를 글리프 0 으로 보낸다.
+GLYPHLESS_TTF = base64.b64decode("".join((
+    "AAEAAAAKAIAAAwAgT1MvMkTfRiQAAAEoAAAAYGNtYXAADABGAAABjAAAACxnbHlmAAAAAAAAAbwAAAABaGVhZC0B3dAAAACsAAAA",
+    "NmhoZWEDcgNyAAAA5AAAACRobXR4A+gAAAAAAYgAAAAEbG9jYQAAAAAAAAG4AAAABG1heHAAAgACAAABCAAAACBuYW1lOToKEgAA",
+    "AcAAAAEacG9zdAADAAAAAALcAAAAJAABAAAAAQAAQIw4el8PPPUAAwPoAAAAAOb1zngAAAAA5vXOeAAAAAAAAAAAAAAAAwACAAAA",
+    "AAAAAAEAAANw/4gAAAPoAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAEAAAABAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAwPo",
+    "AZAABQAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPz8/PwAAAAAAAANw/4gAAANwAHgA",
+    "AAAAAAAAAAAAAAAAAAAgAAAD6AAAAAAAAgAAAAMAAAAUAAMAAQAAABQABAAYAAAAAgACAAAAAP//AAD//wABAAAAAAAAAAAAAAAA",
+    "AAwAlgABAAAAAAABAAgAAAABAAAAAAACAAcACAABAAAAAAADABIADwABAAAAAAAEAAgAAAABAAAAAAAFAAsAIQABAAAAAAAGAAgA",
+    "AAADAAEECQABABAALAADAAEECQACAA4APAADAAEECQADACQASgADAAEECQAEABAALAADAAEECQAFABYAbgADAAEECQAGABAALFll",
+    "b25FT0NSUmVndWxhclllb25FT0NSIGdseXBobGVzc1ZlcnNpb24gMS4wAFkAZQBvAG4ARQBPAEMAUgBSAGUAZwB1AGwAYQByAFkA",
+    "ZQBvAG4ARQBPAEMAUgAgAGcAbAB5AHAAaABsAGUAcwBzAFYAZQByAHMAaQBvAG4AIAAxAC4AMAAAAAIAAAAAAAAAAAAAAAAAAAAA",
+    "AAAAAAAAAAAAAAAAAAAAAQAA",
+)))
+
+
 def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
     """문서에 글리프 없는 Type0 글꼴 하나를 넣는다. CID 는 글자마다 1부터, ToUnicode 로 유니코드에 잇는다(확장 B 는 UTF-16 대리 쌍).
-    폭은 전각 1000·반각 500. 돌려주는 값: (글꼴 xref, {글자: CID})."""
+    폭은 전각 1000·반각 500. 글꼴 파일(GLYPHLESS_TTF)을 내장하고 CIDToGIDMap 으로 모든 CID 를 글리프 0 에 보낸다(보이지 않는 글이라 모양은 없어도 된다).
+    돌려주는 값: (글꼴 xref, {글자: CID})."""
     cids = {c: i + 1 for i, c in enumerate(dict.fromkeys(c for c in chars if c))}
     cmap = ("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
             "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /YeonEOCR-UCS def\n/CMapType 2 def\n"
@@ -332,12 +362,14 @@ def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
     cmap += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
     half = " ".join(f"{cid}[500]" for c, cid in items if adv(c) != 1.0)
     tu = doc.get_new_xref(); doc.update_object(tu, "<<>>"); doc.update_stream(tu, cmap.encode())
+    ff = doc.get_new_xref(); doc.update_object(ff, f"<</Length1 {len(GLYPHLESS_TTF)}>>"); doc.update_stream(ff, GLYPHLESS_TTF)
+    c2g = doc.get_new_xref(); doc.update_object(c2g, "<<>>"); doc.update_stream(c2g, bytes(2 * (len(cids) + 1)))   # CID 0..n → 글리프 0
     desc = doc.get_new_xref()
     doc.update_object(desc, f"<</Type/FontDescriptor/FontName/{FONT_NAME}/Flags 4/FontBBox[0 {int(DESC * 1000)} 1000 {int(ASC * 1000)}]"
-                            f"/ItalicAngle 0/Ascent {int(ASC * 1000)}/Descent {int(DESC * 1000)}/CapHeight {int(ASC * 1000)}/StemV 80>>")
+                            f"/ItalicAngle 0/Ascent {int(ASC * 1000)}/Descent {int(DESC * 1000)}/CapHeight {int(ASC * 1000)}/StemV 80/FontFile2 {ff} 0 R>>")
     cidf = doc.get_new_xref()
     doc.update_object(cidf, f"<</Type/Font/Subtype/CIDFontType2/BaseFont/{FONT_NAME}/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>"
-                            f"/FontDescriptor {desc} 0 R/DW 1000{f'/W[{half}]' if half else ''}/CIDToGIDMap/Identity>>")
+                            f"/FontDescriptor {desc} 0 R/DW 1000{f'/W[{half}]' if half else ''}/CIDToGIDMap {c2g} 0 R>>")
     f0 = doc.get_new_xref()
     doc.update_object(f0, f"<</Type/Font/Subtype/Type0/BaseFont/{FONT_NAME}/Encoding/Identity-H/DescendantFonts[{cidf} 0 R]/ToUnicode {tu} 0 R>>")
     return f0, cids
@@ -376,11 +408,17 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
         U = (o + pymupdf.Point(u)) * to_pdf - p; V = (o + pymupdf.Point(w)) * to_pdf - p
         return f"{U.x * fs:.3f} {U.y * fs:.3f} {V.x * fs:.3f} {V.y * fs:.3f} {p.x:.3f} {p.y:.3f} Tm"
     mids = [(a + b) / 2 for a, b in sp]
-    starts = [m - adv(c) * fs / 2 for m, c in zip(mids, cs)]
-    ends = [m + adv(c) * fs / 2 for m, c in zip(mids, cs)]
+    wid = [adv(c) * fs for c in cs]
+    for i in range(len(cs)):                                            # 반각 글자(숫자·라틴)가 전각 간격으로 찍혔으면(卷第12) 한 칸을 다 준다 —
+        near = [abs(mids[j] - mids[i]) for j in (i - 1, i + 1) if 0 <= j < len(cs)]   # 반 칸만 주면 글자 사이 틈이 반 칸이 되어 '1 2' 로 읽힌다
+        if wid[i] < fs and near and min(near) > 0.75 * fs:
+            wid[i] = fs
+    scale = [w / (adv(c) * fs) for w, c in zip(wid, cs)]                # 칸 / 글꼴 폭: 1(제 폭) 또는 2(반각을 전각 칸에)
+    starts = [m - w / 2 for m, w in zip(mids, wid)]
+    ends = [m + w / 2 for m, w in zip(mids, wid)]
     runs, cur = [], [0]
     for i in range(1, len(cs)):
-        if starts[i] - ends[i - 1] > 0.5 * fs:
+        if starts[i] - ends[i - 1] > 0.5 * fs or scale[i] != scale[i - 1]:   # 틈, 또는 Tz 가 달라져야 하는 자리
             runs.append(cur); cur = []
         cur.append(i)
     runs.append(cur)
@@ -400,8 +438,10 @@ def text_state(page: pymupdf.Page) -> str:
     return "visible" if any(s.get("type", 0) != 3 and s.get("opacity", 1) > 0 for s in spans) else "hidden"
 
 
-def strip_hidden_text(page: pymupdf.Page) -> bool:
-    """보이지 않는 글자(다른 OCR 층·이전에 넣은 이 글자층)를 지운다. 그림·선은 그대로. 지우는 법을 모르는 PyMuPDF 면 지우지 않고 False."""
+def strip_hidden_text(page: pymupdf.Page) -> tuple[bool, int]:
+    """보이지 않는 글자(다른 OCR 층·이전에 넣은 이 글자층)를 지운다. 그림·선은 그대로. 쪽 전체를 가리는 지움(redaction)은 링크(목차·주석의
+    바로가기)까지 지우므로 미리 받아 두고 다시 넣는다. 돌려주는 값: (지웠는가, 다시 넣은 링크 수). 지우는 법을 모르는 PyMuPDF 면 지우지 않고 False."""
+    links = page.get_links()
     page.add_redact_annot(page.rect)
     try:
         page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
@@ -409,13 +449,58 @@ def strip_hidden_text(page: pymupdf.Page) -> bool:
     except (TypeError, AttributeError):                                # 선(graphics)을 지키는 선택이 없는 판: 선까지 지울 수 있어 하지 않는다
         for a in list(page.annots(types=[pymupdf.PDF_ANNOT_REDACT])):
             page.delete_annot(a)
+        return False, 0
+    fix = visible_to_pdf(page) * page.transformation_matrix             # insert_link 는 'from' 에 ~transformation_matrix 를 곱해 /Rect 로 삼는데,
+    kept = 0                                                            #   돌린 쪽에서 그 행렬은 회전을 모른다(PyMuPDF 1.28) — 미리 되돌려 준다
+    for link in links:
+        try:
+            link["from"] = link["from"] * fix; page.insert_link(link); kept += 1
+        except Exception:                                               # PyMuPDF 가 다시 못 넣는 종류의 링크는 둘 수 없다
+            pass
+    return True, kept
+
+
+def has_own_layer(page: pymupdf.Page) -> bool:
+    """이 글자층(FONT_NAME 글꼴)의 글자가 쪽에 있는가."""
+    return any(is_own_span(s) for s in page.get_texttrace())
+
+
+def content_refs(doc: pymupdf.Document, page: pymupdf.Page) -> list[int]:
+    """쪽 /Contents 의 내용 흐름 xref 목록. 흐름 하나(N 0 R)·직접 배열([a 0 R b 0 R])·간접 배열(N 0 R → [..]) 모두 흐름 번호로 푼다.
+    간접 배열을 흐름으로 잘못 알고 `[N 0 R 새 0 R]` 로 쓰면 MuPDF 가 'object is not a stream' 으로 쪽을 백지로 그린다(검토에서 재현)."""
+    kind, val = doc.xref_get_key(page.xref, "Contents")
+    if kind == "null":
+        return []
+    if kind == "xref":
+        n = int(val.split()[0])
+        if doc.xref_is_stream(n):
+            return [n]
+        val = doc.xref_object(n)                                             # 간접 배열 — 그 안의 흐름들
+    return [int(x) for x in re.findall(r"(\d+) 0 R", val)]
+
+
+def _set_contents(doc: pymupdf.Document, page: pymupdf.Page, refs: list[int]) -> None:
+    doc.xref_set_key(page.xref, "Contents", f"[{' '.join(f'{x} 0 R' for x in refs)}]" if refs else "null")
+
+
+def strip_own_layer(doc: pymupdf.Document, page: pymupdf.Page) -> bool:
+    """이전에 넣은 이 글자층만 지운다(다른 OCR 층은 그대로). 이 층은 /Contents 배열에 따로 붙인 내용 흐름(머리 'q BT 3 Tr /<이름> 1 Tf')이라
+    그 흐름만 뺀다. 글꼴 자원은 둔다 — 다른 쪽과 같이 쓰는(물려받은) 자원이면 그 쪽의 글자가 깨진다. 다른 도구가 흐름을 하나로 합쳐 가려낼 수
+    없으면 지우지 않고 False."""
+    names = {f[4].encode() for f in page.get_fonts(full=True) if f[3] == FONT_NAME}
+    refs = content_refs(doc, page)
+    keep = [x for x in refs if not ((m := re.match(rb"\s*q BT 3 Tr /(\S+) 1 Tf", doc.xref_stream(x) or b"")) and m.group(1) in names)]
+    if len(keep) == len(refs):
         return False
-    return True
+    _set_contents(doc, page, keep)
+    return not has_own_layer(doc[page.number])
 
 
-def _add_font_resource(doc: pymupdf.Document, page: pymupdf.Page, font_xref: int) -> None:
-    """쪽 자원의 /Font 에 이 글꼴을 넣는다. 자원이 위(Pages)에서 물려받은 것이면 먼저 쪽에 붙인다 — 쪽에 새 /Resources 를 만들면
-    물려받던 스캔 그림을 잃는다. 경로 중간이 간접 객체면 그 객체에 직접 쓴다(xref_set_key 의 경로는 간접 객체를 건너지 못한다)."""
+def _add_font_resource(doc: pymupdf.Document, page: pymupdf.Page, font_xref: int) -> str:
+    """쪽 자원의 /Font 에 이 글꼴을 넣고 그 이름을 돌려준다. 자원이 위(Pages)에서 물려받은 것이면 먼저 쪽에 붙인다 — 쪽에 새 /Resources 를 만들면
+    물려받던 스캔 그림을 잃는다. 경로 중간이 간접 객체면 그 객체에 직접 쓴다(xref_set_key 의 경로는 간접 객체를 건너지 못한다).
+    이름은 FONT_KEY. 그 이름이 벌써 다른 글꼴(이전에 넣은 층, 자원을 같이 쓰는 다른 쪽의 층)을 가리키면 FYeonEOCR2·3…로 비켜 간다 —
+    같은 이름에 새 글꼴을 덧쓰면 그 이름으로 쓴 옛 글자가 전부 다른 글자로 읽힌다."""
     if doc.xref_get_key(page.xref, "Resources")[0] == "null":
         x = page.xref
         while (p := doc.xref_get_key(x, "Parent"))[0] == "xref":
@@ -430,9 +515,12 @@ def _add_font_resource(doc: pymupdf.Document, page: pymupdf.Page, font_xref: int
         holder, key = int(val.split()[0]), "Font"
     kind, val = doc.xref_get_key(holder, key)
     if kind == "xref":
-        doc.xref_set_key(int(val.split()[0]), FONT_KEY, f"{font_xref} 0 R")
-    else:
-        doc.xref_set_key(holder, f"{key}/{FONT_KEY}", f"{font_xref} 0 R")
+        holder, key = int(val.split()[0]), ""
+    name, k = FONT_KEY, 1
+    while (cur := doc.xref_get_key(holder, f"{key}/{name}" if key else name))[0] != "null" and cur[1] != f"{font_xref} 0 R":
+        k += 1; name = f"{FONT_KEY}{k}"
+    doc.xref_set_key(holder, f"{key}/{name}" if key else name, f"{font_xref} 0 R")
+    return name
 
 
 def visible_to_pdf(page: pymupdf.Page) -> pymupdf.Matrix:
@@ -448,13 +536,13 @@ def write_lines(doc: pymupdf.Document, page: pymupdf.Page, lines: list[Line], fr
     ops = [o for o in (line_ops(ln, frame, to_pdf, cids) for ln in lines) if o]
     if not ops:
         return
+    key = _add_font_resource(doc, page, font_xref)                       # wrap 보다 먼저: 물려받은 자원을 쪽에 붙이기 전에 내용을 읽으면
+    old = content_refs(doc, page)                                        #   MuPDF 가 그림 자원을 못 찾았다고 알린다(결과는 같아도 로그가 어지럽다)
+    _set_contents(doc, page, old)                                        # 간접 배열(N 0 R → [..])은 흐름 배열로 바로 적는다 — 그대로 두면 wrap 뒤 백지
     page.wrap_contents()
-    _add_font_resource(doc, page, font_xref)
     sx = doc.get_new_xref(); doc.update_object(sx, "<<>>")
-    doc.update_stream(sx, ("q BT 3 Tr /" + FONT_KEY + " 1 Tf\n" + "\n".join(ops) + "\nET Q\n").encode())
-    kind, val = doc.xref_get_key(page.xref, "Contents")
-    old = val.strip()[1:-1].strip() if kind == "array" else ("" if kind == "null" else val)
-    doc.xref_set_key(page.xref, "Contents", f"[{old} {sx} 0 R]".replace("[ ", "["))
+    doc.update_stream(sx, ("q BT 3 Tr /" + key + " 1 Tf\n" + "\n".join(ops) + "\nET Q\n").encode())
+    _set_contents(doc, page, content_refs(doc, page) + [sx])
 
 
 def own_text(doc: pymupdf.Document, pno: int) -> list[str]:
@@ -471,10 +559,12 @@ def own_text(doc: pymupdf.Document, pno: int) -> list[str]:
 def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str | Path, strip_old: bool = True, log=print, step=None) -> dict:
     """pages 의 쪽에 글자층을 넣어 out 에 저장한다(doc 을 바꾼다 — 버릴 사본을 넘길 것). page_data(쪽) → (PageReading, 쪽 이미지, 이미지 틀, 세로쓰기인가).
     쪽 이미지는 쪽마다 불러 자리만 잡고 버린다(700쪽 책도 메모리에 이미지를 쌓지 않게). step(끝난 수, 전체 수) 를 주면 쪽마다 부른다.
+    이전에 넣은 이 글자층은 strip_old 와 상관없이 지운다(두 번 넣을 까닭이 없고, 글꼴 이름이 겹치면 옛 글자가 깨진다). 넣은 쪽이 없으면 저장하지 않는다.
     돌려주는 값: {"pages": 넣은 쪽 수, "chars": 글자 수, "how": {방법: 줄 수}, "skipped": {쪽: 까닭}, "stripped": 옛 글자층을 지운 쪽 수,
+    "own_stripped": 이전의 이 글자층만 지운 쪽 수, "links_kept": 지우면서 다시 넣은 링크 수, "bad_chars": 글꼴에 못 넣어 뺀 글자 수(깨진 대리 코드),
     "mismatch": [다시 읽은 글이 넣은 글과 다른 쪽]}."""
     plans: dict[int, list[Line]] = {}; frames: dict[int, tuple] = {}
-    stats = {"pages": 0, "chars": 0, "how": {}, "skipped": {}, "stripped": 0, "mismatch": []}
+    stats = {"pages": 0, "chars": 0, "how": {}, "skipped": {}, "stripped": 0, "own_stripped": 0, "links_kept": 0, "bad_chars": 0, "mismatch": []}
     total = len(pages) * 2
     for i, n in enumerate(sorted(pages)):
         state = text_state(doc[n - 1])
@@ -483,22 +573,35 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
         else:
             pr, img, frame, vertical = page_data(n)
             plans[n] = plan_page(pr, img, frame, layer_chars(doc, n) if state == "hidden" else None, vertical); frames[n] = frame
+            stats["bad_chars"] += drop_bad_chars(plans[n])
             del img
         if step: step(i + 1, total)
-    font_xref, cids = add_font(doc, [c for ls in plans.values() for ln in ls for c, _ in ln.chars])
-    for i, (n, lines) in enumerate(plans.items()):
+    if plans:
+        font_xref, cids = add_font(doc, [c for ls in plans.values() for ln in ls for c, _ in ln.chars])
+    for i, (n, lines) in enumerate(list(plans.items())):
         page = doc[n - 1]
         if strip_old and text_state(page) == "hidden":
-            if strip_hidden_text(page):
-                stats["stripped"] += 1
+            ok, kept = strip_hidden_text(page)
+            if ok:
+                stats["stripped"] += 1; stats["links_kept"] += kept
             else:
                 log("  주의: 이 PyMuPDF 판은 숨은 글자층만 골라 지우지 못해 원래 글자층을 그대로 둡니다(pip install -U pymupdf).")
                 strip_old = False
+        if has_own_layer(page):                                        # 남아 있는 이전의 이 글자층(--keep-old-layer): 그것만 지우고 넣는다
+            if strip_own_layer(doc, page):
+                stats["own_stripped"] += 1; page = doc[n - 1]
+            else:
+                stats["skipped"][n] = "이전에 넣은 이 글자층을 가려내 지우지 못함(--keep-old-layer 없이 다시 실행)"; del plans[n]
+                if step: step(len(pages) + i + 1, total)
+                continue
         write_lines(doc, page, lines, frames[n], font_xref, cids)
         stats["pages"] += 1; stats["chars"] += sum(1 for ln in lines for c, _ in ln.chars if c)
         for ln in lines:
             stats["how"][ln.how] = stats["how"].get(ln.how, 0) + 1
         if step: step(len(pages) + i + 1, total)
+    if step: step(total, total)
+    if not stats["pages"]:                                              # 넣은 쪽이 없으면 사본을 만들지 않는다(cli 가 '넣은 쪽 없음'으로 알린다)
+        return stats
     from .state import write_atomic_with
     out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
     write_atomic_with(out, lambda t: doc.save(t, garbage=3, deflate=True))

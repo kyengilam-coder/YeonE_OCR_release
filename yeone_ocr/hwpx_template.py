@@ -5,13 +5,16 @@
 한문 문단은 줄 나눔을 '글자 단위'로 바꾼 문단 모양을 쓴다: 양식 스타일 대부분이 '어절 단위'(KEEP_WORD)라 띄어쓰기 없는 한문이 긴 덩어리째
 다음 줄로 넘어가며 줄 가운데 큰 빈칸이 생긴다. 스타일 연결은 그대로라 한글에서 스타일을 다시 적용하면 양식대로 돌아간다."""
 from __future__ import annotations
-import copy, re
+import copy, re, zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from .blocks import Block
 from .grades import styled_runs, split_marks, GRADE_STYLE, STYLE_ALIAS
 
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+HC = "{http://www.hancom.co.kr/hwpml/2011/core}"
+OPF = "{http://www.idpf.org/2007/opf/}"
 HWPUNIT_PER_MM = 7200 / 25.4
 # 쓰임 → 양식 스타일 이름(앞의 것이 있으면 그것). 없으면 바탕글. 올려 받은 본초학 양식의 이름을 기본으로 한다.
 PARA_STYLES = {
@@ -85,23 +88,31 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
     from hwpx import HwpxDocument
     from .hwpx_memo import MemoWriter
     doc = HwpxDocument.open(template)
+    sec0 = doc.sections[0]
+    dropped = {"sections": 0, "headers": 0, "footers": 0, "controls": 0, "paragraphs": 0}   # 양식에서 뺀 것(cli 가 알린다)
     for extra in list(doc.sections[1:]):
-        doc.remove_section(extra)
-    doc.sections[0].clear_body(on_control_content="strip")
-    for hide in list(doc.sections[0].element.iter(f"{HP}pageHiding")):   # 양식 첫 쪽(표지)의 머리말·쪽 번호 감추기는 빼고
+        doc.remove_section(extra); dropped["sections"] += 1
+    stories = lambda: [len(sec0.element.findall(f".//{HP}ctrl/{HP}{k}")) for k in ("header", "footer")]   # 한글이 읽는 머리말·꼬리말(hp:ctrl 안)
+    before = stories()
+    rep = sec0.clear_body(on_control_content="strip")                 # 본문과 글·개체가 든 머리말·꼬리말을 비운다(쪽 설정은 그대로)
+    for hide in list(sec0.element.iter(f"{HP}pageHiding")):          # 양식 첫 쪽(표지)의 머리말·쪽 번호 감추기는 빼고
         ctrl = hide.getparent(); ctrl.getparent().remove(ctrl)
-    try:
-        doc.media.remove_unused_images()                              # 비운 양식 본문의 그림(BinData)도 꾸러미에서 뺀다
-    except Exception:
-        pass
+    after = stories()
+    dropped.update(headers=before[0] - after[0], footers=before[1] - after[1],
+                   controls=getattr(rep, "stripped_controls", 0), paragraphs=getattr(rep, "removed_paragraphs", 0))
+    # 양식에 쪽 번호(남은 머리말·꼬리말 안 pageNum/autoNum)가 이미 있으면 그대로 두고 우리 것은 넣지 않는다
+    has_page_num = any(sec0.element.find(f".//{HP}ctrl/{HP}{k}//{HP}{n}") is not None for k in ("header", "footer") for n in ("pageNum", "autoNum"))
+    # 비운 본문이 쓰던 양식 그림(BinData)은 꾸러미에 그대로 둔다: 구역이 둘 이상인 양식에서 remove_unused_images() 를 부르면 뒤에 넣는
+    # 그림이 꾸러미 목록(content.hpf)에 오르지 않아 한글이 열지 못하는 파일이 된다. 한글이 저장할 때 알아서 지운다.
     header = doc.oxml.headers[0]
     styles = template_styles(doc)
     base = styles.get("바탕글") or {"id": "0", "type": "PARA", "para": "0", "char": "0"}
     mw = MemoWriter(doc, author)
     stats = {"paragraphs": 0, "headings": 0, "images": 0, "tables": 0, "uncertain_items": 0, "marks": 0, "page_breaks": 0,
-             "green": 0, "blue": 0, "red_ctx": 0, "memos": 0, "bookmarks": 0, "styles": {}, "missing": []}
+             "green": 0, "blue": 0, "red_ctx": 0, "memos": 0, "bookmarks": 0, "styles": {}, "missing": [],
+             "template_dropped": dropped, "page_number_from_template": has_page_num}
     body_w, body_h = _body_size_mm(doc)
-    brk_cache: dict = {}; run_cache: dict = {}; names: set = set()
+    brk_cache: dict = {}; run_cache: dict = {}; names: set = set(); pic_ppr: list = []
 
     def para_style(role: str) -> dict:
         for name in PARA_STYLES.get(role, ("바탕글",)):
@@ -131,16 +142,19 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
                 kw = dict(color=COLOR_NOTE)
             else:
                 g = GRADE_STYLE[STYLE_ALIAS.get(kind, kind)]
-                kw = dict(bold=g["bold"], color=g["color"])
+                kw = dict(color=g["color"])
+                if g["bold"]:
+                    kw["bold"] = True                                   # 굵기는 등급이 굵게일 때만 — 아니면 양식 글자 모양(본경 조문·제목)의 굵기를 그대로
                 if g["highlight"]:
                     kw["highlight"] = g["highlight"]
                 if g["underline"]:
                     kw.update(underline=True, underline_shape=g["underline"], underline_color=g["color"])
+            # doc.oxml 쪽을 부른다: doc.ensure_run_style(옛 겉면)은 bold·italic 을 안 주면 False 로 넘겨 양식 글자 모양의 굵기를 지운다
             try:
-                run_cache[key] = doc.ensure_run_style(base_char_pr_id=base_char, **kw)
+                run_cache[key] = doc.oxml.ensure_run_style(base_char_pr_id=base_char, **kw)
             except (TypeError, ValueError):
                 kw.pop("underline_shape", None); kw.pop("underline_color", None)
-                run_cache[key] = doc.ensure_run_style(base_char_pr_id=base_char, **kw)
+                run_cache[key] = doc.oxml.ensure_run_style(base_char_pr_id=base_char, **kw)
         return run_cache[key]
 
     def bookmark(p, label: str, cpr: str) -> None:
@@ -156,11 +170,18 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
         text = b.text
         han = len(_HAN.findall(text)) >= max(1, len(text.strip())) * 0.5
         ppr = _break_word_para(header, st["para"], brk_cache) if han and role not in HEADING_ROLES else st["para"]
-        p = doc.add_paragraph("", para_pr_id_ref=ppr, style_id_ref=st["id"], char_pr_id_ref=st["char"], include_run=False, inherit_style=False)
         notes = list(b.memos) if memos else []
         if not memos and b.memos:
             text = text + "".join(f"〔고지: {m}〕" for _, m in b.memos)
         segs = styled_runs(text, b.spans if highlight else (), notes) if text else []
+        anchors: dict[int, list[str]] = {}
+        for o, label in b.anchors:
+            anchors.setdefault(min(max(0, o), len(text)), []).append(label)
+        if not segs and not anchors and role in HEADING_ROLES:
+            return                                                      # 빈 제목은 넣지 않는다(런 없는 <hp:p/> 가 된다)
+        p = doc.add_paragraph("", para_pr_id_ref=ppr, style_id_ref=st["id"], char_pr_id_ref=st["char"], include_run=False, inherit_style=False)
+        if not segs and not anchors:
+            p.add_run("", char_pr_id_ref=st["char"])                    # 빈 줄도 런 하나는 있어야 한다
         stats["marks"] += sum(1 for _, k in split_marks(text) if k == "mark")
         cs = [None] * len(text)                                        # 글자마다 글자 스타일(양식의 소주·출처·본경 조문)
         if role == "small":
@@ -168,9 +189,6 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
         for a, e, kind in b.cstyles:
             for i in range(max(0, a), min(len(text), e)):
                 cs[i] = kind
-        anchors: dict[int, list[str]] = {}
-        for o, label in b.anchors:
-            anchors.setdefault(min(max(0, o), len(text)), []).append(label)
         pos = 0
         for seg, kind, msgs in segs:
             if role == "note" and kind == "body":
@@ -209,10 +227,17 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
             h = w * b.ratio
             if h > body_h * 0.9:
                 h = body_h * 0.9; w = h / b.ratio
+            if not pic_ppr:                                            # 그림 문단은 바탕글을 가운데 정렬한 문단 모양으로(앞 제목의 문단 모양을 물려받지 않게)
+                try:
+                    pic_ppr.append(header.ensure_paragraph_format(base_para_pr_id=base["para"], alignment="CENTER"))
+                except Exception:
+                    pic_ppr.append(base["para"])
+            fmt = Path(b.path).suffix.lstrip(".").lower() or "png"
+            kw = dict(width_mm=round(w, 1), height_mm=round(h, 1), para_pr_id_ref=pic_ppr[0], style_id_ref=base["id"], char_pr_id_ref=base["char"])
             try:
-                doc.add_picture(data, Path(b.path).suffix.lstrip(".").lower() or "png", width_mm=round(w, 1), height_mm=round(h, 1), align="CENTER")
+                doc.add_picture(data, fmt, align="CENTER", **kw)
             except Exception:
-                doc.add_picture(data, Path(b.path).suffix.lstrip(".").lower() or "png", width_mm=round(w, 1), height_mm=round(h, 1))
+                doc.add_picture(data, fmt, **kw)
             stats["images"] += 1
         elif b.type == "table":
             t = doc.add_table(len(b.rows), len(b.rows[0]))
@@ -227,16 +252,27 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
         elif b.type == "report":
             for line in ["〔작업 기록〕"] + b.text.splitlines():
                 write(Block(type="para", text=line), "note")
+    sec = sec0.element
     try:                                                              # 쪽 번호: 컨트롤을 구역 설정 문단으로 옮겨 맨 앞 빈 줄이 생기지 않게
-        doc.set_page_number(position="BOTTOM_CENTER")
-        sec = doc.sections[0].element
+        if not has_page_num:
+            doc.set_page_number(position="BOTTOM_CENTER")
         paras = sec.findall(f"{HP}p")
         holder = next((q for q in paras[1:] if q.find(f".//{HP}pageNum") is not None and not "".join(t.text or "" for t in q.iter(f"{HP}t")).strip()), None)
         if holder is not None and paras:
             for run in holder.findall(f"{HP}run"):
                 paras[0].insert(len(paras[0].findall(f"{HP}run")), run)
             sec.remove(holder)
-            doc.sections[0].mark_dirty()
+            sec0.mark_dirty()
+    except Exception:
+        pass
+    try:                                                              # 양식의 첫 문단(쪽 설정·단·꼬리말 컨트롤만 든 빈 줄)을 첫 내용 문단에 합친다
+        paras = sec.findall(f"{HP}p")
+        runs0 = paras[0].findall(f"{HP}run") if paras else []
+        if len(paras) > 1 and runs0 and all(ch.tag in (f"{HP}secPr", f"{HP}ctrl") for run in runs0 for ch in run):
+            for i, run in enumerate(runs0):
+                paras[1].insert(i, run)                                 # 구역 설정은 첫 문단 첫 런에 있어야 하므로 맨 앞에, 차례대로
+            sec.remove(paras[0])
+            sec0.mark_dirty()
     except Exception:
         pass
     try:
@@ -245,15 +281,19 @@ def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_m
         doc.close()
     re_ = HwpxDocument.open(out_path)
     try:
-        try:
-            imgs = re_.media.images
-            stats["images_in_file"] = len(list(imgs() if callable(imgs) else imgs))
+        try:                                                          # 본문이 가리키는 그림이 꾸러미 목록(content.hpf)에 있고 파일도 있는 것만 센다
+            with zipfile.ZipFile(out_path) as z:
+                have = set(z.namelist())
+                listed = {it.get("id"): (it.get("href") or "").lstrip("/") for it in ET.fromstring(z.read("Contents/content.hpf")).iter(f"{OPF}item")}
+            refs = [im.get("binaryItemIDRef") for pic in re_.sections[0].element.iter(f"{HP}pic") for im in pic.findall(f"{HC}img")]
+            stats["images_in_file"] = sum(1 for r in refs if listed.get(r) in have)
         except Exception:
-            stats["images_in_file"] = len(list(re_.list_images()))
+            stats["images_in_file"] = len(re_.sections[0].element.findall(f".//{HP}pic"))
         try:
-            rep = re_.validate(); stats["validate_issues"] = len(getattr(rep, "issues", ()) or ())
+            issues = list(getattr(re_.validate(), "issues", ()) or ())
+            stats["validate_issues"] = len(issues); stats["validate_messages"] = [str(i)[:200] for i in issues[:5]]
         except Exception as e:
-            stats["validate_issues"] = f"검사 불가: {e}"
+            stats["validate_issues"] = f"검사 불가: {e}"; stats["validate_messages"] = []
     finally:
         re_.close()
     return stats

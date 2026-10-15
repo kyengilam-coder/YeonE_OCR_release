@@ -13,14 +13,18 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 import numpy as np
-from .blocks import Block, first_reading
+from .blocks import Block, first_reading, fold_marks
 
 ROLES = ("chapter", "section", "subsection", "entry", "body", "bonjing", "bielu", "commentary", "small", "caption", "note")
 PRESETS = ("none", "auto", "bencao")   # auto = 주석·출처 규칙은 늘, 약재명 떼기는 그런 문단이 문서에 셋 이상일 때만(다른 책의 우연한 꼴을 떼지 않게)
 _HAN = "㐀-䶿一-鿿豈-﫿\U00020000-\U0003134f"
-ENTRY_RE = re.compile(rf"^([{_HAN}]{{1,6}})[ \t\n\u00a0\u2002\u2003\u3000]+(?=(?:味|一名|主|生|性|氣|气)[{_HAN}])")   # 사이 빈칸: 보통·전각·em·줄바꿈
-COMMENT_RE = re.compile(r"^[［\[〔【（(]\s*[^］\]〕】）)\s]{0,10}?(?:云|曰|按|注|謹按|谨按|又按|今注|今按|說|说)\s*[］\]〕】）)]")
-SOURCE_RE = re.compile(r"(?:(?<=[。，、；：\s　])|^)((?:唐|今|宋|新|陳藏器|陈藏器|海藥|海药|唐本)(?:附|餘|余|增|退|移))[ 　]*$")
+_OPENERS = "味|一名|主|性|氣|气"   # 조문을 여는 낱말(이름 뒤). 生 은 뺐다: 序例 병증 목록 「吐唾血　生地黃　大黃」의 둘째 약재를 조문으로 읽지 않게
+ENTRY_RE = re.compile(rf"^([{_HAN}]{{1,6}})[ \t\n\u00a0\u2002\u2003\u3000]+(?=(?:{_OPENERS})[{_HAN}])")   # 사이 빈칸: 보통·전각·em·줄바꿈
+COMMENT_RE = re.compile(r"^[［\[〔【（(]\s*[^］\]〕】）)\s/:：]{0,16}?(?:云|曰|按|注|謹按|谨按|又按|今注|今按|今詳|今详|今據|今据|說|说)\s*[］\]〕】）)]")   # /·: 가 든 〔a/b〕·〔疑: X〕 는 판독 표시
+_FUNC_END = "云曰按注經錄等謹所"   # 이 글자로 끝나는 '이름' 은 약재명이 아니라 글의 토막(陶隱居云·本經·謹按)
+_UNIT_END = "兩两錢钱分枚升斤個箇合字銖铢丸片把束尺寸撮粒顆颗"   # 수량사로 끝나는 '이름' 은 처방의 약재 목록(桂枝三兩 生薑三兩)
+_FUNC_START = "凡又其此是以故若則则乃每諸诸"   # 허사로 시작하는 '이름' 은 문장의 첫머리(凡藥 性有宜丸者)
+SOURCE_RE = re.compile(r"(?:(?<=[。，、；：\s　])|^)((?:唐|今|宋|新|唐本)(?:附|增|退|移)|(?:陳藏器|陈藏器|海藥|海药|唐本)(?:餘|余)|新補|新补|新定)[ 　]*$")   # 余 는 陳藏器餘·海藥餘 꼴에서만(간체 「今余」는 보통 낱말)
 BOLD_RATIO = 1.25            # 책 전체 중앙값의 이 배수를 넘으면 굵은 글자
 BOLD_MIN_RUN = 4             # 이 글자 수 넘게 이어져야 굵은 범위로(낱글자 잡음 제외)
 
@@ -37,18 +41,39 @@ def _split(b: Block, cut: int, rest: int) -> tuple[Block, Block]:
     return head, tail
 
 
-ENTRY_START = re.compile(rf"(?:味|一名|主|生|性|氣|气)[{_HAN}]")
+ENTRY_START = re.compile(rf"(?:{_OPENERS})[{_HAN}]")
+
+
+def _is_name(name: str) -> bool:
+    """한자 1~6자이면서 글의 토막(…云·…按)·수량(…三兩)·허사 첫머리(凡…)가 아닌 것만 약재명 후보."""
+    return bool(re.fullmatch(rf"[{_HAN}]{{1,6}}", name)) and name[-1] not in _FUNC_END and name[-1] not in _UNIT_END and name[0] not in _FUNC_START
+
+
+def _entry_match(text: str):
+    """글 첫머리의 「약재명 + 빈칸 + 味…」 — 판독 표시(〔a/b〕·〔疑: X〕)는 1차 글자로 접어 맞추고, 자리는 원글 기준으로 돌려준다."""
+    folded, pos = fold_marks(text)
+    m = ENTRY_RE.match(folded)
+    if m and _is_name(m.group(1)):
+        return pos[m.end(1)], pos[m.end()]
+    return None
 
 
 def _entry_cut(b: Block) -> tuple[int, int] | None:
     """약재명 제목을 떼어 낼 자리 (이름 끝, 조문 시작). 글에 빈칸이 있으면 그것으로, 없으면(판독이 빈칸을 빠뜨림) 쪽 이미지에서 잰
     첫 줄의 큰 틈(measure_bold 의 "gap") 으로 — 틈 앞이 한자 1~6자이고 틈 뒤가 味·一名·主… 로 시작할 때만."""
-    if m := ENTRY_RE.match(b.text):
-        return m.end(1), m.end()
+    if cut := _entry_match(b.text):
+        return cut
     for a, _, k in b.cstyles:
-        if k == "gap" and 1 <= a <= 6 and re.fullmatch(rf"[{_HAN}]+", b.text[:a]) and ENTRY_START.match(b.text, a):
-            return a, a
+        if k == "gap" and 1 <= a <= len(b.text):
+            name = first_reading(b.text[:a])
+            if _is_name(name) and ENTRY_START.match(first_reading(b.text[a:])):
+                return a, a
     return None
+
+
+def _starts_entry(text: str) -> bool:
+    """쪽 첫머리에서 넘어온 글이 새 조문(약재명·주석)으로 시작하는가 — cont 로 잘못 이어진 것을 가를 때."""
+    return bool(_entry_match(text)) or bool(COMMENT_RE.match(text))
 
 
 def _join(a: Block, b: Block) -> Block:
@@ -59,6 +84,20 @@ def _join(a: Block, b: Block) -> Block:
                    memos=list(a.memos) + [(o + k, m) for o, m in b.memos], anchors=list(a.anchors) + [(o + k, t) for o, t in b.anchors])
 
 
+def _like_name(a: str, b: str) -> bool:
+    """되읽은 이름 a 가 제목 b 와 같은 약재명인가: 이체자·호환 한자를 접고 간체·번체 차이(雄黄/雄黃)는 OpenCC 로 맞춘 뒤, 글자 절반 이상 같으면(點青/扁青 처럼
+    판독이 한 글자를 달리 읽은 것도) 같은 것으로 본다. 「菜 下」와 「香薷」처럼 아예 다른 이름은 아니다."""
+    from difflib import SequenceMatcher
+    from .merge import _fold
+    try:
+        from .normalization import _opencc_converter
+        conv = _opencc_converter()
+    except Exception:
+        conv = lambda x: x
+    fa, fb = _fold(conv(a)), _fold(conv(b))
+    return fa == fb or SequenceMatcher(None, fa, fb).ratio() >= 0.5
+
+
 def _heading_entry(blocks: list[Block], i: int) -> tuple | None:
     """제목 블록 i 가 약재명인지(판독이 약재명을 제목으로 읽은 쪽이 많다):
     ("split", 이름 끝, 조문 시작) — 제목 글 안에 「약재명 + 빈칸 + 味·一名·主…」 가 붙음,
@@ -67,42 +106,54 @@ def _heading_entry(blocks: list[Block], i: int) -> tuple | None:
     b = blocks[i]
     if b.type != "heading" or b.kind in ("그림제목", "표제목"):
         return None
-    if m := ENTRY_RE.match(b.text):
-        return ("split", m.end(1), m.end())
+    if cut := _entry_match(b.text):
+        return ("split", cut[0], cut[1])
     name = re.sub(r"[\s　·・.,，。]", "", first_reading(b.text))
-    if not re.fullmatch(rf"[{_HAN}]{{1,6}}", name):
+    if not _is_name(name):
         return None
-    nxt = next((x for x in blocks[i + 1:i + 4] if x.type in ("para", "heading") and x.text.strip()), None)
-    if nxt is None or nxt.type != "para" or _entry_cut(nxt):
+    j = next((k for k in range(i + 1, min(len(blocks), i + 4)) if blocks[k].type in ("para", "heading") and blocks[k].text.strip()), None)
+    if j is None:
+        return None
+    nxt = blocks[j]
+    if nxt.type == "heading":                                           # 약재명 둘이 잇달아 제목으로 읽혔으면(뒤 것이 약재명이면) 앞 것도
+        return ("name",) if len(name) <= 4 and _heading_entry(blocks, j) else None
+    if _entry_cut(nxt):
         return None                                                     # 다음 문단이 제 약재명으로 시작하면(「菜 下」 뒤 「香薷 味辛…」) 이 제목은 위 단계
     t = first_reading(nxt.text).lstrip(" 　")
-    if re.match(rf"[{_HAN}]{{0,{len(name)}}}[ 　,，、]*(?:味|一名)[{_HAN}]", t):
+    m = re.match(rf"([{_HAN}]{{0,6}})[ 　,，、]*(?:味|一名)[{_HAN}]", t)
+    if m and (not m.group(1) or _like_name(m.group(1), name)):          # 앞에 되읽은 이름이 있으면 이 제목과 같아야(다른 약재명이면 아님)
         return ("name",)
     return None
 
 
-def _bold_role(b: Block) -> tuple[str, list]:
-    """조문 블록의 본경·별록과 남길 굵은 범위(섞인 문단만). 굵기를 재지 못했으면 별록으로 둔다."""
+def _bold_role(b: Block, measured: bool = True) -> tuple[str, list]:
+    """조문 블록의 본경·별록과 남길 굵은 범위(섞인 문단만). 굵기를 재지 않았거나 책에 굵은 글자가 없으면(measured=False) 가르지 않고 본문으로 둔다."""
     bold = [(a, e) for a, e, k in b.cstyles if k == "bold"]
     count = lambda rs: sum(1 for a, e in rs for c in b.text[a:e] if re.match(rf"[{_HAN}]", c))
     total = sum(1 for c in b.text if re.match(rf"[{_HAN}]", c)) or 1
     nb = count(bold)
     if nb == 0:
-        return "bielu", []
+        return ("bielu" if measured else "body"), []
     if nb >= 0.5 * total:
         return ("bonjing", [] if nb >= 0.9 * total else [(a, e, "bonjing") for a, e in bold])
     return "bielu", [(a, e, "bonjing") for a, e in bold]
 
 
-def apply_structure(blocks: list[Block], preset: str = "bencao") -> tuple[list[Block], dict]:
+def apply_structure(blocks: list[Block], preset: str = "bencao", bold_measured: bool = True) -> tuple[list[Block], dict]:
     """블록에 쓰임을 붙이고(필요하면 약재명 제목을 떼어 내고) 쓰임별 글자 범위를 단다. 돌려주는 값: (새 블록 목록, 쓰임별 수).
     약재명은 문단 첫머리(_entry_cut)에서도, 판독이 약재명을 제목으로 읽은 제목 블록(_heading_entry)에서도 찾는다.
-    제목 안에 붙은 조문 앞부분(「孔公孽 味辛，溫，無毒。」의 味…)은 떼어 다음 문단 앞에 잇는다."""
+    제목 안에 붙은 조문 앞부분(「孔公孽 味辛，溫，無毒。」의 味…)은 떼어 다음 문단 앞에 잇는다.
+    쪽 첫머리(책갈피 자리)에서 새 조문·주석이 시작되는데 앞 문단에 이어진 것(판독의 cont 가 틀림)은 거기서 가른다(stats['page_split']).
+    bold_measured=False(획 굵기를 재지 않음)거나 문서 어디에도 굵은 범위가 없으면(本經을 굵게 찍지 않은 책) 本經·別錄을 가르지 않고 조문을 본문으로 둔다
+    — '굵은 글자 없음' 을 '別錄' 으로 읽으면 本經 조문까지 별록 꼬리표가 붙는다."""
     if preset not in PRESETS:
         raise ValueError(f"preset 은 {PRESETS} 중 하나: {preset!r}")
     rules = preset != "none"
+    bold_measured = bold_measured and any(k == "bold" for b in blocks for _, _, k in b.cstyles)
     heads = {i: h for i in range(len(blocks)) if rules and (h := _heading_entry(blocks, i))}
-    entries = preset == "bencao" or (preset == "auto" and sum(1 for b in blocks if b.type == "para" and _entry_cut(b)) + len(heads) >= 3)
+    n_para = sum(1 for b in blocks if b.type == "para")
+    hits = sum(1 for b in blocks if b.type == "para" and _entry_cut(b)) + len(heads)
+    entries = preset == "bencao" or (preset == "auto" and hits >= 3 and hits >= 0.01 * n_para)   # 우연한 꼴 셋으로 다른 책에서 켜지지 않게
     out: list[Block] = []; stats: dict = {}
     tail: Block | None = None                                           # 제목에서 떼어 낸 조문 앞부분 — 다음 문단 앞에 잇는다
 
@@ -110,22 +161,31 @@ def apply_structure(blocks: list[Block], preset: str = "bencao") -> tuple[list[B
         stats[role] = stats.get(role, 0) + 1
 
     def para(b: Block) -> None:
+        if entries:                                                     # 쪽 첫머리에서 새 조문·주석이 시작되면 거기서 가른다
+            for o, _ in sorted(b.anchors):
+                if 0 < o < len(b.text) and _starts_entry(b.text[o:]):
+                    head, rest = _split(b, o, o)
+                    stats["page_split"] = stats.get("page_split", 0) + 1
+                    para(head); para(rest); return
         nb = replace(b, cstyles=list(b.cstyles))
         if b.kind == "소주":
             nb.role = "small"
-        elif rules and COMMENT_RE.match(b.text):
+        elif rules and COMMENT_RE.match(b.text):                        # 〔陶隱居云〕 꼴도 주석(판독이 책의 ［］ 를 〔〕 로 적기도 한다)
             nb.role = "commentary"
         elif entries and (cut := _entry_cut(b)):
             head, nb = _split(b, *cut)
             head.type, head.role, head.level = "heading", "entry", 3
             head.cstyles = []
             out.append(head); count("entry")
-            nb.role, extra = _bold_role(nb)
+            nb.role, extra = _bold_role(nb, bold_measured)
+            nb.cstyles = [c for c in nb.cstyles if c[2] != "bold"] + extra
+        elif entries and out and out[-1].type == "heading" and out[-1].role == "entry":
+            nb.role, extra = _bold_role(nb, bold_measured)              # 약재명 제목 바로 뒤 조문 — 문단 첫머리에서 떼어 낸 조문과 같은 규칙(한 문서 안에서 같은 모양)
             nb.cstyles = [c for c in nb.cstyles if c[2] != "bold"] + extra
         else:
             nb.role = "body"
             if entries:                                                 # 약재 조문을 이어 쓰는 문단(앞 쪽에서 넘어온 것 등)도 굵기로
-                role, extra = _bold_role(nb)
+                role, extra = _bold_role(nb, bold_measured)
                 if role == "bonjing":
                     nb.role, nb.cstyles = role, [c for c in nb.cstyles if c[2] != "bold"] + extra
         if nb.role != "bonjing" and nb.role != "bielu":
@@ -321,14 +381,14 @@ def measure_bold(pages, log=None) -> tuple[dict, dict]:
     잡는다 — 한 쪽이 통째로 굵어도 그 쪽을 보통으로 잘못 보지 않게."""
     per_page = {}; gaps = {}
     import importlib.util
-    if importlib.util.find_spec("cv2") is None:                       # 선택 설치 — 없으면 굵기를 재지 않고 전부 별록으로
+    if importlib.util.find_spec("cv2") is None:                       # 선택 설치 — 없으면 굵기를 재지 않는다(조문은 본문으로)
         if log:
             log("  주의: opencv-python-headless 가 없어 획 굵기를 재지 않습니다 — 본경·별록을 가르지 않습니다.")
         return {}, {"pages": 0, "chars": 0, "median": 0.0, "bold_paragraphs": 0}
     for n, pr, img, frame, vertical in pages:
         try:
             per_page[n], gaps[n] = page_strokes(pr, img, frame, vertical)
-        except Exception as e:                                          # 재지 못한 쪽은 굵기 없이(별록) — 문서는 계속
+        except Exception as e:                                          # 재지 못한 쪽은 굵기 없이 — 문서는 계속
             if log:
                 log(f"  주의: {n}쪽 획 굵기를 재지 못했습니다({type(e).__name__}: {str(e)[:60]}) — 그 쪽은 본경·별록을 가르지 않습니다.")
     allw = [w for st in per_page.values() for seq in st.values() for _, w in seq]

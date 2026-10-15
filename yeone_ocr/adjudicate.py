@@ -85,8 +85,8 @@ def make_ask(site: "Site", win: GlyphWindow, candidates, *salt, tick: bool = Fal
 def plain(text: str) -> str:
     """표시를 1차 글자로 접은 글(길이·위치 계산용)."""
     def rep(m):
-        inner = m.group(0)[1:-1]
-        if inner.startswith("疑:"):
+        inner = m.group(0)[1:-1].strip()
+        if inner.startswith(("疑:", "疑：")):                                 # 전각 쌍점도(blocks.first_reading 과 같은 뜻 — 자리 계산이 어긋나지 않게)
             return inner[2:].strip()
         if "/" in inner:
             return inner.split("/")[0]
@@ -118,24 +118,44 @@ def site_key(s) -> tuple:
     return (get("region_id"), get("col_index"), get("a"), get("b"), get("pre"), get("post"))
 
 
-def answered_sites(rec: dict, models, min_px: float = 0) -> set[tuple]:
-    """앞선 차례에 이미 결론이 난 미정 자리(site_key). 다시 물어도 같은 답일 자리라 다시 사지 않는다.
+def answered_records(rec: dict, models, min_px: float = 0) -> list[dict]:
+    """앞선 차례에 이미 결론이 난 미정 자리의 기록. 다시 물어도 같은 답일 자리라 다시 사지 않는다.
     - models 가운데 하나가 답했지만 고르지 못한 자리(미정·조각 위치 어긋남·눈가림 불일치·반영 못 함)
     - 글자가 작아 묻지 않은 자리(저해상) 가운데 잰 크기가 지금 문턱(min_px)보다도 작은 자리
     호출이 실패한 자리(판별 실패·눈가림 확인 실패)와 다른 모델이 답한 자리는 넣지 않는다 — 다음 실행·다른 모델로 다시 묻는다."""
     ms = {m for m in models if m}
-    out = set()
+    out = []
     for e in rec.get("adjudications") or []:
         if e.get("choice"):
             continue
         ev = e.get("evidence") or ""
         if ev.startswith(LOWRES_NOTE):
             if min_px and 0 < (e.get("em_px") or 0) < min_px:
-                out.add(site_key(e))
+                out.append(e)
             continue
         if e.get("model") in ms and not ev.startswith("판별 실패") and "눈가림 확인 실패" not in ev:
-            out.add(site_key(e))
+            out.append(e)
     return out
+
+
+def answered_sites(rec: dict, models, min_px: float = 0) -> set[tuple]:
+    """answered_records 의 열쇠(site_key) 집합."""
+    return {site_key(e) for e in answered_records(rec, models, min_px)}
+
+
+def same_site(e: dict, s: Site) -> bool:
+    """기록 e 가 자리 s 와 같은 자리인가: 열쇠(영역·열·두 후보·앞뒤 넉 자)가 같으면 그렇다. 곁 자리의 〔a/b〕 가 뒤 실행에서 정해져 글에 반영되면
+    이 자리의 앞뒤 넉 자 가운데 한 자가 바뀌므로(地玄黃宇 → 地玄黄宇), 영역·열·두 후보가 같고 앞뒤 글이 한 자만 다르며 글자 번호가 넉 자 안에서
+    움직였으면 같은 자리로 본다 — 아니면 같은 모델에 같은 자리를 다시 산다(검토에서 재현)."""
+    if site_key(e) == site_key(s):
+        return True
+    if (e.get("region_id"), e.get("col_index"), e.get("a"), e.get("b")) != (s.region_id, s.col_index, s.a, s.b):
+        return False
+    pre_e, post_e = e.get("pre") or "", e.get("post") or ""
+    if len(pre_e) != len(s.pre or "") or len(post_e) != len(s.post or ""):
+        return False
+    changed = sum(x != y for x, y in zip(pre_e + post_e, (s.pre or "") + (s.post or "")))
+    return changed <= 1 and abs(int(e.get("char_index") or 0) - int(s.char_index)) <= 4
 
 
 def pending_sites(rec: dict, models=(), min_px: float = 0) -> tuple[list[Site], int]:
@@ -143,8 +163,8 @@ def pending_sites(rec: dict, models=(), min_px: float = 0) -> tuple[list[Site], 
     sites = find_sites(PageReading.model_validate(rec["merged"]))
     if not models:
         return sites, 0
-    seen = answered_sites(rec, models, min_px)
-    keep = [x for x in sites if site_key(x) not in seen]
+    seen = answered_records(rec, models, min_px)
+    keep = [x for x in sites if not any(same_site(e, x) for e in seen)]
     return keep, len(sites) - len(keep)
 
 

@@ -780,6 +780,9 @@ class AdjudicateCommand(unittest.TestCase):
                 asked, out = run("gpt-4.1")
                 self.assertEqual(asked, 0); self.assertIn("결론 난 미정 자리 4곳은 다시 묻지 않음", out)
                 self.assertEqual(len(work.load_record(1)["adjudications"]), 2)                # 같은 기록을 다시 쌓지 않는다
+                r1 = work.load_record(1); r1["adjudications"] = r1["adjudications"][:1]; work.save_record(1, r1)   # 한 쪽에 결론 난 자리와 새 자리가 섞임
+                self.assertEqual(run("gpt-4.1")[0], 1)                                        # 새 자리만 묻는다(adjudicate_page 에도 건너뛸 모델이 넘어감)
+                self.assertEqual(len(work.load_record(1)["adjudications"]), 2)
                 self.assertEqual(run("gemini-2.5-pro")[0], 4)                                 # 다른 모델은 다시 묻는다
                 self.assertEqual(run("gpt-4.1", readjudicate=True)[0], 4)                     # 일부러 다시 묻기
                 self.assertEqual(run("gemini-2.5-pro")[0], 0)
@@ -812,6 +815,13 @@ class AdjudicateCommand(unittest.TestCase):
             sites2, skipped = pending_sites(r, {"m"})
             self.assertEqual(([x.mark for x in sites2], skipped), ([sites[1].mark], 1))
             self.assertEqual(len(pending_sites(r, ())[0]), 2)                                  # 모델을 주지 않으면(--readjudicate) 모두
+            s = sites[1]; e = {**{k: getattr(s, k) for k in ("region_id", "col_index", "a", "b", "post", "char_index")}, "model": "m", "choice": "", "evidence": "x"}
+            swap = {"黃": "黄", "黄": "黃"}
+            e["pre"] = (s.pre[:-1] + swap.get(s.pre[-1], "甲")) if s.pre else ""                 # 곁 자리의 답이 반영돼 앞 글 한 자가 바뀐 기록
+            r["adjudications"].append(e)
+            self.assertEqual(pending_sites(r, {"m"})[1], 2)                                     # 그래도 같은 자리로 보아 다시 사지 않는다
+            e["char_index"] = s.char_index + 9
+            self.assertEqual(pending_sites(r, {"m"})[1], 1)                                     # 글자 번호가 멀면 다른 자리
 
     def test_window_asks_before_buying_third_pass_on_rerun(self):
         """[▶ 한 번에 인식] 전에 이미 판독한 쪽의 3차 판별 자리·호출 어림을 보여 주고 고르게 한다: 예=그대로 · 아니요=--no-adjudicate · 취소=실행 안 함."""
@@ -866,6 +876,44 @@ class AdjudicateCommand(unittest.TestCase):
             with mock.patch.object(gui.messagebox, "askyesnocancel", lambda title, msg: shown.append(msg) or False):
                 app.do_build()
             self.assertNotIn("3차 글자 판별", shown[-1]); self.assertIn("--no-context-model", built[0]); self.assertNotIn("--no-adjudicate", built[0])
+
+    def test_auto_counts_sites_after_flash_name_is_known_and_keeps_old_stats(self):
+        """--adjudicate-model auto: flash 가 앞서 물어 못 가린 자리는 세기 전에 '다시 묻지 않을' 집합에 든다(전에는 세고 나서 더해 〔a/b〕 수가 많이 찍히고,
+        물을 것이 없는 쪽도 adjudicate_page 를 거쳐 앞 실행의 adjudicate_stats 가 0 으로 덮였다)."""
+        from yeone_ocr import cli
+        from yeone_ocr.adjudicate import find_sites
+        old = cli.make_glyph_readers
+        try:
+            with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+                doc, work = self._work(td); handles.callback(doc.close)
+                stats = {"sites": 2, "decided": 0, "undecided": 2, "failed": 0}
+                for pg in (1, 2):
+                    r = work.load_record(pg)
+                    r["adjudications"] = [{**{k: getattr(x, k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "flash", "choice": "", "evidence": "뭉개짐"}
+                                          for x in find_sites(PageReading.model_validate(r["merged"]))]
+                    r["adjudicate_stats"] = dict(stats); work.save_record(pg, r)
+                flash, pro = self._undecided_reader("flash"), self._undecided_reader("pro")
+                cli.make_glyph_readers = lambda args: (flash, pro)
+                args = Namespace(pdf=work.pdf_path.as_posix(), work=str(work.dir), pages=None, dpi=300, mode="vertical", reader="gemini", model="pro",
+                                 thinking_budget=None, no_cache=True, max_sites=0, zoom=6, batch_sites=8, workers=2, workers_start=2,
+                                 adjudicate_model="auto", adjudicate_thinking="low", no_suspects=True)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.cmd_adjudicate(args, work, doc, standalone=True), 0)
+                out = buf.getvalue()
+                self.assertIn("판별할 〔a/b〕 자리가 없습니다", out); self.assertIn("결론 난 미정 자리 4곳은 다시 묻지 않음", out)
+                self.assertNotIn("〔a/b〕 4곳", out)
+                self.assertEqual((flash.asked, pro.asked), (0, 0))
+                self.assertEqual(work.load_record(1)["adjudicate_stats"], stats)
+                r = work.load_record(1); r["adjudications"] = r["adjudications"][:1]; work.save_record(1, r)   # 1쪽에 아직 묻지 않은 자리 하나
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.cmd_adjudicate(args, work, doc, standalone=True), 0)
+                self.assertIn("1쪽 · 〔a/b〕 1곳", buf.getvalue())
+                self.assertEqual(flash.asked, 1)
+                self.assertEqual(work.load_record(2)["adjudicate_stats"], stats)                               # 물을 것이 없는 쪽은 그대로
+        finally:
+            cli.make_glyph_readers = old
 
     def test_run_adaptive_throttles_and_stops_on_fatal(self):
         import contextlib, io

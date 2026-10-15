@@ -17,6 +17,20 @@ def keep_valid(items):
     return {item["id"]: item["source"] for item in items if item["source"] in item["candidates"]}
 
 
+class Offsets(unittest.TestCase):
+    def test_anchors_cstyles_memos_follow_length_changing_rules(self):
+        """부호 규칙이 글 길이를 바꿔도(，→, ) 책갈피·쓰임 범위·등급 범위·메모가 같은 글자를 가리킨다(내용별 문서의 쪽 책갈피·본경 범위)."""
+        b = Block(type="para", text="汉书，云曰。髒腑", kind="본문", anchors=[(3, "PDF 2쪽"), (6, "PDF 3쪽")],
+                  cstyles=[(3, 5, "bold"), (6, 8, "source")], spans=[(0, 2, "green")], memos=[(6, "m")])
+        out, _ = normalize_blocks([b], resolver=lambda items: {})
+        o = out[0]
+        self.assertEqual(o.text, "漢書, 云曰. 髒腑")
+        self.assertEqual((o.anchors, o.cstyles, o.spans, o.memos),
+                         ([(4, "PDF 2쪽"), (8, "PDF 3쪽")], [(4, 6, "bold"), (8, 10, "source")], [(0, 2, "green")], [(8, "m")]))
+        self.assertEqual((o.text[o.anchors[0][0]], o.text[4:6], o.text[8:10]), ("云", "云曰", "髒腑"))
+        self.assertEqual((b.text, b.anchors), ("汉书，云曰。髒腑", [(3, "PDF 2쪽"), (6, "PDF 3쪽")]))                  # 원본 블록은 그대로
+
+
 class MsrData(unittest.TestCase):
     def test_full_ordered_macro_data_and_flags(self):
         data = rule_data()

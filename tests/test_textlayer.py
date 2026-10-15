@@ -139,6 +139,102 @@ class SearchablePdf(unittest.TestCase):
             st = TL.searchable_pdf(d, [1], lambda n: (pr, img, page_frame(d, 1), False), self.tmp / "o.pdf", log=lambda *a: None)
         self.assertEqual(st["pages"], 0); self.assertIn(1, st["skipped"])
 
+    def test_nothing_inserted_saves_no_copy_and_progress_reaches_total(self):
+        doc = pymupdf.open(); doc.new_page(width=200, height=200).insert_text((20, 40), "visible", fontsize=12)
+        pdf = self.tmp / "born2.pdf"; doc.save(pdf); doc.close()
+        pr = PageReading.model_validate({"pdf_page": 1, "regions": [{"id": "r1", "k": "본문", "bbox": [100, 100, 300, 600], "dir": "가로", "paras": [{"cols": [{"n": 1, "t": "天地"}]}]}]})
+        steps = []
+        with pymupdf.open(pdf) as d:
+            img, _ = page_image(d, 1)
+            st = TL.searchable_pdf(d, [1], lambda n: (pr, img, page_frame(d, 1), False), self.tmp / "none.pdf", log=lambda *a: None, step=lambda a, b: steps.append((a, b)))
+        self.assertEqual(st["pages"], 0)
+        self.assertFalse((self.tmp / "none.pdf").exists())                   # 넣은 쪽이 없으면 원본 사본을 만들지 않는다
+        self.assertEqual(steps[-1], (2, 2))                                   # 진행 막대는 끝까지 간다
+
+    def test_indirect_contents_array_keeps_the_scan_visible_and_font_is_embedded(self):
+        """검토에서 재현된 것: /Contents 가 간접 배열(N 0 R → [a 0 R b 0 R])인 쪽에 글자층을 덧붙이면 배열 객체를 흐름으로 알고 이어 써
+        MuPDF 가 'object is not a stream' 으로 쪽을 백지로 그렸다(숨은 글자층이 없어 redaction 을 거치지 않는 순수 스캔·--keep-old-layer).
+        글꼴은 내장(FontFile2)이어야 Acrobat 이 '글꼴을 찾거나 만들 수 없습니다' 창을 띄우지 않는다."""
+        pdf, truth = scan(self.tmp, HLINES[:1], vertical=False, name="indirect")
+        doc = pymupdf.open(pdf); page = doc[0]
+        cx = page.get_contents()
+        arr = doc.get_new_xref(); doc.update_object(arr, "[" + " ".join(f"{x} 0 R" for x in cx) + "]")
+        doc.xref_set_key(page.xref, "Contents", f"{arr} 0 R")
+        src = self.tmp / "indirect2.pdf"; doc.save(src); doc.close()
+        with pymupdf.open(src) as before:
+            self.assertEqual(before.xref_get_key(before[0].xref, "Contents")[0], "xref"); shown = render(before)
+            pymupdf.TOOLS.mupdf_warnings(reset=True)                                  # scan() 의 글꼴 경고는 여기 것이 아님
+            for strip in (True, False):
+                st, done = self.make(src, reading(truth, False), False, strip_old=strip)
+                self.assertEqual((st["pages"], st["mismatch"]), (1, []))
+                self.assertEqual(render(done), shown)                                  # 그림이 그대로 보인다(백지 아님)
+                self.assertEqual(len(done[0].search_for(HLINES[0][:3])), 1)
+                refs = TL.content_refs(done, done[0])
+                self.assertTrue(refs and all(done.xref_is_stream(x) for x in refs), refs)  # 배열 안은 모두 흐름
+                fonts = [f for f in done[0].get_fonts(full=True) if f[3] == TL.FONT_NAME]
+                self.assertEqual(len(fonts), 1)
+                name, ext, _, buf, *_ = done.extract_font(fonts[0][0])
+                self.assertEqual((ext, buf[:4]), ("ttf", b"\x00\x01\x00\x00"))      # 글꼴 파일이 내장됨
+                self.assertEqual(pymupdf.TOOLS.mupdf_warnings(), "")
+
+    def test_strip_old_keeps_links(self):
+        pdf, truth = scan(self.tmp, HLINES[:1], vertical=False, name="link")
+        doc = pymupdf.open(pdf); doc[0].insert_text((40, 88), "香蕾", fontname="china-t", fontsize=20, render_mode=3)
+        doc[0].insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(10, 10, 100, 40), "uri": "https://example.org/a"})
+        doc[0].insert_link({"kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(10, 50, 100, 80), "page": 0, "to": pymupdf.Point(0, 0)})
+        old = self.tmp / "link.ocr.pdf"; doc.save(old); doc.close()
+        with pymupdf.open(old) as before:
+            want = [(l["kind"], tuple(round(v, 1) for v in l["from"]), l.get("uri")) for l in before[0].get_links()]
+        self.assertEqual(len(want), 2)
+        st, done = self.make(old, reading(truth, False), False)
+        self.assertEqual((st["stripped"], st["links_kept"]), (1, 2))
+        self.assertEqual([(l["kind"], tuple(round(v, 1) for v in l["from"]), l.get("uri")) for l in done[0].get_links()], want)
+        self.assertNotIn("香蕾", done[0].get_text())                           # 옛 층은 지워졌다
+        for rot in (90, 270):                                                 # 돌린 쪽에서도 링크 자리가 그대로
+            with self.subTest(rot=rot):
+                d = pymupdf.open(); pg = d.new_page(width=300, height=400); pg.set_rotation(rot)
+                pg.insert_text((40, 88), "hidden", fontsize=20, render_mode=3)
+                pg.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(10, 10, 100, 40), "uri": "https://example.org/r"})
+                d = pymupdf.open("pdf", d.tobytes()); pg = d[0]
+                before = [(l["kind"], tuple(round(v, 1) for v in l["from"])) for l in pg.get_links()]
+                self.assertEqual(TL.strip_hidden_text(pg), (True, 1))
+                d = pymupdf.open("pdf", d.tobytes(garbage=3))
+                self.assertEqual([(l["kind"], tuple(round(v, 1) for v in l["from"])) for l in d[0].get_links()], before)
+                self.assertEqual(d[0].get_text().strip(), "")
+
+    def test_lone_surrogate_in_reading_is_dropped_and_counted(self):
+        pdf, truth = scan(self.tmp, HLINES[:1], vertical=False, name="surr")
+        pr = reading(truth, False)
+        pr.regions[0].paragraphs[0].columns[0].text = HLINES[0][:4] + "\ud83d" + HLINES[0][4:]       # JSON 에서 반 쪽만 남은 이모지
+        st, done = self.make(pdf, pr, False)
+        self.assertEqual((st["pages"], st["bad_chars"], st["mismatch"]), (1, 1, []))
+        self.assertEqual("".join(TL.own_text(done, 1)).replace(" ", ""), HLINES[0])
+
+    def test_keep_old_layer_strips_only_our_previous_layer(self):
+        pdf, truth = scan(self.tmp, HLINES[:1], vertical=False, name="own")
+        doc = pymupdf.open(pdf); doc[0].insert_text((40, 88), "香蕾", fontname="china-t", fontsize=20, render_mode=3)
+        old = self.tmp / "own.ocr.pdf"; doc.save(old); doc.close()
+        st, first = self.make(old, reading(truth, False), False, strip_old=False)
+        self.assertEqual((st["pages"], st["own_stripped"]), (1, 0))
+        first_pdf = self.tmp / "own_first.pdf"; first.save(first_pdf)
+        pr = reading(truth, False)
+        pr.regions[0].paragraphs[0].columns[0].text = new = "香薷味辛微溫主霍亂"                # 글자가 다른 새 판독(같은 수): 옛 층이 남으면 그 글자는 깨진다
+        st, done = self.make(first_pdf, pr, False, strip_old=False)
+        self.assertEqual((st["pages"], st["stripped"], st["own_stripped"], st["mismatch"]), (1, 0, 1, []))
+        self.assertEqual("".join(TL.own_text(done, 1)).replace(" ", ""), new)      # 이전의 이 글자층은 사라지고 새 판독만
+        self.assertIn("香蕾", text_layer(done, 1).plain())                          # 다른 OCR 층은 그대로
+        with pymupdf.open(old) as before:
+            self.assertEqual(render(done), render(before))
+        with pymupdf.open(first_pdf) as d:                                          # 흐름이 하나로 합쳐진 꼴은 가려낼 수 없어 건너뛴다(깨뜨리지 않는다)
+            page = d[0]; refs = [int(x) for x in __import__("re").findall(r"(\d+) 0 R", d.xref_get_key(page.xref, "Contents")[1])]
+            merged = b"".join(d.xref_stream(x) for x in refs); d.update_stream(refs[0], merged)
+            d.xref_set_key(page.xref, "Contents", f"{refs[0]} 0 R")
+            merged_pdf = self.tmp / "own_merged.pdf"; d.save(merged_pdf)
+        with pymupdf.open(merged_pdf) as d:
+            img, _ = page_image(d, 1)
+            st = TL.searchable_pdf(d, [1], lambda n: (pr, img, page_frame(d, 1), False), self.tmp / "own_skip.pdf", strip_old=False, log=lambda *a: None)
+        self.assertEqual(st["pages"], 0); self.assertIn("가려내", st["skipped"][1]); self.assertFalse((self.tmp / "own_skip.pdf").exists())
+
 
 class Writing(unittest.TestCase):
     """자리 계획과 무관하게 쓰기만: 희귀 한자 보존, /Rotate·CropBox 좌표, 위에서 물려받은 자원."""
@@ -195,9 +291,53 @@ class Writing(unittest.TestCase):
         self.assertEqual(doc.xref_get_key(doc[0].xref, "Resources")[0], "null")
         before = render(doc)
         line = TL.Line("h", [(c, (0.1 + i * 0.1, 0.4, 0.2 + i * 0.1, 0.5)) for i, c in enumerate("天地玄")], "ink")
+        pymupdf.TOOLS.mupdf_warnings(reset=True)
         with self.write(doc, [line]) as out:
+            self.assertEqual(pymupdf.TOOLS.mupdf_warnings(), "")               # 자원을 쪽에 붙인 뒤 내용을 감싸므로 'cannot find XObject' 가 없다
             self.assertEqual(render(out), before)
             self.assertEqual("".join(TL.own_text(out, 1)), "天地玄")
+
+
+class WritingMore(unittest.TestCase):
+    """글꼴 자원 이름 겹침(자원을 같이 쓰는 쪽)과 전각 간격으로 찍힌 반각 글자."""
+
+    def test_shared_resources_get_a_fresh_font_key_so_other_pages_stay_readable(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = pymupdf.open(); p = d.new_page(width=120, height=80); p.draw_rect(pymupdf.Rect(10, 10, 60, 40), color=(0, 0, 0), fill=(0, 0, 0))
+            png = Path(td) / "a.png"; p.get_pixmap(dpi=100).save(png); d.close()
+            doc = pymupdf.open("pdf", images_to_pdf([png, png], default_dpi=100))
+        res = doc.xref_get_key(doc[0].xref, "Resources")
+        pages_xref = int(doc.xref_get_key(doc.pdf_catalog(), "Pages")[1].split()[0])
+        doc.xref_set_key(pages_xref, "Resources", res[1])                        # 두 쪽이 자원 하나를 물려받는다
+        for pg in doc: doc.xref_set_key(pg.xref, "Resources", "null")
+        doc = pymupdf.open("pdf", doc.tobytes())
+        plan = lambda txt: TL.Line("h", [(c, (0.1 + i * 0.1, 0.4, 0.2 + i * 0.1, 0.5)) for i, c in enumerate(txt)], "ink")
+        font, cids = TL.add_font(doc, "天地玄黃")
+        for pno, txt in ((0, "天地玄"), (1, "黃地天")):
+            TL.write_lines(doc, doc[pno], [plan(txt)], (0, 0, 120, 80), font, cids)
+        doc = pymupdf.open("pdf", doc.tobytes(garbage=3, deflate=True))
+        self.assertEqual((TL.own_text(doc, 1), TL.own_text(doc, 2)), (["天地玄"], ["黃地天"]))
+        self.assertTrue(TL.has_own_layer(doc[0]))
+        self.assertTrue(TL.strip_own_layer(doc, doc[0]))                           # 1쪽의 이 글자층만 빼고 다른 글꼴(다른 CID)로 다시 넣는다
+        font, cids = TL.add_font(doc, "宇宙")
+        TL.write_lines(doc, doc[0], [plan("宇宙")], (0, 0, 120, 80), font, cids)
+        doc = pymupdf.open("pdf", doc.tobytes(garbage=3, deflate=True))
+        self.assertEqual((TL.own_text(doc, 1), TL.own_text(doc, 2)), (["宇宙"], ["黃地天"]))   # 2쪽(건드리지 않은 쪽)의 글자가 깨지지 않는다
+        self.assertEqual(sorted(f[4] for f in doc[0].get_fonts()), [TL.FONT_KEY, TL.FONT_KEY + "2"])
+
+    def test_half_width_digits_at_full_width_pitch_stay_joined_and_in_place(self):
+        for d_, mids in (("h", [0.15, 0.25, 0.352, 0.455]), ("v", [0.15, 0.25, 0.352, 0.455]), ("h", [0.15, 0.25, 0.325, 0.375])):
+            with self.subTest(dir=d_, mids=mids):                                   # 숫자가 전각 간격(1.03칸)으로 — 또는 반각 둘이 한 칸에
+                boxes = [((m - 0.05, 0.4, m + 0.05, 0.5) if d_ == "h" else (0.4, m - 0.05, 0.5, m + 0.05)) for m in mids]
+                doc = pymupdf.open(); doc.new_page(width=300, height=300)
+                font, cids = TL.add_font(doc, "卷第12")
+                TL.write_lines(doc, doc[0], [TL.Line(d_, list(zip("卷第12", boxes)), "ink")], (0, 0, 300, 300), font, cids)
+                out = pymupdf.open("pdf", doc.tobytes())
+                self.assertEqual(TL.own_text(out, 1), ["卷第12"])                      # '卷第1 2' 가 아니다
+                self.assertEqual(len(out[0].search_for("卷第12")), 1)
+                got = [l for l in layer_chars(out, 1, own=True) if l["chars"]][0]["chars"]
+                for (c, bb), m in zip(got, mids):
+                    self.assertAlmostEqual(((bb[0] + bb[2]) if d_ == "h" else (bb[1] + bb[3])) / 2 / 300, m, delta=0.02, msg=c)
 
 
 class Command(unittest.TestCase):

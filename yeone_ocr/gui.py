@@ -5,7 +5,7 @@
 [▸ 고급 → 패키지 설치·점검] 단추로 설치한다.
 """
 from __future__ import annotations
-import contextlib, io, json, os, queue, re, subprocess, sys, threading, time, traceback, webbrowser
+import contextlib, copy, io, json, os, queue, re, subprocess, sys, threading, time, traceback, webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -22,11 +22,12 @@ CONFIG_PATH = Path.home() / ".yeone_ocr" / "config.json"
 PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2", "opencv-python-headless"),
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
-            "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
+            "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "structure": "auto", "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 LAYOUT_LABELS = {"page": "원본 쪽대로(검수용)", "flow": "내용별(제목·문단)"}   # 문서 짜임 --layout
+STRUCTURE_LABELS = {"auto": "자동(本草 조문 꼴이 셋·1% 이상일 때)", "bencao": "本草 조문 규칙 늘", "none": "규칙 없음(영역 종류만)"}   # 내용별 짜임 규칙 --structure
 from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
 MRES_LABELS = {"default": "기본", "high": "높음(high)", "ultra_high": "최고(ultra_high · Gemini 3)"}   # 2차 조각 이미지 토큰 예산
@@ -156,15 +157,70 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    """설정 파일에는 API 키가 그대로 들어가므로 본인만 읽게(0o600) 만든다 — Windows 에서는 뜻이 없고 그 밖에서는 맞는 권한."""
+    """설정 파일에는 API 키가 그대로 들어가므로 본인만 읽게(0o600) 만든다 — Windows 에서는 뜻이 없고 그 밖에서는 맞는 권한.
+    임시 파일에 다 쓴 뒤 바꿔 넣는다(원자적) — 쓰는 도중 창이 죽어도 설정이 비거나 반쪽만 남지 않게."""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(CONFIG_PATH, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(json.dumps(cfg, ensure_ascii=False, indent=1))
+    tmp = CONFIG_PATH.with_name(CONFIG_PATH.name + f".{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(cfg, ensure_ascii=False, indent=1))
+        os.replace(tmp, CONFIG_PATH)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         os.chmod(CONFIG_PATH, 0o600)                           # 이전 판이 만든 파일도
     except OSError:
         pass
+
+
+def merge_config(disk: dict, loaded: dict, new: dict) -> dict:
+    """파일에 얹을 설정: new(이 창이 쓰려는 값) 가운데 loaded(이 창이 읽었거나 마지막으로 저장한 값)와 다른 열쇠와 파일에 없는 열쇠만 disk 위에 쓴다.
+    다른 창이나 옛 판이 그 사이 저장한 값은 그대로 둔다(한 창의 메모리 설정 전체를 덮어쓰면 다른 창이 고친 양식·짜임이 되돌아간다).
+    provider_settings 는 제공사별로 같은 규칙."""
+    out = dict(disk)
+    for k, v in new.items():
+        if k != "provider_settings" and (k not in out or v != loaded.get(k)):
+            out[k] = v
+    if "provider_settings" in new:
+        had = loaded.get("provider_settings") or {}
+        got = dict(out.get("provider_settings") or {})
+        for p, v in (new.get("provider_settings") or {}).items():
+            if p not in got or v != had.get(p):
+                got[p] = v
+        out["provider_settings"] = got
+    return out
+
+
+def write_config(app) -> None:
+    """창의 설정(app.cfg)을 파일에 저장한다. 창이 읽어 둔 값(app._cfg_loaded)이 있으면 파일을 새로 읽어 이 창이 바꾼 값만 얹는다.
+    (vars 로 본다 — 덜 만들어진 Tk 창의 getattr 은 재귀하고, 시험의 가짜 창은 그 값이 없어 전처럼 통째로 쓴다.)"""
+    loaded = vars(app).get("_cfg_loaded") if hasattr(app, "__dict__") else None
+    if loaded is None:
+        save_config(app.cfg); return
+    save_config(merge_config(load_config(), loaded, app.cfg))
+    app._cfg_loaded = copy.deepcopy(app.cfg)                   # 다음 저장은 이 시점 이후 바뀐 값만 얹는다(메모리 값은 그대로 — 화면 칸과 같다)
+
+
+def missing_template(app) -> str:
+    """내용별 짜임에 양식 경로가 적혀 있는데 그 파일이 없으면 그 경로, 아니면 "". (vars 로 본다 — 덜 만들어진 Tk 창의 getattr 은 재귀하고, 시험의 가짜 창은 칸이 없다.)"""
+    d = vars(app) if hasattr(app, "__dict__") else {}
+    if d.get("v_layout") is None or d.get("v_template") is None or app.layout_key() != "flow":
+        return ""
+    tpl = str(app.v_template.get() or "").strip()
+    return tpl if tpl and not Path(tpl).is_file() else ""
+
+
+def template_ok(app) -> bool:
+    """[▶ 한 번에 인식]·[④ 문서 만들기] 전에: 양식 파일이 없으면 알리고 False(모델을 부르기 전에 막는다 — 명령 쪽도 같은 검사로 끝 코드 2)."""
+    tpl = missing_template(app)
+    if not tpl:
+        return True
+    messagebox.showerror(APP_NAME, f"양식 파일이 없습니다: {tpl}\n[설정] 의 양식 칸을 있는 HWPX 로 고치거나 비우십시오(비우면 기본 모양으로 만듭니다).")
+    return False
 
 
 def _pages_failed(problems: list[str] | None) -> bool:
@@ -609,13 +665,13 @@ class EstimateDialog(tk.Toplevel):
             try: return float(s.strip()) if s.strip() else 0.0
             except ValueError: return 0.0
         prices[model] = {"in": num(self.e_in.get()), "out": num(self.e_out.get())}
-        self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = self.e_fx.get().strip(); save_config(self.app.cfg)
+        self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = self.e_fx.get().strip(); write_config(self.app)
         self.render(self.app.estimate_data())
 
     def reset(self):
         model = self.app.v_model.get().strip()
         prices = dict(self.app.cfg.get("prices") or {}); prices.pop(model, None)
-        self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = ""; save_config(self.app.cfg)
+        self.app.cfg["prices"] = prices; self.app.cfg["fx_krw"] = ""; write_config(self.app)
         self.render(self.app.estimate_data())
 
     def ok(self):
@@ -703,6 +759,7 @@ class App(tk.Tk):
         apply_window_icon(self)
         self.title(f"{APP_NAME} · 연어OCR {__version__}")
         self.cfg = load_config()
+        self._cfg_loaded = copy.deepcopy(self.cfg)             # 읽은 그대로 — 저장할 때 이 창이 바꾼 값만 파일에 얹는다(write_config)
         self._style()
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h = min(self.px(1180), sw - 40), min(self.px(980), sh - 80)
@@ -1020,7 +1077,10 @@ class App(tk.Tk):
         if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get():
             document += " + 검색 PDF"
         if getattr(self, "v_layout", None) is not None and self.layout_key() == "flow":
-            document += " · 내용별" + (" · 양식" if self.v_template.get().strip() else "")
+            tpl = self.v_template.get().strip()
+            document += " · 내용별" + (f" · 양식 {Path(tpl).name}" if tpl else " · 양식 없음(기본 모양)")
+            if App.structure_key(self) != "auto":
+                document += " · " + {"bencao": "本草 규칙", "none": "규칙 없음"}[App.structure_key(self)]
         self.v_settings_summary.set(f"{self.v_provider.get()} · {self.v_model.get().strip()} · {self.v_mode.get()} · {document}")
         scope = "이미지 OCR" if self._active_input == 2 else "일반 OCR"
         self.v_force_scope.set(f"{scope}: 기록 있는 쪽도 다시 판독")
@@ -1097,6 +1157,7 @@ class App(tk.Tk):
         self.v_layout = tk.StringVar(value=LAYOUT_LABELS.get(self.cfg.get("layout", "page"), LAYOUT_LABELS["page"]))
         self.v_template = tk.StringVar(value=self.cfg.get("template", "") or "")
         self.v_bold = tk.BooleanVar(value=bool(self.cfg.get("bold_split", True)))
+        self.v_structure = tk.StringVar(value=STRUCTURE_LABELS.get(self.cfg.get("structure", "auto"), STRUCTURE_LABELS["auto"]))
         self.v_ctxmodel = tk.BooleanVar(value=bool(self.cfg.get("context_model", True)))
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
@@ -1246,10 +1307,15 @@ class App(tk.Tk):
         self._btn(tf, "고르기…", self.pick_template, tip="내용별 문서를 채울 양식 HWPX 를 고릅니다(비우면 기본 모양).").grid(row=0, column=1, padx=(P(4), 0))
         Tip(te, "내용별 문서는 이 양식의 쪽 설정과 스타일(제목-장·제목-절·제목-본초명+생약명·본경 원문·별록원문·주석·소주·출처·그림캡션)로 채웁니다. "
                 "양식의 본문 내용은 쓰지 않습니다. 한문 문단은 줄 나눔만 글자 단위로 바꿉니다(어절 단위면 줄 가운데 큰 빈칸이 생김).", self)
-        bc = ttk.Checkbutton(cl, text="本經(굵은 글씨)·別錄 획 굵기로 가르기", variable=self.v_bold); bc.grid(row=4, column=0, columnspan=2, sticky="w", pady=(P(4), 0))
-        Tip(bc, "내용별 문서에서 쪽 이미지의 획 굵기를 재어, 굵게 찍힌 조문은 '본경 원문', 보통 굵기는 '별록원문' 스타일로 넣습니다(모델 호출 없음). "
-                "한 문단에 섞여 있으면 굵은 범위만 '본경 조문' 글자 스타일로 둡니다.", self)
-        self.te_template, self.cb_bold = te, bc
+        ttk.Label(cl, text="짜임 규칙", style="Field.TLabel").grid(row=4, column=0, sticky="w", padx=(0, P(8)), pady=(P(4), 0))
+        sc = ttk.Combobox(cl, textvariable=self.v_structure, values=list(STRUCTURE_LABELS.values()), state="readonly", width=self._cw(list(STRUCTURE_LABELS.values())))
+        sc.grid(row=4, column=1, sticky="w", pady=(P(4), 0))
+        Tip(sc, "내용별 문서에서 문단을 가르는 규칙. 자동: 주석(［陶隱居云］…)·출처(唐附…) 규칙은 늘, 약재명 떼기(「약재명 味…」)는 그런 문단이 셋 이상이고 문단의 1% 이상일 때만. "
+                "本草 규칙 늘: 本草 조문 책(證類 계열). 규칙 없음: 판독의 영역 종류(제목·문단·소주)만 — 方劑書·醫經 등 다른 갈래의 책.", self)
+        bc = ttk.Checkbutton(cl, text="本經(굵은 글씨)·別錄 획 굵기로 가르기", variable=self.v_bold); bc.grid(row=5, column=0, columnspan=2, sticky="w", pady=(P(4), 0))
+        Tip(bc, "양식 HWPX 로 만드는 내용별 문서에서 쪽 이미지의 획 굵기를 재어, 굵게 찍힌 조문은 '본경 원문', 보통 굵기는 '별록원문' 스타일로 넣습니다(모델 호출 없음). "
+                "한 문단에 섞여 있으면 굵은 범위만 '본경 조문' 글자 스타일로 둡니다. 양식이 없으면 재지 않습니다(기본 모양에는 그 구분이 없음).", self)
+        self.te_template, self.cb_bold, self.cb_structure = te, bc, sc
         self.v_layout.trace_add("write", self._layout_changed); self._layout_changed()
         r0 = len(checks) + 1
         self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=r0, column=0, sticky="ew", pady=(P(8), 0))
@@ -1266,7 +1332,8 @@ class App(tk.Tk):
         steps = [("① 구조 보기", self.do_inspect, "쪽수, 쪽마다 스캔 이미지인지, 텍스트 레이어 글자 수, 쪽번호 표기를 보여 줍니다"),
                  ("② 준비", self.do_prepare, "쪽 이미지와 기존 텍스트 레이어를 결과 폴더에 꺼냅니다"),
                  ("③ 판독", self.do_read, "1차·2차 판독만 합니다(기록이 있는 쪽은 건너뜀)"),
-                 ("④ 문서 만들기", self.do_build, "판독 기록으로 HWPX(+DOCX)를 만듭니다. readings 를 손으로 고친 뒤에 누릅니다"),
+                 ("④ 문서 만들기", self.do_build, "판독 기록으로 HWPX(+DOCX)를 만듭니다. readings 를 손으로 고친 뒤에 누릅니다. "
+                                                "번체 문맥 교정으로 모델을 부릅니다(새 후보가 있을 때만 · [설정]에서 끌 수 있음)"),
                  ("⑤ 검수 화면", self.do_review, "원본 위에 영역 상자를 그린 검수 화면(review.html)을 만들어 엽니다"),
                  ("⑥ 보고", self.do_report, "쪽별 상태와 다발 오인식 장부(report.md)를 진행 기록에 보여 줍니다")]
         tools = [("3차 글자 판별", self.do_adjudicate, "1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(앞뒤 글자는 글로 주지 않고 후보 차례는 섞음 · 8자리씩 묶어 한 호출, 쪽은 동시에)"),
@@ -1607,7 +1674,7 @@ class App(tk.Tk):
     def pick_pdf2(self):
         p = filedialog.askopenfilename(title="책갈피가 든 원본 PDF", filetypes=[("PDF", "*.pdf"), ("모든 파일", "*.*")])
         if p:
-            self.v_pdf2.set(p); self.cfg["collate_pdf"] = p; save_config(self.cfg)
+            self.v_pdf2.set(p); self.cfg["collate_pdf"] = p; write_config(self)
 
     def pdf2(self) -> str:
         """교정 탭의 PDF. 비어 있으면 일반 OCR의 PDF를 쓴다(이미지 탭과 무관)."""
@@ -1619,7 +1686,7 @@ class App(tk.Tk):
     def pick_hwpx(self):
         p = filedialog.askopenfilename(title="교정할 HWPX", filetypes=[("HWPX", "*.hwpx"), ("모든 파일", "*.*")])
         if p:
-            self.v_hwpx.set(p); self.cfg["hwpx"] = p; save_config(self.cfg)
+            self.v_hwpx.set(p); self.cfg["hwpx"] = p; write_config(self)
             self.suggest_styles()
 
     def suggest_styles(self):
@@ -1652,7 +1719,7 @@ class App(tk.Tk):
         StylePicker(self, counts)
 
     def set_heading_styles(self, names: list[str]):
-        self.v_hstyles.set(", ".join(names)); self.cfg["heading_styles"] = self.v_hstyles.get(); save_config(self.cfg)
+        self.v_hstyles.set(", ".join(names)); self.cfg["heading_styles"] = self.v_hstyles.get(); write_config(self)
 
     def heading_styles_list(self) -> list[str]:
         return [s.strip() for s in self.v_hstyles.get().split(",") if s.strip()]
@@ -1677,7 +1744,7 @@ class App(tk.Tk):
             return
         pdf, hwpx, src = self.pdf2(), self.v_hwpx.get().strip(), self.anchor_source()
         styles = self.heading_styles_list() or None
-        self.cfg["anchor_source"] = src; self.cfg["heading_styles"] = self.v_hstyles.get(); save_config(self.cfg)
+        self.cfg["anchor_source"] = src; self.cfg["heading_styles"] = self.v_hstyles.get(); write_config(self)
         self.v_cstat.set("색인 중…")
         def t():
             try:
@@ -1769,7 +1836,7 @@ class App(tk.Tk):
                 "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) + extra + self._read_opts(print_offset=False, force=self.v_cforce.get())
         if apply: argv.append("--apply")
         argv += ["--memo", self.collate_memo_mode()] + self._glyph_opts()
-        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode()}); save_config(self.cfg)
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode()}); write_config(self)
         self.nb.select(0)
         self.start(argv, ("교정 반영·저장" if apply else "대조") + f" — {row['name'][:20]}")
 
@@ -1789,7 +1856,7 @@ class App(tk.Tk):
                 "--anchor-source", self.anchor_source(), "--policy", self.collate_policy()] + (["--heading-styles", ",".join(self.heading_styles_list())] if self.heading_styles_list() else []) \
                + self._read_opts(print_offset=False, force=self.v_cforce.get())
         argv += ["--memo", self.collate_memo_mode()] + self._glyph_opts()
-        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode()}); save_config(self.cfg)
+        self.cfg.update({"hwpx": self.v_hwpx.get().strip(), "collate_pdf": self.v_pdf2.get().strip(), "collate_policy": self.collate_policy(), "collate_memo": self.collate_memo_mode()}); write_config(self)
         self.nb.select(0)
         self.start(argv, "HWPX 전체 교정", open_after=self.work2() / "collate" / "_전체_요약.html")
 
@@ -1913,6 +1980,8 @@ class App(tk.Tk):
                 o += ["--template", tpl]
             if getattr(self, "v_bold", None) is not None and not self.v_bold.get():
                 o.append("--no-bold")
+            if getattr(self, "v_structure", None) is not None and App.structure_key(self) != "auto":
+                o += ["--structure", App.structure_key(self)]
         if not self.v_join.get(): o.append("--no-join-pages")
         if not self.v_hl.get(): o.append("--no-highlight")
         if not self.v_ctx.get(): o.append("--no-context")
@@ -1927,11 +1996,16 @@ class App(tk.Tk):
     def layout_key(self) -> str:
         return next((k for k, v in LAYOUT_LABELS.items() if v == self.v_layout.get()), "page")
 
+    def structure_key(self) -> str:
+        v = self.__dict__.get("v_structure")
+        return next((k for k, lab in STRUCTURE_LABELS.items() if v is not None and lab == v.get()), "auto")
+
     def _layout_changed(self, *_):
         """짜임에 쓰이지 않는 칸은 흐리게: 내용별이면 '쪽마다 쪽 나누기', 원본 쪽대로면 양식 칸·획 굵기(값은 그대로 둔다).
         양식 [고르기…]는 늘 눌리게 둔다 — 고르면 내용별로 바뀐다."""
         flow = self.layout_key() == "flow"
-        for w, on in ((getattr(self, "cb_pb", None), not flow), (getattr(self, "te_template", None), flow), (getattr(self, "cb_bold", None), flow)):
+        for w, on in ((getattr(self, "cb_pb", None), not flow), (getattr(self, "te_template", None), flow), (getattr(self, "cb_bold", None), flow),
+                      (getattr(self, "cb_structure", None), flow)):
             if w is not None:
                 w.state(["!disabled"] if on else ["disabled"])
 
@@ -1963,7 +2037,7 @@ class App(tk.Tk):
 
     def toggle_advanced(self):
         self.v_adv.set(not self.v_adv.get()); self._apply_advanced()
-        self.cfg["advanced_open"] = self.v_adv.get(); save_config(self.cfg)
+        self.cfg["advanced_open"] = self.v_adv.get(); write_config(self)
         if self.v_adv.get():
             self.after(60, lambda: self._reveal(self.adv_frame))          # 펼친 단추들이 화면 밖이면 보이게 굴린다
 
@@ -1977,7 +2051,7 @@ class App(tk.Tk):
 
     def toggle_details(self):
         self.v_details.set(not self.v_details.get()); self._apply_details()
-        self.cfg["details_open"] = self.v_details.get(); save_config(self.cfg)
+        self.cfg["details_open"] = self.v_details.get(); write_config(self)
         if self.v_details.get():
             self.after(60, lambda: self._reveal(self.details))
 
@@ -1991,8 +2065,10 @@ class App(tk.Tk):
             self.after_idle(self._fit_sash)
 
     def _prepare_env(self) -> bool:
+        """실행 전 점검: API 키(모델을 부르지 않는 실행은 묻지 않는다 — do_build 가 _env_need_key=False 를 둔다)·호출 상한 값, 그리고 설정 저장."""
         reader = self.v_reader.get()
-        if reader != "mock":
+        need_key = self.__dict__.pop("_env_need_key", True)
+        if reader != "mock" and need_key:
             from .readers import split_keys, normalize_key, key_shape_warning
             env_keys = ENV_KEYS[reader]
             raw = self.v_key.get().strip() or next((os.environ[n] for n in env_keys if os.environ.get(n)), "")
@@ -2172,7 +2248,7 @@ class App(tk.Tk):
         self.select_tab(2)
         self._reset_screenshot_pages()
         self.v_pdf.set(""); self.cfg["last_pdf"] = ""
-        self._remember_inputs(); save_config(self.cfg)
+        self._remember_inputs(); write_config(self)
         self.refresh_table()
         self.open_after = None
         self.progress.configure(value=0); self.v_prog.set("")
@@ -2247,7 +2323,7 @@ class App(tk.Tk):
         self.cfg["image_mode"] = self.mode_key(2)
 
     def _use_pdf(self, p: str):
-        self.v_pdf.set(p); self.cfg["last_pdf"] = p; self._remember_inputs(); save_config(self.cfg); self.refresh_table()
+        self.v_pdf.set(p); self.cfg["last_pdf"] = p; self._remember_inputs(); write_config(self); self.refresh_table()
         kind = "이미지" if Path(p).suffix.lower() in IMAGE_EXTS else "PDF"
         self._append(f"{kind}: {p}\n결과 폴더: {self.work()}\n")
         if kind == "이미지" and self.mode_key() == "auto":
@@ -2412,11 +2488,11 @@ class App(tk.Tk):
             self.cfg["textlayer_pdf"] = self.v_tlpdf.get()
         if getattr(self, "v_layout", None) is not None:
             self.cfg.update({"layout": self.layout_key(), "template": self.v_template.get().strip(), "bold_split": bool(self.v_bold.get()),
-                             "context_model": bool(self.v_ctxmodel.get())})
+                             "context_model": bool(self.v_ctxmodel.get()), "structure": App.structure_key(self)})
         mc = max_calls_value(self.v_maxcalls.get())
         self.cfg["max_calls"] = mc if mc is not None else self.cfg.get("max_calls", 0)     # 잘못 넣은 값은 저장하지 않는다(실행은 _prepare_env 가 막음)
         self._remember_inputs()
-        save_config(self.cfg)
+        write_config(self)                                     # 파일을 새로 읽어 이 창이 바꾼 값만 얹는다 — 다른 창이 저장한 양식·짜임을 되돌리지 않게
         if not quiet:
             self.v_status.set(f"설정 저장됨 → {CONFIG_PATH}")
 
@@ -2433,7 +2509,7 @@ class App(tk.Tk):
     def _fx_fetched(self, rate: float, day: str):
         self._fx = (rate, "오늘 자동 조회")
         self.cfg["fx_auto"] = rate; self.cfg["fx_auto_date"] = day
-        save_config(self.cfg)
+        write_config(self)
 
     def fx_setting(self) -> tuple[float | None, str]:
         """환율: 직접 입력값 > 자동 조회값 > (없음 → estimate 가 기본값을 씀)."""
@@ -2506,7 +2582,9 @@ class App(tk.Tk):
             self.start(["read", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts(), "③ 판독")
 
     def do_build(self):
-        if self._need_pdf() and self._prepare_env():
+        ctx = self.__dict__.get("v_ctxmodel")
+        self._env_need_key = ctx is None or bool(ctx.get())                  # 문맥 교정 모델을 끈 문서 만들기는 API 키가 없어도 된다
+        if self._need_pdf() and self._prepare_env() and template_ok(self):
             extra = self._confirm_model_steps(adjudicate=False)            # 문서 만들기도 문맥 교정으로 모델을 부른다
             if extra is None:
                 return
@@ -2538,19 +2616,38 @@ class App(tk.Tk):
             per.append(len(sites)); skipped += k
         return sum(per), skipped, sum(-(-n // 8) for n in per if n)
 
-    def _model_step_plan(self, adjudicate: bool) -> tuple[int, dict | None, tuple[int, int, int]] | None:
-        """이미 판독한 쪽에서 모델을 더 부를 단계의 어림(모델 호출 없음): (판독 기록 쪽 수, 문맥 교정 어림 또는 None, 3차 (자리, 건너뜀, 묶음 호출))."""
+    def _model_step_plan(self, adjudicate: bool) -> tuple[int, dict | None, tuple[int, int, int], str, tuple[int, int]] | None:
+        """이미 판독한 쪽에서 모델을 더 부를 단계의 어림(모델 호출 없음):
+        (판독 기록 쪽 수, 문맥 교정 어림 또는 None, 3차 (자리, 건너뜀, 묶음 호출), 어림하지 못한 까닭 또는 "", 합의 의심 (자리, 묶음 호출)).
+        기록이 아직 없으면 None(새로 판독하는 실행 — 판독 비용 창이 대신한다). 기록을 읽지 못했거나 3차·합의 의심·문맥 교정 어림이 예외로
+        실패하면 까닭(예외 종류·메시지 앞 80자)을 적어 돌려준다 — 묻지도 않고 모델을 부르는 일이 없게."""
+        def why(what: str, e: Exception) -> str:
+            return f"{what}: {type(e).__name__}: {str(e)[:80]}"
+        trouble = ""; sus = (0, 0)
         try:
             from .state import Work
             from .pdfio import parse_pages, open_pdf
             w = Work(self.pdf(), str(self.work()), initialize=False)
             with open_pdf(self.pdf()) as doc:
                 recs = w.records(parse_pages(self.v_pages.get().strip() or None, len(doc)), repair=False)
-        except Exception:
-            return None
+                vs = self.__dict__.get("v_suspects")
+                if adjudicate and recs and vs is not None and vs.get():          # 합의 의심(入/人 같은 자형 쌍)도 모델 호출 — 〔a/b〕 가 없어도 돈이 나간다
+                    try:
+                        from . import cli
+                        from .adjudicate import suspects_pending, suspect_freq, SUSPECT_MAX
+                        freq = suspect_freq(w.dir)
+                        ks = [suspects_pending(r, cli._load_layer(w, doc, r["pdf_page"]).get("plain", ""), SUSPECT_MAX, False, freq) for r in recs]
+                        sus = (sum(ks), sum(-(-k // 8) for k in ks if k))
+                    except Exception as e:
+                        trouble = why("합의 의심 어림 실패", e)
+        except Exception as e:
+            return 0, None, (0, 0, 0), why("판독 기록을 읽지 못함", e), (0, 0)
         if not recs:
             return None
-        glyph = self._glyph_plan(recs) if adjudicate else (0, 0, 0)
+        try:
+            glyph = self._glyph_plan(recs) if adjudicate else (0, 0, 0)
+        except Exception as e:
+            glyph = (0, 0, 0); trouble = (trouble + " · " if trouble else "") + why("3차 판별 어림 실패", e)
         norm = None
         ctx = self.__dict__.get("v_ctxmodel")                           # getattr 은 Tk 가 덜 만들어진 창에서 무한 재귀(시험·옛 설정)
         if ctx is not None and ctx.get():
@@ -2560,47 +2657,70 @@ class App(tk.Tk):
                 pass
             try:
                 from . import cli
+                join = self.__dict__.get("v_join")
                 norm = cli.normalization_plan(w, recs, self.v_reader.get(), self._glyph_model(),
-                                              self.layout_key() if self.__dict__.get("v_layout") is not None else "page")
-            except Exception:
-                norm = None
-        return len(recs), norm, glyph
+                                              layout=self.layout_key() if self.__dict__.get("v_layout") is not None else "page",
+                                              join_pages=join is None or bool(join.get()), structure=App.structure_key(self))   # 시험의 가짜 창에도 맞게 클래스로
+            except Exception as e:
+                trouble = (trouble + " · " if trouble else "") + why("문맥 교정 어림 실패", e)
+        return len(recs), norm, glyph, trouble, sus
 
     def _confirm_model_steps(self, adjudicate: bool = True) -> list[str] | None:
         """[▶ 한 번에 인식]·[④ 문서 만들기] 전에, 이미 판독한 쪽에서 3차 판별·번체 문맥 교정으로 모델에 물을 수와 호출 어림을 보여 주고 고르게 한다.
-        [] = 그대로 · [아니요] = 그 단계들을 모델 없이(--no-adjudicate · --no-context-model) · None = 취소.
-        물을 것이 없거나 셀 수 없으면 묻지 않고 []. 다시 판독하는 실행은 기록이 새로 생기므로 판독 비용 창이 대신한다."""
+        [] = 그대로 · [아니요] = 그 단계들을 모델 없이(run 은 --no-adjudicate, 문맥 교정 모델이 켜져 있으면 --no-context-model) · None = 취소.
+        물을 것이 없으면 묻지 않고 []. 어림을 하지 못했으면(기록을 읽지 못함·어림 중 예외) 까닭을 보이고 그래도 모델 단계를 실행할지 묻는다
+        (기본 단추 [아니요]). 기록이 아직 없는 실행은 새로 생기는 기록이라 판독 비용 창이 대신한다."""
         if self.v_reader.get() == "mock" or (adjudicate and self.v_force.get()):
             return []
         plan = self._model_step_plan(adjudicate)
         if plan is None:
             return []
-        pages, norm, (n, skipped, calls) = plan
+        pages, norm, (n, skipped, calls), trouble, (n_sus, sus_calls) = plan
         from .cli import CHOICE_BATCH
         ask = (norm or {}).get("ask", 0)
-        if not n and not ask:
-            return []
+        ctx = self.__dict__.get("v_ctxmodel")
+        ctx_on = ctx is not None and bool(ctx.get())
+        without = (["--no-adjudicate"] if adjudicate else []) + (["--no-context-model"] if ctx_on else [])
+        if trouble:
+            try:
+                self._append(f"어림 실패: {trouble}\n")
+            except Exception:
+                pass
+        if not n and not ask and not n_sus:
+            if not trouble:
+                return []
+            ans = messagebox.askyesnocancel(APP_NAME, f"모델 호출 수를 어림하지 못했습니다({trouble}).\n그래도 모델 단계(3차 판별·문맥 교정)를 실행할까요?\n\n"
+                                            "[예] 그대로 실행\n[아니요] 모델 없이 실행(--no-adjudicate --no-context-model)\n[취소] 실행하지 않음", default=messagebox.NO)
+            if ans is None:
+                return None
+            return [] if ans else without
         lines = [f"이미 판독한 {pages}쪽에서 모델을 더 부르는 단계입니다.", ""]
         if n:
             lines.append(f"■ 3차 글자 판별: 〔a/b〕 자리 {n:,}곳 — 8자리씩 묶어 약 {calls:,}회, 묶음 답이 조각과 맞지 않은 자리는 하나씩 다시 물어 최대 약 {calls + n:,}회"
                          + (f", 고른 자리를 후보 없이 한 번 더 읽는 데 최대 약 {calls:,}회 더" if self.v_blind.get() else "") + ".")
             if skipped:
                 lines.append(f"   같은 모델({self._glyph_model()})이 앞서 물어 고르지 못한 {skipped:,}곳은 다시 묻지 않습니다.")
+        if n_sus:
+            lines.append(f"■ 합의 판독 의심: 1·2차가 같게 읽었지만 글자층과 자형이 헷갈리는 자리 {n_sus:,}곳 — 8자리씩 묶어 약 {sus_calls:,}회(저해상 자리는 빠짐).")
         if ask:
             lines.append(f"■ 번체 문맥 교정: 후보 {norm['total']:,}건 가운데 새로 물을 것 약 {ask:,}건 — {CHOICE_BATCH}건씩 약 {norm['calls']:,}회.")
             if norm["reused"] or norm["remembered"]:
                 lines.append(f"   앞서 고른 답 {norm['reused']:,}건은 다시 쓰고, 이 모델이 이미 물어 못 고른 {norm['remembered']:,}건은 다시 묻지 않습니다.")
+        if trouble and (n or ask or n_sus):
+            lines.append(f"■ 어림하지 못한 단계: {trouble} — [예] 면 그 단계도 그대로 실행합니다.")
         lines += ["", "글자가 작아 묻지 않는 자리는 빠지므로 실제 호출은 이보다 적을 수 있고, 새로 판독하는 쪽에서 생기는 것은 더해집니다.", "",
                   "[예] 모두 실행",
-                  "[아니요] 이 단계들은 모델 없이 실행 — 〔a/b〕 와 갈리는 번체 후보는 원문대로 남습니다(나중에 따로 할 수 있음)",
+                  (("[아니요] 이번 실행에서 3차 판별(합의 의심 포함)과 문맥 교정 모델을 모두 끔 — 새로 판독한 쪽도 포함. 〔a/b〕 와 갈리는 번체 후보는 원문대로 남습니다(나중에 따로 할 수 있음)"
+                    if ctx_on else "[아니요] 이번 실행에서 3차 판별(합의 의심 포함)을 끔 — 새로 판독한 쪽도 포함. 〔a/b〕 는 그대로 남습니다(나중에 따로 할 수 있음)")
+                   if adjudicate else "[아니요] 문맥 교정을 모델 없이 실행 — 갈리는 번체 후보는 원문대로 남습니다(나중에 따로 할 수 있음)"),
                   "[취소] 실행하지 않음"]
         ans = messagebox.askyesnocancel(APP_NAME, "\n".join(lines))
         if ans is None:
             return None
-        return [] if ans else (["--no-adjudicate"] if n else []) + (["--no-context-model"] if ask else [])
+        return [] if ans else without
 
     def do_run(self):
-        if self._need_pdf() and self._prepare_env() and self._confirm_cost():
+        if self._need_pdf() and self._prepare_env() and template_ok(self) and self._confirm_cost():
             glyph = self._confirm_model_steps(adjudicate=True)
             if glyph is None:
                 return
@@ -2721,7 +2841,7 @@ class App(tk.Tk):
     # ---------- 업데이트 ----------
     def _save_update_preference(self):
         self.cfg["auto_update"] = self.v_auto_update.get()
-        save_config(self.cfg)
+        write_config(self)
 
     def check_updates(self, manual=True):
         if getattr(self, "_closing", False) or self._update_installing:
