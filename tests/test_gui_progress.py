@@ -286,6 +286,51 @@ class ProgressCardRealTk(unittest.TestCase):
             self.assertEqual(app._want_row, 3)
         app.v_nb.set(0); app.nb.select(0); app.__dict__.pop("_want_row", None)
 
+    def test_6_page_events_drive_strip_big_line_and_calls(self):
+        """큐의 쪽 알림('page', 쪽, 상태)과 호출 수를 실은 진행 알림이 쪽 띠·범례·큰 숫자 줄·단계 몫을 움직이고, 멈추면 남은 '지금'은 '남음'."""
+        app = self.app; gui = self.gui; app.select_tab(0); app._use_pdf(str(self.pdf)); self.wait_strip()
+        app._run_label = "한 번에 인식 (전체 → HWPX)"
+        app._set_running(True, "run"); app._calls_live = True
+        items = [("progress", "prepare", 0, 0, 0), ("page", 1, "record")] + [("page", n, "remain") for n in (2, 3, 4, 5)]
+        items += [("progress", "read", 0, 4, 0), ("page", 2, "now"), ("page", 3, "now"), ("page", 2, "done"), ("progress", "read", 1, 4, 3),
+                  ("page", 4, "now"), ("page", 3, "fail"), ("progress", "read", 2, 4, 5), ("page", 5, "now"), ("page", 9, "bogus")]
+        for it in items:
+            app.q.put(it)
+        try:
+            with mock.patch.object(gui.App, "_call_count", return_value=5):
+                self.settle()
+                self.assertEqual(app._strip_marks, {1: "record", 2: "done", 3: "fail", 4: "now", 5: "now"})
+                self.assertEqual((app._calls_by_stage, app._calls_used), ({"read": 5}, 5))
+                big = "".join(w.cget("text") for w in app._big_left.winfo_children())
+                self.assertIn("지금 4~5쪽 판독 중 (동시 2쪽)", big)
+                legend = [app.c_legend.itemcget(i, "text") for i in app.c_legend.find_all()
+                          if app.c_legend.type(i) == "text" and app.c_legend.itemcget(i, "text") != "!"]     # '!' 은 실패 견본 속 글
+                self.assertEqual(legend, ["끝남 1", "지금 2", "실패 1", "기록 있음 · 건너뜀 1", "남음 0"])
+                app.q.put(("page", 4, "done")); app.q.put(("done", 130, app._run_label))
+                self.settle()
+        finally:
+            if app.running:
+                app._set_running(False)
+            self.settle()
+        self.assertEqual(app._run_result["calls"], 5)
+        self.assertEqual(app._strip_marks[4], "done"); self.assertEqual(app._strip_marks[5], "remain")      # 멈춘 쪽은 남음
+        gui.App._on_page(app, 5, "now")                                                                     # 끝난 뒤 늦게 온 알림은 버림
+        self.assertEqual(app._strip_marks[5], "remain")
+        app._run_result = None; app._strip_marks = {}; app.__dict__.pop("_page_live", None)
+
+    def test_7_page_events_only_for_this_tab_read(self):
+        """책갈피 교정(다른 PDF의 쪽을 판독)·문서 만들기 같은 명령의 쪽 알림은 이 탭의 쪽 띠를 바꾸지 않는다."""
+        app = self.app; app.select_tab(0); app._use_pdf(str(self.pdf)); self.wait_strip()
+        for cmd in ("collate", "build"):
+            app._set_running(True, cmd)
+            before = dict(app._strip_marks)
+            try:
+                self.gui.App._on_page(app, 2, "now")
+                self.assertEqual(app._strip_marks, before, cmd)
+            finally:
+                app._set_running(False)
+        self.assertIn("run", self.gui.PAGE_CMDS); self.assertIn("read", self.gui.PAGE_CMDS); self.assertNotIn("collate", self.gui.PAGE_CMDS)
+
     def test_5_collate_open_buttons_are_not_locked(self):
         app = self.app
         texts = {}

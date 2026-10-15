@@ -174,7 +174,7 @@ class Ledger(unittest.TestCase):
     def test_ledger_rows_group_steps_and_without_choice(self):
         app = self.app(None)
         self.plan(app)
-        app._calls_by = {}
+        app._calls_by_stage = {}
         view = self.gui.App._ledger_rows(app, app._ledger, False, False, False, False, None)
         names = [g[0] for g in view[:-1]]
         self.assertEqual(names, ["판독", "모델 단계"])
@@ -182,10 +182,19 @@ class Ledger(unittest.TestCase):
         self.assertFalse(view[0][2])
         self.assertTrue(view[0][3].startswith("예상 "))
         self.assertEqual(view[-1][1], "합계")
+        app._calls_by_stage = {"prepare": 0, "read": 2}; app._calls_tail = ("read", 1)    # 이번 실행: 판독 몫 3회(알림 사이에 읽은 1회 포함)
+        led = dict(app._ledger, choice="all")
+        view = self.gui.App._ledger_rows(app, led, True, True, False, False, 3)
+        hi = sum(r["calls"][1] for r in led["rows"] if r["step"] in ("read1", "read2"))
+        self.assertTrue(view[0][3].startswith("호출 3회 / 예상 "), view[0][3])
+        self.assertEqual(view[0][5], "over" if 3 > hi else "plain")
+        self.assertTrue(view[1][3].startswith("아직 · 예상 "))                            # 모델 단계는 아직
+        app._calls_by_stage = {"read": hi + 4}; app._calls_tail = None
+        self.assertEqual(self.gui.App._ledger_rows(app, led, True, True, False, False, hi + 4)[0][5], "over")   # 어림보다 많으면 주의 색
         led = dict(app._ledger, choice="without")
         view = self.gui.App._ledger_rows(app, led, True, True, False, False, 3)
         self.assertEqual(view[1][3], "이번엔 뺌")
-        self.assertTrue(all(r[1] == "이번엔 뺌" for r in view[1][4]))
+        self.assertTrue(all(r[1] == "이번엔 뺌" and r[2] == "muted" for r in view[1][4]))   # 모델 단계 줄은 지우지 않고 흐리게
         self.assertEqual(view[-1][1], "합계(이번 실행)")
 
     def test_load_ledger_reads_saved_file_and_ignores_broken(self):

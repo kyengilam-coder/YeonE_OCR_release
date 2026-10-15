@@ -532,6 +532,7 @@ CLEARED_STATUS = "새 이미지나 스크린샷을 입력하십시오"          
 COPY_TIP = "실행 중에는 읽기용 사본을 엽니다 — 실행이 끝날 때 이 파일을 다시 쓰는데, 한글·PDF 뷰어가 쥐고 있으면 저장이 막히기 때문입니다."
 TAG_TIP = "[아니요]면 뺌: 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 빠지는 단계"
 LEDGER_GROUPS = (("판독", "1차·2차", ("read1", "read2")), ("모델 단계", "", ("glyph", "suspect", "choice")))   # 장부 묶음(비용 창의 run 묶음과 같은 단계)
+PAGE_CMDS = ("run", "run-pdf", "read")       # 쪽 띠를 쪽 알림(cli.PAGE_EVENT)으로 움직이는 명령 — 이 탭 원본의 쪽을 판독한다
 
 
 def finish_caption(rc, cmd: str, failed: bool) -> str:
@@ -2738,10 +2739,12 @@ class App(tk.Tk):
         # ---- 장부 ----
         led = self._led_card = ttk.Frame(self._work, style="Card.TFrame", padding=(P(18), P(16)))    # _place_cards 가 오른쪽 단(한 단이면 진행 아래)에
         lb = self._led_body = tk.Frame(led, bg=C["PANEL"]); lb.pack(fill="both", expand=True); lb.columnconfigure(0, weight=1)
-        head = tk.Frame(lb, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
-        L(head, "장부", "SECTION").pack(side="left")
+        head = self._led_head = tk.Frame(lb, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
+        self._led_title = L(head, "장부", "SECTION"); self._led_title.pack(side="left")
         self.l_led_cap = L(head, "", "CAP", "MUTED", wrap=True)          # 긴 캡션('이 명령은 따로 셈 — …')은 줄을 바꿔 오른쪽 단(340)을 넓히지 않게
         self.l_led_cap.pack(side="left", fill="x", expand=True, padx=(P(8), P(6)), pady=(P(2), 0))
+        self._led_cap_below = False
+        head.bind("<Configure>", lambda _e: App._place_led_cap(self), add="+")
         self.b_estimate = self._btn(head, "비용 미리 보기", self.do_estimate, style="Link.TButton",
                                     tip="[▶ 한 번에 인식 (HWPX 만들기)]의 판독·3차 판별·합의 의심·문맥 교정 호출·토큰·금액을 한 창에 어림합니다"
                                         "(기록 있는 쪽은 정확히, 새로 읽을 쪽은 이 책 평균으로). 아무것도 쓰지 않고 결과 폴더도 만들지 않습니다.")
@@ -2994,30 +2997,40 @@ class App(tk.Tk):
         cap = getattr(mod, "CALL_CAP", None)
         return int(getattr(cap, "used", 0)) if cap is not None else None
 
-    def _poll_calls(self) -> bool:
-        """실행 중 호출 수를 읽어 지금 단계 몫에 더한다(판독 → 판독 묶음, 3차 판별·문서 만들기 → 모델 단계 묶음). 바뀌었으면 True."""
+    def _count_calls(self, snap: int | None = None) -> bool:
+        """이번 실행의 모델 호출(재시도 포함, CALL_CAP.used)을 단계 몫으로 나눈다(명세 §9 _calls_by_stage — 장부의 '호출 n회 / 예상 m회').
+        snap 은 진행 알림이 가져온 그때의 수(명령 스레드에서 알림과 함께 읽음): 그 알림 앞의 호출은 모두 앞 단계 몫으로 확정한다 — 알림이
+        큐에 쌓여 늦게 와도 앞 단계의 호출이 다음 단계로 새지 않는다. None 이면 지금 수를 읽어 다음 알림까지 지금 단계 몫으로 잠시 보인다(100ms 마다).
+        명령(cli.main)이 CALL_CAP 을 0 으로 돌린 뒤의 수만 믿도록 첫 알림 전에는 읽은 수를 쓰지 않는다(끝에서 snap 으로 한 번에 셈). 바뀌었으면 True."""
         d = vars(self)
-        used = App._call_count()
-        if used is None or not d.get("running"):
-            return False
-        seen = d.get("_calls_seen", 0)
-        if used < seen:                                                 # 명령이 시작하며 0 으로 돌렸다(앞 명령의 남은 수)
-            seen = 0
-        if used == seen:
+        if not d.get("running") or not d.get("_calls_live"):
             return False
         stage = getattr(d.get("tracker"), "stage", "") or ""
-        group = "read" if stage in ("prepare", "read") else "model" if stage in ("adjudicate", "build") else "other"
-        by = d.setdefault("_calls_by", {}); by[group] = by.get(group, 0) + used - seen
-        self._calls_seen = used; self._calls_used = sum(by.values())
-        return True
+        before = d.get("_calls_used")
+        by = d.setdefault("_calls_by_stage", {})
+        if snap is not None:
+            base = d.get("_calls_base") or 0
+            if snap > base:
+                by[stage] = by.get(stage, 0) + snap - base
+            self._calls_base = snap; tail = 0
+        else:
+            base, used = d.get("_calls_base"), App._call_count()
+            if base is None or used is None:
+                return False
+            tail = max(0, used - base)
+        self._calls_tail = (stage, tail)
+        self._calls_used = sum(by.values()) + tail
+        return self._calls_used != before
 
     def _sync_ledger(self) -> None:
         """장부: 머리 캡션(마지막 어림 · HWPX 만들기/문자 PDF · 미리 보기 어림 · 어림 다시 필요 · 어림 전 · 실행 중 '금액은 실행 전 어림 · 호출은 실제'),
-        이번 실행 줄, 원화·달러, 호출 막대(어림 범위 BAND · 실제 INK), 묶음(판독 · 모델 단계 [아니요]면 뺌)과 줄, 합계."""
+        이번 실행 줄, 원화·달러, 호출 막대(어림 범위 BAND · 실제 INK), 묶음(판독 · 모델 단계 [아니요]면 뺌)과 줄, 합계.
+        [아니요 · 모델 단계 없이]로 시작한 실행은 금액·막대의 어림도 판독 줄만(합계(이번 실행)와 같은 셈 — gui_progress.run_totals)."""
         d = vars(self)
         if "l_led_cap" not in d:
             return
         from .estimate import fmt_krw
+        from .gui_progress import run_totals
         C, F = self.colors, self.fonts
         led = d.get("_ledger"); has = bool(self.pdf())
         running = bool(self.running); cmd = (d.get("_running_cmd") or "") if running else ""
@@ -3027,6 +3040,8 @@ class App(tk.Tk):
         stale = led is not None and not live and not running and App._ledger_stale(self, led)
         self._led_stale = stale                                          # 진행 카드의 단계 띠 비용 줄도 같은 판정('어림 다시 필요')
         pdf_act = bool(led) and led.get("action") == "pdf"
+        without = live and led.get("choice") == "without"
+        tot = run_totals(led, without)
         # 머리 캡션
         cap_fg = C["MUTED"]
         if other:
@@ -3042,13 +3057,13 @@ class App(tk.Tk):
         else:
             cap = "미리 보기 어림 · 저장 안 함"
         self.l_led_cap.configure(text=cap, fg=cap_fg)
+        App._place_led_cap(self)
         # 이번 실행 줄
         if live:
             tail = ""
             if not running and res:
                 tail = {"ok": " · 끝", "partial": " · 끝", "stopped": " · 중지됨"}.get(res.get("kind"), " · 오류로 멈춤")
-            parts = ("이번 실행: ", "예 · 모두 실행" if led.get("choice") != "without" else "아니요 · 모델 단계 없이",
-                     " · " + ("문자 PDF" if pdf_act else "HWPX") + tail)
+            parts = ("이번 실행: ", "아니요 · 모델 단계 없이" if without else "예 · 모두 실행", " · " + ("문자 PDF" if pdf_act else "HWPX") + tail)
         elif led is None:
             parts = ("[비용 미리 보기]로 어림할 수 있습니다 — 실행 단추를 눌러도 먼저 어림해 묻습니다" if has
                      else "원본을 고르면 [비용 미리 보기]로 어림할 수 있습니다", "", "")
@@ -3061,29 +3076,28 @@ class App(tk.Tk):
         else:
             self.l_led_note.configure(text=parts[0])
             self._led_choice.grid_remove(); self.l_led_note.grid(row=1, column=0, sticky="ew", pady=(self.px(6), 0))
-        # 금액
+        # 금액(이번 실행의 어림)
         model_now = self.v_model.get().strip()
         amt_fg = C["MUTED"] if stale else C["INK"]
         if led is None:
             amount, usd = "—", f"$ — · {model_now}"
         else:
-            t = led.get("totals") or {}
             models = ", ".join(led.get("models") or [led.get("model", "")])
-            if t.get("usd") is not None and led.get("krw"):
-                amount = f"약 {fmt_krw(led['krw'][0])} ~ {fmt_krw(led['krw'][1])}"
-                usd = f"$ {t['usd'][0]:.2f} ~ {t['usd'][1]:.2f} · {models}"
+            if tot["usd"] is not None and tot["krw"]:
+                amount = f"약 {fmt_krw(tot['krw'][0])} ~ {fmt_krw(tot['krw'][1])}"
+                usd = f"$ {tot['usd'][0]:.2f} ~ {tot['usd'][1]:.2f} · {models}"
             else:
                 amount = "금액을 다 낼 수 없음"
-                known = t.get("usd_known") or [0, 0]
-                usd = (f"아는 부분만 $ {known[0]:.2f} ~ {known[1]:.2f} · " if known[1] else "") + f"단가 없는 모델: {', '.join(t.get('missing_prices') or [])}"
+                known = tot["known"]
+                usd = (f"아는 부분만 $ {known[0]:.2f} ~ {known[1]:.2f} · " if known[1] else "") + f"단가 없는 모델: {', '.join(tot['missing'])}"
         self.l_led_amount.configure(text=amount, fg=amt_fg, font=F["NUM"] if led is None or amount.startswith("약") else F["BODY_B"])
         self.l_led_usd.configure(text=usd)
-        # 호출 막대
+        # 호출 막대: 이번 실행 호출(실제, 재시도 포함) 대 어림 범위
         used = d.get("_calls_used") if (live or other) else None
         if live and not running and res:
             used = res.get("calls", used)
         if led is not None or other:
-            calls = (led.get("totals") or {}).get("calls") if led is not None and not other else None
+            calls = tot["calls"] if tot is not None and not other else None
             self._led_used[0].configure(text="이번 명령 호출 " if other else "이번 실행 호출 ")
             over = bool(calls and used is not None and used > calls[1])
             self._led_used[1].configure(text="—" if used is None else (f"어림보다 많음 · {used:,}회" if over else f"{used:,}회"), fg=C["WARN"] if over else C["INK"])
@@ -3104,56 +3118,87 @@ class App(tk.Tk):
             App._draw_calls_bar(self)
         else:
             self._led_bar.grid_remove(); self._led_bar_vals = None
-        # 묶음과 줄
+        # 묶음과 줄 — 줄은 바뀌었을 때만 다시 만들고, 묶음 머리 오른쪽(실제 대 어림 호출)은 제자리에서 고친다
         view = App._ledger_rows(self, led, live, running, other, stale, used)
-        if view != d.get("_led_view"):
-            self._led_view = view
+        shape = tuple(g[:3] + (g[4],) for g in view[:-1]) + (view[-1],)
+        if shape != d.get("_led_view"):
+            self._led_view = shape
             App._draw_ledger_rows(self, view)
+        for g, heads in zip(view[:-1], d.get("_led_heads") or ()):
+            App._set_group_right(self, heads, g[3], g[5] if len(g) > 5 else "plain")
         total, total_name = view[-1]
         self.l_led_total.configure(text=total, fg=amt_fg if total != "—" else C["INK"])
         self.l_led_total_name.configure(text=total_name)
 
+    def _place_led_cap(self) -> None:
+        """장부 머리 캡션: '장부'와 [비용 미리 보기] 사이 한 줄에 들어가면 그 사이에, 아니면 머리 아래 제 줄에 온 너비로
+        (좁은 사이에서 두 줄로 접혀 '장부' 옆에 매달리지 않게 — 실행 중 '금액은 실행 전 어림 · 호출은 실제'는 오른쪽 단 304에 빠듯함)."""
+        d = vars(self); head, lab, title, btn = d.get("_led_head"), d.get("l_led_cap"), d.get("_led_title"), d.get("b_estimate")
+        if head is None or lab is None:
+            return
+        P = self.px
+        try:
+            width = head.winfo_width()
+            if width <= 1:
+                return
+            need = title.winfo_reqwidth() + P(8) + self._font("CAP").measure(lab.cget("text")) + P(6) + btn.winfo_reqwidth()
+        except tk.TclError:
+            return
+        below = need > width
+        if below == d.get("_led_cap_below"):
+            return
+        self._led_cap_below = below
+        lab.pack_forget()
+        if below:
+            lab.pack(side="bottom", fill="x", before=title, pady=(P(2), 0))
+        else:
+            lab.pack(side="left", fill="x", expand=True, padx=(P(8), P(6)), pady=(P(2), 0), after=title)
+
     def _ledger_rows(self, led: dict | None, live: bool, running: bool, other: bool, stale: bool, used) -> tuple:
-        """장부 몸통의 그림 값(바뀌었을 때만 다시 그린다): 묶음마다 (이름, 부제, 꼬리표, 오른쪽 글, [(줄 이름, 금액 글, 꾸밈)]) + (합계 글, 합계 이름)."""
+        """장부 몸통의 그림 값: 묶음마다 (이름, 부제, 꼬리표, 오른쪽 글, [(줄 이름, 금액 글, 꾸밈)], 오른쪽 꾸밈) + (합계 글, 합계 이름).
+        오른쪽 글은 실행 전 '예상 n회', 이번 실행이면 '호출 31회 / 예상 90회'(아직 없으면 '아직 · 예상 …') — 실제는 단계별 호출(_calls_by_stage)의
+        묶음 몫, 어림보다 많으면 꾸밈 'over'(WARN). [아니요]로 시작한 실행은 모델 단계 줄을 지우지 않고 흐리게 '이번엔 뺌'."""
         from .costplan import LABELS, without_flags
+        from .gui_progress import calls_split, part_totals
         def money(v):
             return "단가 미입력" if v is None else (f"${v[0]:.2f}" if abs(v[0] - v[1]) < 0.005 else f"${v[0]:.2f}~{v[1]:.2f}")
         span = lambda c: f"{c[0]:,}" if c[0] == c[1] else f"{c[0]:,}~{c[1]:,}"
+        d = vars(self)
         without = bool(led) and led.get("choice") == "without" and live
-        by = vars(self).get("_calls_by") or {}
+        got_by = calls_split(d.get("_calls_by_stage"), d.get("_calls_tail"))
         groups = []
         tot_lo = tot_hi = 0.0; tot_missing = False
         for gi, (name, sub, steps) in enumerate(LEDGER_GROUPS):
             tag = gi == 1 and bool(without_flags("run", bool((led or {}).get("context_model", True))))
-            rows = []; calls = [0, 0]
+            rows = []
             for step in steps:
                 mine = [r for r in (led or {}).get("rows", []) if r.get("step") == step]
                 if not mine:
                     continue
-                c = [sum(r["calls"][0] for r in mine), sum(r["calls"][1] for r in mine)]
-                calls = [calls[0] + c[0], calls[1] + c[1]]
-                usd = None if any(r.get("usd") is None for r in mine) else [sum(r["usd"][0] for r in mine), sum(r["usd"][1] for r in mine)]
-                skip = without and gi == 1
-                if skip:
+                c, usd = part_totals(mine, (step,))
+                if without and gi == 1:
                     rows.append((LABELS.get(step, step), "이번엔 뺌", "muted"))
                     continue
-                if usd is None and c[1]:
+                if usd is None:
                     rows.append((LABELS.get(step, step), "단가 미입력", "warn")); tot_missing = True
                 elif not c[1]:
                     rows.append((LABELS.get(step, step), "$0.00", "muted"))
                 else:
                     rows.append((LABELS.get(step, step), money(usd), "stale" if stale else "money"))
                     tot_lo += usd[0]; tot_hi += usd[1]
+            calls, _ = part_totals((led or {}).get("rows"), steps)
+            look = "plain"
             if led is None or other:
                 right = "—"
             elif without and gi == 1:
                 right = "이번엔 뺌"
             elif live:
-                got = by.get("read" if gi == 0 else "model", 0)
+                got = got_by["read" if gi == 0 else "model"]
                 right = (f"호출 {got:,}회 / 예상 {span(calls)}회" if got else f"아직 · 예상 {span(calls)}회")
+                look = "over" if got > calls[1] else "plain"
             else:
                 right = f"예상 {span(calls)}회"
-            groups.append((name, sub, tag, right, tuple(rows)))
+            groups.append((name, sub, tag, right, tuple(rows), look))
         if led is None:
             total = ("—", "합계")
         elif tot_missing:
@@ -3169,7 +3214,8 @@ class App(tk.Tk):
         for c in box.winfo_children():
             c.destroy()
         r = 0
-        for name, sub, tag, right, rows in view[:-1]:
+        heads = []
+        for name, sub, tag, right, rows, *_ in view[:-1]:
             h = tk.Frame(box, bg=C["PANEL"]); h.grid(row=r, column=0, sticky="ew", pady=(P(6) if r else 0, 0)); r += 1
             L(h, image=self.icons["receipt"]).pack(side="left", padx=(0, P(5)))
             L(h, name, "CAP_B").pack(side="left")
@@ -3177,7 +3223,14 @@ class App(tk.Tk):
                 L(h, sub, "CAP", "MUTED").pack(side="left", padx=(P(5), 0))
             if tag:
                 t = ttk.Label(h, text=CostDialog.TAG, style="Tag.TLabel"); t.pack(side="left", padx=(P(6), 0)); Tip(t, TAG_TIP, self)
-            L(h, right, "CAP", "MUTED").pack(side="right")
+            rt = tk.Frame(h, bg=C["PANEL"]); rt.pack(side="right")
+            parts = (L(rt, "", "CAP", "MUTED"), L(rt, "", "CAP_B"), L(rt, "", "CAP", "MUTED"))
+            for part in parts:
+                part.pack(side="left")
+            head = {"parts": parts, "tips": [Tip(part, "", self) for part in parts], "spec": None, "row": h, "right": rt, "below": False}
+            heads.append(head)
+            for w in (h, rt):                                           # 오른쪽 글('호출 14회 / 예상 60~195회')이 꼬리표와 겹치면 아래 줄로
+                w.bind("<Configure>", lambda _e, hd=head: App._fit_group_head(self, hd), add="+")
             tk.Frame(box, bg=C["LINE"], height=max(1, P(1))).grid(row=r, column=0, sticky="ew", pady=(P(2), P(2))); r += 1
             for label, amount, look in rows:
                 row = tk.Frame(box, bg=C["PANEL"]); row.grid(row=r, column=0, sticky="ew", pady=(P(1), P(1))); r += 1
@@ -3185,6 +3238,48 @@ class App(tk.Tk):
                 L(row, label, "BODY", fg="MUTED" if look == "muted" else "INK").pack(side="left")
                 L(row, amount, "BODY_B" if look in ("money", "stale") else "BODY", fg=fg).pack(side="right")
                 App._leader(self, row).pack(side="left", fill="x", expand=True, padx=P(8))
+        self._led_heads = heads
+
+    def _fit_group_head(self, head: dict) -> None:
+        """묶음 머리: 왼쪽(영수증 · 이름 · 부제 · 꼬리표)과 오른쪽 호출 글이 한 줄에 들어가지 않으면 오른쪽을 아래 줄 오른쪽 끝으로(겹치지 않게)."""
+        h, rt = head["row"], head["right"]
+        try:
+            width = h.winfo_width()
+            if width <= 1:
+                return
+            def pads(w):                                                # pack 의 padx: 0 · 5 · (5, 0) · '5 0'
+                v = w.pack_info().get("padx", 0)
+                vals = [int(float(x)) for x in (str(v).replace("{", " ").replace("}", " ").split() if not isinstance(v, (tuple, list)) else v)]
+                return sum(vals) if len(vals) > 1 else 2 * (vals[0] if vals else 0)
+            left = sum(w.winfo_reqwidth() + pads(w) for w in h.pack_slaves() if w is not rt)
+            below = left + rt.winfo_reqwidth() + self.px(10) > width
+        except (tk.TclError, ValueError, IndexError):
+            return
+        if below == head["below"]:
+            return
+        head["below"] = below
+        rt.pack_forget()
+        if below:
+            rt.pack(side="bottom", anchor="e", before=h.pack_slaves()[0], pady=(self.px(1), 0))
+        else:
+            rt.pack(side="right")
+
+    def _set_group_right(self, head: dict, right: str, look: str) -> None:
+        """묶음 머리 오른쪽: '호출 **31회** / 예상 90회'(실제 굵게 먹 — 어림보다 많으면 주의 색), 그 밖에는 보조 글 한 조각."""
+        spec = (right, look)
+        if head.get("spec") == spec:
+            return
+        head["spec"] = spec
+        C = self.colors
+        a, b, c = head["parts"]
+        m = re.match(r"^(호출 )([\d,]+회)( / .*)$", right)
+        fg = C["WARN"] if look == "over" else C["MUTED"]
+        if m:
+            a.configure(text=m.group(1), fg=fg); b.configure(text=m.group(2), fg=C["WARN"] if look == "over" else C["INK"]); c.configure(text=m.group(3), fg=fg)
+        else:
+            a.configure(text=right, fg=fg); b.configure(text=""); c.configure(text="")
+        for tip in head["tips"]:
+            tip.text = ("이번 실행에서 이 묶음이 부른 호출(재시도 포함) / 실행 전 어림" + (" — 어림보다 많습니다" if look == "over" else "")) if m else ""
 
     def _leader(self, parent) -> tk.Canvas:
         """장부 줄의 이름과 금액 사이 점선(RULE, 1px 긋고 2px 띄우는 조각을 손으로 — Tk dash 는 Windows 에서 몇 가지 펜 모양뿐)."""
@@ -3277,9 +3372,12 @@ class App(tk.Tk):
         self.l_task_title = L(task, "", "BODY_B"); self.l_task_title.pack(side="left", padx=(P(10), 0))
         self.l_task_sub = L(task, "", "CAP", "MUTED"); self.l_task_sub.pack(side="left", padx=(P(10), 0), pady=(P(2), 0))
         # 큰 숫자 줄: 왼쪽 '판독 12 / 45쪽 …' · 오른쪽 '지난 시간 … · 남은 시간 … · 이번 실행 호출 …'(실행 전 '어림 호출 …' · [비용 미리 보기])
-        big = tk.Frame(b, bg=C["PANEL"]); big.grid(row=3, column=0, sticky="ew", pady=(P(12), 0))
+        big = self._big_row = tk.Frame(b, bg=C["PANEL"]); big.grid(row=3, column=0, sticky="ew", pady=(P(12), 0))
         self._big_left = tk.Frame(big, bg=C["PANEL"]); self._big_left.pack(side="left", anchor="s")
-        right = tk.Frame(big, bg=C["PANEL"]); right.pack(side="right", anchor="s")
+        right = self._big_right_box = tk.Frame(big, bg=C["PANEL"]); right.pack(side="right", anchor="s")
+        self._big_wrapped = False
+        for w in (big, self._big_left, right):                         # 글이 바뀌어 왼쪽·오른쪽 너비가 바뀔 때도
+            w.bind("<Configure>", lambda _e: App._fit_big(self), add="+")
         self._big_rparts = tk.Frame(right, bg=C["PANEL"]); self._big_rparts.pack(side="left", anchor="s")
         self.b_big_est = self._btn(right, "비용 미리 보기", self.do_estimate, style="Link.TButton",
                                    tip="[▶ 한 번에 인식 (HWPX 만들기)]의 호출·금액을 어림합니다 — 아무것도 쓰지 않고 결과 폴더도 만들지 않습니다.")
@@ -3356,12 +3454,14 @@ class App(tk.Tk):
             self._band.grid_remove(); self._task_row.grid(row=2, column=0, sticky="ew", pady=(self.px(14), 0))
         pdf = self.pdf()
         shot = bool(pdf) and bool(SCREENSHOT_NAME.fullmatch(Path(pdf).name))
+        now = [n for n, st in (d.get("_page_live") or {}).items() if st == "now"] if phase == "running" else ()
         left = G.big_view(cmd, phase=phase, stage=tr.stage, done=tr.done, total=tr.total, note=tr.note, seen=d.get("_seen"),
-                          result=res, counts=counts, screenshot=shot, label=label)
+                          result=res, counts=counts, screenshot=shot, label=label, now_pages=now)
         right, link = App._big_right(self, phase, cmd, res, led, est)
         big = any(lk == "big" for _, lk in left)
         App._set_parts(self, self._big_left, left, "_big_spec", big)
         App._set_parts(self, self._big_rparts, right, "_right_spec", big)
+        App._fit_big(self)
         if link and self.b_big_est.winfo_manager() != "pack":
             self.b_big_est.pack(side="left", anchor="s", pady=(0, max(0, self._font("BIG").metrics("descent") - self._font("BODY").metrics("descent") - self.px(3)) if big else 0))
         elif not link and self.b_big_est.winfo_manager():
@@ -3403,6 +3503,28 @@ class App(tk.Tk):
                 return [("어림 호출 ", "m"), (f"{c[0]:,}~{c[1]:,}회" if c[0] != c[1] else f"{c[1]:,}회", "b")], False
             return ([("어림 다시 필요 · ", "warn")] if est == "stale" else [("어림 호출 — · ", "m")]), True
         return [], False
+
+    def _fit_big(self) -> None:
+        """큰 숫자 줄: 왼쪽('판독 12 / 45쪽 · 지금 14~18쪽 판독 중 (동시 5쪽)')과 오른쪽(지난·남은 시간 · 이번 실행 호출)이 한 줄에 들어가지 않으면
+        오른쪽을 아래 줄로 내린다(좁은 창·462쪽 책의 긴 글 — 오른쪽이 눌려 잘리지 않게). 들어가면 다시 한 줄로."""
+        d = vars(self); row, left, right = d.get("_big_row"), d.get("_big_left"), d.get("_big_right_box")
+        if row is None:
+            return
+        try:
+            avail = row.winfo_width()
+            if avail <= 1:
+                return
+            wrap = left.winfo_reqwidth() + right.winfo_reqwidth() + self.px(16) > avail
+        except tk.TclError:
+            return
+        if wrap == d.get("_big_wrapped"):
+            return
+        self._big_wrapped = wrap
+        left.pack_forget(); right.pack_forget()
+        if wrap:
+            left.pack(side="top", anchor="w"); right.pack(side="top", anchor="w", pady=(self.px(2), 0))
+        else:
+            left.pack(side="left", anchor="s"); right.pack(side="right", anchor="s")
 
     def _set_parts(self, frame, parts: list, key: str, big: bool) -> None:
         """굵기·크기가 섞인 한 줄(큰 숫자 줄)을 Label 조각으로 — 같으면 그대로. big 이면 큰 숫자와 밑줄(글자 바닥)을 맞춘다."""
@@ -3461,7 +3583,9 @@ class App(tk.Tk):
 
     # ---- 쪽 띠(명세 §5.4) ----
     def _pagemap_done(self, seq: int, data: dict | None) -> None:
-        """작업 스레드가 센 쪽 띠의 칸(state.page_marks). 끝난 실행 뒤라면 실행 전에 기록이 없던 쪽 가운데 이제 기록이 생긴 쪽을 '끝남'으로."""
+        """작업 스레드가 센 쪽 띠의 칸(state.page_marks). 끝난 실행 뒤라면 실행 전에 기록이 없던 쪽 가운데 이제 기록이 생긴 쪽을 '끝남'으로,
+        그리고 이번 실행의 쪽 알림이 온 쪽은 알림대로(다시 판독한 쪽도 '끝남', 멈출 때 남은 '지금'은 '남음'). 실행 중에 온 셈도 알림을 덮지 않는다."""
+        from .gui_progress import merge_marks
         d = vars(self)
         if seq != d.get("_counts_seq") or not data:
             if seq == d.get("_counts_seq"):
@@ -3470,14 +3594,36 @@ class App(tk.Tk):
             return
         marks = dict(data.get("marks") or {})
         res, before = d.get("_run_result"), d.get("_marks0")
-        if res and before is not None and res.get("cmd") in ("run", "run-pdf", "read"):
+        mine = bool(res) and res.get("cmd") in PAGE_CMDS
+        if mine and before is not None:
             for n, st in marks.items():
                 if st == "record" and before.get(n) != "record":
                     marks[n] = "done"
+        if d.get("running") and d.get("_running_cmd") in PAGE_CMDS or mine:
+            marks = merge_marks(marks, d.get("_page_live"), finished=not d.get("running"), before=before)
         self._strip_pages = list(data.get("pages") or [])
         self._strip_marks = marks
         App._sync_progress(self)
         App._draw_strip(self); App._draw_legend(self)
+
+    def _on_page(self, n: int, state: str) -> None:
+        """쪽 알림('page', 쪽, 상태 — cli.PAGE_EVENT): 그 칸을 바꾸고 큐를 다 비운 뒤 한 번 다시 그린다(_poll). 쪽 띠에 없던 쪽(셈이 오기 전)은 더한다.
+        이 탭 원본을 판독하는 명령(한 번에 인식 둘 · ③ 판독)의 알림만 — 늦게 온 지난 명령의 알림은 버린다."""
+        d = vars(self)
+        if not d.get("running") or d.get("_running_cmd") not in PAGE_CMDS or state not in self.STRIP_LABEL:
+            return
+        n = int(n)
+        marks = d.setdefault("_strip_marks", {})
+        if state == "remain" and marks.get(n) == "fail":
+            state = "fail"                                              # 지난번에 실패한 쪽은 다시 읽기 시작할 때까지 실패로(읽을 차례라는 첫 알림이 지우지 않게)
+        if n not in marks:
+            pages = d.setdefault("_strip_pages", [])
+            if n not in pages:
+                import bisect
+                bisect.insort(pages, n)
+        marks[n] = state
+        d.setdefault("_page_live", {})[n] = state
+        self._strip_dirty = True
 
     def _draw_strip(self) -> None:
         """칸(높이 18 · 사이 2 · 최소 12)과 눈금. 다섯 상태는 모양과 밝기로 갈린다: 끝남 먹 채움 · 지금 굵은 먹 테 · 실패 RED 테 + '!' ·
@@ -4657,7 +4803,9 @@ class App(tk.Tk):
             self._running_cmd = command; self._stop_requested = False; self._run_result = None
             self._ledger_live = d.get("_ledger_for") == command and command in ("run", "run-pdf")   # 이번 실행의 어림이 장부에 있음(go 안에서 남김)
             self._ledger_for = None
-            self._calls_seen = App._call_count() or 0; self._calls_by = {}; self._calls_used = 0
+            self._calls_by_stage = {}; self._calls_base = None; self._calls_tail = None; self._calls_used = 0
+            self._calls_live = False                                    # start() 가 켠다(명령 스레드가 CALL_CAP 을 셀 때만 읽음)
+            self._page_live = {}                                        # 이번 실행의 쪽 알림(cli.PAGE_EVENT) — 끝난 뒤 다시 센 칸에도 겹친다
             self._seen = {}                                             # 단계마다 마지막으로 본 (끝난 수, 전체) — 끝난 뒤 단계 띠·큰 숫자 줄
             self._run_counts = dict(d["_counts"]) if d.get("_counts") else None      # 실행을 시작할 때의 책 수치(끝나면 다시 셈)
             self._strip_marks = {n: "record" if m == "done" else m for n, m in (d.get("_strip_marks") or {}).items()}   # 지난 실행의 '끝남'은 이번엔 기록 있음
@@ -4712,9 +4860,11 @@ class App(tk.Tk):
             v = max(v, -(-self._bar_cap * 1000 // width))
         return min(1000, v)
 
-    def _on_progress(self, stage: str, done: int, total: int):
+    def _on_progress(self, stage: str, done: int, total: int, calls: int | None = None):
+        """명령의 진행 알림(단계, 끝난 수, 전체 수, 그때의 호출 수 — 창이 넣은 cli.PROGRESS 가 명령 스레드에서 함께 읽음)."""
         before = self.tracker.stage
-        App._poll_calls(self)                                           # 앞 단계에서 쓴 호출은 앞 단계 몫으로
+        if App._count_calls(self, calls):                               # 이 알림 앞의 호출은 앞 단계 몫으로(바뀐 단계는 아래 update 뒤부터)
+            App._sync_ledger(self)
         f = self.tracker.update(stage, done, total)
         if self.tracker.stage:
             vars(self).setdefault("_seen", {})[self.tracker.stage] = (self.tracker.done, self.tracker.total)
@@ -4733,6 +4883,8 @@ class App(tk.Tk):
             cmd = "run-pdf"
         self._run_label = label                                         # 한 번에 인식이 아닌 명령은 실행 단추 자리에 '{label} 중'
         self._set_running(True, cmd); self.v_status.set(label + " 중…")
+        self._calls_live = True                                         # 이 명령(cli.main)이 CALL_CAP 을 센다 — 장부의 이번 실행 호출
+        pages = cmd in PAGE_CMDS                                        # 이 탭 원본의 쪽을 판독하는 명령만 쪽 띠를 움직인다(책갈피 교정의 판독은 다른 PDF)
         self.q.put(("log", f"\n▶ {label}\n   yeone-ocr {' '.join(argv)}\n"))
         def target():
             rc = 1
@@ -4743,11 +4895,13 @@ class App(tk.Tk):
                 with contextlib.redirect_stdout(w), contextlib.redirect_stderr(w):
                     from . import cli
                     cli.CANCEL.clear()
-                    cli.PROGRESS = lambda st, d, t: self.q.put(("progress", st, d, t))
+                    cli.PROGRESS = lambda st, d, t: self.q.put(("progress", st, d, t, App._call_count()))    # 그때의 호출 수 — 단계 몫을 정확히
+                    if pages:
+                        cli.PAGE_EVENT = lambda n, st: self.q.put(("page", n, st))                     # 쪽 띠의 칸(판독의 쪽마다)
                     try:
                         rc = cli.main(argv)
                     finally:
-                        cli.PROGRESS = None
+                        cli.PROGRESS = None; cli.PAGE_EVENT = None
             except SystemExit as e:
                 rc = e.code if isinstance(e.code, int) else 1
                 if e.code and not isinstance(e.code, int): self.q.put(("log", str(e.code) + "\n"))
@@ -4780,7 +4934,7 @@ class App(tk.Tk):
                     if not self.v_hstyles.get().strip():
                         self.v_hstyles.set(item[1])
                 elif item[0] == "progress":
-                    self._on_progress(item[1], item[2], item[3])
+                    self._on_progress(*item[1:])                       # (단계, 끝난 수, 전체 수[, 그때의 호출 수])
                 elif item[0] == "plan_progress":
                     if item[1] == self._plan_seq and self._plan_wait is not None:
                         try:
@@ -4797,6 +4951,8 @@ class App(tk.Tk):
                     App._counts_done(self, *item[1:])
                 elif item[0] == "pagemap":
                     App._pagemap_done(self, *item[1:])
+                elif item[0] == "page":
+                    App._on_page(self, *item[1:])
                 elif item[0] == "fx":
                     self._fx_fetched(item[1], item[2])
                 elif item[0] == "update_check":
@@ -4807,6 +4963,9 @@ class App(tk.Tk):
                         return
         except queue.Empty:
             pass
+        if vars(self).get("_strip_dirty"):                              # 쪽 알림은 큐를 다 비운 뒤 한 번만 다시 그린다(700쪽 책의 첫 알림 수백 개도)
+            self._strip_dirty = False
+            App._draw_strip(self); App._draw_legend(self); App._sync_progress(self)
         if getattr(self, "_closing", False) and getattr(self, "_update_installing", False):
             return
         self._offer_update()
@@ -4816,12 +4975,18 @@ class App(tk.Tk):
             self.v_prog.set(self.tracker.live_text()); self._prog_shown = time.time()      # 남은 시간(또는 지난 시간) 글을 1초마다 새로
             App._sync_progress(self)
         App._fit_host(self)                                             # 카드가 접히거나 늘면 본문 높이를 맞춘다(같으면 아무것도 하지 않음)
-        if self.running and App._poll_calls(self):
+        if self.running and App._count_calls(self):
             App._sync_ledger(self)                                      # 장부의 이번 실행 호출(재시도 포함)
         self.after(100, self._poll)
 
     def _finish(self, rc, label):
-        App._poll_calls(self)                                           # 마지막 호출 수(끝난 뒤 장부에 남김)
+        App._count_calls(self, App._call_count() if vars(self).get("_calls_live") else None)   # 마지막 호출 수 — 명령이 끝났으니 지금 수가 이 명령의 것(끝난 뒤 장부에 남김)
+        live = vars(self).get("_page_live")
+        if live:                                                        # 쪽이 끝나기 전에 멈췄으면(중지·오류) 남은 '지금'은 '남음'
+            from .gui_progress import settle_marks
+            before = vars(self).get("_marks0")
+            self._page_live = settle_marks(live, before); self._strip_marks = settle_marks(self._strip_marks, before)
+            self._strip_dirty = True
         self._set_running(False)
         if getattr(self, "_closing", False):             # 닫는 중에 끝났으면 알림창 없이 조용히
             self._last_writer = None; return

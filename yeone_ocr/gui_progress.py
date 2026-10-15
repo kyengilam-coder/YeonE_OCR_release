@@ -246,9 +246,21 @@ def pill_view(*, phase: str, stage: str = "", label: str = "", result: dict | No
     return "오류로 멈춤", "fail"
 
 
+def now_text(pages) -> str:
+    """지금 판독 중인 쪽들(쪽 알림의 'now') → '14~18'(이어지면) · '14·16·19'(띄엄띄엄 — 넷이 넘으면 앞 넷 뒤에 '…')."""
+    ps = sorted(set(int(n) for n in pages or ()))
+    if not ps:
+        return ""
+    if len(ps) > 1 and ps[-1] - ps[0] == len(ps) - 1:
+        return f"{ps[0]}~{ps[-1]}"
+    return "·".join(map(str, ps[:4])) + ("…" if len(ps) > 4 else "")
+
+
 def big_view(cmd: str, *, phase: str, stage: str = "", done: int = 0, total: int = 0, note: str = "", seen: dict | None = None,
-             result: dict | None = None, counts: dict | None = None, screenshot: bool = False, label: str = "") -> list[tuple[str, str]]:
-    """큰 숫자 줄의 왼쪽 조각(§5.5). 꾸밈: 'm' 보조(MUTED) · 'big' 큰 숫자(바탕 24) · 'unit' 단위(맑은 고딕 12 MUTED) · 'body' · 'b' 굵게 · 'red_b'."""
+             result: dict | None = None, counts: dict | None = None, screenshot: bool = False, label: str = "",
+             now_pages=()) -> list[tuple[str, str]]:
+    """큰 숫자 줄의 왼쪽 조각(§5.5). 꾸밈: 'm' 보조(MUTED) · 'big' 큰 숫자(바탕 24) · 'unit' 단위(맑은 고딕 12 MUTED) · 'body' · 'b' 굵게 · 'red_b'.
+    now_pages 는 판독 중 쪽 알림이 '지금'이라 한 쪽들 — '· 지금 14~18쪽 판독 중 (동시 5쪽)'."""
     seen = seen or {}
     if phase == "empty":
         return [("원본을 고르면 쪽마다 칸이 생기고, 새로 읽을 쪽 수와 어림 호출이 여기 나옵니다.", "m")]
@@ -277,6 +289,10 @@ def big_view(cmd: str, *, phase: str, stage: str = "", done: int = 0, total: int
         out = [(name, "m"), (f"{min(done, t):,}", "big"), (f"/ {t:,}{UNITS.get(stage, '쪽')}", "unit")]
         if note:
             out.append((" · " + note, "m"))
+        now = now_text(now_pages) if stage == "read" else ""
+        if now:
+            k = len(set(now_pages))
+            out.append((f" · 지금 {now}쪽 판독 중" + (f" (동시 {k}쪽)" if k > 1 else ""), "m"))
         return out
     # 끝난 뒤(§7.3)
     res = result or {}
@@ -307,7 +323,69 @@ def big_view(cmd: str, *, phase: str, stage: str = "", done: int = 0, total: int
     return out
 
 
+# ---------- 이번 실행의 호출·어림(§5.6·§5.7·§9) ----------
+READ_STAGES = ("prepare", "read")                     # 장부의 '판독' 묶음
+MODEL_STAGES = ("adjudicate", "build")                # 장부의 '모델 단계' 묶음(3차 판별 · 문서 만들기의 문맥 교정)
+RUN_STEPS = {"all": ("read1", "read2", "glyph", "suspect", "choice"), "without": ("read1", "read2")}   # [예]·[아니요]가 이번 실행에서 하는 어림 줄
+
+
+def calls_split(by_stage: dict | None, tail: tuple[str, int] | None = None) -> dict:
+    """단계별 실제 호출(_calls_by_stage — 진행 알림이 가져온 그때의 CALL_CAP.used 로 나눈 몫)을 장부 묶음으로: read(준비·판독) ·
+    model(3차 판별 · 문서 만들기의 문맥 교정) · other(그 밖 — 구획 대조 등). tail 은 다음 알림까지 지금 단계 몫으로 잠시 보이는 (단계, 수)."""
+    out = {"read": 0, "model": 0, "other": 0}
+    items = list((by_stage or {}).items()) + ([tail] if tail and tail[1] else [])
+    for stage, n in items:
+        out["read" if stage in READ_STAGES else "model" if stage in MODEL_STAGES else "other"] += int(n or 0)
+    return out
+
+
+def part_totals(rows: list | None, steps) -> tuple[list[int], list[float] | None]:
+    """어림 줄(step·calls·usd) 가운데 steps 의 호출·달러 합 — 단가가 없어 금액을 낼 수 없는 줄(호출이 있는데 usd 없음)이 있으면 달러 None."""
+    mine = [r for r in rows or [] if r.get("step") in steps]
+    calls = [sum((r.get("calls") or [0, 0])[0] for r in mine), sum((r.get("calls") or [0, 0])[1] for r in mine)]
+    if any(r.get("usd") is None and (r.get("calls") or [0, 0])[1] for r in mine):
+        return calls, None
+    return calls, [sum((r.get("usd") or [0, 0])[0] for r in mine), sum((r.get("usd") or [0, 0])[1] for r in mine)]
+
+
+def run_totals(led: dict | None, without: bool) -> dict | None:
+    """장부 머리 금액·호출 막대가 말할 '이번 실행'의 어림: [예]면 계획의 합계 그대로, [아니요 · 모델 단계 없이]로 시작한 실행이면 판독 줄만
+    (합계(이번 실행)와 같은 셈 — 원화는 어림의 환율로). → {calls, usd(None = 단가 없음), krw, missing} 또는 어림이 없으면 None."""
+    if not led:
+        return None
+    t = led.get("totals") or {}
+    if not without:
+        return {"calls": list(t.get("calls") or [0, 0]), "usd": t.get("usd"), "krw": led.get("krw"),
+                "known": t.get("usd_known") or [0.0, 0.0], "missing": list(t.get("missing_prices") or [])}
+    steps = RUN_STEPS["without"]
+    calls, usd = part_totals(led.get("rows"), steps)
+    _, known = part_totals([r for r in led.get("rows") or [] if r.get("usd") is not None], steps)
+    fx = led.get("fx") or 0
+    return {"calls": calls, "usd": usd, "krw": [v * fx for v in usd] if usd is not None and fx else None,
+            "known": known or [0.0, 0.0], "missing": [] if usd is not None else list(t.get("missing_prices") or [])}
+
+
 # ---------- 쪽 띠(§5.4) ----------
+def merge_marks(disk: dict, live: dict | None, *, finished: bool, before: dict | None = None) -> dict:
+    """작업 스레드가 센 칸(state.page_marks — 기록·상태 파일로 본 모양)에 이번 실행의 쪽 알림(cli.PAGE_EVENT)을 겹친다 — 알림이 온 쪽은
+    알림이 맞다(다시 판독은 기록이 있어도 '남음'으로 세므로 파일로는 이번에 끝난 쪽을 가릴 수 없다). 실행이 끝났으면(중지·오류 포함)
+    남은 '지금'은 settle_marks 처럼 되돌린다."""
+    out = dict(disk)
+    for n, st in (live or {}).items():
+        if n in out:
+            out[n] = _unfinished(n, before) if finished and st == "now" else st
+    return out
+
+
+def _unfinished(n: int, before: dict | None) -> str:
+    return "fail" if (before or {}).get(n) == "fail" else "remain"
+
+
+def settle_marks(marks: dict, before: dict | None = None) -> dict:
+    """실행이 끝난 칸: '지금'이 남았으면(쪽이 끝나기 전에 멈춤·오류) '남음' — 다시 누르면 그 쪽부터 읽는다. 실행 전에 실패였던 쪽(before)을
+    다시 읽다 멈췄으면 그대로 실패(상태 파일의 '판독 확인 필요'도 그대로라 다음 실행 전 칸과 같게)."""
+    return {n: (_unfinished(n, before) if st == "now" else st) for n, st in marks.items()}
+
 def strip_layout(n: int, width: float, gap: float, min_cell: float) -> tuple[int, list[tuple[float, float, int, int]]]:
     """대상 n쪽을 너비 width 에 칸으로 나눈다: 칸 최소 너비 min_cell, 칸 사이 gap. → (한 칸의 쪽 수, [(x0, x1, 첫 쪽 번호(0부터), 끝 쪽 번호+1)])."""
     if n <= 0 or width <= 0:
@@ -341,18 +419,22 @@ def cell_kind(states: list[str]) -> tuple[str, float]:
 
 
 def strip_ticks(pages: list[int], per: int, cells: list[tuple[float, float, int, int]], min_gap: float = 40.0) -> list[tuple[float, str]]:
-    """눈금: 첫 쪽·끝 쪽과 그 사이 둥근 수(10·20·50·100 …)마다 — 칸 사이가 min_gap 이상이 되는 가장 작은 둥근 수. → [(가운데 x, 글)]."""
+    """눈금: 첫 쪽·끝 쪽과 그 사이 둥근 수(10·20·50·100 …)마다 — 눈금 사이가 min_gap 이상이 되는 가장 작은 둥근 수. → [(x, 글)].
+    한 칸이 여러 쪽이면 눈금은 칸 가운데가 아니라 그 칸 안에서 그 쪽의 자리에(칸 가운데에 두면 20쪽마다의 눈금이 칸 2개·3개 건너로 고르지 않아 붙어 보임)."""
     if not cells or not pages:
         return []
     pitch = (cells[-1][1] - cells[0][0]) / max(1, len(cells)) if len(cells) > 1 else cells[0][1] - cells[0][0]
     step = 10
     while step / per * pitch < min_gap and step < 10 ** 7:
         step = step * 2 if str(step)[0] == "1" else (step * 5 // 2 if str(step)[0] == "2" else step * 2)
-    mid = lambda c: (c[0] + c[1]) / 2
-    ticks = [(mid(cells[0]), str(pages[0]))]
+
+    def at(k):                                                          # k 번째 쪽(0부터)의 x — 칸 안에서 그 쪽 몫의 가운데
+        x0, x1, a, b = cells[min(len(cells) - 1, k // per)]
+        return x0 + (x1 - x0) * (k - a + 0.5) / max(1, b - a)
+    ticks = [(at(0), str(pages[0]))]
     for k, p in enumerate(pages):
         if p % step == 0 and k > 0 and k < len(pages) - 1:
-            ticks.append((mid(cells[k // per]), str(p)))
+            ticks.append((at(k), str(p)))
     if len(pages) > 1:
-        ticks.append((mid(cells[-1]), str(pages[-1])))
+        ticks.append((at(len(pages) - 1), str(pages[-1])))
     return ticks
