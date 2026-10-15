@@ -88,6 +88,8 @@ class BookCountsAndText(unittest.TestCase):
         self.assertIn("문자 PDF를 열었습니다", fc(0, "run-pdf", False))
         self.assertIn("[HWPX 만들기]를 다시 누르면 실패한 쪽만", fc(3, "run", True))
         self.assertIn("[문자 PDF 만들기]를 다시 누르면 실패한 쪽만", fc(3, "run-pdf", True))
+        self.assertIn("[HWPX 만들기]를 다시 누르면 실패한 9쪽만 다시 판독하고", fc(3, "run", True, (9,)))     # F_done — 쪽 번호까지
+        self.assertIn("실패한 1, 2, 3, 4, 5…쪽만", fc(3, "run", True, (1, 2, 3, 4, 5, 6)))
         self.assertIn("주의 줄", fc(3, "run", False))
         self.assertIn("3차 판별을 이어서", fc(4, "run", False))
         self.assertIn("[결과 폴더]", fc(5, "run", False))
@@ -263,6 +265,8 @@ class WorkTabRealTk(unittest.TestCase):
         try:
             self.assertEqual(str(app.b_run.cget("style")), "SealBusy.TButton")
             self.assertIn("한 번에 인식 (HWPX) · 판독 중", app.b_run.cget("text"))
+            lock = str(app.icons["lock_seal"])                                              # 잠긴 단추에도 자물쇠 그림을 따로 — 점무늬(stipple)가 덮지 않게
+            self.assertEqual([str(x) for x in app.tk.splitlist(app.b_run.cget("image"))], [lock, "disabled", lock])
             self.assertEqual(self.state(app.b_run_pdf), "disabled"); self.assertEqual(str(app.b_run_pdf.cget("style")), "SealOut.TButton")
             self.assertEqual(self.state(app.b_stop), "normal")
             self.assertEqual(self.state(app.b_open_hwpx), "normal")

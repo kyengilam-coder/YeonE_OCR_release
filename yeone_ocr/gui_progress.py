@@ -138,6 +138,8 @@ def band_view(cmd: str, *, phase: str, idx: int = -1, done: int = 0, total: int 
                 circle = "fail"
         else:                                                           # 중지·오류: 그때 단계까지
             at = max(0, idx)
+            if kind == "error" and res.get("failed_n") and "read" in keys:
+                at = min(at, keys.index("read"))                        # 판독이 실패한 실행 — 뒤 단계는 기록 없이 지나갔을 뿐(끝난 것이 아님)
             circle = "done" if i < at else ("stop" if kind == "stopped" else "fail") if i == at else "wait"
         if key == "adjudicate" and without and phase in ("running", "done") and circle in ("wait", "now", "done"):
             circle = "skip"                                             # [아니요]로 시작한 실행 — 3차 판별을 하지 않음
@@ -199,6 +201,8 @@ def band_view(cmd: str, *, phase: str, idx: int = -1, done: int = 0, total: int 
                 else:
                     lines += _cost_lines(key, rows, "none" if phase == "empty" else est)
         else:                                                           # 글자층 넣기·검수 화면·보고
+            if key == "textlayer" and circle != "done" and status != [(WHAT[key], "cap")]:
+                lines.append([(WHAT[key], "cap")])                      # 실행 중에도 무엇을 만드는지(문자 PDF) — 명세 §5.3
             lines.append([("모델 안 씀", "cap")])
         receipt = key in ("read", "adjudicate") or (key == "build" and ctx_model)
         out.append({"key": key, "name": STAGE_NAMES.get(key, key), "num": i + 1, "circle": circle, "receipt": receipt,

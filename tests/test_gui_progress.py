@@ -74,6 +74,11 @@ class BandView(unittest.TestCase):
         self.assertTrue(view[1]["bold"] and not view[2]["bold"])
         pdf = self.G.band_view("run-pdf", phase="running", idx=3, done=20, total=46, counts=COUNTS, rows=ROWS, est="ok")
         self.assertEqual((pdf[3]["circle"], text(pdf[3]["lines"][0])), ("now", "20 / 46쪽"))
+        self.assertEqual([text(ln) for ln in pdf[3]["lines"]], ["20 / 46쪽", "문자 PDF", "모델 안 씀"])      # 실행 중에도 무엇을 만드는지(F_work_pdf)
+        wait = self.G.band_view("run-pdf", phase="running", idx=1, done=12, total=45, counts=COUNTS, rows=ROWS, est="ok")
+        self.assertEqual([text(ln) for ln in wait[3]["lines"]], ["기다림", "문자 PDF", "모델 안 씀"])
+        fin = self.G.band_view("run-pdf", phase="done", idx=5, result={"kind": "ok", "rc": 0})
+        self.assertEqual([text(ln) for ln in fin[3]["lines"]], ["끝 · 문자 PDF", "모델 안 씀"])                # 끝 줄이 이미 말함 — 겹치지 않게
 
     def test_finished_states(self):
         seen = {"prepare": (1, 1), "read": (45, 45), "adjudicate": (45, 45), "build": (46, 46), "review": (1, 1), "report": (1, 1)}
@@ -91,6 +96,11 @@ class BandView(unittest.TestCase):
         self.assertEqual(text(stop[1]["lines"][0]), "중지됨 · 남은 33쪽")
         err = self.G.band_view("run-pdf", phase="done", idx=3, done=3, total=46, seen=seen, result={"kind": "error", "rc": 1})
         self.assertEqual((err[3]["circle"], text(err[3]["lines"][0])), ("fail", "오류 — 진행 기록"))
+        # 모든 쪽 판독이 실패한 실행(rc 2): 뒤 단계(문서 만들기·검수 화면)는 기록이 없어 아무것도 만들지 않았다 — 끝남(✓)으로 그리지 않는다
+        none = self.G.band_view("run", phase="done", idx=5, seen=seen, counts=COUNTS,
+                                result={"kind": "error", "rc": 2, "failed_n": 2, "failed_pages": [2, 3]})
+        self.assertEqual([v["circle"] for v in none], ["done", "fail", "wait", "wait", "wait", "wait"])
+        self.assertEqual((text(none[1]["lines"][0]), text(none[3]["lines"][0]), text(none[4]["lines"][0])), ("오류 — 진행 기록", "기다림", "기다림"))
 
     def test_without_choice_skips_model_steps(self):
         view = self.G.band_view("run", phase="running", idx=1, done=3, total=45, without=True, counts=COUNTS, rows=ROWS, est="ok")
@@ -261,6 +271,8 @@ class ProgressCardRealTk(unittest.TestCase):
             for b in (app.b_open_hwpx, app.b_open_pdf, app.b_open_review, app.b_open_work, app._book_cards[0]["source"]):
                 self.assertEqual(str(b.cget("state")), "normal")
             self.assertTrue(all(str(b.cget("state")) == "disabled" for b in app._tool_rows[0][1]))
+            self.assertEqual([str(x) for x in app.tk.splitlist(app._tool_rows[0][1][2].cget("image"))],     # 잠긴 영수증 단추는 흐린 영수증(점무늬 없이)
+                             [str(app.icons["receipt"]), "disabled", str(app.icons["receipt_dis"])])
             self.assertEqual(str(app._tab_buttons[1].cget("state")), "disabled")
             self.assertEqual(app._lockline.winfo_manager(), "pack")                                     # 잠금 줄(한 줄 안내)
         finally:
@@ -342,6 +354,44 @@ class ProgressCardRealTk(unittest.TestCase):
         walk(app.act_cards[1])
         self.assertNotIn(texts["보고 열기"], app.buttons); self.assertNotIn(texts["교정본 열기"], app.buttons)
         self.assertIn(texts["▶  HWPX 전체 교정"], app.buttons)
+
+    def test_9_legend_fail_glyph_uses_the_cell_font(self):
+        """범례의 실패 견본 '!'는 칸과 같은 F_CAP_B(9pt) — 앱에서 9pt 아래 글은 없다."""
+        app = self.app; app.select_tab(0); app._use_pdf(str(self.pdf)); self.wait_strip()
+        self.gui.App._draw_legend(app)
+        cv = app.c_legend
+        bang = [i for i in cv.find_all() if cv.type(i) == "text" and cv.itemcget(i, "text") == "!"]
+        self.assertEqual(len(bang), 1)
+        size = abs(int(app.tk.call("font", "actual", cv.itemcget(bang[0], "font"), "-size")))
+        self.assertEqual(size, abs(int(app.tk.call("font", "actual", app.fonts["CAP_B"], "-size"))))
+        self.assertGreaterEqual(size, 9)
+
+    def test_8_collate_section_buttons_need_a_picked_row(self):
+        """[이 구획 대조만]·[이 구획 교정]은 표에서 구획을 고른 때만 켜진다(F_collate) — 실행 중에는 잠기고, 끝나면 고른 줄이 있을 때만 다시 켜진다."""
+        app = self.app
+        state = lambda: [str(b.cget("state")) for b in app._csec_btns]
+        old = list(app.collate_rows)
+        app.collate_rows = [{"no": 1, "lv": 1, "name": "大薊", "read": "대계", "para": 3, "pdf": "大薊", "page": 12, "how": "책갈피"},
+                            {"no": 2, "lv": 1, "name": "小薊", "read": "소계", "para": 2, "pdf": "小薊", "page": 13, "how": "책갈피"}]
+        try:
+            app.refresh_collate_table(); self.settle()
+            self.assertEqual(state(), ["disabled", "disabled"])                                     # 표는 찼지만 고른 줄이 없음
+            app.ctable.selection_set("2"); self.settle()
+            self.assertEqual(state(), ["normal", "normal"])
+            app._set_running(True, "collate"); self.settle()
+            try:
+                self.assertEqual(state(), ["disabled", "disabled"])
+                app.ctable.selection_set("1"); self.settle()
+                self.assertEqual(state(), ["disabled", "disabled"])                                 # 실행 중에는 골라도 잠김
+            finally:
+                app._set_running(False); self.settle()
+            self.assertEqual(state(), ["normal", "normal"])
+            app.ctable.selection_remove(app.ctable.selection()); self.settle()
+            self.assertEqual(state(), ["disabled", "disabled"])
+            app.ctable.selection_set("1"); app._set_running(True, "read"); app._set_running(False); app.refresh_collate_table(); self.settle()
+            self.assertEqual(state(), ["disabled", "disabled"])                                     # 표를 다시 채우면 고른 줄이 없어진다
+        finally:
+            app.collate_rows = old; app.refresh_collate_table(); self.settle()
 
 
 if __name__ == "__main__":

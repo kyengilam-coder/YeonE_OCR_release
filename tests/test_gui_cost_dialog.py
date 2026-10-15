@@ -224,6 +224,59 @@ class CostDialogRealTk(unittest.TestCase):
             self.assertGreaterEqual(d.col_w["basis"], self.app.px(150))
         self.assertGreaterEqual(d.content_w, self.app.px(852))
 
+    def test_table_spans_the_widest_row_and_gives_back_the_unused_gutter(self):
+        """표가 단가 칸 줄·금액 줄·바닥 단추 줄보다 좁게 끝나지 않고, 스크롤 막대가 없으면 막대 자리(gutter)를 근거 열이 쓴다."""
+        P = self.app.px
+        with mock.patch.object(self.gui, "work_area", lambda w: (P(1920), P(1040))):            # 넓은 화면(가상 화면 크기와 상관없이)
+            d = self.dialog(_plan(model="claude-sonnet-4-5-20250929"))
+            narrow = self.dialog(_plan(model="gpt-4.1"))
+        d.update_idletasks()
+        self.assertGreaterEqual(d.content_w, d._adj_row.winfo_reqwidth() + 2 * P(14))   # 단가 칸은 접혀 있어도 잰다(펼칠 때 너비가 바뀌지 않게)
+        self.assertGreaterEqual(d.content_w, d._amt.winfo_reqwidth())
+        self.assertGreaterEqual(d.content_w, d._foot.winfo_reqwidth())
+        self.assertFalse(d.sb.winfo_ismapped())
+        basis = d.COLS.index("basis")
+        for g in d.grids:
+            self.assertEqual(int(g.grid_columnconfigure(basis)["minsize"]), d.col_w["basis"] + d.gutter)
+        self.assertEqual(int(d.cv.cget("width")), d.content_w)
+        self.assertLessEqual(int(d.cb_model.cget("width")), 24)
+        self.assertEqual(int(narrow.cb_model.cget("width")), 12)                                # 짧은 모델 이름이면 시안처럼 좁게
+
+    def test_more_panel_sits_below_buttons_and_dialog_fits_small_work_area(self):
+        """근거·가정을 펼쳐도 단추 줄이 밀려 내려가지 않는다(바닥 줄 아래에 펼침) — 작은 작업 영역에서는 표 몸통과 근거 글이 줄고 스크롤된다."""
+        P = self.app.px
+        plan = _plan()
+        for r in plan["rows"]:
+            r["detail"] = "자세한 근거 " * 30
+        plan["notes"] = [f"가정 {i} " * 20 for i in range(8)]
+        with mock.patch.object(self.gui, "work_area", lambda w: (P(1366), P(600))):
+            d = self.dialog(plan)
+            d.toggle_more(); d.update_idletasks()
+            self.assertGreater(int(d.more.grid_info()["row"]), int(d._foot.grid_info()["row"]))   # 바닥 단추 줄 아래
+            self.assertLessEqual(d.winfo_reqheight(), P(600) - P(40) + 2 * d._more_lh)
+            self.assertLess(int(d.t_more.cget("height")), d._more_lines())                       # 넘치는 근거 글은 그 칸만 스크롤
+            self.assertEqual(d.sb_more.winfo_manager(), "grid")
+            d.toggle_more(); d.update_idletasks()
+            self.assertEqual(d.more.winfo_manager(), "")
+            self.assertLessEqual(d.winfo_reqheight(), P(600) - P(40))
+
+    def test_wheel_and_page_keys_scroll_the_body_from_any_cell(self):
+        """휠은 창 하나에 묶는다(칸 Label 위에서 굴려도 몸통이 움직임) — PgDn·PgUp 도 몸통을 한 화면씩."""
+        P = self.app.px
+        with mock.patch.object(self.gui, "work_area", lambda w: (P(1366), P(560))):
+            d = self.dialog(_plan())
+        cell = [w for w in d.inner.winfo_children() if w.winfo_class() == "Label" and str(w.cget("text")).strip()][3]
+        self.assertIn(str(d), cell.bindtags()); self.assertEqual(cell.bind("<MouseWheel>"), "")
+        self.assertTrue(d.bind("<MouseWheel>") and d.bind("<Button-5>") and d.bind("<Next>"))
+        with mock.patch.object(d.sb, "winfo_ismapped", lambda: True):
+            for ev in (types.SimpleNamespace(widget=cell, num=5, delta=0), types.SimpleNamespace(widget=cell, num=0, delta=-120)):
+                before = d.cv.yview()[0]
+                self.assertEqual(d._wheel(ev), "break")
+                self.assertGreater(d.cv.yview()[0], before)
+            before = d.cv.yview()[0]
+            d._page(-1); self.assertLess(d.cv.yview()[0], before)
+        self.assertIsNone(d._wheel(types.SimpleNamespace(widget=d.t_more, num=5, delta=0)))   # 근거 글 위면 그 글만(제 Text 묶음)
+
 
 if __name__ == "__main__":
     unittest.main()

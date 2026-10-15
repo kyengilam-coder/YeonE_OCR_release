@@ -231,6 +231,36 @@ class SettingsTabRealTk(unittest.TestCase):
         self.assertEqual(app.details.winfo_manager(), "pack" if details else "")
         app.select_tab(0)
 
+    def test_12_bare_checkboxes_draw_focus_around_the_box_and_header_keeps_its_front(self):
+        """글 없는 체크 상자(설정 줄의 조작)는 초점 점선이 상자를 감싼다 — 켜진 상자(먹 채움)에서도 Tab 초점이 보이게.
+        머리띠의 패키지 상태는 자리가 모자라면 ' → ' 앞('설치 구성요소 오류 2개')만, 그래도 넘치면 앞을 줄여 '…오류 2개' — 전체 글은 풍선 도움말로."""
+        app = self.app; R = app._set_rows
+        bare = [R[k]["ctrl"] for k in ("bold", "cforce", "suspects", "blind")]
+        self.assertEqual({str(c.cget("style")) for c in bare}, {"Bare.TCheckbutton"})
+        def find(layout, name):
+            for el, opts in layout:
+                if el == name:
+                    return opts
+                got = find(opts.get("children", []), name)
+                if got is not None:
+                    return got
+            return None
+        focus = find(self.gui.ttk.Style(app).layout("Bare.TCheckbutton"), "Checkbutton.focus")
+        self.assertEqual([el for el, _ in focus["children"]], ["BareCheck.indicator"])
+        old = app.v_pkg.get(); lab = app._pkg_label; f = app._font("CAP")
+        full = "설치 구성요소 오류 2개 → 설치파일로 다시 설치"
+        try:
+            for room, shown in ((f.measure(full) + 4, full), (f.measure("설치 구성요소 오류 2개") + 2, "설치 구성요소 오류 2개")):
+                with mock.patch.object(lab, "winfo_width", return_value=room):
+                    app.v_pkg.set(full)
+                    self.assertEqual(lab.cget("text"), shown)
+                    self.assertEqual(app._pkg_tip.text, full)                                     # 풍선 도움말은 늘 전체 글
+            with mock.patch.object(lab, "winfo_width", return_value=f.measure("…오류 2개") + 1):
+                app._fit_pkg()
+                self.assertEqual(lab.cget("text"), "…오류 2개")                                   # 상태와 수가 남는다(안내 꼬리 '…다시 설치'가 아니라)
+        finally:
+            app.v_pkg.set(old)
+
     def test_11_rules_dialog_enter_never_saves_from_the_fields(self):
         app = self.app
         from yeone_ocr.gui_corrections import PunctuationRulesDialog
