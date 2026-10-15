@@ -1,5 +1,6 @@
 """짜임 규칙(preset): 내용별 문서에서 책마다 다른 규칙 — 약재명(조문 제목) 떼기·주석 문단·문단 끝 출처·굵은/보통 글씨의 쓰임·쓰임 → 양식 스타일 이름 —
 을 코드 상수가 아니라 JSON 데이터로 둔다. 내장 규칙은 data/preset_<id>.json(regions = 영역 종류만(기본), kaibao = 本草 조문), 다른 책은 사용자 JSON 파일.
+기본 규칙 basic 은 원본의 제목·본문·소주를 일반적인 한글 스타일 이름에 연결한다.
 파일에는 정규식이 아니라 낱말 목록·글자 모음·수만 적고 여기서 정규식으로 짠다(괄호 하나 틀려 짜임이 몰래 바뀌지 않게). 모르는 칸·틀린 값은 칸 이름을 밝힌 오류.
 kaibao 가 짜는 정규식은 0.7.x structure.py 의 상수와 같다(tests/test_presets 의 말뭉치 비교). 표준 라이브러리만 쓴다 — 창 프로그램이 처음부터 불러온다."""
 from __future__ import annotations
@@ -10,9 +11,9 @@ from pathlib import Path
 
 ROLES = ("chapter", "section", "subsection", "entry", "body", "bonjing", "bielu", "commentary", "small", "caption", "note")   # 블록의 쓰임(structure 가 붙임)
 EMPHASIS_ROLES = ("body", "bonjing", "bielu", "commentary")           # 굵은/보통 글씨 조문에 붙일 수 있는 쓰임
-BUILTIN = ("regions", "kaibao")
+BUILTIN = ("basic", "regions", "kaibao")
 ALIASES = {"none": ("regions", None), "auto": ("kaibao", None), "bencao": ("kaibao", "always")}   # 예전 --structure 값 → (내장, entry.when 덮어쓰기)
-DEFAULT_PRESET = "regions"
+DEFAULT_PRESET = "basic"
 DATA = Path(__file__).with_name("data")                               # data/preset_<id>.json
 _HAN = "㐀-䶿一-鿿豈-﫿\U00020000-\U0003134f"   # 한자(확장 A·통합·호환·확장 B~) — 이스케이프로 적는다(호환 한자 豈 가 NFC 로 바뀌면 한글까지 한자로 센다)
 _ALIAS_LABELS = {"none": "영역 종류만 (예전 설정 none)", "auto": "本草 조문 (예전 설정 auto)", "bencao": "本草 조문 · 약재명 늘 떼기(예전 설정 bencao)"}
@@ -180,6 +181,7 @@ _JSON_MSGS = (("Expecting ',' delimiter", "쉼표(,)가 빠졌습니다 — 칸�
               ("Expecting property name enclosed in double quotes", '칸 이름은 큰따옴표 "…" 로 감싸야 합니다(마지막 칸 뒤의 쉼표도 이 오류)'),
               ("Expecting ':' delimiter", '칸 이름 뒤에 쌍점(:)이 빠졌습니다 — "칸": 값'),
               ("Expecting value", "값이 없거나 꼴이 틀렸습니다 — 글은 큰따옴표 \"…\", 목록은 [ ], 없음은 null(목록 마지막 값 뒤의 쉼표도 이 오류)"),
+              ("Illegal trailing comma before end of array", "값이 없거나 꼴이 틀렸습니다 — 목록 마지막 값 뒤의 쉼표를 지우십시오"),
               ("Unterminated string", "큰따옴표로 연 글이 닫히지 않았습니다"),
               ("Invalid control character", "글 안에 줄바꿈·탭이 그대로 들어 있습니다 — 한 줄로 쓰십시오"),
               ("Extra data", "맨 위 {…} 뒤에 글이 더 있습니다"))   # json 의 영어 오류 → 고칠 길을 말하는 글(모르는 것은 영어 그대로)
@@ -191,7 +193,7 @@ def _builtin(pid: str) -> Preset:
 
 
 def resolve_preset(ref: str | None) -> Preset:
-    """None·"" → 기본(regions) · 내장 id · 예전 --structure 이름(auto=kaibao, bencao=kaibao 약재명 늘, none=regions) · 그 밖은 규칙 JSON 파일 경로(지금 폴더 기준)."""
+    """None·"" → 기본(basic) · 내장 id · 예전 --structure 이름(auto=kaibao, bencao=kaibao 약재명 늘, none=regions) · 그 밖은 규칙 JSON 파일 경로(지금 폴더 기준)."""
     ref = (ref or "").strip() or DEFAULT_PRESET
     if ref in BUILTIN:
         return _builtin(ref)
@@ -204,7 +206,7 @@ def resolve_preset(ref: str | None) -> Preset:
         return load_preset(path, ref=ref)
     if path.suffix.lower() == ".json" or "/" in ref or "\\" in ref:
         raise PresetError(f"짜임 규칙 파일이 없습니다: {ref}")
-    raise PresetError(f"짜임 규칙 {ref!r} 를 모릅니다 — 내장: regions(영역 종류만)·kaibao(本草 조문), 또는 규칙 JSON 파일 경로")
+    raise PresetError(f"짜임 규칙 {ref!r} 를 모릅니다 — 내장: basic(기본 규칙)·regions(영역 종류만)·kaibao(本草 조문), 또는 규칙 JSON 파일 경로")
 
 
 def preset_label(ref: str | None) -> str:
@@ -252,7 +254,7 @@ def export_builtin(pid: str, dest) -> Path:
 
 
 def preset_choices(current: str | None) -> list[tuple[str, str]]:
-    """고를 수 있는 [(ref, 이름)]: 내장 둘 + (지금 것이 내장이 아니면 그것 — 예전 이름·파일). 창이 끝에 '파일에서 고르기…' 를 붙인다."""
+    """고를 수 있는 [(ref, 이름)]: 내장 + (지금 것이 내장이 아니면 그것 — 예전 이름·파일). 창이 끝에 '파일에서 고르기…' 를 붙인다."""
     out = [(i, preset_label(i)) for i in BUILTIN]
     cur = (current or "").strip()
     if cur and cur not in BUILTIN:

@@ -27,7 +27,8 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "preset": DEFAULT_PRESET, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
-            "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True}
+            "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
+            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": ""}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 LAYOUT_LABELS = {"page": "원본 쪽대로(검수용)", "flow": "내용별(제목·문단)"}   # 문서 짜임 --layout
 PRESET_PICK = "파일에서 고르기…"                                   # 짜임 규칙 칸의 끝 항목 — 규칙 JSON 파일을 고른다(--preset 파일 경로)
@@ -46,9 +47,11 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 글자는 선택한 Gemini·ChatGPT(OpenAI)·Claude 가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다.
 제공사별 API 키와 모델을 따로 기억합니다. 채팅 서비스 구독과 별도로 해당 제공사의 API 키가 필요합니다.
 같은 파일·결과 폴더에서 판독기를 바꿔 실행하면 완료한 쪽은 보존하고 남은 작업을 이어 갑니다.
-문서를 만들 때 간체→번체, 제공된 중문부호 규칙, 문맥에 따른 云/雲 교정을 자동 적용하고 변경 내역을 남깁니다.
-맨 위의 [일반 OCR]은 PDF → HWPX, [책갈피 OCR]은 기존 HWPX를 PDF와 대조합니다.
-[이미지(스크린샷) OCR]은 이미지 파일이나 캡처를 HWPX로 만듭니다. PDF와 이미지 입력·쪽 범위는 따로 기억합니다.
+문서를 만들 때 [설정] → [자동 교정]에서 선택한 간체→번체, 중문부호 규칙, 云/雲 교정을 적용하고 변경 내역을 남깁니다.
+중문부호 규칙은 [규칙 추가·수정]에서 편집하여 JSON 파일로 저장하거나 [파일에서 고르기]로 불러옵니다.
+맨 위의 [일반 OCR]은 PDF를 판독하고, [책갈피 OCR]은 기존 HWPX를 PDF와 대조합니다.
+[이미지(스크린샷) OCR]은 이미지 파일이나 캡처를 판독합니다. PDF와 이미지 입력·쪽 범위는 따로 기억합니다.
+일반·이미지 OCR에서 [HWPX 만들기] 또는 [문자 PDF 만들기]를 선택하고 공통 [중지]로 멈출 수 있습니다.
 [설정]에는 판독기·모델·API 키·읽기 방향·문서 옵션·책갈피 교정 옵션과 고급 도구가 모여 있습니다.
 [설정 바꾸기]로 이동하고 [설정 저장] 후 [OCR로 돌아가기]로 하던 작업을 계속합니다.
 문서 짜임·양식·짜임 규칙·획 굵기·쪽 범위·인쇄 쪽수 보정·읽기 방향은 책마다 그 결과 폴더의 book_settings.json 에 따로 기억합니다
@@ -67,22 +70,26 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
     인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 글자층이 없는 이미지·스캔의 읽기 방향은
     실제 글줄 배치로 자동 판정합니다. 이미지 OCR은 기본값이 자동 판정이며 PDF·책갈피와 방향 설정을 따로 기억합니다.
-    화면 캡처는 Win+Shift+S → [스크린샷 붙여넣기](Ctrl+Shift+V)로 불러옵니다. 자동으로 이미지 OCR 탭으로 이동하며 바로 옆 [원본 보기]로 확인합니다.
+    화면 캡처는 Win+Shift+S → 이미지 탭의 큰 원본 상자 클릭 → Ctrl+V로 불러옵니다. 마우스 오른쪽 메뉴나 Ctrl+Shift+V도 됩니다.
+    상자 안의 미리보기로 확인하고, 이미지를 두 번 클릭하면 원본을 크게 볼 수 있습니다.
     붙여넣은 캡처는 사용자 데이터 폴더의 screenshots에 PNG로 보관하며 같은 캡처는 기존 작업을 이어 씁니다.
     붙여넣기는 이전 쪽 범위·인쇄 쪽수 보정·강제 재판독을 초기화하며, 일반 Ctrl+V는 입력 칸의 글자 붙여넣기로 유지합니다.
     [입력 비우기]는 선택한 이미지·묶음과 쪽 범위·진행 표시를 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 그대로 남습니다.
- 4. [▶ 한 번에 인식 (PDF·이미지 → HWPX)] 를 누르면 먼저 판독·3차 글자 판별·합의 의심·문맥 교정의 예상 호출·토큰·비용을 한 창에 보여 주고
+ 4. [▶ 한 번에 인식 (HWPX 만들기)] 를 누르면 먼저 판독·3차 글자 판별·합의 의심·문맥 교정의 예상 호출·토큰·비용을 한 창에 보여 주고
     ([비용 미리 보기] 와 같음), [예 · 모두 실행] 을 누르면 준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 만들기 → 검수 화면 → 보고·혼동 장부 까지
     한 번에 갑니다([아니요 · 모델 단계 없이] 는 판독·문서 만들기만). 내장 요금표에 없는 모델은 단가를 한 번 넣어 두면 금액도 나옵니다.
     이전 판으로 만든 판독 기록이 있으면 지금 규칙으로 저절로 다시 비교합니다(모델 호출 없음).
     쪽이 많으면 오래 걸립니다(쪽당 30초~1분). [■ 중지] 로 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다.
- 5. 끝나면 [HWPX 바로 열기]로 결과를 엽니다. [HWPX 저장]에 실제 저장 폴더가 표시되며 [저장 폴더]로 탐색기에서 확인합니다.
+    [▶ 한 번에 인식 (문자 PDF 만들기)]는 새 원본의 판독부터 검색·복사 가능한 PDF 생성까지 이어서 합니다.
+    문자 PDF는 원본 모양과 글자 위치를 유지하며 HWPX용 자동 교정을 적용하지 않습니다. HWPX 양식도 필요 없습니다.
+ 5. 끝나면 [HWPX 바로 열기] 또는 [문자 PDF 열기]로 결과를 엽니다. [결과 저장]에 실제 저장 폴더가 표시되며 [저장 폴더]로 탐색기에서 확인합니다.
     검수 화면에서 원본과 대조합니다. 〔 〕로 남은 자리만 사람이 보면 됩니다.
  6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
     사본(<이름>_교정.hwpx)에 고쳐 넣고 요약을 남깁니다. 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다.
  7. [설정]에서 "▸ 고급 — 단계별 실행·도구" 를 펼치면 ①~⑥ 단계별 단추와 [3차 글자 판별]·[혼동 장부]·[비교 다시 계산]·[PDF 글자층 넣기]·[검수 결과 기록…] 이 보입니다.
     [PDF 글자층 넣기]는 판독한 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)를 만듭니다.
     문서 옵션의 "검색 가능한 PDF 도 만들기"를 켜면 [▶ 한 번에 인식] 끝에 저절로 만듭니다. 원본 PDF 는 고치지 않습니다.
+    인쇄 쪽수 보정은 [설정] → [고급]에 있습니다. 파일 쪽수와 책에 적힌 쪽수를 맞춰 검수할 때 쓰며, 비우면 자동 판정합니다.
     글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
  8. 시작할 때 새 버전을 확인하며, 위의 [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
     실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 고급에서 끌 수 있습니다.
@@ -93,6 +100,11 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
  review.html  검수 화면      report.md  상태 보고
  readings/ 쪽별 판독 기록    crops/     이미지로 보존한 도판
  book_settings.json  책별 설정(원본을 바꿔 이전 결과를 보관해도 남음)
+
+짜임 규칙은 판독한 글을 제목·본문·주석 등으로 나누고 문단 스타일에 연결하는 기준입니다.
+한글 스타일은 글꼴·크기·문단 모양을 정합니다. [기본 규칙]은 대제목·중제목·소제목과 문단-1~5를 사용합니다.
+문단-1은 본문, 문단-2는 해설, 문단-3은 소주, 문단-4는 그림 설명, 문단-5는 작업 메모용입니다.
+원문에서 확인한 구분만 사용하고 제목·문단을 임의로 만들지 않습니다. 별도 책의 규칙은 [파일에서 고르기]로 불러옵니다.
 
 〔 〕 표시는 확인이 필요한 자리입니다. 프로그램은 추측으로 채우지 않습니다.
 """
@@ -874,8 +886,8 @@ class Tip:
         tw.geometry(f"+{max(0, x)}+{y}")
 
 
-TAB_HINTS = ("스캔 PDF를 판독해 HWPX 문서로 만듭니다", "이미 입력된 HWPX를 PDF 원본과 대조해 고친 사본을 만듭니다",
-             "이미지 파일·화면 캡처를 판독하고 저장된 HWPX를 바로 엽니다", "판독기·모델·문서 옵션과 OCR 도구를 설정합니다")
+TAB_HINTS = ("스캔 PDF를 판독해 HWPX·문자 PDF로 만듭니다", "이미 입력된 HWPX를 PDF 원본과 대조해 고친 사본을 만듭니다",
+             "이미지·화면 캡처를 붙여넣고 HWPX·문자 PDF로 만듭니다", "판독기·모델·자동 교정·문서 옵션을 설정합니다")
 
 
 class App(tk.Tk):
@@ -1178,6 +1190,8 @@ class App(tk.Tk):
             self._active_input = i
             variables = self._input_vars[i]
             self.v_pdf, self.v_pages, self.v_off = variables["pdf"], variables["pages"], variables["print_offset"]
+            if getattr(self, "e_print_offset", None) is not None:
+                self.e_print_offset.configure(textvariable=self.v_off)
             self.v_force.set(self._input_force[i])
             if self._inputs_ready and self._book["dir"] != self._book_dir():
                 self._load_book(clear_if_missing=False)      # 그 탭 원본의 책별 설정(시작할 때도). 탭마다 기억한 쪽 범위·보정은 파일이 없으면 그대로
@@ -1295,6 +1309,10 @@ class App(tk.Tk):
         self._preset_ref = self.cfg.get("preset") or DEFAULT_PRESET       # 짜임 규칙(내장 id·예전 이름·규칙 파일의 절대 경로) — 칸에는 그 이름(v_preset)
         self.v_preset = tk.StringVar(value=preset_label(self._preset_ref))
         self.v_ctxmodel = tk.BooleanVar(value=bool(self.cfg.get("context_model", True)))
+        self.v_traditional = tk.BooleanVar(value=bool(self.cfg.get("normalize_traditional", True)))
+        self.v_yun = tk.BooleanVar(value=bool(self.cfg.get("normalize_yun", True)))
+        self.v_punctuation = tk.BooleanVar(value=bool(self.cfg.get("normalize_punctuation", True)))
+        self.v_punctuation_rules = tk.StringVar(value=str(self.cfg.get("punctuation_rules", "") or ""))
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
@@ -1419,10 +1437,6 @@ class App(tk.Tk):
                                                          "이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
                   ("원본 쪽마다 쪽 나누기", self.v_pb, "원본 쪽대로 만들 때 PDF 한 쪽마다 한글 쪽을 나눕니다. 내용별 문서에서는 쓰지 않습니다(원본 쪽은 책갈피로 남김)."),
                   ("앞 쪽에서 이어지는 문단 잇기", self.v_join, None), ("DOCX 도 함께 만들기", self.v_docx, None),
-                  ("번체 문맥 교정에 모델 쓰기 (호출 듦)", self.v_ctxmodel, "간체→번체 변환에서 한 글자가 여러 번체로 갈리는 후보(发→發/髮, 干→幹/乾, 云/雲 등)를 모델이 앞뒤 글로 고릅니다. "
-                                                         "후보마다 앞뒤 60자만 80건씩 묻고, 앞서 고른 답과 이미 물어 못 고른 후보는 다시 묻지 않습니다"
-                                                         "(다른 모델이 물은 것도 — 판독 칸 [세부 설정 ▾] 에서 끌 수 있음). "
-                                                         "끄면 규칙 변환(간체→번체·부호)만 하고 갈리는 후보는 원문을 두며 교정 보고에 남깁니다(모델 호출 없음)."),
                   ("검색 가능한 PDF 도 만들기", self.v_tlpdf, "문서를 만들 때 원본 PDF 쪽 위에 판독한 글을 보이지 않는 글자층으로 넣은 사본(out\\<이름>_글자층.pdf)도 만듭니다. "
                                                          "화면은 원본 그대로이고 PDF 뷰어에서 찾기·복사가 됩니다. 원본에 다른 OCR 의 숨은 글자층이 있으면 그 쪽에서는 지우고 넣습니다. "
                                                          "원본 PDF 는 고치지 않으며 모델을 부르지 않습니다. 고급 도구의 [PDF 글자층 넣기]로 따로 만들 수도 있습니다."))
@@ -1456,7 +1470,10 @@ class App(tk.Tk):
                           width=self._cw([lab for _, lab in preset_choices(DEFAULT_PRESET)] + [PRESET_PICK, PRESET_EXPORT]))
         sc.grid(row=4, column=1, sticky="w", pady=(P(4), 0))
         sc.bind("<<ComboboxSelected>>", self._preset_selected)
-        Tip(sc, "내용별 문서에서 문단을 가르는 규칙. 영역 종류만(기본): 판독의 제목·본문·소주 구분만 — 어느 책에나 안전합니다. "
+        Tip(sc, "짜임 규칙은 판독한 제목·본문·주석을 문단 역할로 나누고 한글 스타일에 연결하는 기준입니다. "
+                "기본 규칙: 대제목·중제목·소제목, 본문(문단-1)·해설(문단-2)·소주(문단-3)·그림 설명(문단-4)·작업 메모(문단-5). "
+                "글꼴·크기 등 모양은 연결된 HWPX 스타일이 정합니다. 원문에 없는 제목이나 문단 단계는 만들지 않습니다. "
+                "영역 종류만: 판독의 제목·본문·소주 구분만 사용합니다. "
                 "本草 조문: 開寶本草·證類 계열 本草 — 약재명 제목·［…云］ 주석·唐附 출처·굵은 글씨 本經/보통 글씨 別錄(양식 HWPX 가 있을 때 획 굵기를 잽니다). "
                 "파일에서 고르기…: 다른 책에 맞춰 만든 규칙 JSON(README '짜임 규칙 파일 만들기'). "
                 "本草 조문 규칙을 파일로 저장…: 내장 규칙의 사본을 남깁니다 — 고쳐서 다른 책의 규칙으로(고르던 규칙은 그대로).", self)
@@ -1470,8 +1487,9 @@ class App(tk.Tk):
         self.v_layout.trace_add("write", self._layout_changed); self.v_template.trace_add("write", self._layout_changed); self._layout_changed()
         r0 = len(checks) + 1
         self._hint(b, "초록 = 3차 자형 판별로 고름 · 파랑 = 골랐지만 확인 권장 · 빨강〔〕= 원본 확인 필수 · 〔〕안 실선 밑줄 = 문맥 추정(확정 아님) · 메모 = 고지 사항").grid(row=r0, column=0, sticky="ew", pady=(P(8), 0))
-        self._hint(b, "자동 교정: 간체→번체 · 중문부호 규칙 · 云/雲 문맥 판별. 변경 내역은 출력 폴더의 교정 기록에 저장됩니다.").grid(row=r0 + 2, column=0, sticky="ew", pady=(P(8), 0))
         self._btn(b, "설정 저장", self.save_settings, tip="지금 설정을 저장합니다(실행할 때와 창을 닫을 때도 저절로 저장). 짜임·양식·짜임 규칙·쪽 범위는 이 책의 결과 폴더(book_settings.json)에도 — 결과 폴더가 아직 없으면 실행할 때 남깁니다.").grid(row=r0 + 1, column=0, sticky="e", pady=(P(8), 0))
+
+        self._build_correction_settings(common)
 
         # ---- 고급(접힘) ----
         self.v_adv = tk.BooleanVar(value=bool(self.cfg.get("advanced_open", False)))
@@ -1511,6 +1529,13 @@ class App(tk.Tk):
         self.v_auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
         ttk.Checkbutton(g, text="시작할 때 업데이트 확인", variable=self.v_auto_update,
                         command=self._save_update_preference).grid(row=3, column=0, columnspan=width + 1, sticky="w", pady=(P(8), 0))
+        offsets = ttk.Frame(g, style="Panel.TFrame")
+        offsets.grid(row=4, column=0, columnspan=width + 1, sticky="ew", pady=(P(8), 0))
+        ttk.Label(offsets, text="인쇄 쪽수 보정 (현재 일반·이미지 원본)", style="Field.TLabel").pack(side="left")
+        self.e_print_offset = ttk.Entry(offsets, textvariable=self.v_off, width=7)
+        self.e_print_offset.pack(side="left", padx=P(8))
+        self._hint(offsets, "비우면 자동 · 원본 1쪽이 인쇄 30쪽이면 29").pack(side="left", fill="x", expand=True)
+        Tip(self.e_print_offset, "책에 적힌 쪽수와 파일 쪽수를 맞춰 검수 기록에 표시합니다. 원본 파일과 실제 쪽 순서는 바뀌지 않습니다.", self)
         self._apply_advanced()
 
         self._build_collate_tab(tab2)
@@ -1564,41 +1589,114 @@ class App(tk.Tk):
         for cls in ("TCheckbutton", "TRadiobutton", "TButton"):
             self.bind_class(cls, "<ButtonRelease-1>", lambda e: self.after_idle(self._drop_mouse_focus, e.widget), add="+")
 
+    def _build_correction_settings(self, parent):
+        card = self._card(parent, "자동 교정"); card.pack(fill="x", pady=(self.px(10), 0))
+        body = card.body
+        self._hint(body, "HWPX·DOCX를 만들 때 선택한 교정만 적용합니다. 판독 기록은 보존하고 변경 내역은 출력 폴더에 남깁니다.").pack(fill="x")
+        row = ttk.Frame(body, style="Panel.TFrame"); row.pack(fill="x", pady=self.px(6))
+        for label, variable in (("간체→번체", self.v_traditional), ("云/雲 문맥 판별", self.v_yun),
+                                ("중문부호 수정 규칙", self.v_punctuation)):
+            ttk.Checkbutton(row, text=label, variable=variable).pack(side="left", padx=(0, self.px(18)))
+        cb = ttk.Checkbutton(body, text="번체·云/雲의 불확실한 후보에 모델 사용 (호출 듦)", variable=self.v_ctxmodel)
+        cb.pack(anchor="w")
+        Tip(cb, "간체→번체 또는 云/雲 교정을 선택했을 때만 적용합니다. 끄면 규칙으로 확인되는 것만 바꾸고 불확실한 후보는 보고에 남깁니다.", self)
+        files = ttk.Frame(body, style="Panel.TFrame"); files.pack(fill="x", pady=(self.px(8), 0))
+        self.v_punctuation_label = tk.StringVar()
+        self._hint(files, textvariable=self.v_punctuation_label).pack(side="left", fill="x", expand=True)
+        for label, command in (("규칙 추가·수정…", self.edit_punctuation_rules), ("파일에서 고르기…", self.pick_punctuation_rules),
+                                ("기본 규칙", lambda: self.v_punctuation_rules.set(""))):
+            self._btn(files, label, command).pack(side="left", padx=(self.px(6), 0))
+        def label_changed(*_):
+            path = self.v_punctuation_rules.get().strip()
+            self.v_punctuation_label.set("중문부호: " + (Path(path).name if path else "내장 기본 규칙"))
+        self.v_punctuation_rules.trace_add("write", label_changed)
+        label_changed()
+
+    def pick_punctuation_rules(self):
+        path = filedialog.askopenfilename(title="중문부호 수정 규칙", filetypes=[("JSON 규칙", "*.json")])
+        if not path:
+            return
+        try:
+            from .normalization import load_punctuation_rules
+            load_punctuation_rules(path)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror(APP_NAME, str(exc)); return
+        self.v_punctuation_rules.set(str(Path(path).resolve()))
+
+    def edit_punctuation_rules(self):
+        try:
+            from .gui_corrections import PunctuationRulesDialog
+            PunctuationRulesDialog(self)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror(APP_NAME, f"규칙을 열 수 없습니다. [기본 규칙] 또는 [파일에서 고르기]로 사용할 규칙을 선택하십시오.\n{exc}")
+
+    def _corrections_ok(self):
+        variable = vars(self).get("v_punctuation_rules")
+        enabled = vars(self).get("v_punctuation")
+        path = variable.get().strip() if variable is not None else ""
+        if path and (enabled is None or enabled.get()):
+            try:
+                from .normalization import load_punctuation_rules
+                load_punctuation_rules(path)
+            except (ValueError, OSError) as exc:
+                messagebox.showerror(APP_NAME, f"자동 교정의 중문부호 규칙을 확인하십시오.\n{exc}")
+                return False
+        return True
+
+    def _normalization_opts(self):
+        options = []
+        for name, flag in (("v_traditional", "--no-traditional"), ("v_yun", "--no-yun"), ("v_punctuation", "--no-punctuation")):
+            variable = vars(self).get(name)
+            if variable is not None and not variable.get():
+                options.append(flag)
+        variable = vars(self).get("v_punctuation_rules")
+        if variable is not None and variable.get().strip():
+            options += ["--punctuation-rules", variable.get().strip()]
+        return options
+
+    def _context_model_enabled(self):
+        def enabled(name):
+            variable = vars(self).get(name)
+            return variable is None or bool(variable.get())
+        return enabled("v_ctxmodel") and (enabled("v_traditional") or enabled("v_yun"))
+
     def _build_input_card(self, parent, tab: int) -> None:
         """탭별 입력과 결과 열기. 판독기·문서 옵션은 설정 탭에서 고른다."""
         P = self.px; images = tab == 2; variables = self._input_vars[tab]
         card = self._card(parent, "이미지 · 스크린샷" if images else "PDF"); card.pack(fill="x")
         body = card.body; body.columnconfigure(1, weight=1)
         self._field_label(body, "원본", 0)
-        ttk.Entry(body, textvariable=variables["pdf"], state="readonly").grid(row=0, column=1, columnspan=2, sticky="ew", pady=P(3))
+        if images:
+            from .gui_preview import ImageInputPreview
+            self.image_preview = ImageInputPreview(body, variable=variables["pdf"], paste=self.paste_screenshot,
+                                                   open_source=self.open_source, height=P(180))
+            self.image_preview.grid(row=0, column=1, columnspan=2, sticky="ew", pady=P(3))
+        else:
+            ttk.Entry(body, textvariable=variables["pdf"], state="readonly").grid(row=0, column=1, columnspan=2, sticky="ew", pady=P(3))
         controls = ttk.Frame(body, style="Panel.TFrame")
         controls.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
         self._btn(controls, "이미지 고르기…" if images else "PDF 고르기…", self.choose_images if images else self.choose_pdf,
                   tip="이미지를 여러 장 고르면 이름의 숫자 순서로 한 권으로 묶습니다." if images else "판독할 스캔 PDF를 고릅니다.").pack(side="left")
-        if images:
-            self._btn(controls, "스크린샷 붙여넣기", self.paste_screenshot,
-                      tip="Win+Shift+S로 캡처 → Ctrl+Shift+V로 붙여넣기. [한 번에 인식]을 눌러 판독을 시작합니다.").pack(side="left", padx=(P(6), 0))
-        self._btn(controls, "원본 보기", self.open_source,
-                  tip="바로 앞에서 불러온 스크린샷이나 선택한 원본을 엽니다.").pack(side="left", padx=(P(6), 0))
+        if not images:
+            self._btn(controls, "원본 보기", self.open_source,
+                      tip="선택한 원본 PDF를 엽니다.").pack(side="left", padx=(P(6), 0))
         if images:
             self._btn(controls, "입력 비우기", self.clear_image_input,
                       tip="불러온 이미지 선택과 쪽 범위를 모두 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 보존합니다.").pack(side="left", padx=(P(14), 0))
-            self._hint(body, "Win+Shift+S로 캡처 → 붙여넣기 → 원본 확인 → [한 번에 인식]. 가로·세로 읽기 방향은 이미지의 글줄 배치로 자동 판정합니다.").grid(
+            self._hint(body, "Win+Shift+S로 캡처 → 위 상자에서 Ctrl+V → [한 번에 인식]. 이미지를 두 번 클릭하면 원본을 크게 봅니다. 여러 장은 첫 쪽을 미리 보여 줍니다.").grid(
                 row=2, column=1, columnspan=2, sticky="ew", pady=(P(4), P(3)))
         self._field_label(body, "쪽 범위", 3, top=6)
         row = ttk.Frame(body, style="Panel.TFrame"); row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
         ttk.Entry(row, textvariable=variables["pages"], width=12).pack(side="left")
         self._btn(row, "전체", lambda: variables["pages"].set(""), tip="비우면 원본 전체를 판독합니다.").pack(side="left", padx=(P(6), 0))
         ttk.Label(row, text="비우면 전체 · 예 1-5, 8", style="Hint.TLabel").pack(side="left", padx=(P(10), 0))
-        ttk.Label(row, text="빈칸이면 자동 판정", style="Hint.TLabel").pack(side="right", padx=(P(8), 0))
-        offset = ttk.Entry(row, textvariable=variables["print_offset"], width=6); offset.pack(side="right")
-        ttk.Label(row, text="인쇄 쪽수 = 원본 쪽수 +", style="Field.TLabel").pack(side="right", padx=(0, P(6)))
-        Tip(offset, "원본 1쪽이 인쇄 30쪽이면 29. 비우면 자동 판정합니다.", self)
-        self._field_label(body, "HWPX 저장", 4, top=6)
+        self._field_label(body, "결과 저장", 4, top=6)
         ttk.Entry(body, textvariable=self.v_output_dir, state="readonly").grid(row=4, column=1, sticky="ew", pady=(P(6), P(3)))
         actions = ttk.Frame(body, style="Panel.TFrame"); actions.grid(row=4, column=2, sticky="w", padx=(P(8), 0), pady=(P(6), P(3)))
         self._btn(actions, "HWPX 바로 열기", self.open_hwpx,
                   tip="현재 원본의 가장 최근 완성된 HWPX를 바로 엽니다. 중간 저장본은 제외합니다.").pack(side="left")
+        self._btn(actions, "문자 PDF 열기", self.open_textlayer,
+                  tip="현재 원본에서 마지막으로 만든 검색·복사 가능한 PDF를 엽니다.").pack(side="left", padx=(P(6), 0))
         self._btn(actions, "저장 폴더", self.open_output_folder,
                   tip="HWPX가 저장되는 out 폴더를 탐색기로 엽니다.").pack(side="left", padx=(P(6), 0))
         self._build_settings_summary(parent)
@@ -1614,10 +1712,14 @@ class App(tk.Tk):
         self.actbars = ttk.Frame(host); self.actbars.pack(fill="x")
         act = self._card(self.actbars, pad=(P(16), P(10), P(16), P(10)))
         a = act.body
-        self._btn(a, "▶  한 번에 인식 (PDF·이미지 → HWPX)", self.do_run, style="Accent.TButton",
+        runrow = ttk.Frame(a, style="Panel.TFrame"); runrow.pack(fill="x")
+        self._btn(runrow, "▶  한 번에 인식 (HWPX 만들기)", self.do_run, style="Accent.TButton",
                   tip="준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. 먼저 판독·모델 단계의 예상 비용을 한 창에 보여 주고 묻습니다.").pack(side="left")
-        self.b_stop = ttk.Button(a, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop.pack(side="left", padx=(P(8), 0))
+        self._btn(runrow, "▶  한 번에 인식 (문자 PDF 만들기)", self.do_run_pdf, style="Accent.TButton",
+                  tip="원본을 판독한 뒤 검색·복사 가능한 PDF를 만듭니다. 원본 모양을 유지하고 판독한 글을 숨은 글자층에 넣습니다. HWPX 문서용 자동 교정은 적용하지 않습니다.").pack(side="left", padx=(P(8), 0))
+        self.b_stop = ttk.Button(runrow, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2"); self.b_stop.pack(side="left", padx=(P(8), 0))
         Tip(self.b_stop, "지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 이어서 합니다.", self)
+        a = ttk.Frame(a, style="Panel.TFrame"); a.pack(fill="x", pady=(P(7), 0))
         for t, c, tip in (("HWPX 열기", self.open_hwpx, "가장 최근에 만든 HWPX 를 한컴오피스로 엽니다"),
                           ("결과 폴더", self.open_work, "결과 폴더(쪽 이미지·판독 기록·문서·검수 화면)를 엽니다"),
                           ("비용 미리 보기", self.do_estimate, "판독·3차 판별·합의 의심·문맥 교정의 호출·토큰·금액을 한 창에 어림합니다(기록 있는 쪽은 정확히, 새로 읽을 쪽은 이 책 평균으로)")):
@@ -2141,7 +2243,8 @@ class App(tk.Tk):
         if not self.v_hl.get(): o.append("--no-highlight")
         if not self.v_ctx.get(): o.append("--no-context")
         if not self.v_pb.get(): o.append("--no-page-breaks")
-        if getattr(self, "v_ctxmodel", None) is not None and not self.v_ctxmodel.get(): o.append("--no-context-model")
+        if not App._context_model_enabled(self): o.append("--no-context-model")
+        o += App._normalization_opts(self)
         o += ["--check-list", self.check_list_mode(), "--memo", self.memo_mode()]
         return o
 
@@ -2343,6 +2446,8 @@ class App(tk.Tk):
             return
         self.open_after = open_after
         cmd = argv[0] if argv else ""
+        if cmd == "run" and "--pdf-only" in argv:
+            cmd = "run-pdf"
         self._set_running(True, cmd); self.v_status.set(label + " 중…")
         self.q.put(("log", f"\n▶ {label}\n   yeone-ocr {' '.join(argv)}\n"))
         def target():
@@ -2501,7 +2606,7 @@ class App(tk.Tk):
                 else:
                     self._bundle_images(paths, reset_pages=True)
             else:
-                messagebox.showinfo(APP_NAME, "클립보드에 이미지가 없습니다.\nWin+Shift+S로 원하는 부분을 캡처한 뒤 [스크린샷 붙여넣기]를 누르십시오.\n저장된 이미지는 [이미지 고르기…]로 열 수 있습니다.")
+                messagebox.showinfo(APP_NAME, "클립보드에 이미지가 없습니다.\nWin+Shift+S로 원하는 부분을 캡처한 뒤 이미지 상자에서 Ctrl+V를 누르십시오.\n저장된 이미지는 [이미지 고르기…]로 열 수 있습니다.")
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"스크린샷을 불러오지 못했습니다. 다시 캡처하거나 이미지 파일로 저장해 열어 보십시오.\n{exc}")
         finally:
@@ -2823,6 +2928,11 @@ class App(tk.Tk):
             self.cfg["skip_any_model"] = bool(self.v_skipany.get())
         if getattr(self, "v_tlpdf", None) is not None:
             self.cfg["textlayer_pdf"] = self.v_tlpdf.get()
+        for key, name in (("normalize_traditional", "v_traditional"), ("normalize_yun", "v_yun"),
+                          ("normalize_punctuation", "v_punctuation"), ("punctuation_rules", "v_punctuation_rules")):
+            variable = getattr(self, name, None)
+            if variable is not None:
+                self.cfg[key] = variable.get()
         if getattr(self, "v_layout", None) is not None:
             self.cfg.update({"layout": self.layout_key(), "template": self.v_template.get().strip(), "bold_split": bool(self.v_bold.get()),
                              "context_model": bool(self.v_ctxmodel.get()), "preset": App.preset_ref(self)})
@@ -2872,7 +2982,11 @@ class App(tk.Tk):
         return PlanInput(kind=kind, pdf=self.pdf(), work_dir=str(self.work()), pages=self.v_pages.get().strip(), reader=self.v_reader.get(),
                          model=self.v_model.get().strip(), second_model=self.v_model2.get().strip(), second_pass=bool(self.v_second.get()), upscale=up,
                          use_cache=bool(self.v_cache.get()), force=bool(self.v_force.get()), suspects=bool(self.v_suspects.get()), blind=bool(self.v_blind.get()),
-                         context_model=bool(self.v_ctxmodel.get()), layout=self.layout_key(), preset=App.preset_ref(self), join_pages=bool(self.v_join.get()),
+                         context_model=App._context_model_enabled(self), layout=self.layout_key(), preset=App.preset_ref(self), join_pages=bool(self.v_join.get()),
+                         normalize_traditional=bool(self.v_traditional.get()) if getattr(self, "v_traditional", None) is not None else True,
+                         normalize_yun=bool(self.v_yun.get()) if getattr(self, "v_yun", None) is not None else True,
+                         normalize_punctuation=bool(self.v_punctuation.get()) if getattr(self, "v_punctuation", None) is not None else True,
+                         punctuation_rules=self.v_punctuation_rules.get().strip() if getattr(self, "v_punctuation_rules", None) is not None else "",
                          skip_any_model=bool(self.v_skipany.get()))
 
     def _lock_for_plan(self, on: bool):
@@ -2883,6 +2997,9 @@ class App(tk.Tk):
         """비용 한 창: 판독·3차 판별·합의 의심·문맥 교정의 어림(costplan.count_plan)을 작업 스레드에서 세고(462쪽이면 몇 초 — 창이 멈추지 않게
         작은 진행 창을 띄우고 단추를 잠근다) 끝나면 _poll → _plan_done. go(extra) 는 실행(extra = 모델 단계를 뺄 선택), go=None 은 [비용 미리 보기].
         mock 판독기는 모델을 부르지 않아 어림하지 않는다. 어림 중에 다시 눌러도(창이 잠겨 있지만) 두 번 세지 않는다."""
+        pdf_only = kind == "run-pdf"
+        if pdf_only:
+            kind = "run"
         if self.v_reader.get() == "mock":
             if go is None:
                 messagebox.showinfo(APP_NAME, "mock 판독기는 모델을 부르지 않아 비용이 없습니다.")
@@ -2894,6 +3011,9 @@ class App(tk.Tk):
         from . import costplan
         try:
             inp = self._plan_input(kind)
+            if pdf_only:
+                from dataclasses import replace
+                inp = replace(inp, context_model=False, normalize=False, layout="page", preset=DEFAULT_PRESET, punctuation_rules="")
             cancel = threading.Event()
             wait = PlanWait(self, cancel)
         except Exception as e:                                             # 어림을 시작하지 못하면 실행하지 않는다(닫힌 쪽으로)
@@ -2970,8 +3090,10 @@ class App(tk.Tk):
             self._with_plan("read", go)
 
     def do_build(self):
-        self._env_need_key = bool(self.v_ctxmodel.get())                  # 문맥 교정 모델을 끈 문서 만들기는 API 키가 없어도 된다
-        if self._need_pdf() and self._prepare_env() and template_ok(self) and preset_ok(self):
+        if not self._need_pdf() or not App._corrections_ok(self):
+            return
+        self._env_need_key = App._context_model_enabled(self)
+        if self._prepare_env() and template_ok(self) and preset_ok(self):
             def go(extra):                                                 # extra: [아니요 · 모델 없이] 면 --no-context-model
                 opts = ["--reader", self.v_reader.get()] + extra + self._answered_opts()
                 if self.v_model.get().strip(): opts += ["--model", self.v_model.get().strip()]
@@ -2990,7 +3112,7 @@ class App(tk.Tk):
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
     def do_run(self):
-        if self._need_pdf() and self._prepare_env() and template_ok(self) and preset_ok(self):
+        if self._need_pdf() and App._corrections_ok(self) and self._prepare_env() and template_ok(self) and preset_ok(self):
             def go(extra):                                                 # extra: [아니요 · 모델 단계 없이] 면 --no-adjudicate(문맥 교정 모델이 켜져 있으면 + --no-context-model)
                 self.nb.select(0)
                 self._save_book(create=True)                               # 실행 직전(비용 확인을 받은 뒤): 이 책의 설정을 결과 폴더에
@@ -2998,6 +3120,18 @@ class App(tk.Tk):
                 self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True)
                            + self._answered_opts() + extra + self._build_opts(), "한 번에 인식 (전체 → HWPX)" if not pages else f"한 번에 인식 ({pages}쪽 → HWPX)")
             self._with_plan("run", go)
+
+    def do_run_pdf(self):
+        """Read the selected source and produce a searchable PDF without HWPX assembly."""
+        if self._need_pdf() and self._prepare_env():
+            def go(extra):
+                self.nb.select(0)
+                self._save_book(create=True)
+                out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
+                argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
+                argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra
+                self.start(argv, "한 번에 인식 (문자 PDF 만들기)", open_after=out)
+            self._with_plan("run-pdf", go)
 
     def do_stop(self):
         try:
@@ -3061,6 +3195,14 @@ class App(tk.Tk):
             open_path(path)
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"HWPX를 열지 못했습니다. [저장 폴더]에서 파일을 확인하거나 HWPX를 지원하는 프로그램의 파일 연결을 확인하십시오.\n{exc}")
+
+    def open_textlayer(self):
+        if not self._need_pdf(): return
+        out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
+        if not out.is_file():
+            messagebox.showinfo(APP_NAME, f"문자 PDF가 아직 없습니다. [한 번에 인식 (문자 PDF 만들기)]를 먼저 실행하십시오.\n\n저장 위치: {out}")
+            return
+        open_path(out)
 
     def open_output_folder(self):
         if not self._need_pdf(): return

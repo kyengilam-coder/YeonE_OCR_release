@@ -11,6 +11,7 @@ from zipfile import ZipFile
 
 from yeone_ocr.blocks import Block
 from yeone_ocr.normalization import extract_msr_rules, normalize_blocks, normalize_text, rule_data
+from yeone_ocr.normalization import NormalizationOptions, default_punctuation_rules, load_punctuation_rules, validate_punctuation_rules
 
 
 def keep_valid(items):
@@ -231,6 +232,62 @@ class ContextNormalization(unittest.TestCase):
         with patch("yeone_ocr.collate.zh._cc", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "OpenCC"):
                 normalize_blocks([Block(type="para", text="简体")])
+
+
+class SelectableCorrections(unittest.TestCase):
+    def test_three_switches_are_independent_in_all_combinations(self):
+        from itertools import product
+        for traditional, yun, punctuation in product((False, True), repeat=3):
+            with self.subTest(traditional=traditional, yun=yun, punctuation=punctuation):
+                asked = []
+                def choose(items):
+                    asked.extend(items)
+                    return {x["id"]: "雲" for x in items}
+                options = NormalizationOptions(traditional=traditional, yun=yun, punctuation=punctuation)
+                source = Block(type="para", text="汉，云。")
+                out, report = normalize_blocks([source], converter=lambda s: s.replace("汉", "漢").replace("云", "雲"),
+                                               resolver=choose, options=options)
+                want = ("漢" if traditional else "汉") + (", " if punctuation else "，") + ("雲" if yun else "云") + (". " if punctuation else "。")
+                self.assertEqual(out[0].text, want)
+                self.assertEqual([i["source"] for i in asked], ["云"] if yun else [])
+                self.assertTrue(report["complete"])
+                self.assertEqual(source.text, "汉，云。")
+
+    def test_punctuation_only_does_not_need_opencc_or_ask_character_candidates(self):
+        with patch("yeone_ocr.normalization._opencc_converter", side_effect=AssertionError("not needed")):
+            out, report = normalize_blocks([Block(type="table", rows=[["髒，汉书。", "云雨；白术"]])],
+                                           options=NormalizationOptions(traditional=False, yun=False))
+        self.assertEqual(out[0].rows, [["髒, 汉书. ", "云雨; 白术"]])
+        self.assertEqual(report["decisions"], [])
+        self.assertTrue(report["complete"])
+
+    def test_custom_rules_replace_defaults_in_order_with_offsets_and_protected_marks(self):
+        rules = [{"find": "，", "replace": "::"}, {"find": "::", "replace": " / "}, {"find": "。", "replace": ""}]
+        source = Block(type="para", text="甲，乙。〔甲，乙〕", spans=[(2, 3, "green")], memos=[(2, "乙")], anchors=[(2, "here")])
+        out, report = normalize_blocks([source], options=NormalizationOptions(False, False, True, rules))
+        self.assertEqual(out[0].text, "甲 / 乙〔甲，乙〕")
+        self.assertEqual((out[0].spans, out[0].memos, out[0].anchors), ([(4, 5, "green")], [(4, "乙")], [(4, "here")]))
+        self.assertTrue(report["custom_punctuation"])
+        self.assertEqual([r["replace"] for r in report["punctuation_rules"]], ["::", " / ", ""])
+        self.assertEqual(normalize_text("甲，乙。", options=NormalizationOptions(False, False, True, [])).text, "甲，乙。")
+
+    def test_rules_are_validated_literal_data_and_default_copy_is_editable(self):
+        defaults = default_punctuation_rules()
+        defaults[0]["replace"] = "!"
+        self.assertEqual(default_punctuation_rules()[0]["replace"], ", ")
+        valid = validate_punctuation_rules({"rules": [{"find": ".*", "replace": ""}]})
+        self.assertEqual(normalize_text("甲.*乙。", options=NormalizationOptions(False, False, True, valid)).text, "甲乙。")
+        for bad in (None, {}, [{"find": "", "replace": "!"}], [{"find": "，"}],
+                    [{"find": "云", "replace": "雲"}], [{"find": "，", "replace": ",", "regex": True}]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate_punctuation_rules(bad)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rules.json"
+            path.write_text(json.dumps({"rules": default_punctuation_rules()}, ensure_ascii=False), encoding="utf-8-sig")
+            self.assertEqual(len(load_punctuation_rules(path)), len(default_punctuation_rules()))
+            path.write_text("not JSON", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "규칙 파일"):
+                load_punctuation_rules(path)
 
 
 class HwpxNormalizedOutput(unittest.TestCase):

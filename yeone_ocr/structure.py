@@ -5,7 +5,7 @@
 2) 책별 규칙은 짜임 규칙(preset) 파일에서 — presets.py, data/preset_kaibao.json(本草 고전 조문 책): 문단 첫머리의 「약재명 + 빈칸 + 味/一名/主…」
    → 약재명(entry) 제목을 떼어 내고 나머지는 조문, 「［陶隐居云］·［唐本注云］·［今按］…」 로 시작하는 문단 → 주석(commentary),
    문단 끝의 「唐附·今附…」 → 출처(source). 개보본초(尚志钧 輯復本) 394·395·396·413쪽 판면에서 확인한 꼴이다.
-   기본 규칙 regions(data/preset_regions.json)는 이 셋도 굵기 해석도 없이 1)의 영역 종류만 쓴다(어느 책에나 안전).
+   기본 규칙 basic 과 예전 regions 는 이 셋도 굵기 해석도 없이 1)의 영역 종류만 쓴다(어느 책에나 안전).
 3) 획 굵기(measure_bold): 쪽 이미지에서 글자마다 획 굵기(먹 넓이 × 2 / 먹 둘레)를 재어, 책 전체 중앙값의 1.25배를 넘는 글자가 4자 이상
    이어지면(앞뒤 일곱 글자 중앙값으로 고른 뒤) 굵은 글씨로 본다. 輯復本은 本經 글을 굵게 찍었다(394쪽 苦瓠 4.6 · 395쪽 水靳 4.6, 보통 글 2.6~3.5).
    조문의 굵은 글자가 반을 넘으면 굵은 글씨 쓰임(kaibao: 본경 bonjing), 아니면 보통 글씨 쓰임(별록 bielu) — 짜임 규칙의 emphasis.
@@ -129,7 +129,7 @@ def apply_structure(blocks: list[Block], preset: Preset | str = DEFAULT_PRESET, 
     쪽 첫머리(책갈피 자리)에서 새 조문·주석이 시작되는데 앞 문단에 이어진 것(판독의 cont 가 틀림)은 거기서 가른다(stats['page_split']).
     bold_measured=False(획 굵기를 재지 않음)거나 문서 어디에도 굵은 범위가 없으면(本經을 굵게 찍지 않은 책) 本經·別錄을 가르지 않고 조문을 본문으로 둔다
     — '굵은 글자 없음' 을 '別錄' 으로 읽으면 本經 조문까지 별록 꼬리표가 붙는다.
-    preset: 짜임 규칙(Preset, 또는 이름 — 내장 id·예전 --structure 값·규칙 JSON 경로, presets.resolve_preset). 기본 regions 는 영역 종류만:
+    preset: 짜임 규칙(Preset, 또는 이름 — 내장 id·예전 --structure 값·규칙 JSON 경로, presets.resolve_preset). 기본 basic 은 영역 종류만:
     규칙에 없는 칸(entry·commentary·source·emphasis = null)의 일은 하지 않는다. 약재명 떼기는 entry.when 이 always 이거나
     그런 문단(제목으로 읽힌 약재명 포함)이 min_hits 이상이고 문단의 min_ratio 이상일 때만."""
     p = preset if isinstance(preset, Preset) else resolve_preset(preset)

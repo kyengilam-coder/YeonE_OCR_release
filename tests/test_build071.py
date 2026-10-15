@@ -89,6 +89,37 @@ class BuildNormalization(unittest.TestCase):
         with ZipFile(self.work.out_dir / "source.hwpx") as archive:
             self.assertIn("髒，汉书。", archive.read("Contents/section0.xml").decode("utf-8"))
 
+    def test_punctuation_only_custom_rules_reach_hwpx_docx_and_audit_without_models(self):
+        path = self.root / "punctuation.json"
+        path.write_text(json.dumps([{ "find": "，", "replace": " / "}], ensure_ascii=False), encoding="utf-8")
+        with patch.object(cli, "create_reader") as factory:
+            self.assertEqual(self.run_build(self.args("--no-traditional", "--no-yun", "--punctuation-rules", str(path), "--docx")), 0)
+            factory.assert_not_called()
+        for name, xml_name in (("source.hwpx", "Contents/section0.xml"), ("source.docx", "word/document.xml")):
+            with ZipFile(self.work.out_dir / name) as archive:
+                self.assertIn("髒 / 汉书。", archive.read(xml_name).decode("utf-8"))
+        audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
+        self.assertEqual(audit["options"], {"traditional": False, "yun": False, "punctuation": True})
+        self.assertTrue(audit["custom_punctuation"])
+        self.assertTrue(audit["complete"])
+        self.assertEqual(self.work.record_path(1).read_text(encoding="utf-8"), self.original)
+
+    def test_disabling_all_three_stages_is_equivalent_to_no_normalize(self):
+        with patch.object(cli, "create_reader") as factory:
+            self.assertEqual(self.run_build(self.args("--no-traditional", "--no-yun", "--no-punctuation")), 0)
+            factory.assert_not_called()
+        audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
+        self.assertFalse(audit["enabled"])
+
+    def test_invalid_rules_stop_run_before_ocr_but_disabled_punctuation_ignores_them(self):
+        args = cli.build_parser().parse_args(["run", str(self.pdf), "--work", str(self.work.dir), "--punctuation-rules", str(self.root / "missing.json")])
+        with patch.object(cli, "cmd_read") as read:
+            with fitz.open(self.pdf) as doc:
+                self.assertEqual(cli.cmd_run(args, self.work, doc), 2)
+            read.assert_not_called()
+        args.no_punctuation = True
+        self.assertIsNone(cli._check_document(args))
+
     def test_cache_does_not_confuse_repeated_target_positions(self):
         inputs = [dict(id="1", context="甲云乙云", source="云", candidates=["云", "雲"], target_offset=1),
                   dict(id="2", context="甲云乙云", source="云", candidates=["云", "雲"], target_offset=3)]

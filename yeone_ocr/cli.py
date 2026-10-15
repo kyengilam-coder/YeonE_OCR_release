@@ -1544,7 +1544,7 @@ def _cached_choice(item: dict, keys: tuple[str, ...], choices: dict):
 
 
 def normalization_plan(work: Work, records: list[dict], provider: str, model: str, layout: str = "page",
-                       join_pages: bool = True, preset=DEFAULT_PRESET, any_model: bool = True) -> dict:
+                       join_pages: bool = True, preset=DEFAULT_PRESET, any_model: bool = True, options=None) -> dict:
     """문맥 교정에서 모델에 새로 물을 후보 수 어림(모델 호출 없음·파일을 쓰지 않음). 문서 조립·규칙 변환까지 해 보고 재사용 기록과 견준다.
     문서를 만들 때와 같은 조건(짜임·쪽 잇기·짜임 규칙 preset — 이름이나 Preset)으로 조립해야 앞뒤 60자 열쇠가 같다
     — 그래도 등급 표시·굵기 범위는 글을 바꾸지 않으므로 '약' 이다. any_model 이면(--skip-answered any-model) 다른 모델이 앞서 물은 결론도 센다.
@@ -1562,7 +1562,7 @@ def normalization_plan(work: Work, records: list[dict], provider: str, model: st
     def capture(items):
         seen.extend(items); return {}
     capture.batch_size = 1 << 30
-    normalize_blocks(blocks, resolver=capture)
+    normalize_blocks(blocks, resolver=capture, options=options)
     rules_hash, prompt = _choice_hashes()
     cache, undecided, askers = _load_normalization_cache(work)
     others = _normalization_askers(work, provider, model, undecided, askers) if any_model else []
@@ -1740,7 +1740,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             log(f"build: 판독 기록이 있는 {len(records)}쪽만 문서에 넣음 (PDF 전체 {len(doc)}쪽). 전체를 만들려면 쪽 범위를 비우고 [▶ 한 번에 인식] 을 다시 누르십시오.")
         chunks = [records[i:i + args.split] for i in range(0, len(records), args.split)] if getattr(args, "split", 0) and args.split > 0 else [records]
     ok = True; written = []; all_tpl = True                         # last_build: 쓴 HWPX 이름·모두 양식으로 썼는지
-    normalize = not interim and not getattr(args, "no_normalize", False)
+    norm_options = normalization_options(args) if not interim else None
+    normalize = norm_options is not None and norm_options.enabled
     resolver = resolver_meta = None
     if normalize:
         from .normalization import normalize_blocks
@@ -1826,7 +1827,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         t0 = time.time()
         norm_report = None
         if normalize:
-            blocks, norm_report = normalize_blocks(blocks, resolver=resolver)
+            blocks, norm_report = normalize_blocks(blocks, resolver=resolver, options=norm_options)
             norm_report["enabled"] = True
             norm_report["reader"] = dict(resolver_meta)
             norm_report["output"] = out_h.name
@@ -1854,7 +1855,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         all_tpl = all_tpl and st is not None
         if st is None:
             st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline",
+                            preset=preset if layout == "flow" else None)
         fissues = check_hwpx_file(str(out_h))
         vi = st.get("validate_issues")
         if isinstance(vi, int) and vi > 0:                              # python-hwpx 스키마·꾸러미 검증(양식으로 만든 파일만 값이 있음)
@@ -1878,7 +1880,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             summary = norm_report.get("summary", {})
             log((f"번체·문맥 교정: 변경 {summary.get('changes', 0)}건 · 확인 필요 {summary.get('review', 0)}건 · 보고 {report_html}"
                  + (" — 미확정 후보는 원문을 유지했습니다." if not norm_report.get("complete", True) else ""))
-                if norm_report.get("enabled") else "번체·문맥 교정: --no-normalize 설정으로 생략")
+                if norm_report.get("enabled") else "자동 교정: 모든 교정 항목을 꺼서 생략")
             if (norm_report.get("reader") or {}).get("disabled"):
                 log(f"  문맥 교정 모델 끔(--no-context-model): 갈리는 후보 {summary.get('context_unresolved', 0) + summary.get('yun_ambiguous', 0)}건은 원문을 유지했습니다 — 교정 보고 {report_html}")
             elif not norm_report.get("complete", True):
@@ -1915,6 +1917,18 @@ def preset_ref(args) -> str:
     return getattr(args, "preset", None) or getattr(args, "structure", None) or DEFAULT_PRESET
 
 
+def normalization_options(args):
+    """CLI·창에서 고른 자동 교정 항목. 사용하지 않는 규칙 파일은 읽지 않는다."""
+    from .normalization import NormalizationOptions, load_punctuation_rules
+    enabled = not getattr(args, "no_normalize", False)
+    punctuation = enabled and not getattr(args, "no_punctuation", False)
+    path = getattr(args, "punctuation_rules", None)
+    rules = load_punctuation_rules(path) if punctuation and path else None
+    return NormalizationOptions(traditional=enabled and not getattr(args, "no_traditional", False),
+                                yun=enabled and not getattr(args, "no_yun", False),
+                                punctuation=punctuation, punctuation_rules=rules)
+
+
 def _check_document(args) -> str | None:
     """문서 설정(--template·--preset)을 모델을 부르기 전에 검사한다: 양식 파일이 없거나 원본 쪽대로(--layout page)와 함께 주었거나,
     --preset 과 예전 --structure 를 함께 주었거나, 내용별(--layout flow)인데 짜임 규칙을 쓸 수 없으면 오류 글, 괜찮으면 None.
@@ -1933,6 +1947,10 @@ def _check_document(args) -> str | None:
             resolve_preset(preset_ref(args))
         except PresetError as e:
             return f"오류: {e}"
+    try:
+        normalization_options(args)
+    except ValueError as e:
+        return f"오류: {e}"
     return None
 
 
@@ -1957,9 +1975,12 @@ def cmd_build(args, work: Work | None = None, doc=None):
         return 130
     if getattr(args, "textlayer_pdf", False):                 # 문서와 함께 검색 가능한 PDF 도(실패해도 문서는 그대로 — 진행 기록의 '오류:' 줄로 알림)
         try:
-            make_textlayer(args, work, pages, report=False)
+            pdf_rc = make_textlayer(args, work, pages, report=False)
+            if pdf_rc == 130:
+                return 130
+            ok = ok and pdf_rc == 0
         except Exception as e:
-            log(f"오류: 검색 가능한 PDF 를 만들지 못했습니다({type(e).__name__}: {str(e)[:120]}). HWPX 는 그대로입니다.")
+            log(f"오류: 검색 가능한 PDF 를 만들지 못했습니다({type(e).__name__}: {str(e)[:120]}). HWPX 는 그대로입니다."); ok = False
     return (5 if getattr(args, "_normalization_incomplete", False) else 0) if ok else 1
 
 
@@ -1968,7 +1989,7 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
     """검색 가능한 PDF: 판독 기록(merged)의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 새 PDF 로 저장한다(원본은 그대로, 모델 호출 없음).
     글자 자리는 판독에 쓴 쪽 이미지에서 잰다(textlayer.plan_page). 판독 기록이 있는 쪽만 넣고, 그 쪽에 있던 다른 OCR 의 숨은 글자층은
     지운다(--keep-old-layer 면 둠). report=False 면 진행 막대에 알리지 않는다(문서 만들기에 붙어 돌 때)."""
-    from .textlayer import searchable_pdf, out_path
+    from .textlayer import searchable_pdf, out_path, TextlayerCancelled
     from .pdfio import page_frame
     records = {r["pdf_page"]: r for r in work.records(pages)}
     if not records:
@@ -1988,7 +2009,9 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
         log(f"▶ 검색 가능한 PDF: 판독 기록이 있는 {len(todo)}쪽에 보이지 않는 글자층을 넣습니다 → {out}")
         try:
             st = searchable_pdf(doc, todo, page_data, out, strip_old=not getattr(args, "keep_old_layer", False), log=log,
-                                step=(lambda d, t: progress("textlayer", d, t)) if report else None)
+                                step=(lambda d, t: progress("textlayer", d, t)) if report else None, should_stop=CANCEL.is_set)
+        except TextlayerCancelled:
+            log("중지: 검색 가능한 PDF 만들기를 멈췄습니다. 판독 기록은 보존되어 다시 실행할 수 있습니다."); return 130
         except PermissionError:
             log(f"오류: {out.name} 을(를) 저장하지 못했습니다 — PDF 뷰어에서 열려 있으면 닫고 다시 실행하십시오."); return 1
     finally:
@@ -2349,7 +2372,8 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
 def cmd_run(args, work: Work | None = None, doc=None):
     """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
     사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
-    bad = _check_document(args)                               # 판독·판별에 돈을 쓰기 전에 — 끝의 문서 만들기에서 막히면 그 호출이 헛된다
+    pdf_only = getattr(args, "pdf_only", False)
+    bad = None if pdf_only else _check_document(args)         # PDF 전용은 문서의 양식·자동 교정 설정을 쓰지 않는다
     if bad:
         log(bad); return 2
     doc = doc or open_pdf(args.pdf)
@@ -2401,14 +2425,15 @@ def cmd_run(args, work: Work | None = None, doc=None):
 
     ahead_thread.start()                                      # 문서 객체를 혼자 쓰는 판정(읽기 방향·쪽수)이 끝난 뒤에
     try:
-        rc = cmd_read(args, work, doc, checkpoint_fn=checkpoint if args.checkpoint else None)
+        rc = cmd_read(args, work, doc, checkpoint_fn=checkpoint if args.checkpoint and not pdf_only else None)
     finally:
         ahead_done()
     partial = rc == 3                                         # 끝까지 갔지만 실패한 쪽이 있음 — 문서는 만들되 성공으로 돌려주지 않는다
     adj_failed = False                                        # 3차 판별을 못 마침(〔a/b〕 남음) — 실패한 쪽과는 다른 말·끝 코드(4)로
     if rc not in (0, 3) or CANCEL.is_set():
         if work.records(pages):
-            log("판독이 중간에 멈춰 '진행중' HWPX 를 남겼습니다. 다시 실행하면 남은 쪽부터 이어서 합니다.")
+            log("판독이 중간에 멈췄습니다. 판독 기록을 보존했으며 다시 실행하면 남은 쪽부터 이어서 합니다." if pdf_only else
+                "판독이 중간에 멈춰 '진행중' HWPX 를 남겼습니다. 다시 실행하면 남은 쪽부터 이어서 합니다.")
         return rc if rc not in (0, 3) else 130
     if auto_offset and getattr(args, "print_offset", None) is None:
         recs = work.records(pages); off = offset_from_records(recs)
@@ -2424,7 +2449,7 @@ def cmd_run(args, work: Work | None = None, doc=None):
         except Exception as e:
             log(f"오류: 3차 글자 판별을 건너뜀({e}). 〔a/b〕 표시는 그대로 남습니다."); adj_failed = True
         if CANCEL.is_set(): return 130
-    rc = cmd_build(args, work, doc)
+    rc = make_textlayer(args, work, pages) if pdf_only else cmd_build(args, work, doc)
     if CANCEL.is_set(): return 130
     cmd_review(args, work, doc)
     try:
@@ -2433,7 +2458,8 @@ def cmd_run(args, work: Work | None = None, doc=None):
     except Exception:
         pass
     cmd_report(args, work, doc)
-    log("끝. 결과: out/ 의 HWPX · review.html(검수 화면) · report.md(상태·다발 오인식 장부) · confusion.json"
+    output_label = ("out/ 의 검색 가능한 PDF" if rc == 0 else "PDF 생성·검증을 완료하지 못했습니다(위 오류 확인)") if pdf_only else "out/ 의 HWPX"
+    log(f"끝. 결과: {output_label} · review.html(검수 화면) · report.md(상태·다발 오인식 장부) · confusion.json"
         + (" — 실패한 쪽이 있습니다(위 '오류:' 줄). 다시 [▶] 를 누르면 그 쪽만 다시 시도합니다." if partial else "")
         + ((" —" if not partial else "") + " 3차 글자 판별을 마치지 못해 〔a/b〕 표시가 남았습니다(위 '오류:' 줄). 다시 [▶] 를 누르면 3차 판별을 이어서 합니다." if adj_failed else ""))
     return rc or (3 if partial else (4 if adj_failed else 0))         # 3 = 실패한 쪽 있음, 4 = 쪽은 다 읽었지만 3차 판별을 못 마침
@@ -2530,13 +2556,17 @@ def build_parser():
                        help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
+        p.add_argument("--no-traditional", action="store_true", help="간체→번체 변환과 한자 치환 문맥 후보를 끔(云/雲·부호는 별도)")
+        p.add_argument("--no-yun", action="store_true", help="云/雲 문맥 교정을 끔(원래 글자 보존)")
+        p.add_argument("--no-punctuation", action="store_true", help="중문부호 치환을 끔")
+        p.add_argument("--punctuation-rules", help="편집한 중문부호 규칙 JSON: [{\"find\": \"，\", \"replace\": \", \"}, ...], 기본 부호 목록을 대체")
         p.add_argument("--no-context-model", action="store_true",
                        help="번체 문맥 교정에 모델을 부르지 않음: 규칙 변환(간체→번체·부호)은 하고, 문맥으로 갈리는 후보(发→發/髮, 云/雲 등)는 원문을 두고 교정 보고에 남김")
         p.add_argument("--layout", choices=["page", "flow"], default="page",
                        help="문서 짜임: page=원본 쪽마다 기록 줄·쪽 나누기(기본, 검수용) / flow=내용별(제목·문단으로 잇고 원본 쪽은 책갈피로)")
         p.add_argument("--template", help="내용별 문서(--layout flow)를 채울 양식 HWPX — 그 스타일(제목-장·제목-절·본경 원문·주석…)과 쪽 설정을 쓴다")
         p.add_argument("--preset", default=None,
-                       help="내용별 짜임 규칙: regions(기본 · 영역 종류만) · kaibao(本草 조문 — 開寶本草·證類 계열) · 또는 규칙 JSON 파일 경로(README '짜임 규칙 파일 만들기')")
+                       help="내용별 짜임 규칙: basic(기본 · 제목·문단 스타일) · regions(영역 종류만) · kaibao(本草 조문 — 開寶本草·證類 계열) · 또는 규칙 JSON 파일 경로(README '짜임 규칙 파일 만들기')")
         p.add_argument("--structure", choices=["auto", "bencao", "none"], default=None, help=argparse.SUPPRESS)   # 예전 이름: auto=kaibao · bencao=kaibao(약재명 늘) · none=regions
         p.add_argument("--no-bold", action="store_true", help="내용별 문서에서 쪽 이미지의 획 굵기를 재지 않음 — 굵은 글씨·보통 글씨(本草: 本經·別錄) 가르기와 판독이 빠뜨린 약재명 뒤 빈칸 찾기를 하지 않음(양식 HWPX 가 있고 짜임 규칙에 약재명 떼기(entry)가 있을 때만 잼)")
         p.add_argument("--textlayer-pdf", action="store_true",
@@ -2578,6 +2608,7 @@ def build_parser():
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")
     p.add_argument("--clear-check", action="store_true", help="'판독 확인 필요' 표시를 지움(사람이 확인한 뒤)"); p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("run"); common(p); read_opts(p); adjudicate_opts(p); build_opts(p); answered_opt(p); p.set_defaults(fn=cmd_run)
+    p.add_argument("--pdf-only", action="store_true", help="판독·3차 판별 뒤 검색 가능한 PDF만 만듦(문서 조립·자동 교정·HWPX 중간 저장 생략)")
     p = sub.add_parser("textlayer", help="검색 가능한 PDF: 판독 기록의 글을 원본 PDF 에 보이지 않는 글자층으로 넣어 새 PDF 로 저장(모델 호출 없음)"); common(p)
     p.add_argument("--out", help="저장할 PDF 경로(기본 결과 폴더 out/<이름>_글자층.pdf)")
     p.add_argument("--keep-old-layer", action="store_true",

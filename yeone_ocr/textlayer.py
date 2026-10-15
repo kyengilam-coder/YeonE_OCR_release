@@ -31,6 +31,10 @@ ASC, DESC = 0.88, -0.12              # 글꼴의 위·아래 범위(em). 글자 
 INK_THR = 110                        # 먹으로 칠 밝기(layout·adjudicate 와 같은 값)
 
 
+class TextlayerCancelled(Exception):
+    """중지 요청: 작업 중인 사본을 버리고 기존 출력 PDF 는 보존한다."""
+
+
 @dataclass
 class Line:
     dir: str                           # "v"(세로 열, 위→아래) | "h"(가로 줄, 왼→오른쪽)
@@ -318,7 +322,7 @@ def _u16(c: str) -> str:
 
 
 def drop_bad_chars(lines: list[Line]) -> int:
-    """홀로 남은 UTF-16 대리 코드(\ud800~\udfff: 판독 JSON 에서 반 쪽만 남은 이모지 등)는 utf-16 으로 적을 수 없어 글꼴에 못 넣는다.
+    """홀로 남은 UTF-16 대리 코드(U+D800~U+DFFF: 판독 JSON 에서 반 쪽만 남은 이모지 등)는 utf-16 으로 적을 수 없어 글꼴에 못 넣는다.
     판독불명처럼 자리(상자)만 두고 글자는 None 으로 바꾼다. 돌려주는 값: 바꾼 글자 수."""
     bad = 0
     for ln in lines:
@@ -554,17 +558,25 @@ def own_text(doc: pymupdf.Document, pno: int) -> list[str]:
     return out
 
 
-def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str | Path, strip_old: bool = True, log=print, step=None) -> dict:
+def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str | Path, strip_old: bool = True, log=print, step=None,
+                   should_stop=None) -> dict:
     """pages 의 쪽에 글자층을 넣어 out 에 저장한다(doc 을 바꾼다 — 버릴 사본을 넘길 것). page_data(쪽) → (PageReading, 쪽 이미지, 이미지 틀, 세로쓰기인가).
     쪽 이미지는 쪽마다 불러 자리만 잡고 버린다(700쪽 책도 메모리에 이미지를 쌓지 않게). step(끝난 수, 전체 수) 를 주면 쪽마다 부른다.
+    should_stop() 이 참이면 쪽 사이·저장 전후에 TextlayerCancelled 를 낸다. 검증까지 임시 파일에서 마쳐 기존 출력은 보존한다.
     이전에 넣은 이 글자층은 strip_old 와 상관없이 지운다(두 번 넣을 까닭이 없고, 글꼴 이름이 겹치면 옛 글자가 깨진다). 넣은 쪽이 없으면 저장하지 않는다.
     돌려주는 값: {"pages": 넣은 쪽 수, "chars": 글자 수, "how": {방법: 줄 수}, "skipped": {쪽: 까닭}, "stripped": 옛 글자층을 지운 쪽 수,
     "own_stripped": 이전의 이 글자층만 지운 쪽 수, "links_kept": 지우면서 다시 넣은 링크 수, "bad_chars": 글꼴에 못 넣어 뺀 글자 수(깨진 대리 코드),
     "mismatch": [다시 읽은 글이 넣은 글과 다른 쪽]}."""
+    def check_stop():
+        if should_stop and should_stop():
+            raise TextlayerCancelled()
+
+    check_stop()
     plans: dict[int, list[Line]] = {}; frames: dict[int, tuple] = {}
     stats = {"pages": 0, "chars": 0, "how": {}, "skipped": {}, "stripped": 0, "own_stripped": 0, "links_kept": 0, "bad_chars": 0, "mismatch": []}
     total = len(pages) * 2
     for i, n in enumerate(sorted(pages)):
+        check_stop()
         state = text_state(doc[n - 1])
         if state == "visible":
             stats["skipped"][n] = "보이는 글자가 있는 쪽(스캔이 아님)"
@@ -574,9 +586,11 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
             stats["bad_chars"] += drop_bad_chars(plans[n])
             del img
         if step: step(i + 1, total)
+    check_stop()
     if plans:
         font_xref, cids = add_font(doc, [c for ls in plans.values() for ln in ls for c, _ in ln.chars])
     for i, (n, lines) in enumerate(list(plans.items())):
+        check_stop()
         page = doc[n - 1]
         if strip_old and text_state(page) == "hidden":
             ok, kept = strip_hidden_text(page)
@@ -597,15 +611,25 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
         for ln in lines:
             stats["how"][ln.how] = stats["how"].get(ln.how, 0) + 1
         if step: step(len(pages) + i + 1, total)
-    if step: step(total, total)
+    check_stop()
     if not stats["pages"]:                                              # 넣은 쪽이 없으면 사본을 만들지 않는다(cli 가 '넣은 쪽 없음'으로 알린다)
+        if step: step(total, total)
         return stats
     from .state import write_atomic_with
     out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic_with(out, lambda t: doc.save(t, garbage=3, deflate=True))
-    with pymupdf.open(out) as check:                                  # 다시 열어 넣은 글이 그대로 읽히는지
-        for n, lines in plans.items():
-            want = "".join(c for ln in lines for c, _ in ln.chars if c)
-            if re.sub(r"\s", "", "".join(own_text(check, n))) != want:      # 빈칸은 추출기가 큰 틈에 넣는 것이라 세지 않는다
-                stats["mismatch"].append(n)
+
+    def save_and_check(tmp):
+        check_stop()
+        doc.save(tmp, garbage=3, deflate=True)
+        check_stop()
+        with pymupdf.open(tmp) as check:                              # 검증·중지가 끝난 뒤에만 최종 이름으로 바꾼다
+            for n, lines in plans.items():
+                check_stop()
+                want = "".join(c for ln in lines for c, _ in ln.chars if c)
+                if re.sub(r"\s", "", "".join(own_text(check, n))) != want:  # 빈칸은 추출기가 큰 틈에 넣는 것이라 세지 않는다
+                    stats["mismatch"].append(n)
+        check_stop()
+
+    write_atomic_with(out, save_and_check)
+    if step: step(total, total)
     return stats

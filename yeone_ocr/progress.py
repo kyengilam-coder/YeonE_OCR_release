@@ -21,6 +21,7 @@ NOTES = {"normalize": "문맥 교정"}
 # 명령별 단계와 무게. 한 번에 인식(run)은 판독이 대부분이다.
 PLANS: dict[str, tuple[tuple[str, float], ...]] = {
     "run": (("prepare", 0.03), ("read", 0.75), ("adjudicate", 0.12), ("build", 0.07), ("review", 0.015), ("report", 0.015)),
+    "run-pdf": (("prepare", 0.03), ("read", 0.75), ("adjudicate", 0.12), ("textlayer", 0.07), ("review", 0.015), ("report", 0.015)),
     "read": (("read", 1.0),), "prepare": (("prepare", 1.0),), "adjudicate": (("adjudicate", 1.0),), "build": (("build", 1.0),),
     "remerge": (("remerge", 1.0),), "review": (("review", 1.0),), "report": (("report", 1.0),),
     "collate": (("collate", 1.0),), "textlayer": (("textlayer", 1.0),),

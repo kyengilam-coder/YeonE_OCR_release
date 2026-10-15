@@ -379,7 +379,7 @@ class Window(unittest.TestCase):
         self.book_dir(self.a).mkdir()
         gui.App.save_settings(app, quiet=True)
         self.assertEqual(load_book_settings(self.book_dir(self.a)),
-                         {"layout": "flow", "template": "T.hwpx", "preset": "regions", "bold_split": True, "pages": "2-4", "print_offset": "", "mode": "auto"})
+                         {"layout": "flow", "template": "T.hwpx", "preset": "basic", "bold_split": True, "pages": "2-4", "print_offset": "", "mode": "auto"})
         self.assertEqual((self.saved[0]["layout"], self.saved[0]["template"]), ("flow", "T.hwpx"))   # 전체 설정 = 새 책의 기본값(지난 값)
         self.assertNotIn("book_settings", json.dumps(self.saved[0], ensure_ascii=False))
 

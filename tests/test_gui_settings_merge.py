@@ -26,7 +26,7 @@ def fake_app(gui, cfg: dict, **over):
              think2=True, blind=False, chunk="8", suspects=True, tlpdf=False, layout=gui.LAYOUT_LABELS[cfg.get("layout", "page")],
              template=cfg.get("template", ""), bold=True, ctxmodel=True, maxcalls="0", status="", skipany=cfg.get("skip_any_model", True))
     v.update(over)
-    app = types.SimpleNamespace(cfg=cfg, _cfg_loaded=copy.deepcopy(cfg), _preset_ref=over.get("preset", cfg.get("preset", "regions")),
+    app = types.SimpleNamespace(cfg=cfg, _cfg_loaded=copy.deepcopy(cfg), _preset_ref=over.get("preset", cfg.get("preset", gui.DEFAULT_PRESET)),
                                 **{"v_" + k: Var(x) for k, x in v.items() if k != "preset"})
     app.check_list_mode = lambda: "none"; app.memo_mode = lambda: "notice"; app.collate_policy = lambda: "sure"; app.collate_memo_mode = lambda: "notice"
     app.media_res_key = lambda: "high"; app.mode_key = lambda i: "auto"; app.page_think_key = lambda: "auto"; app.page_mres_key = lambda: "auto"
@@ -97,9 +97,11 @@ class SettingsMerge(unittest.TestCase):
                                            {"preset": "D:/a.json"}, {"layout": "flow", "preset": "regions"}, {"layout": "flow", "structure": ["x"]},
                                            {"layout": "page", "structure": "auto", "template": "D:/본초학.hwpx"}, {"layout": "page", "structure": "bencao"},
                                            {"layout": "page", "template": "  "})],
-                         ["kaibao", "kaibao", "regions", "bencao", "regions", "regions", "regions", "D:/a.json", "regions", "kaibao",
-                          "kaibao", "bencao", "regions"])                              # 검수용으로 잠시 원본 쪽대로 둔 사람(양식이 있음)도 本草 조문 그대로
-        self.assertEqual(gui.upgrade_config(dict(gui.DEFAULTS, preset=None), {"preset": None})["preset"], "regions")   # 망가진 값
+                         ["kaibao", "kaibao", "regions", "bencao", "basic", "basic", "basic", "D:/a.json", "regions", "kaibao",
+                          "kaibao", "bencao", "basic"])                              # 검수용으로 잠시 원본 쪽대로 둔 사람(양식이 있음)도 本草 조문 그대로
+        self.assertEqual(gui.upgrade_config(dict(gui.DEFAULTS, preset=None), {"preset": None})["preset"], "basic")   # 망가진 값
+        for selected in ("regions", "kaibao", "bencao", "auto", "none", "D:/a.json"):
+            self.assertEqual(up({"layout": "flow", "preset": selected}), selected)       # 명시적으로 고른 규칙은 새 기본값으로 바꾸지 않는다
         gui.save_config({"layout": "flow", "structure": "auto", "template": "T.hwpx", "workers": 8})
         cfg = gui.load_config()
         self.assertEqual((cfg["preset"], cfg["structure"], cfg["template"]), ("kaibao", "auto", "T.hwpx"))

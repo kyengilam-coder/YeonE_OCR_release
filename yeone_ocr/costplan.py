@@ -8,6 +8,7 @@ import json, math
 from dataclasses import dataclass
 
 from .estimate import CHARS_PER_TOKEN, DEFAULT_FX_KRW, PRICES_DATE, _cost, fmt_krw, fmt_tokens, resolve_price
+from .presets import DEFAULT_PRESET
 
 SITES_PER_PAGE = 20          # 실측 없을 때: 새로 읽는 쪽 하나에서 생기는 〔a/b〕 자리
 SUSPECTS_PER_PAGE = 3        # 합의 의심(쪽당 상한 8)
@@ -39,8 +40,12 @@ class PlanInput:
     blind: bool = False
     context_model: bool = True
     normalize: bool = True
+    normalize_traditional: bool = True
+    normalize_yun: bool = True
+    normalize_punctuation: bool = True
+    punctuation_rules: str = ""
     layout: str = "page"
-    preset: str = "regions"
+    preset: str = DEFAULT_PRESET
     join_pages: bool = True
     skip_any_model: bool = True
 
@@ -313,13 +318,17 @@ def count_plan(inp: PlanInput, progress=None, should_stop=None) -> dict:
 
             def choice():                                                # (6) 문맥 교정(번체) — 문서 조립·규칙 변환까지 해 보므로 수백 쪽이면 몇 초
                 from . import cli
+                from .normalization import NormalizationOptions, load_punctuation_rules
                 from .readers import TEXT_CHOICE_SYSTEM
+                options = NormalizationOptions(traditional=inp.normalize_traditional, yun=inp.normalize_yun,
+                    punctuation=inp.normalize_punctuation,
+                    punctuation_rules=load_punctuation_rules(inp.punctuation_rules) if inp.normalize_punctuation and inp.punctuation_rules else None)
                 base = have or recs
                 np_ = None
                 if base:
                     tell(0, 0, "문맥 교정 후보 세는 중(수백 쪽이면 몇 초)")
                     np_ = cli.normalization_plan(w, base, inp.reader, model, layout=inp.layout, join_pages=inp.join_pages, preset=inp.preset,
-                                                 any_model=inp.skip_any_model)
+                                                 any_model=inp.skip_any_model, options=options)
                     stop()
                 avg = _choice_avg(w, model)
                 sys_tok = len(TEXT_CHOICE_SYSTEM) / CHARS_PER_TOKEN
@@ -356,7 +365,7 @@ def count_plan(inp: PlanInput, progress=None, should_stop=None) -> dict:
                     ask = round((CANDIDATES_PER_PAGE if x is None else x) * new_n); c = -(-ask // CHOICE_BATCH)
                     tin, tk, tout = tokens(ask, ask * per_item, c)
                     rows.append(_row("choice", "new", new_n, model, basis + t_basis, (c, c), tin, tk, tout, f"새 후보 약 {ask:,}건(모두 새로 묻는 셈)", ask))
-            if kind in ("run", "build") and inp.normalize and inp.context_model:
+            if kind in ("run", "build") and inp.normalize and inp.context_model and (inp.normalize_traditional or inp.normalize_yun):
                 stage("choice", choice)
     except PlanCancelled:
         raise

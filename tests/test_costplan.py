@@ -119,6 +119,18 @@ class Counts(unittest.TestCase):
         with mock.patch.object(cli, "normalization_plan", side_effect=AssertionError("부르면 안 됨")):
             count_plan(inp(self.pdf, self.w, kind="adjudicate")); count_plan(inp(self.pdf, self.w, kind="read"))
 
+    def test_context_estimate_respects_separate_correction_switches(self):
+        from yeone_ocr.normalization import NormalizationOptions
+        self.assertEqual(rows(count_plan(inp(self.pdf, self.w, kind="build", normalize_traditional=False, normalize_yun=False)), "choice"), [])
+        for traditional, yun, punctuation in ((False, True, False), (True, False, True)):
+            with self.subTest(traditional=traditional, yun=yun):
+                options = NormalizationOptions(traditional=traditional, yun=yun, punctuation=punctuation)
+                want = cli.normalization_plan(self.w, self.w.records(), "openai", "gpt-4.1", options=options)
+                p = count_plan(inp(self.pdf, self.w, kind="build", normalize_traditional=traditional,
+                                   normalize_yun=yun, normalize_punctuation=punctuation))
+                c, = rows(p, "choice")
+                self.assertEqual((c["items"], c["calls"]), (want["ask"], [want["calls"]] * 2))
+
     def test_new_pages_use_this_books_averages_or_defaults(self):
         p = count_plan(inp(self.pdf, self.w))
         self.assertEqual((p["pages"], p["records"], p["to_read"], p["new_pages"]), (5, 3, 2, 2))

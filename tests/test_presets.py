@@ -103,9 +103,10 @@ def write(td: str, data, name: str = "내책.json") -> Path:
 
 class Builtins(unittest.TestCase):
     def test_builtins_aliases_and_default(self):
-        self.assertEqual((DEFAULT_PRESET, BUILTIN), ("regions", ("regions", "kaibao")))
-        for ref in (None, "", "  ", "regions"):
-            self.assertEqual(resolve_preset(ref).id, "regions", ref)
+        self.assertEqual((DEFAULT_PRESET, BUILTIN), ("basic", ("basic", "regions", "kaibao")))
+        for ref in (None, "", "  ", "basic"):
+            self.assertEqual(resolve_preset(ref).id, "basic", ref)
+        self.assertEqual(resolve_preset("regions").id, "regions")
         r, k = resolve_preset("regions"), resolve_preset("kaibao")
         self.assertIs(resolve_preset("kaibao"), k)                                    # 내장은 한 번만 읽는다
         self.assertEqual((r.entry, r.comment_re, r.source_re, r.emphasis), (None, None, None, None))
@@ -203,7 +204,7 @@ class PresetFiles(unittest.TestCase):
         self.assertEqual(str(cm.exception), f"짜임 규칙 파일이 없습니다: {Path(self.td) / '없는.json'}")
         with self.assertRaises(PresetError) as cm:
             resolve_preset("honzo")
-        self.assertIn("짜임 규칙 'honzo' 를 모릅니다 — 내장: regions(영역 종류만)·kaibao(本草 조문)", str(cm.exception))
+        self.assertIn("짜임 규칙 'honzo' 를 모릅니다 — 내장: basic(기본 규칙)·regions(영역 종류만)·kaibao(本草 조문)", str(cm.exception))
         (Path(self.td) / "글자.json").write_bytes("{}".encode("utf-16"))
         with self.assertRaises(PresetError) as cm:
             load_preset(Path(self.td) / "글자.json")
@@ -276,14 +277,14 @@ class PresetFiles(unittest.TestCase):
         self.assertEqual((look.para_styles["chapter"], look.para_styles["subsection"], look.char_styles["small"]), (("편명",), ("제목-본초명(소)", "제목-절"), ("협주",)))
 
     def test_labels_and_choices(self):
-        self.assertEqual(preset_choices("kaibao"), [("regions", "영역 종류만 (제목·문단·소주)"), ("kaibao", "本草 조문 (開寶本草·證類 계열)")])
+        self.assertEqual(preset_choices("kaibao"), [("basic", "기본 규칙"), ("regions", "영역 종류만 (제목·문단·소주)"), ("kaibao", "本草 조문 (開寶本草·證類 계열)")])
         self.assertEqual(preset_choices(None), preset_choices("regions"))
-        self.assertEqual(preset_choices("D:/x.json")[2], ("D:/x.json", "파일: x.json (읽지 못함)"))
-        self.assertEqual(preset_choices("bencao")[2], ("bencao", "本草 조문 · 약재명 늘 떼기(예전 설정 bencao)"))
-        self.assertEqual(len({lab for _, lab in preset_choices("auto")}), 3)                  # 예전 이름도 내장과 다른 이름으로 보인다
+        self.assertEqual(preset_choices("D:/x.json")[3], ("D:/x.json", "파일: x.json (읽지 못함)"))
+        self.assertEqual(preset_choices("bencao")[3], ("bencao", "本草 조문 · 약재명 늘 떼기(예전 설정 bencao)"))
+        self.assertEqual(len({lab for _, lab in preset_choices("auto")}), 4)                  # 예전 이름도 내장과 다른 이름으로 보인다
         good = write(self.td, {"schema": 1}, "책.json")
         self.assertEqual(preset_label(str(good)), "파일: 책.json")
-        self.assertEqual(preset_label("kaibao"), "本草 조문 (開寶本草·證類 계열)"); self.assertEqual(preset_label(""), preset_label("regions"))
+        self.assertEqual(preset_label("kaibao"), "本草 조문 (開寶本草·證類 계열)"); self.assertEqual(preset_label(""), preset_label("basic"))
         self.assertEqual(preset_label("honzo"), "파일: honzo (읽지 못함)")
 
 

@@ -456,7 +456,7 @@ class Command(unittest.TestCase):
             self.assertEqual(rc, 0, log.getvalue()[-800:])
             self.assertIn("원본 쪽 책갈피 1개", log.getvalue()); self.assertIn("내용별 짜임", log.getvalue())
             self.assertTrue((tmp / "w" / "out" / "내용별.hwpx").exists())
-            self.assertIn("짜임 규칙: 영역 종류만 (제목·문단·소주) (regions)", log.getvalue())               # 명령줄 기본은 regions
+            self.assertIn("짜임 규칙: 기본 규칙 (basic)", log.getvalue())
 
     def test_bold_is_measured_only_when_the_preset_interprets_it(self):
         """획 굵기(쪽마다 그려 재는 몇 분)는 내용별 + 양식 + 짜임 규칙에 약재명 떼기(entry — 굵기 해석이 없어도 빠뜨린 빈칸을 잼)가 있을 때만 잰다 — 아니면 까닭을 로그에."""
@@ -475,7 +475,7 @@ class Command(unittest.TestCase):
             for flags, called, why in ((["--preset", "regions"], False, "짜임 규칙 '영역 종류만 (제목·문단·소주)' 에는 굵은 글씨 해석이 없어 재지 않습니다"),
                                        (["--preset", str(tmp / "약재명만.json")], True, "판독이 빠뜨린 약재명 뒤 빈칸을 쪽 이미지에서 재려고 잽니다"),
                                        (["--preset", str(tmp / "약재명만.json"), "--no-bold"], False, ""),
-                                       ([], False, "굵은 글씨 해석이 없어"),                                                       # 기본 regions
+                                       ([], False, "굵은 글씨 해석이 없어"),                                                       # 기본 basic
                                        (["--preset", "kaibao", "--no-bold"], False, ""),
                                        (["--structure", "none"], False, "굵은 글씨 해석이 없어"),
                                        (["--preset", "kaibao"], True, "짜임 규칙: 本草 조문 (開寶本草·證類 계열) (kaibao)"),
@@ -499,7 +499,7 @@ class Command(unittest.TestCase):
         a = build_parser().parse_args(["build", "x.pdf", "--layout", "flow", "--structure", "bencao"])        # 예전 이름도 받는다(도움말에는 숨김)
         self.assertEqual((a.preset, a.structure, cli.preset_ref(a)), (None, "bencao", "bencao"))
         a = build_parser().parse_args(["run", "x.pdf"])
-        self.assertEqual((a.layout, a.template, a.preset, a.structure, a.no_bold, cli.preset_ref(a)), ("page", None, None, None, False, "regions"))
+        self.assertEqual((a.layout, a.template, a.preset, a.structure, a.no_bold, cli.preset_ref(a)), ("page", None, None, None, False, "basic"))
         self.assertNotIn("--structure", build_parser()._subparsers._group_actions[0].choices["build"].format_help())
         try:
             from yeone_ocr import gui
@@ -518,7 +518,7 @@ class Command(unittest.TestCase):
         app.v_layout = V(gui.LAYOUT_LABELS["page"])
         o = gui.App._build_opts(app)
         self.assertEqual(o[:2], ["--layout", "page"]); self.assertNotIn("--preset", o); self.assertNotIn("--template", o)
-        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("page", "", True, "regions"))
+        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("page", "", True, "basic"))
         self.assertNotIn("structure", gui.DEFAULTS)
 
     def test_window_greys_out_options_the_layout_does_not_use(self):

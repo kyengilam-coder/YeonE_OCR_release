@@ -3,6 +3,7 @@ import contextlib
 import io
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,7 +84,7 @@ class SearchablePdf(unittest.TestCase):
         img, _ = page_image(doc, 1); frame = page_frame(doc, 1)
         out = self.tmp / f"{pdf.stem}_out.pdf"
         st = TL.searchable_pdf(doc, [1], lambda n: (pr, img, frame, vertical), out, strip_old=strip_old, log=lambda *a: None)
-        done = pymupdf.open(out); self.addCleanup(done.close)
+        done = pymupdf.open("pdf", out.read_bytes()); self.addCleanup(done.close)  # 다음 변형에서도 같은 출력 이름을 쓸 수 있게(Windows 파일 잠금)
         return st, done
 
     def test_vertical_scan_gets_invisible_columns_at_the_glyphs_even_with_shifted_model_box(self):
@@ -150,6 +151,53 @@ class SearchablePdf(unittest.TestCase):
         self.assertEqual(st["pages"], 0)
         self.assertFalse((self.tmp / "none.pdf").exists())                   # 넣은 쪽이 없으면 원본 사본을 만들지 않는다
         self.assertEqual(steps[-1], (2, 2))                                   # 진행 막대는 끝까지 간다
+
+    def test_stop_between_pages_keeps_previous_output(self):
+        pdf, truth = scan(self.tmp, HLINES[:1], vertical=False, name="stop")
+        pr = reading(truth, False)
+        out = self.tmp / "previous.pdf"
+        for stop_at in (0, 1, 2, 3, 4):
+            with self.subTest(stop_at=stop_at), pymupdf.open(pdf) as doc:
+                doc.fullcopy_page(0)
+                img, _ = page_image(doc, 1)
+                data = mock.Mock(side_effect=lambda n: (pr, img, page_frame(doc, n), False))
+                stop = threading.Event()
+                if stop_at == 0:
+                    stop.set()
+                out.write_bytes(b"previous completed PDF")
+                def step(done, total):
+                    if done == stop_at:
+                        stop.set()
+                with self.assertRaises(TL.TextlayerCancelled):
+                    TL.searchable_pdf(doc, [1, 2], data, out, step=step, should_stop=stop.is_set)
+                self.assertEqual(out.read_bytes(), b"previous completed PDF")
+                self.assertEqual(data.call_count, min(stop_at, 2))
+
+    def test_stop_during_save_discards_temporary_pdf_and_can_resume(self):
+        pdf, truth = scan(self.tmp, HLINES[:1], vertical=False, name="save_stop")
+        pr = reading(truth, False)
+        out = self.tmp / "finished.pdf"
+        out.write_bytes(b"previous completed PDF")
+        before = {p.name for p in self.tmp.iterdir()}
+        stop = threading.Event()
+        with pymupdf.open(pdf) as doc:
+            img, _ = page_image(doc, 1)
+            save = doc.save
+            def save_then_stop(*args, **kwargs):
+                save(*args, **kwargs)
+                stop.set()
+            with mock.patch.object(doc, "save", side_effect=save_then_stop):
+                with self.assertRaises(TL.TextlayerCancelled):
+                    TL.searchable_pdf(doc, [1], lambda n: (pr, img, page_frame(doc, n), False), out, should_stop=stop.is_set)
+        self.assertEqual(out.read_bytes(), b"previous completed PDF")
+        self.assertEqual({p.name for p in self.tmp.iterdir()}, before)
+        stop.clear()
+        with pymupdf.open(pdf) as doc:
+            img, _ = page_image(doc, 1)
+            st = TL.searchable_pdf(doc, [1], lambda n: (pr, img, page_frame(doc, n), False), out, should_stop=stop.is_set)
+        self.assertEqual((st["pages"], st["mismatch"]), (1, []))
+        with pymupdf.open(out) as done:
+            self.assertIn(HLINES[0], "".join(TL.own_text(done, 1)).replace(" ", ""))
 
     def test_indirect_contents_array_keeps_the_scan_visible_and_font_is_embedded(self):
         """검토에서 재현된 것: /Contents 가 간접 배열(N 0 R → [a 0 R b 0 R])인 쪽에 글자층을 덧붙이면 배열 객체를 흐름으로 알고 이어 써
@@ -377,6 +425,20 @@ class Command(unittest.TestCase):
         a = build_parser().parse_args(["textlayer", "x.pdf", "--keep-old-layer", "--pages", "2-3"])
         self.assertTrue(a.keep_old_layer); self.assertEqual(a.pages, "2-3")
         self.assertIn("textlayer", PLANS); self.assertIn("textlayer", STAGE_NAMES)
+
+    def test_pdf_run_progress_tracks_pdf_output_after_ocr(self):
+        from yeone_ocr.progress import Tracker
+        tracker = Tracker("run-pdf")
+        tracker.update("read", 2, 2)
+        tracker.update("adjudicate", 2, 2)
+        start = tracker.frac
+        tracker.update("textlayer", 1, 2)
+        self.assertGreater(tracker.frac, start)
+        self.assertIn("글자층 넣기", tracker.text())
+        tracker.update("textlayer", 2, 2)
+        tracker.update("review", 1, 1)
+        tracker.update("report", 1, 1)
+        self.assertAlmostEqual(tracker.frac, 1.0)
 
 
 @unittest.skipUnless(__import__("importlib").util.find_spec("tkinter"), "tkinter 없음")

@@ -8,7 +8,7 @@
 from __future__ import annotations
 import copy, re, zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from .blocks import Block, anchor_map
 from .grades import styled_runs, GRADE_STYLE, STYLE_ALIAS
@@ -31,6 +31,16 @@ LARGE_FIGURES = ("원형나경도", "복잡한표", "계통도", "도식")    # 
 GRADES = ("green", "blue", "red_ctx")                            # 등급 수를 세는 모양
 # 쓰임 → 양식 스타일 이름은 짜임 규칙(presets, data/preset_*.json 의 styles)에 있다 — 규칙에 없는 쓰임은 regions 의 이름, 그것도 없으면 바탕글.
 HEADING_ROLES = {"chapter", "section", "subsection", "entry", "caption"}
+BASIC_FORMATS = {
+    "chapter": (16, True, "CENTER", 14, 7),
+    "section": (14, True, "LEFT", 10, 4),
+    "subsection": (12, True, "LEFT", 6, 2),
+    "body": (11, False, "JUSTIFY", 0, 0),
+    "commentary": (10.5, False, "JUSTIFY", 0, 0),
+    "small": (9.5, False, "JUSTIFY", 0, 0),
+    "caption": (9.5, False, "CENTER", 3, 3),
+    "note": (9, False, "LEFT", 0, 0),
+}
 _HAN = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003134f]")   # 한자(확장 A·통합·호환·확장 B~) — 이스케이프로 적는다(호환 한자 豈 가 NFC 로 바뀌면 한글까지 한자로 센다)
 
 
@@ -76,6 +86,34 @@ def template_styles(doc) -> dict[str, dict]:
     for st in doc.oxml.headers[0].element.iter(f"{HH}style"):
         out[st.get("name", "")] = {"id": st.get("id"), "type": st.get("type"), "para": st.get("paraPrIDRef"), "char": st.get("charPrIDRef")}
     return out
+
+
+def _ensure_basic_styles(doc, preset: Preset, *, template: bool = False) -> dict[str, dict]:
+    """기본 규칙의 여덟 문단 스타일을 만든다. 양식에 같은 이름이 있으면 그 모양을 그대로 쓴다.
+    예전 이름만 있으면 그 스타일의 모양을 잇고, 없으면 번호 없는 기본 문단 모양에서 만든다."""
+    header = doc.oxml.headers[0]
+    existing = template_styles(doc)
+    created = []
+    for role, (size, bold, alignment, before, after) in BASIC_FORMATS.items():
+        names = preset.para_styles.get(role, ())
+        if not names or names[0] in existing:
+            continue
+        inherited = next((existing[n] for n in names[1:] if n in existing and existing[n]["type"] == "PARA"), None) if template else None
+        if inherited:
+            ppr, cpr = inherited["para"], inherited["char"]
+        else:
+            cpr = doc.oxml.ensure_run_style(font=FONT_HEAD if bold else FONT_BODY, size=size, bold=bold,
+                                           color=COLOR_NOTE if role == "note" else "#000000")
+            ppr = header.ensure_paragraph_format(base_para_pr_id=0, alignment=alignment, heading={"type": "NONE"},
+                                                margins={"prev": int(before * 100), "next": int(after * 100)})
+        style_id = header.ensure_style(names[0], style_type="PARA", para_pr_id_ref=ppr, char_pr_id_ref=cpr, next_style_id_ref=0)
+        existing[names[0]] = {"id": style_id, "type": "PARA", "para": str(ppr), "char": str(cpr)}
+        created.append(names[0])
+    body = next((existing[n] for n in preset.para_styles.get("body", ()) if n in existing and existing[n]["type"] == "PARA"), None)
+    if body:
+        for name in created:
+            header.ensure_style(name, next_style_id_ref=body["id"])
+    return template_styles(doc)
 
 
 def _break_word_para(header, base_id: str, cache: dict) -> str:
@@ -214,6 +252,48 @@ class DefaultLook:
         pass
 
 
+class BasicLook(DefaultLook):
+    """양식 없이도 한글에서 다시 적용할 수 있는 대·중·소제목과 문단-1~5 스타일을 쓴다."""
+    SIZE = {**DefaultLook.SIZE, **{role: fmt[0] for role, fmt in BASIC_FORMATS.items()}}
+
+    def __init__(self, preset: Preset, page_breaks: bool = True, author: str = MEMO_AUTHOR):
+        super().__init__(page_breaks=page_breaks, author=author)
+        self.preset = replace(preset, para_styles={**resolve_preset("basic").para_styles, **preset.para_styles})
+
+    def open(self, highlight: bool):
+        doc = super().open(highlight)
+        styles = _ensure_basic_styles(doc, self.preset)
+        self.role_styles = {}
+        used = {}
+        for role, names in self.preset.para_styles.items():
+            name = next((n for n in names if n in styles and styles[n]["type"] == "PARA"), None)
+            if name is not None:
+                st = styles[name]
+                self.role_styles[role] = st
+                self.S[role] = st["char"]
+                used[role] = name
+        self.extra_stats = {"styles": used}
+        return doc
+
+    def paras(self, b: Block):
+        if b.type == "heading":
+            role = b.role or ("caption" if b.kind in ("그림제목", "표제목") else ("chapter", "section", "subsection")[min(3, max(1, b.level)) - 1])
+        elif b.type == "para":
+            role = b.role or ("small" if b.kind == "소주" else "body")
+        else:
+            role = "note"
+        role = role if role in self.role_styles else "body"
+        st = self.role_styles[role]
+        for para in super().paras(b):
+            yield replace(para, key=role, base=st["char"], para_pr=st["para"], style=st["id"], fmt=None,
+                          cstyles=list(b.cstyles) if b.type == "para" else None)
+
+    def char(self, para: Para, kind: str, cs_kind) -> str:
+        if cs_kind == "small":
+            para = replace(para, key="small", base=self.S["small"])
+        return super().char(para, kind, cs_kind)
+
+
 class TemplateLook:
     """사용자 양식(HWPX)의 스타일로 내용별 문서를 채운다. 양식의 쪽 설정(용지·여백)은 그대로 두고 본문은 비운 뒤, 블록의 쓰임(structure.ROLES)마다
     양식 스타일을 골라 문단을 넣는다. 확인 등급 색·고지 메모는 양식 글자 모양 위에 덧입힌다(바탕은 양식 그대로, 색·굵기·형광펜만 바꾼 글자 모양을 따로).
@@ -226,6 +306,7 @@ class TemplateLook:
         규칙에 없는 쓰임은 regions 의 이름으로(그것도 양식에 없으면 바탕글)."""
         preset = preset or resolve_preset("kaibao")
         base = resolve_preset("regions")
+        self.preset = preset
         self.template, self.author = template, author
         self.para_styles = {**base.para_styles, **preset.para_styles}
         self.char_styles = {**base.char_styles, **preset.char_styles}
@@ -250,7 +331,7 @@ class TemplateLook:
         # 비운 본문이 쓰던 양식 그림(BinData)은 꾸러미에 그대로 둔다: 구역이 둘 이상인 양식에서 remove_unused_images() 를 부르면 뒤에 넣는
         # 그림이 꾸러미 목록(content.hpf)에 오르지 않아 한글이 열지 못하는 파일이 된다. 한글이 저장할 때 알아서 지운다.
         self.doc, self.sec0, self.header = doc, sec0, doc.oxml.headers[0]
-        self.styles = template_styles(doc)
+        self.styles = _ensure_basic_styles(doc, self.preset, template=True) if self.preset.id == "basic" else template_styles(doc)
         self.base = self.styles.get("바탕글") or {"id": "0", "type": "PARA", "para": "0", "char": "0"}
         self.extra_stats = {"styles": {}, "missing": [], "template_dropped": dropped, "page_number_from_template": self.has_page_num}
         self.body_w, self.body_h = _body_size_mm(doc)
