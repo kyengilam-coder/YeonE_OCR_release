@@ -71,8 +71,9 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     인쇄 쪽수 차이는 PDF 글자층으로 자동 판정합니다("자동 판정"·빈 칸 그대로). 글자층이 없는 이미지·스캔의 읽기 방향은
     실제 글줄 배치로 자동 판정합니다. 이미지 OCR은 기본값이 자동 판정이며 PDF·책갈피와 방향 설정을 따로 기억합니다.
     화면 캡처는 Win+Shift+S → 이미지 탭의 큰 원본 상자 클릭 → Ctrl+V로 불러옵니다. 마우스 오른쪽 메뉴나 Ctrl+Shift+V도 됩니다.
-    상자 안의 미리보기로 확인하고, 이미지를 두 번 클릭하면 원본을 크게 볼 수 있습니다.
-    붙여넣은 캡처는 사용자 데이터 폴더의 screenshots에 PNG로 보관하며 같은 캡처는 기존 작업을 이어 씁니다.
+    계속 붙여넣으면 기존 이미지 뒤에 순서대로 추가됩니다. 미리보기의 이전·다음 단추로 각 쪽을 확인한 뒤 전체를 한 번에 인식합니다.
+    이미지를 두 번 클릭하면 원본을 크게 볼 수 있습니다. [입력 비우기]로 새 묶음을 시작하고, [이미지 고르기]로 새 원본을 선택합니다.
+    붙여넣은 캡처는 사용자 데이터 폴더의 screenshots에 PNG로 보관합니다. 같은 PNG 원본을 재사용해도 다시 붙이면 한 쪽을 더 추가합니다.
     붙여넣기는 이전 쪽 범위·인쇄 쪽수 보정·강제 재판독을 초기화하며, 일반 Ctrl+V는 입력 칸의 글자 붙여넣기로 유지합니다.
     [입력 비우기]는 선택한 이미지·묶음과 쪽 범위·진행 표시를 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 그대로 남습니다.
  4. [▶ 한 번에 인식 (HWPX 만들기)] 를 누르면 먼저 판독·3차 글자 판별·합의 의심·문맥 교정의 예상 호출·토큰·비용을 한 창에 보여 주고
@@ -1683,7 +1684,7 @@ class App(tk.Tk):
         if images:
             self._btn(controls, "입력 비우기", self.clear_image_input,
                       tip="불러온 이미지 선택과 쪽 범위를 모두 비우고 새 입력을 기다립니다. 저장된 원본·판독 기록·HWPX는 보존합니다.").pack(side="left", padx=(P(14), 0))
-            self._hint(body, "Win+Shift+S로 캡처 → 위 상자에서 Ctrl+V → [한 번에 인식]. 이미지를 두 번 클릭하면 원본을 크게 봅니다. 여러 장은 첫 쪽을 미리 보여 줍니다.").grid(
+            self._hint(body, "Ctrl+V로 계속 붙여넣으면 뒤에 추가됩니다. 이전·다음으로 각 쪽 확인 → [한 번에 인식]. 새 묶음은 [입력 비우기], 원본 크게 보기는 두 번 클릭.").grid(
                 row=2, column=1, columnspan=2, sticky="ew", pady=(P(4), P(3)))
         self._field_label(body, "쪽 범위", 3, top=6)
         row = ttk.Frame(body, style="Panel.TFrame"); row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(P(6), P(3)))
@@ -2580,7 +2581,7 @@ class App(tk.Tk):
         self._append("이미지 입력을 비웠습니다. 저장된 원본과 결과 파일은 보존됩니다. 새 이미지를 고르거나 스크린샷을 붙여넣으십시오.\n")
 
     def paste_screenshot(self, event=None):
-        """명시적으로 붙여넣었을 때만 클립보드를 읽는다. API 호출은 실행 단추에서 한다."""
+        """명시적으로 붙여넣은 이미지를 현재 이미지 원본 뒤에 추가한다. API 호출은 실행 단추에서 한다."""
         if self.running or getattr(self, "_closing", False) or getattr(self, "_update_installing", False):
             return "break"
         captured = None
@@ -2591,20 +2592,15 @@ class App(tk.Tk):
                 from .screenshots import save_screenshot
                 source = save_screenshot(captured)
                 self.select_tab(2)
-                self._reset_screenshot_pages()
-                self._use_pdf(str(source))
-                self._append(f"스크린샷 불러옴 ({captured.width} × {captured.height} 픽셀). 원본은 자동 보관됩니다. [한 번에 인식]을 눌러 판독하십시오.\n")
+                App._append_image_input(self, [str(source)])
+                self._append(f"스크린샷 붙여넣기 ({captured.width} × {captured.height} 픽셀). 원본은 자동 보관됩니다. 계속 붙여넣거나 [한 번에 인식]을 눌러 판독하십시오.\n")
             elif isinstance(captured, list) and captured:
                 paths = [str(p) for p in captured]
                 if any(Path(p).suffix.lower() not in IMAGE_EXTS or not Path(p).is_file() for p in paths):
                     messagebox.showinfo(APP_NAME, "복사한 파일 중 이미지가 아닌 파일이 있습니다. PNG·JPG 등의 이미지 파일만 복사하거나 Win+Shift+S로 화면을 캡처하십시오.")
                     return "break"
                 self.select_tab(2)
-                if len(paths) == 1:
-                    self._reset_screenshot_pages()
-                    self._use_pdf(paths[0])
-                else:
-                    self._bundle_images(paths, reset_pages=True)
+                App._append_image_input(self, paths)
             else:
                 messagebox.showinfo(APP_NAME, "클립보드에 이미지가 없습니다.\nWin+Shift+S로 원하는 부분을 캡처한 뒤 이미지 상자에서 Ctrl+V를 누르십시오.\n저장된 이미지는 [이미지 고르기…]로 열 수 있습니다.")
         except Exception as exc:
@@ -2613,6 +2609,19 @@ class App(tk.Tk):
             if captured is not None and hasattr(captured, "close"):
                 captured.close()
         return "break"
+
+    def _append_image_input(self, paths: list[str]):
+        """Keep all existing image-tab pages before the new batch; commit only after bundling succeeds."""
+        current = self.pdf()
+        if current and Path(current).is_file() and Path(current).suffix.lower() in (*IMAGE_EXTS, ".pdf"):
+            from .pdfio import _natural_key
+            incoming = sorted(paths, key=lambda p: _natural_key(Path(p)))
+            self._bundle_images([current, *incoming], reset_pages=True, preserve_order=True)
+        elif len(paths) > 1:
+            self._bundle_images(paths, reset_pages=True)
+        else:
+            self._reset_screenshot_pages()
+            self._use_pdf(paths[0])
 
     def choose_pdf(self):
         if self.running: return
@@ -2770,57 +2779,78 @@ class App(tk.Tk):
             self._append(f"주의: 책별 설정을 저장하지 못했습니다({d / BOOK_SETTINGS}): {type(e).__name__}: {e}\n")
 
     @staticmethod
-    def _bundle_path(srcs: list[Path], progress=None) -> Path:
-        """묶음 파일 경로: '<첫 이름>~<끝 이름> (N장 지문).pdf'. 지문은 고른 이미지마다 (이름·크기·내용의 sha1) 을 이름 순서로 모아 낸
+    def _bundle_path(srcs: list[Path], progress=None, *, compact: bool = False) -> Path:
+        """묶음 파일 경로: '<첫 이름>~<끝 이름> (N장 지문).pdf'. 지문은 고른 이미지마다 (이름·크기·내용의 sha1) 을 입력 순서로 모아 낸
         sha1 앞 8자리라 가운데 이미지만 다른 선택이나 바꿔 넣은·고친 이미지는 이름이 달라지고(결과 폴더도 따로), 폴더를 옮기거나 복사해
         경로·수정 시각이 바뀌어도 그대로다(묶음·결과 폴더를 함께 옮기면 판독 기록이 이어진다). 내용은 8MiB 이하면 파일 전체(BMP·TIFF 의
-        가운데만 고쳐 크기가 같아도 알아본다), 넘으면 앞·가운데·끝 64KiB 씩만 읽는다. progress(끝난 장, 전체) 로 진행을 알린다(느린 드라이브)."""
+        가운데만 고쳐 크기가 같아도 알아본다), 넘으면 앞·가운데·끝 64KiB 씩만 읽는다. compact=True는 전체 파일을 읽고 짧은 이름을 쓴다
+        (기존 PDF 뒤에 계속 추가할 때 중첩된 파일명이 길어지지 않도록). progress(끝난 입력, 전체)로 진행을 알린다."""
         import hashlib
         h = hashlib.sha1()
         for i, s in enumerate(srcs, 1):
             with open(s, "rb") as f:
                 n = os.fstat(f.fileno()).st_size; d = hashlib.sha1()
-                if n <= 8 << 20:
+                if compact:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        d.update(chunk)
+                elif n <= 8 << 20:
                     d.update(f.read())
                 else:
                     for at in (0, n // 2, n - 65536):
                         f.seek(at); d.update(f.read(65536))
             h.update(f"{s.name}|{n}|{d.hexdigest()}\n".encode("utf-8"))
             if progress: progress(i, len(srcs))
-        out = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+        # Appending an existing bundle must not keep growing its filename at every paste.
+        name = (f"이미지모음-{h.hexdigest()[:16]}.pdf" if compact else
+                f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장 {h.hexdigest()[:8]}).pdf")
+        out = srcs[0].with_name(name)
         return safe_output_path(out, srcs[0])
 
-    def _bundle_images(self, paths: list[str], *, reset_pages: bool = False) -> None:
+    def _bundle_images(self, paths: list[str], *, reset_pages: bool = False, preserve_order: bool = False) -> None:
         """이미지 여러 장 → 이름의 숫자 순서로 한 PDF 로 묶어 첫 이미지 옆에 저장(무손실: JPEG 는 그대로, 나머지는 PNG).
+        preserve_order=True는 기존 이미지·PDF와 새 이미지의 입력 순서를 보존하며 모든 쪽을 새 묶음에 담는다.
         이름에 고른 이미지들의 지문이 들어가므로 정확히 같은 선택으로 이미 묶은 파일이 있을 때만 그대로 쓴다(판독 기록이 이어지게).
         지문 계산과 묶기는 작업 스레드에서 하고(느린 드라이브에서도 창이 멈추지 않게) 끝날 때까지 단추를 잠근다. 끝나면 _bundle_msg 가 _use_pdf 로 잇는다."""
-        bad = [p for p in paths if Path(p).suffix.lower() not in IMAGE_EXTS]
+        allowed = (*IMAGE_EXTS, ".pdf") if preserve_order else IMAGE_EXTS
+        bad = [p for p in paths if Path(p).suffix.lower() not in allowed]
         if bad:
             messagebox.showinfo(APP_NAME, "여러 개를 고를 때는 이미지만 고르십시오(PDF 는 한 번에 하나).\n  " + "\n  ".join(Path(b).name for b in bad[:5])); return
         if self.running: return
         self._bundle_reset_pages = reset_pages
+        self._bundle_append = preserve_order
         from .pdfio import _natural_key
-        srcs = sorted((Path(p) for p in paths), key=_natural_key)
+        srcs = [Path(p) for p in paths]
+        if not preserve_order:
+            srcs.sort(key=_natural_key)
         names = " → ".join(s.name for s in srcs[:8]) + (" …" if len(srcs) > 8 else "")
-        self._set_running(True); self.v_status.set(f"이미지 {len(srcs)}장을 한 권으로 묶는 중…")
+        self._bundle_in_progress = True
+        self._set_running(True); self.v_status.set("붙여넣은 이미지를 뒤에 추가하는 중…" if preserve_order else f"이미지 {len(srcs)}장을 한 권으로 묶는 중…")
         for b in (self.b_stop, getattr(self, "b_stop2", None)):          # 묶기는 중간에 멈추지 않는다
             if b is not None: b.configure(state="disabled")
         def t():
             out = part = None; log = ""
             err = "이미지를 묶지 못했습니다"
             try:
-                out = self._bundle_path(srcs, progress=lambda d, n: self.q.put(("bundle", "hash", d, n)))
+                out = self._bundle_path(srcs, progress=lambda d, n: self.q.put(("bundle", "hash", d, n)),
+                                        **({"compact": True} if preserve_order else {}))
                 if out.exists():
-                    err = None; log = f"같은 이미지 {len(srcs)}장으로 묶은 파일을 다시 씀: {out.name}\n  {names}\n"; return
-                old = srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장).pdf")       # 0.6.4 전 이름(지문 없음)
+                    err = None
+                    log = (f"같은 이미지 순서로 묶은 파일을 다시 씀: {out.name}\n  {names}\n" if preserve_order else
+                           f"같은 이미지 {len(srcs)}장으로 묶은 파일을 다시 씀: {out.name}\n  {names}\n")
+                    return
+                old = None if preserve_order else srcs[0].with_name(f"{srcs[0].stem}~{srcs[-1].stem} ({len(srcs)}장).pdf")
                 out.parent.mkdir(parents=True, exist_ok=True)
                 part = out.with_name(out.name + ".part")                       # 다 쓴 뒤에만 이름을 붙인다(끊긴 묶음을 다시 쓰지 않게)
-                from .pdfio import save_images_as_pdf
-                save_images_as_pdf(srcs, part, progress=lambda d, n: self.q.put(("bundle", "prog", d, n)))
+                if preserve_order:
+                    from .image_bundle import save_sources_as_pdf as save_bundle
+                else:
+                    from .pdfio import save_images_as_pdf as save_bundle
+                save_bundle(srcs, part, progress=lambda d, n: self.q.put(("bundle", "prog", d, n)))
                 os.replace(part, out); err = None
-                log = f"이미지 {len(srcs)}장을 이름 순서로 묶음: {out.name}\n  {names}\n" + (
+                log = (f"기존 이미지 뒤에 붙여넣은 이미지를 추가했습니다: {out.name}\n  {names}\n" if preserve_order else
+                       f"이미지 {len(srcs)}장을 이름 순서로 묶음: {out.name}\n  {names}\n") + (
                     f"  참고: 예전 판이 묶은 '{old.name}' 이(가) 옆에 있습니다 — 그 판독 기록은 '{work_dir_for(str(old)).name}' 에 따로 있으니 이어 쓰려면 [일반 OCR]의 [PDF 고르기…]로 그 PDF를 고르십시오.\n"
-                    if old.exists() and work_dir_for(str(old)).is_dir() else "")                # 판독 기록(결과 폴더)이 없으면 알리지 않는다
+                    if old is not None and old.exists() and work_dir_for(str(old)).is_dir() else "")
             except ModuleNotFoundError as e:
                 err = f"패키지가 없어 이미지를 묶지 못했습니다: {e.name}. [▸ 고급 → 패키지 설치·점검] 을 누르십시오."
             except Exception as e:
@@ -2829,17 +2859,25 @@ class App(tk.Tk):
                 if err and part is not None:
                     with contextlib.suppress(OSError): part.unlink()
                 self.q.put(("bundle", "done", out, err, log))
-        threading.Thread(target=t, daemon=True).start()
+        self._worker = threading.Thread(target=t, daemon=True, name="image-bundle")
+        self._worker.start()
 
     def _bundle_msg(self, kind: str, *a):
         """작업 스레드의 묶기 알림(주 스레드에서 _poll 이 부른다): ('prog', 끝난 장, 전체) 또는 ('done', 묶음 경로, 오류, 기록 글)."""
         if kind in ("prog", "hash"):
             d, n = a
             self.progress.configure(value=self._bar_value(d / n if n else 1.0))
-            self.v_status.set(f"이미지를 한 권으로 묶는 중… {d}/{n}장" if kind == "prog" else f"고른 이미지 확인 중(같은 묶음이 있는지)… {d}/{n}장"); return
+            if vars(self).get("_bundle_append", False):
+                self.v_status.set(f"이미지를 뒤에 추가하는 중… 입력 {d}/{n}개" if kind == "prog" else f"추가할 원본 확인 중… 입력 {d}/{n}개")
+            else:
+                self.v_status.set(f"이미지를 한 권으로 묶는 중… {d}/{n}장" if kind == "prog" else f"고른 이미지 확인 중(같은 묶음이 있는지)… {d}/{n}장")
+            return
         out, err, log = a
+        self._bundle_in_progress = False
         reset_pages = getattr(self, "_bundle_reset_pages", False)
         self._bundle_reset_pages = False
+        appended = vars(self).get("_bundle_append", False)
+        self._bundle_append = False
         self._set_running(False); self.v_status.set("준비됨")
         if err:
             self.progress.configure(value=0); self.v_prog.set("이미지 묶기 실패")
@@ -2848,6 +2886,9 @@ class App(tk.Tk):
         if reset_pages:
             self._reset_screenshot_pages()
         self._append(log); self._use_pdf(str(out))
+        preview = vars(self).get("image_preview")
+        if appended and preview is not None:
+            preview.show_last_page()
 
     def toggle_key(self):
         self.e_key.configure(show="" if self.e_key.cget("show") else "•")
@@ -3454,7 +3495,8 @@ class App(tk.Tk):
 
     def _close_when_idle(self):
         w = getattr(self, "_worker", None)
-        if keep_waiting(w is not None and w.is_alive(), self._closing_since, time.time()):
+        active = (w is not None and w.is_alive()) or vars(self).get("_bundle_in_progress", False)
+        if keep_waiting(active, self._closing_since, time.time()):
             self.after(200, self._close_when_idle); return
         self.save_settings(quiet=True)
         self.destroy()

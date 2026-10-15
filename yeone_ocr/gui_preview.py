@@ -4,18 +4,39 @@ import tkinter as tk
 from tkinter import ttk
 
 
-def preview_image(path: str, size: tuple[int, int]):
-    """Return an oriented thumbnail, including the first page of bundled images."""
-    from PIL import Image, ImageOps
+def preview_page_count(path: str) -> int:
+    """Count source pages without retaining an open file or loading every image."""
     if Path(path).suffix.lower() == ".pdf":
         import pymupdf
         with pymupdf.open(path) as document:
-            page = document[0]
+            return document.page_count
+    from PIL import Image
+    with Image.open(path) as source:
+        # MPO may contain HDR gain maps or previews; OCR uses only its main picture.
+        return 1 if source.format == "MPO" else (getattr(source, "n_frames", 1) or 1)
+
+
+def preview_image(path: str, size: tuple[int, int], page_index: int = 0):
+    """Return an oriented thumbnail of a zero-based image or document page."""
+    from PIL import Image, ImageOps
+    if page_index < 0:
+        raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.")
+    if Path(path).suffix.lower() == ".pdf":
+        import pymupdf
+        with pymupdf.open(path) as document:
+            if page_index >= document.page_count:
+                raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.")
+            page = document[page_index]
             scale = min(size[0] / page.rect.width, size[1] / page.rect.height)
             pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     with Image.open(path) as source:
-        source.seek(0)
+        if source.format == "MPO" and page_index:
+            raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.")
+        try:
+            source.seek(page_index)
+        except EOFError as exc:
+            raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.") from exc
         source.draft("RGB", size)
         oriented = ImageOps.exif_transpose(source)
         try:
@@ -32,13 +53,28 @@ class ImageInputPreview(ttk.Frame):
         self.variable = variable
         self._photo = None
         self._thumbnail = None
+        self._thumbnail_page = None
         self._pending = None
         self._path = None
         self._stamp = None
+        self._page_index = 0
+        self._page_count = 0
+        self._requested_page = None
         self.canvas = tk.Canvas(self, height=height, background="#faf8f3", takefocus=True,
                                 highlightthickness=1, highlightbackground="#c9c2b5",
                                 highlightcolor="#73513d", borderwidth=0, cursor="hand2")
         self.canvas.pack(fill="both", expand=True)
+        navigation = ttk.Frame(self, style="Panel.TFrame")
+        navigation.pack(fill="x", pady=(3, 0))
+        self.previous_button = ttk.Button(navigation, text="◀ 이전", width=8,
+                                          command=lambda: self._change_page(-1))
+        self.previous_button.pack(side="left")
+        self.page_label = ttk.Label(navigation, text="0쪽", anchor="center", style="Hint.TLabel")
+        self.page_label.pack(side="left", fill="x", expand=True)
+        self.next_button = ttk.Button(navigation, text="다음 ▶", width=8,
+                                      command=lambda: self._change_page(1))
+        self.next_button.pack(side="right")
+        self._update_navigation()
         self.path_label = ttk.Label(self, textvariable=variable, style="Hint.TLabel")
         self.path_label.pack(fill="x", pady=(3, 0))
         self.canvas.bind("<Button-1>", lambda _e: self.canvas.focus_set())
@@ -67,6 +103,31 @@ class ImageInputPreview(ttk.Frame):
             self.after_cancel(self._pending)
         self._pending = self.after(80, self._draw)
 
+    def show_last_page(self):
+        """Show the newest page after a source update, including a pending redraw."""
+        self._requested_page = -1
+        self._schedule()
+
+    def _change_page(self, offset):
+        page_index = max(0, min(self._page_count - 1, self._page_index + offset))
+        if page_index != self._page_index:
+            self._page_index = page_index
+            self._update_navigation()
+            self._schedule()
+
+    def _update_navigation(self):
+        self.page_label.configure(text=(f"{self._page_index + 1} / {self._page_count}쪽"
+                                        if self._page_count else "0쪽"))
+        self.previous_button.configure(state="normal" if self._page_index > 0 else "disabled")
+        self.next_button.configure(state=("normal" if self._page_index + 1 < self._page_count
+                                         else "disabled"))
+
+    def _clear_thumbnail(self):
+        if self._thumbnail is not None:
+            self._thumbnail.close()
+        self._thumbnail = None
+        self._thumbnail_page = None
+
     def _draw(self):
         self._pending = None
         canvas = self.canvas
@@ -81,17 +142,29 @@ class ImageInputPreview(ttk.Frame):
         except OSError:
             stamp = None
         if path != self._path or stamp != self._stamp:
-            if self._thumbnail is not None:
-                self._thumbnail.close()
-            self._thumbnail = None
+            self._clear_thumbnail()
             self._path = path
             self._stamp = stamp
+            self._page_index = 0
+            self._page_count = 0
             if path:
                 try:
-                    self._thumbnail = preview_image(path, (1800, 1000))
+                    self._page_count = preview_page_count(path)
                 except Exception:
                     # Keep the source selected so opening it or OCR can explain the error.
                     pass
+        if self._requested_page is not None:
+            self._page_index = max(0, self._page_count - 1)
+            self._requested_page = None
+        self._update_navigation()
+        if self._page_count and self._thumbnail_page != self._page_index:
+            self._clear_thumbnail()
+            self._thumbnail_page = self._page_index
+            try:
+                self._thumbnail = preview_image(path, (1800, 1000), self._page_index)
+            except Exception:
+                # A damaged page should not prevent navigation to the other pages.
+                pass
         if self._thumbnail is not None:
             from PIL import Image, ImageTk
             shown = self._thumbnail.copy()
@@ -111,5 +184,4 @@ class ImageInputPreview(ttk.Frame):
         self.variable.trace_remove("write", self._trace)
         if self._pending is not None:
             self.after_cancel(self._pending)
-        if self._thumbnail is not None:
-            self._thumbnail.close()
+        self._clear_thumbnail()
