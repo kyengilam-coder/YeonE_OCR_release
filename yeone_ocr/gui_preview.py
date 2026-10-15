@@ -4,18 +4,39 @@ import tkinter as tk
 from tkinter import ttk
 
 
-def preview_image(path: str, size: tuple[int, int]):
-    """Return an oriented thumbnail, including the first page of bundled images."""
-    from PIL import Image, ImageOps
+def preview_page_count(path: str) -> int:
+    """Count source pages without retaining an open file or loading every image."""
     if Path(path).suffix.lower() == ".pdf":
         import pymupdf
         with pymupdf.open(path) as document:
-            page = document[0]
+            return document.page_count
+    from PIL import Image
+    with Image.open(path) as source:
+        # MPO may contain HDR gain maps or previews; OCR uses only its main picture.
+        return 1 if source.format == "MPO" else (getattr(source, "n_frames", 1) or 1)
+
+
+def preview_image(path: str, size: tuple[int, int], page_index: int = 0):
+    """Return an oriented thumbnail of a zero-based image or document page."""
+    from PIL import Image, ImageOps
+    if page_index < 0:
+        raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.")
+    if Path(path).suffix.lower() == ".pdf":
+        import pymupdf
+        with pymupdf.open(path) as document:
+            if page_index >= document.page_count:
+                raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.")
+            page = document[page_index]
             scale = min(size[0] / page.rect.width, size[1] / page.rect.height)
             pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
             return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     with Image.open(path) as source:
-        source.seek(0)
+        if source.format == "MPO" and page_index:
+            raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.")
+        try:
+            source.seek(page_index)
+        except EOFError as exc:
+            raise IndexError("미리보기 쪽 번호가 범위를 벗어났습니다.") from exc
         source.draft("RGB", size)
         oriented = ImageOps.exif_transpose(source)
         try:
@@ -69,10 +90,11 @@ class ImageInputPreview(ttk.Frame):
     """이미지 탭의 큰 원본 상자(디자인 명세 §5.10). 누르면 초점 → Ctrl+V, 오른쪽 버튼 메뉴, 두 번 누르면 원본을 크게 본다(클립보드는 붙여넣기를 할 때만 읽는다).
     빈 상자: QUIET 판 + EDGE 1.5 점선(손으로 그은 조각) + 가운데 empty_widget(창이 넣는 먹 단추 [이미지 붙여넣기]) + 안내 두 줄.
     찬 상자: FIELD 판 + LINE 1 테두리, 그림을 8px 여백 안 가운데로, 오른쪽 아래 '두 번 눌러 크게 보기'. 초점이면 테두리 INK 2px.
+    상자 아래 쪽 넘기기 줄([◀ 이전] '현재 / 전체쪽' [다음 ▶]) — 붙여넣어 뒤에 쪽이 붙으면 show_last_page 로 마지막 쪽을 보인다.
     경로는 상자에 적지 않는다(책 카드 제목 줄의 파일 이름·풍선과 결과 저장 칸이 대신)."""
     COLORS = {"PANEL": "#fcfaf5", "QUIET": "#f6f1e6", "FIELD": "#ffffff", "LINE": "#e2d9c8", "EDGE": "#8f8271", "INK": "#221c18", "MUTED": "#6b6054"}
     EMPTY_LINES = ("Win+Shift+S로 캡처한 이미지를 여기에 붙여넣으세요",
-                   "상자를 누르고 Ctrl+V · 마우스 오른쪽 버튼 메뉴로도 · 여러 장은 첫 쪽을 미리 보여 줌")
+                   "상자를 누르고 Ctrl+V · 오른쪽 버튼 메뉴로도 · 계속 붙이면 뒤에 쪽이 붙음")
     FOCUS_LINE = "Ctrl+V를 누르면 붙여 넣습니다"
     UNREADABLE = "미리보기를 불러올 수 없습니다. 이미지 고르기로 다시 선택하십시오."
     ZOOM_HINT = "두 번 눌러 크게 보기"
@@ -87,12 +109,28 @@ class ImageInputPreview(ttk.Frame):
         self.empty_widget = None
         self._photo = None
         self._thumbnail = None
+        self._thumbnail_page = None
         self._pending = None
         self._path = None
         self._stamp = None
+        self._page_index = 0
+        self._page_count = 0
+        self._requested_page = None
         self.canvas = tk.Canvas(self, height=height, background=self.C["PANEL"], takefocus=True,
                                 highlightthickness=0, borderwidth=0, cursor="hand2")
         self.canvas.pack(fill="both", expand=True)
+        # 쪽 넘기기 줄(상자 아래): [◀ 이전] '현재 / 전체쪽' [다음 ▶] — 여러 장을 붙이거나 묶으면 모든 쪽을 넘겨 본다
+        # 원본이 없으면(0쪽) 줄째 숨긴다 — 빈 상자는 가운데 안내가 대신한다
+        navigation = self.navigation = ttk.Frame(self, style="Panel.TFrame")
+        self.previous_button = ttk.Button(navigation, text="◀ 이전", width=8, style="Small.TButton", cursor="hand2",
+                                          command=lambda: self._change_page(-1))
+        self.previous_button.pack(side="left")
+        self.page_label = ttk.Label(navigation, text="0쪽", anchor="center", style="Hint.TLabel")
+        self.page_label.pack(side="left", fill="x", expand=True)
+        self.next_button = ttk.Button(navigation, text="다음 ▶", width=8, style="Small.TButton", cursor="hand2",
+                                      command=lambda: self._change_page(1))
+        self.next_button.pack(side="right")
+        self._update_navigation()
         self.canvas.bind("<Button-1>", lambda _e: self.canvas.focus_set())
         self.canvas.bind("<Double-Button-1>", lambda _e: open_source() if variable.get() else None)
         self.canvas.bind("<Control-v>", paste)
@@ -149,6 +187,35 @@ class ImageInputPreview(ttk.Frame):
         else:
             cv.create_line([c for pt in pts for c in pt], fill=color, width=lw, joinstyle="round")
 
+    def show_last_page(self):
+        """Show the newest page after a source update, including a pending redraw."""
+        self._requested_page = -1
+        self._schedule()
+
+    def _change_page(self, offset):
+        page_index = max(0, min(self._page_count - 1, self._page_index + offset))
+        if page_index != self._page_index:
+            self._page_index = page_index
+            self._update_navigation()
+            self._schedule()
+
+    def _update_navigation(self):
+        if self._page_count and not self.navigation.winfo_manager():
+            self.navigation.pack(fill="x", pady=(self.px(6), 0))
+        elif not self._page_count:
+            self.navigation.pack_forget()
+        self.page_label.configure(text=(f"{self._page_index + 1} / {self._page_count}쪽"
+                                        if self._page_count else "0쪽"))
+        self.previous_button.configure(state="normal" if self._page_index > 0 else "disabled")
+        self.next_button.configure(state=("normal" if self._page_index + 1 < self._page_count
+                                         else "disabled"))
+
+    def _clear_thumbnail(self):
+        if self._thumbnail is not None:
+            self._thumbnail.close()
+        self._thumbnail = None
+        self._thumbnail_page = None
+
     def _draw(self):
         self._pending = None
         canvas = self.canvas; C, P, F = self.C, self.px, self.fonts
@@ -162,17 +229,29 @@ class ImageInputPreview(ttk.Frame):
         except OSError:
             stamp = None
         if path != self._path or stamp != self._stamp:
-            if self._thumbnail is not None:
-                self._thumbnail.close()
-            self._thumbnail = None
+            self._clear_thumbnail()
             self._path = path
             self._stamp = stamp
+            self._page_index = 0
+            self._page_count = 0
             if path:
                 try:
-                    self._thumbnail = preview_image(path, (1800, 1000))
+                    self._page_count = preview_page_count(path)
                 except Exception:
                     # Keep the source selected so opening it or OCR can explain the error.
                     pass
+        if self._requested_page is not None:
+            self._page_index = max(0, self._page_count - 1)
+            self._requested_page = None
+        self._update_navigation()
+        if self._page_count and self._thumbnail_page != self._page_index:
+            self._clear_thumbnail()
+            self._thumbnail_page = self._page_index
+            try:
+                self._thumbnail = preview_image(path, (1800, 1000), self._page_index)
+            except Exception:
+                # A damaged page should not prevent navigation to the other pages.
+                pass
         focused = self._focused()
         self._frame(width, height, not path, focused)
         if self._thumbnail is not None:
@@ -218,8 +297,7 @@ class ImageInputPreview(ttk.Frame):
         self.variable.trace_remove("write", self._trace)
         if self._pending is not None:
             self.after_cancel(self._pending)
-        if self._thumbnail is not None:
-            self._thumbnail.close()
+        self._clear_thumbnail()
 
 
 def clip_x(pts: list[tuple[float, float]], x0: float, x1: float) -> list[tuple[float, float]]:
