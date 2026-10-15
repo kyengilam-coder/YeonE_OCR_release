@@ -272,3 +272,41 @@ def expand(size: int, color: str, stroke: float = 1.5) -> str:
     """두 번 눌러 크게 보기(원본 열기) 표지: 바깥으로 벌어지는 두 화살."""
     return _icon(size, color, stroke, [[(9.5, 2.5), (13.5, 2.5), (13.5, 6.5)], [(13.5, 2.5), (8.5, 7.5)],
                                        [(6.5, 13.5), (2.5, 13.5), (2.5, 9.5)], [(2.5, 13.5), (7.5, 8.5)]])
+
+
+def step_circle(size: int, kind: str, ink: str, edge: str, red: str, panel: str, scale: float = 1.0) -> str:
+    """단계 띠의 동그라미(지름 size — 시안 26px 에 배율을 곱한 값). 글자(번호·'–'·'!')는 창이 그림 위에 쓴다(Label compound='center').
+    done = 먹 채움 + 흰 ✓ · now = 먹 2px 고리 + 가운데 10px 먹 점 · wait = EDGE 1.5px 고리 · skip = EDGE 1.5px 점선 고리(손으로 그은 조각 — 3 긋고 2 띄움)
+    · fail = PANEL 속 + RED 2px 고리(채우지 않음 — 인주 채움과 갈리게) · stop = 먹 2px 고리 + 가운데 8px 먹 네모."""
+    s = float(size); c = s / 2
+    k = s / 26.0
+    INK, EDGE, RED, PAN = (hex_rgb(v) + (255,) for v in (ink, edge, red, panel))
+    WHITE = (255, 255, 255, 255)
+    ring = {"now": (INK, 2.0), "wait": (EDGE, 1.5), "skip": (EDGE, 1.5), "fail": (RED, 2.0), "stop": (INK, 2.0)}
+    check = [(c + (x - 8) * k * 14 / 16, c + (y - 8) * k * 14 / 16) for x, y in ((3.5, 8.5), (6.5, 11.5), (12.5, 4.5))]
+    sw = 2.2 * k * 14 / 16
+    period, on = 5.0 * k, 3.0 * k                                   # 점선: 둘레를 따라 3 긋고 2 띄움
+    n = max(1, round(math.pi * (s - 1.5 * k) / period))
+    period = math.pi * (s - 1.5 * k) / n                           # 둘레에 꼭 맞게(이음매에서 조각이 겹치지 않게)
+
+    def at(x: float, y: float):
+        d = math.hypot(x - c, y - c)
+        if d > c:
+            return None
+        if kind == "done":
+            dd = min(_seg_dist(x, y, *check[0], *check[1]), _seg_dist(x, y, *check[1], *check[2]))
+            return WHITE if dd <= sw / 2 else INK
+        col, w = ring.get(kind, (EDGE, 1.5))
+        w *= k
+        if d > c - w:
+            if kind == "skip":
+                pos = (math.atan2(y - c, x - c) + math.pi) * (c - w / 2)
+                return col if pos % period < on else PAN
+            return col
+        if kind == "now" and d <= 5.0 * k:
+            return INK
+        if kind == "stop" and abs(x - c) <= 4.0 * k and abs(y - c) <= 4.0 * k:
+            return INK
+        return PAN
+
+    return png_b64(size, size, _render(size, size, at))
