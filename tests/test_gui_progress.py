@@ -239,19 +239,40 @@ class ProgressCardRealTk(unittest.TestCase):
 
     def test_2_tools_card_toggles_between_progress_and_log(self):
         app = self.app; app.select_tab(0); self.settle()
+        original_two_col = app._two_col
         with mock.patch.object(self.gui, "write_config"):
             app.toggle_advanced(); self.settle()
             try:
-                info = app._adv_card.grid_info()
-                self.assertEqual(info.get("in"), app._work_left)
-                self.assertEqual(int(info["row"]), int(app._prog_card.grid_info()["row"]) + 1)
-                self.assertEqual(int(app._log_card.grid_info()["row"]), int(info["row"]) + 1)
+                # Both responsive layouts are valid. In one column the ledger
+                # sits between progress and tools; in two columns it is on the
+                # right. Apply each layout to real widgets without processing a
+                # display Configure event that would reselect the monitor size.
+                for two_col in (False, True):
+                    with self.subTest(two_col=two_col):
+                        app._two_col = two_col
+                        app._place_cards()
+                        progress = app._prog_card.grid_info()
+                        ledger = app._led_card.grid_info()
+                        tools = app._adv_card.grid_info()
+                        log = app._log_card.grid_info()
+                        self.assertEqual(progress.get("in"), app._work_left)
+                        self.assertEqual(tools.get("in"), app._work_left)
+                        self.assertEqual(log.get("in"), app._work_left)
+                        if two_col:
+                            self.assertEqual(ledger.get("in"), app._work_right)
+                            self.assertEqual(int(tools["row"]), int(progress["row"]) + 1)
+                        else:
+                            self.assertEqual(ledger.get("in"), app._work_left)
+                            self.assertEqual(int(ledger["row"]), int(progress["row"]) + 1)
+                            self.assertEqual(int(tools["row"]), int(ledger["row"]) + 1)
+                        self.assertEqual(int(log["row"]), int(tools["row"]) + 1)
                 self.assertEqual(app.b_adv.cget("text"), "고급 도구 ▴")
                 names = [b.cget("text").strip() for b in app._tool_rows[0][1] + app._tool_rows[1][1]]
                 self.assertEqual(names[:6], ["① 구조 보기", "② 준비", "③ 판독", "④ 문서 만들기", "⑤ 검수 화면", "⑥ 보고"])
                 self.assertIn(str(app.icons["receipt"]), str(app._tool_rows[0][1][2].cget("image")))      # 돈 드는 단추에만 영수증
                 self.assertEqual(str(app._tool_rows[0][1][0].cget("image")), "")
             finally:
+                app._two_col = original_two_col
                 app.toggle_advanced(); self.settle()
         self.assertEqual(app._adv_card.winfo_manager(), "")
 
