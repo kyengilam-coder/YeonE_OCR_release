@@ -25,7 +25,13 @@ jobs:
         run: python -B -X utf8 tools/check_regression.py --output work/ci-regression
       - name: Check preserved AB sources independently
         working-directory: references/AB_OCR_0.3.0
-        run: python -B -X utf8 -m unittest discover -s tests -v
+        run: |
+          # Use one canonical spelling; hosted Windows TEMP may use RUNNER~1.
+          $testTemp = Join-Path $env:GITHUB_WORKSPACE 'work/ab-reference-tests'
+          New-Item -ItemType Directory -Force -Path $testTemp | Out-Null
+          $env:TEMP = (Resolve-Path -LiteralPath $testTemp).Path
+          $env:TMP = $env:TEMP
+          python -B -X utf8 -m unittest discover -s tests -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:
