@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "engine": "rapidocr",
+  "rapidocr_version": "3.9.2",
+  "onnxruntime_version": "1.25.1",
+  "models": [
+    {
+      "file": "ch_PP-OCRv5_det_server.onnx",
+      "sha256": "0f8846b1d4bba223a2a2f9d9b44022fbc22cc019051a602b41a7fda9667e4cad",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_server.onnx",
+      "bytes": 88118768
+    },
+    {
+      "file": "ch_PP-OCRv5_rec_server.onnx",
+      "sha256": "e09385400eaaaef34ceff54aeb7c4f0f1fe014c27fa8b9905d4709b65746562a",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx",
+      "bytes": 84577022
+    },
+    {
+      "file": "korean_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx",
+      "bytes": 13488748
+    },
+    {
+      "file": "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+      "sha256": "54379ae5174d026780215fc748a7f31910dee36818e63d49e17dc598ecc82df7",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+      "bytes": 1018508
+    },
+    {
+      "file": "ch_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "5825fc7ebf84ae7a412be049820b4d86d77620f204a041697b0494669b1742c5",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx",
+      "bytes": 16631306
+    }
+  ],
+  "verified_runtime": {
+    "python": "3.14.5",
+    "packages": {
+      "certifi": "2026.7.22",
+      "charset-normalizer": "3.5.2",
+      "colorama": "0.4.6",
+      "colorlog": "6.12.0",
+      "flatbuffers": "25.12.19",
+      "idna": "3.20",
+      "numpy": "2.5.4",
+      "omegaconf": "2.4.0",
+      "onnxruntime": "1.25.1",
+      "opencv-python": "5.0.0.93",
+      "packaging": "26.3",
+      "pillow": "12.3.0",
+      "protobuf": "7.36.2",
+      "pyclipper": "1.4.0",
+      "PyYAML": "6.0.3",
+      "rapidocr": "3.9.2",
+      "requests": "2.34.2",
+      "shapely": "2.2.0",
+      "six": "1.17.0",
+      "tqdm": "4.70.1",
+      "urllib3": "2.8.0"
+    }
+  },
+  "package_integrity": "Exact dependency version constraints; actual wheel URLs and hashes recorded by pip --report during installation",
+  "source": "https://github.com/RapidAI/RapidOCR/blob/v3.9.2/python/rapidocr/default_models.yaml"
+}

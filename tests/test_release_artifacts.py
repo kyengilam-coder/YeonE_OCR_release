@@ -20,7 +20,7 @@ def pe_bytes(machine=0x8664):
     return bytes(data)
 
 
-def committed_tree(monkeypatch, version="0.7.1"):
+def committed_tree(monkeypatch, version="0.7.1", extra_files=None):
     prefix = f"YeonE_OCR-{version}/"
     files = {
         "yeone_ocr/__init__.py": f'__version__ = "{version}"\n',
@@ -38,6 +38,7 @@ def committed_tree(monkeypatch, version="0.7.1"):
         "docs/book.pdf": "private original",
         "tests/result.hwpx": "private result",
     }
+    files.update(extra_files or {})
     raw = io.BytesIO()
     with zipfile.ZipFile(raw, "w") as archive:
         for name, content in files.items():
@@ -103,6 +104,78 @@ def test_source_archive_refuses_version_mismatch(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="commit release source first"):
         release.create_source_archive(tmp_path, tmp_path / "source.zip", "0.7.1")
     assert not (tmp_path / "source.zip").exists()
+
+
+def test_source_allowlist_preserves_all_current_local_engine_resources():
+    root = Path(__file__).resolve().parents[1]
+    required = set(release.SOURCE_DATA | release.SOURCE_ENGINE_LOCKS | release.SOURCE_JSON_DOCS | release.SOURCE_PACKAGING)
+    required.update(path.relative_to(root).as_posix() for path in (root / "ab_ocr").glob("*.py"))
+    required.update(f"scripts/install_{engine}.py" for engine in ("tesseract", "rapidocr", "easyocr"))
+    assert required
+    for name in required:
+        assert (root / name).is_file(), name
+        assert release.source_allowed(name), name
+    # Presets must stay synchronized with the real built-in registry/data files.
+    from yeone_ocr.presets import BUILTIN
+    assert {f"yeone_ocr/data/preset_{key}.json" for key in BUILTIN} <= release.SOURCE_DATA
+
+
+def test_source_allowlist_rejects_private_inputs_models_and_runtime_homes():
+    rejected = [
+        "work/book/result.py", "ab_ocr/work/result.py", "ab_ocr/Work/result.py",
+        "ab_ocr/source.png", "ab_ocr/source.pdf", "ab_ocr/result.docx", "ab_ocr/raw.json",
+        "ab_ocr/config.json", "ab_ocr/credentials.json", "ab_ocr/.env.production", "ab_ocr/private_key.pem",
+        "ab_ocr/model.onnx", "ab_ocr/model.pth", "ab_ocr/model.traineddata", "ab_ocr/model.safetensors",
+        "resources/model.onnx", "resources/licenses/model.pth", "packaging/third_party_licenses/model.traineddata",
+        "resources/source.png", "packaging/source.png", "packaging/private-record.json",
+        "scripts/private-settings.json", "scripts/unknown-lock.json", "docs/private-record.json",
+        "yeone_ocr/data/private-record.json", "yeone_ocr/data/preset_private.json",
+        "tools/easyocr/credentials.py", "tools/rapidocr/cache.py", "tools/tesseract/installation.py",
+        "scripts/downloads/private.py", "tests/private.hwpx", "docs/private.pdf", "packaging/.env.production",
+        "ab_ocr/../private.py", "/ab_ocr/ocr.py", "C:/Users/private/credentials.json",
+    ]
+    for name in rejected:
+        assert not release.source_allowed(name), name
+
+
+def test_source_archive_keeps_integration_resources_as_committed_bytes(tmp_path, monkeypatch):
+    required = {
+        "ab_ocr/ocr.py": "# vendored local engine interface\n",
+        "ab_ocr/runtime.py": "# independent runtime resource selection\n",
+        "ab_ocr/rapidocr_worker.py": "# isolated RapidOCR worker\n",
+        "ab_ocr/easyocr_worker.py": "# isolated EasyOCR worker\n",
+        "scripts/install_tesseract.py": "# pinned installer\n",
+        "scripts/install_rapidocr.py": "# pinned installer\n",
+        "scripts/install_easyocr.py": "# pinned installer\n",
+        "scripts/tesseract-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/rapidocr-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/easyocr-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "docs/AB_OCR_PROVENANCE.json": '{"source_project":"AB_OCR"}\n',
+        "yeone_ocr/data/preset_basic.json": '{"id":"basic"}\n',
+        "yeone_ocr/data/preset_kaibao.json": '{"id":"kaibao"}\n',
+        "yeone_ocr/data/preset_regions.json": '{"id":"regions"}\n',
+    }
+    private = {"ab_ocr/source.png": "private synthetic image", "ab_ocr/model.pth": "private synthetic weights",
+               "scripts/private-settings.json": "private synthetic configuration",
+               "resources/licenses/model.onnx": "private synthetic weights"}
+    committed_tree(monkeypatch, extra_files={**required, **private})
+    output = tmp_path / "source.zip"
+    result = release.create_source_archive(tmp_path, output, "0.7.1")
+    assert result["files"] == 7 + len(required)
+    prefix = "YeonE_OCR-0.7.1/"
+    with zipfile.ZipFile(output) as archive:
+        for name, content in required.items():
+            assert archive.read(prefix + name) == content.encode("utf-8")
+        for name in private:
+            assert prefix + name not in archive.namelist()
+
+
+def test_source_allowlist_retains_current_upstream_license_inventory():
+    root = Path(__file__).resolve().parents[1]
+    licenses = root / "packaging" / "third_party_licenses"
+    files = [path for path in licenses.rglob("*") if path.is_file()]
+    assert files
+    assert all(release.source_allowed(path.relative_to(root).as_posix()) for path in files)
 
 
 def test_prepare_covers_every_published_payload_with_checksums(tmp_path, monkeypatch):

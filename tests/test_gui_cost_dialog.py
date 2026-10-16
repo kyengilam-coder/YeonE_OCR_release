@@ -270,6 +270,9 @@ class CostDialogRealTk(unittest.TestCase):
         self.assertTrue(d.bind("<MouseWheel>") and d.bind("<Button-5>") and d.bind("<Next>"))
         with mock.patch.object(d.sb, "winfo_ismapped", lambda: True):
             for ev in (types.SimpleNamespace(widget=cell, num=5, delta=0), types.SimpleNamespace(widget=cell, num=0, delta=-120)):
+                # Each wheel format starts at the top. At high DPI one unit can
+                # reach the bottom; the following format must still be tested.
+                d.cv.yview_moveto(0)
                 before = d.cv.yview()[0]
                 self.assertEqual(d._wheel(ev), "break")
                 self.assertGreater(d.cv.yview()[0], before)

@@ -224,7 +224,7 @@ class CliHelp(unittest.TestCase):
         import argparse, re
         from yeone_ocr import cli
         sub = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction))
-        head = r"^ {0,2}([a-z]+) "                                                               # 3.13 은 설명 글의 공통 들여쓰기를 지운다
+        head = r"^ {0,2}([a-z][a-z-]*) "                                                               # 3.13 은 설명 글의 공통 들여쓰기를 지운다
         listed = re.findall(head, cli.__doc__, re.M)
         self.assertEqual(sorted(listed), sorted(sub.choices)); self.assertEqual(len(listed), len(set(listed)))
         run = re.search(r"^ {0,2}run .*?(?=" + head + r"|\Z)", cli.__doc__, re.M | re.S).group(0)

@@ -24,9 +24,18 @@ VERSION_RE = re.compile(r'(?m)^__version__\s*=\s*[\'"]([0-9]+\.[0-9]+\.[0-9]+)[\
 SOURCE_TOP_FILES = {"README.md", "LICENSE", "LICENSE.txt", "DISTRIBUTION_NOTICE.txt", "pyproject.toml", ".gitignore",
                     ".gitattributes", "requirements.txt", "requirements-build.txt", "requirements-windows.txt",
                     "YeonE_OCR.pyw", "YeonE_OCR.bat", "YeonE_OCR.spec", "windows_entry.py"}
-SOURCE_TOP_DIRS = {"yeone_ocr", "tests", "docs", "tools", "scripts", "packaging", "resources", ".github"}
+SOURCE_TOP_DIRS = {"yeone_ocr", "ab_ocr", "tests", "docs", "tools", "scripts", "packaging", "resources", ".github"}
 SENSITIVE_NAMES = {"config.json", "credentials.json", "token.json", "secrets.json", "id_rsa", "id_ed25519"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".pdf", ".hwpx", ".hwp", ".docx", ".doc", ".msr"}
+MODEL_SUFFIXES = {".onnx", ".ort", ".pth", ".pt", ".ckpt", ".safetensors", ".traineddata", ".tflite",
+                  ".h5", ".hdf5", ".pkl", ".pickle", ".bin", ".model", ".pdmodel", ".pdiparams"}
+SOURCE_DATA = {"yeone_ocr/data/normalization_260929.json", "yeone_ocr/data/preset_basic.json",
+               "yeone_ocr/data/preset_kaibao.json", "yeone_ocr/data/preset_regions.json"}
+SOURCE_ENGINE_LOCKS = {"scripts/tesseract-lock.json", "scripts/rapidocr-lock.json", "scripts/easyocr-lock.json"}
+SOURCE_JSON_DOCS = {"docs/AB_OCR_PROVENANCE.json"}
+SOURCE_PACKAGING = {"packaging/YeonE_OCR.spec", "packaging/YeonE_OCR.iss",
+                    "packaging/THIRD_PARTY_NOTICES.txt", "packaging/requirements-windows.lock.txt"}
+LICENSE_SUFFIXES = {"", ".txt", ".md", ".rst", ".py", ".terms", ".apache2", ".mit", ".apache", ".bsd", ".markdown-it"}
 
 
 def read_version(text: str) -> str:
@@ -38,29 +47,40 @@ def read_version(text: str) -> str:
 
 def source_allowed(name: str) -> bool:
     path = PurePosixPath(name)
-    if path.is_absolute() or not path.parts or any(p in {"..", ".git", "__pycache__", "work", ".venv", "venv"} for p in path.parts):
+    if path.is_absolute() or not path.parts or any(p.lower() in {"..", ".git", "__pycache__", "work", ".venv", "venv", "downloads"} for p in path.parts):
         return False
     leaf = path.name.lower()
     if (leaf in SENSITIVE_NAMES or leaf.startswith((".env", "client_secret", "credentials", "private_key"))
-            or path.suffix.lower() in SENSITIVE_SUFFIXES):
+            or path.suffix.lower() in SENSITIVE_SUFFIXES | MODEL_SUFFIXES):
         return False
     if len(path.parts) == 1:
         return name in SOURCE_TOP_FILES
     if path.parts[0] not in SOURCE_TOP_DIRS:
         return False
+    if path.parts[0] == "ab_ocr":
+        # Vendored source is independent of the original project.  No snapshots,
+        # private images, runtime manifests or trained weights belong here.
+        return path.suffix == ".py"
     if path.parts[0] == "yeone_ocr":
         return (path.suffix == ".py" or name == "yeone_ocr/지침.md"
-                or name == "yeone_ocr/data/normalization_260929.json"
+                or name in SOURCE_DATA
                 or (path.parts[1] == "assets" and path.suffix.lower() in {".ico", ".png", ".svg"}))
     if path.parts[0] in {"tools", "scripts", "tests"}:
-        return path.suffix.lower() in {".py", ".ps1"}
+        if path.parts[0] == "tools" and path.parts[1].lower() in {"tesseract", "rapidocr", "easyocr"}:
+            return False
+        return path.suffix.lower() in {".py", ".ps1"} or name in SOURCE_ENGINE_LOCKS
     if path.parts[0] == "docs":
-        return path.suffix.lower() in {".md", ".txt"}
+        return path.suffix.lower() in {".md", ".txt"} or name in SOURCE_JSON_DOCS
     if path.parts[0] == ".github":
         return len(path.parts) == 3 and path.parts[1] == "workflows" and path.suffix.lower() in {".yml", ".yaml"}
-    # Packaging and license resources contain upstream notices without standard
-    # extensions. Runtime/user configuration names and documents were excluded above.
-    return path.suffix.lower() not in {".exe", ".dll", ".pyd", ".zip", ".7z", ".pyc"}
+    if name in SOURCE_PACKAGING:
+        return True
+    # Upstream notices include extensionless LICENSE files and public Python
+    # license metadata.  Avoid treating these directories as arbitrary data trees.
+    if ((path.parts[0] == "packaging" and path.parts[1] in {"licenses", "third_party_licenses"})
+            or (path.parts[0] == "resources" and path.parts[1] == "licenses")):
+        return path.suffix.lower() in LICENSE_SUFFIXES
+    return False
 
 
 def _git(repo: Path, *arguments: str) -> bytes:

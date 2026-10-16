@@ -18,6 +18,7 @@
            자형 혼동 자리는 3차 판별로 가림(--no-glyph-check 면 안 함). --list 는 구획 짝 목록만
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
+  compare-engines 로컬 세 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
@@ -2492,6 +2493,19 @@ def build_parser():
     ap.add_argument("--version", action="version", version=f"YeonE_OCR {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    local = sub.add_parser("compare-engines", help="로컬 세 엔진 비교·원본 보존 프로젝트 만들기(API 호출 없음)")
+    local.add_argument("pdf", help="원본 PDF 또는 이미지")
+    local.add_argument("--work", help="기존 연어OCR 작업 폴더")
+    local.add_argument("--project", help="비교 프로젝트 저장 경로")
+    local.add_argument("--pages", help="예: 1-5,8 (기본 전체)")
+    local.add_argument("--profile", choices=("traditional", "simplified", "mixed"), default="traditional")
+    local.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
+    local.add_argument("--dpi", type=int, default=300)
+    local.add_argument("--engine-root", help="tools 폴더를 포함하는 로컬 엔진 설치 루트")
+    local.add_argument("--force", action="store_true", help="완료 엔진도 다시 읽고 이전 원시 결과를 이력에 보존")
+    from .comparison_cli import command as comparison_command
+    local.set_defaults(fn=comparison_command)
+
     def common(p, pages=True):
         p.add_argument("pdf", help="스캔 PDF, 또는 이미지 파일(PNG·JPG·TIFF…, 여러 쪽 TIFF 는 쪽마다)·이미지 폴더(이름의 숫자 순서로 한 권)")
         p.add_argument("--work", help="작업 폴더(기본 work/<PDF 이름>, 이미지는 work/<이름>_<확장자>, 이미지 폴더는 work/<폴더>_이미지)")
@@ -2663,6 +2677,8 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.cmd == "compare-engines":
+        return args.fn(args)
     from .reader_gemini import set_call_cap, set_cancel_event
     set_call_cap(getattr(args, "max_calls", 0) or 0)        # 호출 상한은 명령마다 새로 센다(창 프로그램은 한 프로세스에서 명령을 여럿 돌린다)
     if getattr(args, "max_calls", 0):

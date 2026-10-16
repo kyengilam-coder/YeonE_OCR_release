@@ -1939,6 +1939,13 @@ class App(tk.Tk):
         tabs = self._tab_bar = self._tabs(hd, [("일반 OCR", 0), ("책갈피 OCR", 1), ("이미지(스크린샷) OCR", 2), ("설정", 3)], self.v_tab,
                                           lambda: self.select_tab(self.v_tab.get()))
         tabs.pack(side="left", fill="y"); self._tab_buttons = list(tabs.winfo_children())
+        local_tools = tk.Frame(self, bg=C["PANEL"])
+        local_tools.pack(fill="x")
+        self.b_comparison = self._btn(local_tools, "3엔진 비교·교정", self.open_local_comparison,
+            style="Link.TButton", tip="선택한 원본을 Tesseract·RapidOCR·EasyOCR로 비교하고 원본 옆에서 교정합니다. 로컬 처리이며 API를 호출하지 않습니다.")
+        self.b_comparison.pack(side="left", padx=(P(24), P(12)), pady=(0, P(3)))
+        tk.Label(local_tools, text="원본 대조 편집 · 로컬 처리", font=self.fonts["CAP"],
+                 bg=C["PANEL"], fg=C["MUTED"]).pack(side="left")
         # 패키지 상태(탭 줄과 판 번호 사이의 남은 자리): 다 들어가지 않으면 ' → ' 앞(예 '설치 구성요소 오류 2개')만, 그래도 넘치면 '…요소 오류 2개' —
         # 안내 꼬리만 '파일로 다시 설치'처럼 남던 것을 고침. 전체 글은 풍선 도움말로
         pkg = self._pkg_label = tk.Label(hd, text=self.v_pkg.get(), font=self.fonts["CAP"], bg=C["PANEL"], fg=C["MUTED"], bd=0, anchor="e")
@@ -5089,6 +5096,43 @@ class App(tk.Tk):
         return b
 
     # ---------- 도우미 ----------
+    def open_local_comparison(self):
+        """Open the independent, source-preserving editor for the active input."""
+        if self.running or getattr(self, "_closing", False):
+            return
+        from .comparison_editor import ComparisonEditor
+        from ab_ocr.runtime import default_engine_root
+        source = self.pdf2() if getattr(self, "_selected_tab", 0) == 1 else self.pdf()
+        mode = self.mode_key(0 if getattr(self, "_selected_tab", 0) == 1 else None)
+        windows = vars(self).setdefault("_comparison_windows", [])
+        windows[:] = [window for window in windows if window.winfo_exists()]
+        for window in windows:
+            active = getattr(getattr(window, "project", None), "source_path", None)
+            if source and active and Path(source).resolve() == Path(active).resolve():
+                window.deiconify(); window.lift(); window.focus_set()
+                return
+        window = ComparisonEditor(self, source_path=source or None,
+            work_dir=work_dir_for(source) if source else None,
+            engine_root=default_engine_root(vars(self).get("cfg", {}).get("local_engine_root")),
+            on_engine_root=lambda path: App._remember_local_engine_root(self, path),
+            on_ai_settings=lambda: App._comparison_ai_settings(self),
+            profile="mixed" if mode == "vertical" else ("simplified" if mode == "horizontal_zh" else None),
+            direction="vertical" if mode == "vertical" else ("horizontal" if mode == "horizontal_zh" else None))
+        windows.append(window)
+
+    def _comparison_ai_settings(self):
+        """Snapshot only the currently selected provider on the owning UI thread."""
+        from .providers import PROVIDERS
+        reader = self.v_reader.get().strip()
+        model = self.v_model.get().strip()
+        if reader not in PROVIDERS or not model:
+            raise ValueError("[설정]에서 AI 판독기와 이미지 입력을 지원하는 모델을 선택하십시오.")
+        return {"provider": reader, "model": model, "api_key": self.v_key.get().strip()}
+
+    def _remember_local_engine_root(self, path):
+        self.cfg["local_engine_root"] = str(Path(path).expanduser().resolve())
+        self.save_settings(quiet=True)
+
     def pdf(self) -> str:
         return self.v_pdf.get().strip()
 
@@ -6586,6 +6630,17 @@ class App(tk.Tk):
                     self.table.see(iid); self.table.selection_set(iid); break
 
     def on_close(self):
+        pending = False
+        for window in list(vars(self).get("_comparison_windows", ())):
+            if window.winfo_exists() and not window.request_close():
+                if not window.busy:
+                    self.v_status.set("비교·교정 창의 저장 상태를 확인하세요. 복구 사본은 보존되어 있습니다.")
+                    window.lift()
+                    return
+                pending = True
+        if pending:
+            self.after(200, self.on_close)
+            return
         if getattr(self, "_update_installing", False) and not getattr(self, "_closing", False):
             if not messagebox.askyesno(APP_NAME, "업데이트 다운로드를 취소하고 닫을까요?\n현재 실행 파일은 바뀌지 않습니다."):
                 return
