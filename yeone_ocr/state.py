@@ -12,6 +12,7 @@ WARN = lambda msg: print(msg, flush=True)      # 깨진 파일을 치웠을 때�
 BOOK_SETTINGS = "book_settings.json"           # 결과 폴더의 책별 설정(창이 읽고 쓴다 — 명령줄은 읽지 않고 창이 늘 선택지로 넘긴다). 원본이 바뀌어 보관할 때도 그대로 둔다
 BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
              "mode": ("auto", "vertical", "horizontal_zh")}           # 값의 꼴(tuple = 허용 값). '다시 판독'(force)은 넣지 않는다 — 책마다 남으면 모르는 새 다시 산다
+LAST_COST = "last_cost.json"                   # 결과 폴더의 마지막 실행 전 비용 어림(창의 장부 — 실행을 고른 뒤에만 쓴다). 결과물이 아니라 원본이 바뀌어 보관할 때도 그대로 둔다
 
 
 def _tmp_path(path: Path) -> Path:
@@ -115,6 +116,56 @@ def save_book_settings(work_dir, new: dict, loaded: dict | None = None, *, creat
     return {k: out[k] for k, shape in BOOK_KEYS.items() if k in out and _book_ok(shape, out[k])}
 
 
+def target_pages(pdf: str, pages: str = "") -> list[int]:
+    """대상 쪽 번호(1부터) — 쪽 수는 원본만 센다(이미지 파일은 1쪽, 이미지 폴더는 이미지 수, PDF 는 pymupdf). 쪽 범위를 읽지 못하면 ValueError."""
+    from .pdfio import image_sources, parse_pages
+    src = Path(pdf)
+    images = image_sources(src)
+    if images:
+        n = len(images)
+    elif src.is_dir():
+        raise ValueError(f"폴더에 이미지가 없습니다: {src}")
+    else:
+        import pymupdf
+        with pymupdf.open(str(src)) as doc:
+            n = len(doc)
+    return list(parse_pages((pages or "").strip() or None, n))
+
+
+def page_marks(work, pages: list[int], force: bool = False) -> dict[int, str]:
+    """쪽 띠(실행 전)의 칸 상태 {쪽: 'record'|'fail'|'remain'}: 판독 기록(readings/p###.json)이 있으면 record(다시 판독이면 remain),
+    기록이 없고 상태에 '판독 확인 필요'가 있으면 fail(cmd_read 의 두 갈래 — '판독 실패(다시 시도 가능)'·'판독 중 예외' — 모두 기록 없이 이 상태만 남김),
+    그 밖에는 remain. 읽기만 하고 폴더·파일을 만들지 않는다."""
+    w = Path(work)
+    rd = w / "readings"
+    have = {int(p.stem[1:]) for p in rd.glob("p*.json") if p.stem[1:].isdigit()} if rd.is_dir() else set()
+    try:
+        st = json.loads((w / "state.json").read_text(encoding="utf-8")).get("pages", {})
+    except (OSError, ValueError, AttributeError):
+        st = {}
+    out = {}
+    for n in pages:
+        if n in have:
+            out[n] = "remain" if force else "record"
+        elif "판독 확인 필요" in ((st.get(str(n)) or {}).get("statuses") or []):
+            out[n] = "fail"
+        else:
+            out[n] = "remain"
+    return out
+
+
+def book_counts(pdf: str, work, pages: str = "", force: bool = False) -> dict:
+    """책 카드의 수치 {target: 대상 쪽 수, records: 그 가운데 판독 기록이 있는 쪽, to_read: 새로 읽을 쪽(다시 판독이면 대상 전부)}.
+    쪽 수는 원본만 센다(이미지 파일은 1쪽, 이미지 폴더는 이미지 수, PDF 는 pymupdf — 이미지를 PDF 로 만들지 않아 빠르다).
+    기록은 readings/p###.json 이 있는지만 본다(읽지 않음 — 수백 쪽도 금방). 원본이 바뀌어 옮겨질 기록까지 맞게 세는 것은 비용 어림(costplan)이다.
+    폴더·파일을 만들지 않는다. 쪽 범위를 읽지 못하면 ValueError."""
+    target = target_pages(pdf, pages)
+    rd = Path(work) / "readings"
+    have = {int(p.stem[1:]) for p in rd.glob("p*.json") if p.stem[1:].isdigit()} if rd.is_dir() else set()
+    records = sum(1 for k in target if k in have)
+    return {"target": len(target), "records": records, "to_read": len(target) if force else len(target) - records}
+
+
 def default_work_dir(pdf_path: str) -> Path:
     """--work 가 없을 때의 결과 폴더. 창의 work_dir_for 와 같은 규칙: PDF 는 work/<이름>, 이미지는 work/<이름>_<확장자>,
     이미지 폴더는 work/<폴더>_이미지(같은 이름끼리 판독 기록이 섞이지 않게)."""
@@ -157,7 +208,7 @@ class Work:
         for d in (self.pages_dir, self.textlayer_dir, self.readings_dir, self.crops_dir, self.out_dir):
             d.mkdir(parents=True, exist_ok=True)
         # 새 작업만 원본 지문을 등록한다. 조회용 Work 생성으로 기존 자료를 옮기지 않는다. 창이 실행 직전에 남긴 책별 설정만 있는 폴더도 새 작업이다
-        entries = [d for d in self.dir.iterdir() if d.name != BOOK_SETTINGS]
+        entries = [d for d in self.dir.iterdir() if d.name not in (BOOK_SETTINGS, LAST_COST)]
         if not entries or all(d.is_dir() and not any(d.iterdir()) for d in entries):
             self.ensure_source()
 

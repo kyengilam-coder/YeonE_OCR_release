@@ -51,6 +51,8 @@ def skip_any(args) -> bool:
 
 CANCEL = threading.Event()   # 창 프로그램의 [중지] 단추가 켠다. 쪽 사이에서 확인한다.
 PROGRESS = None              # 창 프로그램이 넣는 진행 알림 함수 f(단계, 끝난 수, 전체 수). 명령줄에서는 None.
+PAGE_EVENT = None            # 창 프로그램이 넣는 쪽 알림 함수 f(쪽 번호, 상태) — 쪽 띠의 칸. 상태는 PAGE_STATES. 명령줄에서는 None.
+PAGE_STATES = ("record", "remain", "now", "done", "fail")   # 기록 있어 건너뜀 · 읽을 차례 · 판독 중 · 끝남 · 판독 실패(다시 시도 가능)
 DOC_LOCK = threading.Lock()  # PyMuPDF 문서 객체는 스레드 안전하지 않다. 여러 쪽을 동시에 읽을 때 문서 접근을 직렬화한다.
 LOG_LOCK = threading.Lock()
 
@@ -83,6 +85,16 @@ def progress(stage: str, done: int, total: int) -> None:
     if cb is not None:
         try:
             cb(stage, int(done), int(total))
+        except Exception:
+            pass
+
+
+def page_event(n: int, state: str) -> None:
+    """쪽 띠에 한 쪽의 상태를 알린다(창 프로그램에서만 — 판독의 쪽마다). 알림이 실패해도 작업은 계속한다. 출력·기록 파일은 바꾸지 않는다."""
+    cb = PAGE_EVENT
+    if cb is not None:
+        try:
+            cb(int(n), state)
         except Exception:
             pass
 
@@ -1220,6 +1232,8 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     if not args.force and all(existing[n] is not None and
                               (args.no_second_pass or not existing[n].get("pass2_failed")) for n in pages):
         log(f"read: {len(pages)}쪽은 이미 판독되어 모델 호출 없이 건너뜁니다.")
+        for n in pages:
+            page_event(n, "record")
         progress("read", len(pages), len(pages))
         return 130 if CANCEL.is_set() else 0
     try:
@@ -1266,6 +1280,9 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
         log(f"  2차 판독이 일부 영역에서 실패했던 쪽 {len(redo2)}개({', '.join(map(str, redo2[:10]))}{' …' if len(redo2) > 10 else ''})는 1차를 다시 사지 않고 덜 된 영역의 2차만 다시 묻습니다")
     if redo1:
         log(f"  2차 판독이 일부 영역에서 실패했던 쪽 {len(redo1)}개({', '.join(map(str, redo1[:10]))}{' …' if len(redo1) > 10 else ''})는 1차의 모델·읽기 방향·설정이 지금과 달라 1차부터 다시 읽습니다")
+    reading = set(todo)
+    for n in pages:                                                     # 쪽 띠: 기록이 있어 건너뛸 쪽과 읽을 차례인 쪽(다시 판독·2차만 다시 묻는 쪽은 기록이 있어도 읽을 차례)
+        page_event(n, "remain" if n in reading else "record")
     progress("read", 0, len(todo))
     failed: list[int] = []; incomplete: list[int] = []; fatal: Exception | None = None
     done_now = 0; since_ckpt = 0; t_start = time.time()
@@ -1292,6 +1309,7 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                 return False
             for n in it:
                 futures[ex.submit(read_one, work, doc, reader, reader2, n, args)] = n
+                page_event(n, "now")
                 return True
             exhausted = True
             return False
@@ -1308,6 +1326,7 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                 try:
                     rec = fut.result()
                     done_now += 1; since_ckpt += 1
+                    page_event(n, "done")
                     progress("read", done_now + len(failed), len(todo))
                     m = rec["merged"]; u = rec.get("usage") or {}
                     if rec.get("pass2_failed"):
@@ -1321,13 +1340,16 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
                 except ReaderError as e:
                     if e.fatal:
                         fatal = e; log(f"오류: {n}쪽 판독 실패 — {e}")
+                        page_event(n, "remain")                         # 치명 오류(키·한도·호출 상한)는 쪽 탓이 아니다 — 다시 실행하면 그 쪽부터
                     else:
                         failed.append(n); work.set_status(n, "판독 확인 필요", note=f"판독 실패(다시 시도 가능): {e}")
                         log(f"  {n}쪽: 판독 실패 — {str(e)[:120]} → 건너뛰고 계속")
+                        page_event(n, "fail")
                         progress("read", done_now + len(failed), len(todo))
                 except Exception as e:
                     failed.append(n); work.set_status(n, "판독 확인 필요", note=f"판독 중 예외: {type(e).__name__}: {e}")
                     log(f"  {n}쪽: 판독 중 예외 {type(e).__name__}: {str(e)[:120]} → 건너뛰고 계속")
+                    page_event(n, "fail")
                     progress("read", done_now + len(failed), len(todo))
             # 동시 쪽 수 자동 조절: 한도 초과가 새로 보이면 하나 줄이고 20초 쉼, 10쪽 연속 깨끗하면 하나 늘림
             now429 = n429()

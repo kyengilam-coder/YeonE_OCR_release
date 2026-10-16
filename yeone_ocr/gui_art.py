@@ -100,15 +100,16 @@ def stretch_size(radius: int, stretch: int) -> tuple[int, int]:
 
 
 def rounded_box(w: int, h: int, radius: float, fill: str | None, border: str | None = None, bw: float = 1.0,
-                corners: str = "lrtb", ring: str | None = None, ring_w: float = 0.0) -> str:
-    """둥근 사각형(단추·카드·막대). border 는 테두리 색(bw 두께), ring 은 바깥쪽 초점 고리(ring_w 두께, 테두리 바깥)."""
+                corners: str = "lrtb", ring: str | None = None, ring_w: float = 0.0, ring_gap: float = 0.0) -> str:
+    """둥근 사각형(단추·카드·막대). border 는 테두리 색(bw 두께), ring 은 바깥쪽 고리(ring_w 두께, 테두리 바깥에서 ring_gap 만큼 띄움 — 틈은 투명).
+    ring 이 없어도 ring_w·ring_gap 을 주면 그 자리를 비워 둔다(기본 단추가 바뀌어도 단추끼리 크기가 같게)."""
     f = hex_rgb(fill) + (255,) if fill else None
     bd = hex_rgb(border) + (255,) if border else None
     rg = hex_rgb(ring) + (255,) if ring else None
-    o = ring_w if ring else 0.0
+    o = ring_w + ring_gap if (ring or ring_gap) else 0.0
 
     def at(x: float, y: float):
-        if rg and _in_rrect(x, y, 0, 0, w, h, radius + o, corners) and not _in_rrect(x, y, o, o, w - o, h - o, radius, corners):
+        if rg and _in_rrect(x, y, 0, 0, w, h, radius + o, corners) and not _in_rrect(x, y, ring_w, ring_w, w - ring_w, h - ring_w, radius + ring_gap, corners):
             return rg
         if not _in_rrect(x, y, o, o, w - o, h - o, radius, corners):
             return None
@@ -186,3 +187,131 @@ def chevron(w: int, h: int, color: str, stroke: float = 1.6) -> str:
         return c if min(_seg_dist(x, y, *a, *m), _seg_dist(x, y, *m, *b)) <= stroke / 2 else None
 
     return png_b64(w, h, _render(w, h, at))
+
+
+def underline_box(w: int, h: int, fill: str, bar: str | None, bar_h: float) -> str:
+    """밑줄 탭의 판: fill 로 채우고 아래 bar_h 픽셀에 bar 색 막대(고른 탭). bar 가 없으면 판만(고르지 않은 탭)."""
+    f = hex_rgb(fill) + (255,)
+    b = hex_rgb(bar) + (255,) if bar else f
+    edge = h - bar_h
+    return png_b64(w, h, [[b if j >= edge else f] * w for j in range(h)])
+
+
+def _icon(size: int, color: str, stroke: float, paths: list[list[tuple[float, float]]], extra=None) -> str:
+    """16단위 격자에 그린 선 그림(시안의 svg 와 같은 좌표)을 size 픽셀로. paths 는 꺾은선(점 목록), extra(x, y) 는 그 밖의 모양(거리 → 선 위인가)."""
+    k = size / 16.0
+    c = hex_rgb(color) + (255,)
+    segs = [(a[0] * k, a[1] * k, b[0] * k, b[1] * k) for p in paths for a, b in zip(p, p[1:])]
+    half = stroke * k / 2
+
+    def at(x: float, y: float):
+        if any(_seg_dist(x, y, *s) <= half for s in segs):
+            return c
+        if extra is not None and extra(x / k, y / k, stroke / 2):
+            return c
+        return None
+
+    return png_b64(size, size, _render(size, size, at))
+
+
+def receipt(size: int, color: str, stroke: float = 1.4) -> str:
+    """영수증(돈이 드는 단계): 아래가 톱니인 세로 종이 + 줄 셋. 시안 gen_common.receipt 와 같은 모양."""
+    paper = [(3.5, 1.5), (12.5, 1.5), (12.5, 14.5), (11, 13.5), (9.5, 14.5), (8, 13.5), (6.5, 14.5), (5, 13.5), (3.5, 14.5), (3.5, 1.5)]
+    return _icon(size, color, stroke, [paper, [(6, 5.5), (10, 5.5)], [(6, 8.5), (10, 8.5)], [(6, 11), (8.5, 11)]])
+
+
+def lock(size: int, color: str, stroke: float = 1.6) -> str:
+    """자물쇠(실행 중 잠김): 둥근 몸통 + 위 고리."""
+    def shape(x: float, y: float, half: float) -> bool:
+        body = _in_rrect(x, y, 3 - half, 7 - half, 13 + half, 14.5 + half, 1.5 + half) and not _in_rrect(x, y, 3 + half, 7 + half, 13 - half, 14.5 - half, max(0.0, 1.5 - half))
+        arc = y <= 5 and abs(math.hypot(x - 8, y - 5) - 2.5) <= half
+        return body or arc
+    return _icon(size, color, stroke, [[(5.5, 7), (5.5, 5)], [(10.5, 7), (10.5, 5)]], extra=shape)
+
+
+def seal(size: int, fill: str, line: str, large: bool = True, scale: float = 1.0) -> str:
+    """도장 바탕: 인주색 둥근 사각(반지름 4, 작은 도장은 3) + 안쪽 가는 테(큰 도장은 3px, 작은 것은 2px 들여). 글자는 창이 그 위에 쓴다.
+    size 는 픽셀(배율을 곱한 값), large 는 48px 도장인가(34px 이하는 작은 도장)."""
+    s = float(size)
+    r = (4.0 if large else 3.0) * scale
+    inset = (3.0 if large else 2.0) * scale
+    lw = max(1.0, scale)
+    f = hex_rgb(fill) + (255,)
+    ln = hex_rgb(line) + (255,)
+    ri = 2.0 * scale
+
+    def at(x: float, y: float):
+        if not _in_rrect(x, y, 0, 0, s, s, r):
+            return None
+        if _in_rrect(x, y, inset, inset, s - inset, s - inset, ri) and not _in_rrect(x, y, inset + lw, inset + lw, s - inset - lw, s - inset - lw, max(0.0, ri - lw)):
+            return ln
+        return f
+
+    return png_b64(size, size, _render(size, size, at))
+
+
+def folder(size: int, color: str, stroke: float = 1.4) -> str:
+    """폴더(원본 경로 줄 · [저장 폴더])."""
+    return _icon(size, color, stroke, [[(1.5, 4.5), (1.5, 13), (14.5, 13), (14.5, 5.5), (7.5, 5.5), (6, 3.5), (1.5, 3.5), (1.5, 4.5)]])
+
+
+def file_doc(size: int, color: str, stroke: float = 1.4) -> str:
+    """파일(설정 탭 양식 HWPX 이름 앞): 오른쪽 위 귀가 접힌 종이. 시안 gen_common.filei 와 같은 모양."""
+    return _icon(size, color, stroke, [[(3.5, 1.5), (9.5, 1.5), (12.5, 4.5), (12.5, 14.5), (3.5, 14.5), (3.5, 1.5)], [(9.5, 1.5), (9.5, 4.5), (12.5, 4.5)]])
+
+
+def check(size: int, color: str, stroke: float = 2.0) -> str:
+    """✓(저장됨)."""
+    return _icon(size, color, stroke, [[(3, 8.5), (6, 11.5), (13, 4)]])
+
+
+def clip(size: int, color: str, stroke: float = 1.5) -> str:
+    """클립보드(빈 이미지 상자의 [이미지 붙여넣기]): 둥근 판 + 위 집게 + 줄 둘."""
+    def board(x: float, y: float, half: float) -> bool:
+        return (_in_rrect(x, y, 3 - half, 3 - half, 13 + half, 14.5 + half, 1.5 + half)
+                and not _in_rrect(x, y, 3 + half, 3 + half, 13 - half, 14.5 - half, max(0.0, 1.5 - half)))
+    return _icon(size, color, stroke, [[(6, 3), (6, 1.8), (10, 1.8), (10, 3)], [(5.8, 7.5), (10.2, 7.5)], [(5.8, 10.5), (8.8, 10.5)]], extra=board)
+
+
+def expand(size: int, color: str, stroke: float = 1.5) -> str:
+    """두 번 눌러 크게 보기(원본 열기) 표지: 바깥으로 벌어지는 두 화살."""
+    return _icon(size, color, stroke, [[(9.5, 2.5), (13.5, 2.5), (13.5, 6.5)], [(13.5, 2.5), (8.5, 7.5)],
+                                       [(6.5, 13.5), (2.5, 13.5), (2.5, 9.5)], [(2.5, 13.5), (7.5, 8.5)]])
+
+
+def step_circle(size: int, kind: str, ink: str, edge: str, red: str, panel: str, scale: float = 1.0) -> str:
+    """단계 띠의 동그라미(지름 size — 시안 26px 에 배율을 곱한 값). 글자(번호·'–'·'!')는 창이 그림 위에 쓴다(Label compound='center').
+    done = 먹 채움 + 흰 ✓ · now = 먹 2px 고리 + 가운데 10px 먹 점 · wait = EDGE 1.5px 고리 · skip = EDGE 1.5px 점선 고리(손으로 그은 조각 — 3 긋고 2 띄움)
+    · fail = PANEL 속 + RED 2px 고리(채우지 않음 — 인주 채움과 갈리게) · stop = 먹 2px 고리 + 가운데 8px 먹 네모."""
+    s = float(size); c = s / 2
+    k = s / 26.0
+    INK, EDGE, RED, PAN = (hex_rgb(v) + (255,) for v in (ink, edge, red, panel))
+    WHITE = (255, 255, 255, 255)
+    ring = {"now": (INK, 2.0), "wait": (EDGE, 1.5), "skip": (EDGE, 1.5), "fail": (RED, 2.0), "stop": (INK, 2.0)}
+    check = [(c + (x - 8) * k * 14 / 16, c + (y - 8) * k * 14 / 16) for x, y in ((3.5, 8.5), (6.5, 11.5), (12.5, 4.5))]
+    sw = 2.2 * k * 14 / 16
+    period, on = 5.0 * k, 3.0 * k                                   # 점선: 둘레를 따라 3 긋고 2 띄움
+    n = max(1, round(math.pi * (s - 1.5 * k) / period))
+    period = math.pi * (s - 1.5 * k) / n                           # 둘레에 꼭 맞게(이음매에서 조각이 겹치지 않게)
+
+    def at(x: float, y: float):
+        d = math.hypot(x - c, y - c)
+        if d > c:
+            return None
+        if kind == "done":
+            dd = min(_seg_dist(x, y, *check[0], *check[1]), _seg_dist(x, y, *check[1], *check[2]))
+            return WHITE if dd <= sw / 2 else INK
+        col, w = ring.get(kind, (EDGE, 1.5))
+        w *= k
+        if d > c - w:
+            if kind == "skip":
+                pos = (math.atan2(y - c, x - c) + math.pi) * (c - w / 2)
+                return col if pos % period < on else PAN
+            return col
+        if kind == "now" and d <= 5.0 * k:
+            return INK
+        if kind == "stop" and abs(x - c) <= 4.0 * k and abs(y - c) <= 4.0 * k:
+            return INK
+        return PAN
+
+    return png_b64(size, size, _render(size, size, at))

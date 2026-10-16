@@ -250,21 +250,22 @@ class InputTabs(unittest.TestCase):
         self.assertEqual((app._selected_tab, app.v_tab.get(), app._last_ocr_tab), (3, 3, 2))
         self.assertEqual(app.actions, [app.act_cards[2]])
 
-    def test_settings_stop_is_enabled_for_advanced_work_and_disabled_afterwards(self):
+    def test_stop_is_enabled_for_stoppable_work_and_settings_footer_has_no_own_stop(self):
+        """설정 탭에서는 실행을 시작할 일이 없어 바닥 줄의 [■ 중지](b_stop3)를 없앴다(명세 §6.3·§14-8) — 실행 중 잠금과 함께 쓰는 [■ 중지]의 켜고 끔은 그대로."""
         app = self.app(); app.select_tab(3)
         app.buttons = [mock.Mock()]; app._tab_buttons = [mock.Mock() for _ in range(4)]
         app._reader_changed = mock.Mock()
-        app.b_stop, app.b_stop2, app.b_stop3 = mock.Mock(), mock.Mock(), mock.Mock()
+        app.b_stop, app.b_stop2 = mock.Mock(), mock.Mock()
         app.progress = mock.Mock(); app.v_prog = Var("")
         self.gui.App._set_running(app, True, "read")
-        app.b_stop3.configure.assert_called_with(state="normal")
+        app.b_stop.configure.assert_called_with(state="normal"); app.b_stop2.configure.assert_called_with(state="normal")
         self.assertEqual(app.actions, [app.act_cards[2]])
         for button in app.buttons + app._tab_buttons:
             button.configure.assert_called_with(state="disabled")
         self.gui.App._set_running(app, False)
-        app.b_stop3.configure.assert_called_with(state="disabled")
-        self.gui.App._set_running(app, True, "update")
-        app.b_stop3.configure.assert_called_with(state="disabled")
+        app.b_stop.configure.assert_called_with(state="disabled")
+        self.gui.App._set_running(app, True, "update")                                  # 업데이트 내려받기는 멈출 수 없다
+        app.b_stop.configure.assert_called_with(state="disabled")
 
     def test_advanced_build_from_settings_uses_last_active_ocr_input(self):
         for tab, source in ((0, "book.pdf"), (2, "image.png")):

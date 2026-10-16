@@ -316,7 +316,7 @@ class TemplateGuard(unittest.TestCase):
             gui.App.do_build(app); gui.App.do_run(app)
         self.assertEqual(err.call_count, 2); app.start.assert_not_called()
         self.assertIn(f"짜임 규칙을 쓸 수 없습니다: 짜임 규칙 파일이 없습니다: {missing}", err.call_args.args[1])
-        self.assertIn("[설정] → 문서 → 짜임 규칙을 다시 고르십시오", err.call_args.args[1])
+        self.assertIn("[설정] → 이 책 → 짜임 규칙을 다시 고르십시오", err.call_args.args[1])
         app.v_layout.set(gui.LAYOUT_LABELS["page"]); app.v_template.set("")              # 원본 쪽대로면 짜임 규칙을 보지 않는다
         self.assertTrue(gui.preset_ok(app))
         self.assertTrue(gui.preset_ok(types.SimpleNamespace(cfg={})))                    # 짜임 칸이 없는 가짜 창
