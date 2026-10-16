@@ -31,7 +31,7 @@ for name in ("rapidocr_worker.py", "easyocr_worker.py"):
 for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py", "rapidocr-lock.json",
              "install_easyocr.py", "easyocr-lock.json"):
     datas.append((str(ROOT / "scripts" / name), "scripts"))
-for name in ("LOCAL_OCR.md", "INTEGRATION.md", "HANDOFF.md", "AB_OCR_PROVENANCE.json"):
+for name in ("LOCAL_OCR.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
     datas.append((str(ROOT / "docs" / name), "docs"))
 for name in ("THIRD_PARTY_NOTICES.txt", "requirements-windows.lock.txt"):
     resource = ROOT / "packaging" / name

@@ -28,6 +28,9 @@ MAX_TEXT = 2_000_000
 ENGINES = ("tesseract", "rapidocr", "easyocr")
 PROFILES = ("traditional", "simplified", "mixed")
 _HEX = re.compile(r"[a-f0-9]{64}")
+_AI_SECRET_FIELDS = {"apikey", "authorization", "accesstoken", "refreshtoken", "clientsecret", "password",
+                     "credentials", "credential", "secret", "secrets", "headers", "requestheaders", "auth", "bearer",
+                     "imagedata", "imagebase64", "imagebytes", "base64", "dataurl"}
 
 
 class ComparisonError(ValueError):
@@ -48,6 +51,44 @@ def _canonical(value):
 
 def _digest(value):
     return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _text_sha(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _ai_label(value, maximum=128):
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= maximum and not any(ord(c) < 32 for c in value)
+
+
+def _reject_ai_secrets(value):
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            if any(re.sub(r"[^a-z0-9]", "", key.lower()) in _AI_SECRET_FIELDS for key in item):
+                raise ComparisonError("AI 검증 기록에는 인증 정보나 요청 헤더를 저장할 수 없습니다.")
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+
+
+def _ai_box(box, width, height):
+    return (isinstance(box, list) and len(box) == 4
+            and all(type(v) in (int, float) and math.isfinite(v) for v in box)
+            and 0 <= box[0] < box[2] <= width and 0 <= box[1] < box[3] <= height)
+
+
+def _ai_phase(review):
+    return review["request"].get("phase", review.get("metadata", {}).get("phase"))
+
+
+def _ai_batch_key(review):
+    request = review["request"]
+    scope, batch = request.get("scope_fingerprint"), request.get("batch_id")
+    if isinstance(scope, str) and scope and isinstance(batch, str) and batch:
+        return scope, _ai_phase(review), batch
+    return None
 
 
 def _text(value, *, nullable=False):
@@ -130,7 +171,7 @@ def _blank(number):
     return {"number": number, "profile": "traditional", "direction": "horizontal", "runs": [],
             "baseline_engine": None, "baseline_run_id": None, "corrected_text": None,
             "edits": [], "reviewed": False, "review_history": [], "suggestions": [],
-            "comparisons": [], "decisions": [], "last_errors": {}}
+            "comparisons": [], "decisions": [], "last_errors": {}, "ai_reviews": [], "ai_decisions": []}
 
 
 def _latest_runs(page):
@@ -315,6 +356,11 @@ class ComparisonProject:
                 raise ComparisonError("쪽 번호 형식이 올바르지 않습니다.")
             number = int(key)
             project._check_page(number)
+            if isinstance(page, dict):
+                # Version 1 projects written before AI integration have no such
+                # records; opening them must not invent an AI/human decision.
+                page.setdefault("ai_reviews", [])
+                page.setdefault("ai_decisions", [])
             project._validate_page(page, number, run_ids)
             project._pages[number] = copy.deepcopy(page)
         project._id = identifier
@@ -403,10 +449,11 @@ class ComparisonProject:
         edits = page.get("edits")
         if not isinstance(edits, list):
             raise ComparisonError("교정 이력이 올바르지 않습니다.")
+        self._validate_ai_state(page, number, local_ids)
         state, edit_ids, active = None, set(), []
         for edit in edits:
             if (not isinstance(edit, dict) or not isinstance(edit.get("id"), str) or edit["id"] in edit_ids
-                    or edit.get("kind") not in ("manual", "candidate", "undo")
+                    or edit.get("kind") not in ("manual", "candidate", "ai_accept", "undo")
                     or not isinstance(edit.get("at"), str) or not isinstance(edit.get("reason"), str)
                     or edit.get("before") != state):
                 raise ComparisonError("교정 이력의 순서나 내용이 일치하지 않습니다.")
@@ -451,6 +498,206 @@ class ComparisonProject:
                     or type(review.get("before")) is not bool or type(review.get("after")) is not bool):
                 raise ComparisonError("사람의 검수 이력이 올바르지 않습니다.")
         _json_copy(page)
+
+    def _validate_ai_review(self, review, number, runs, previous):
+        if (not isinstance(review, dict) or not isinstance(review.get("id"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", review["id"])
+                or not _ai_label(review.get("created_at"))
+                or not _ai_label(review.get("provider"), 80) or not _ai_label(review.get("model"), 200)
+                or review.get("status") not in ("completed", "failed", "cancelled")
+                or review.get("source_state_on_record") not in ("verified", "changed", "unavailable")
+                or not isinstance(review.get("policy"), dict) or not isinstance(review.get("metadata", {}), dict)):
+            raise ComparisonError("AI 검증 기록의 형식이 올바르지 않습니다.")
+        _text(review.get("response_text"))
+        if "error" in review:
+            _text(review["error"])
+            if len(review["error"]) > 2_000:
+                raise ComparisonError("AI 오류 기록이 너무 깁니다.")
+        unsigned = {key: value for key, value in review.items() if key != "record_sha256"}
+        if review.get("record_sha256") != _digest(unsigned):
+            raise ComparisonError("AI 원시 응답·요청 보존 해시가 일치하지 않습니다.")
+        _reject_ai_secrets(review)
+        request = review.get("request")
+        if (not isinstance(request, dict) or request.get("source_sha256") != self.source_sha256
+                or type(request.get("page_number")) is not int or request["page_number"] != number):
+            raise ComparisonError("AI 검증 요청의 원본 해시 또는 쪽 번호가 일치하지 않습니다.")
+        snapshot = request.get("snapshot_text")
+        _text(snapshot)
+        if request.get("snapshot_sha256") != _text_sha(snapshot):
+            raise ComparisonError("AI 검증 대상 문장의 해시가 일치하지 않습니다.")
+        references = request.get("runs")
+        if not isinstance(references, list) or len(references) > 100:
+            raise ComparisonError("AI 검증의 원시 판독 근거가 올바르지 않습니다.")
+        seen, engines = set(), set()
+        for reference in references:
+            if (not isinstance(reference, dict) or not isinstance(reference.get("run_id"), str) or reference.get("run_id") not in runs
+                    or reference["run_id"] in seen):
+                raise ComparisonError("AI 검증의 원시 판독 연결이 올바르지 않습니다.")
+            run = runs[reference["run_id"]]
+            if (reference.get("engine") != run["engine"] or reference.get("raw_sha256") != run["raw_sha256"]
+                    or run["engine"] in engines):
+                raise ComparisonError("AI 검증의 원시 판독 보존 해시가 일치하지 않습니다.")
+            seen.add(reference["run_id"])
+            engines.add(run["engine"])
+        baseline = request.get("baseline_run_id")
+        if baseline is not None and not isinstance(baseline, str):
+            raise ComparisonError("AI 검증의 기준 판독 식별자가 올바르지 않습니다.")
+        if baseline is not None and baseline not in seen:
+            raise ComparisonError("AI 검증의 기준 판독이 근거 목록에 없습니다.")
+        if references and baseline is None:
+            raise ComparisonError("AI 검증의 기준 판독이 없습니다.")
+        images = request.get("images")
+        if not isinstance(images, list) or len(images) > 64:
+            raise ComparisonError("AI 이미지 근거 목록이 올바르지 않습니다.")
+        image_map = {}
+        for image in images:
+            if (not isinstance(image, dict) or not _ai_label(image.get("id"), 80)
+                    or image["id"] in image_map or not isinstance(image.get("sha256"), str)
+                    or not _HEX.fullmatch(image["sha256"])
+                    or set(image) - {"id", "sha256", "width", "height", "source_width", "source_height", "source_bbox", "png_bytes", "media_type"}):
+                raise ComparisonError("AI 이미지 근거의 식별자 또는 해시가 올바르지 않습니다.")
+            if "png_bytes" in image and (type(image["png_bytes"]) is not int or not 0 <= image["png_bytes"] <= 40_000_000):
+                raise ComparisonError("AI 이미지 크기 기록은 바이트 수만 저장할 수 있습니다.")
+            for key in ("width", "height", "source_width", "source_height"):
+                if type(image.get(key)) is not int or not 0 < image[key] <= 100_000:
+                    raise ComparisonError("AI 이미지 근거의 크기가 올바르지 않습니다.")
+            if (image["width"] * image["height"] > 40_000_000
+                    or image["source_width"] * image["source_height"] > 40_000_000
+                    or not _ai_box(image.get("source_bbox"), image["source_width"], image["source_height"])):
+                raise ComparisonError("AI 이미지 근거가 허용 범위 또는 원본 영역을 벗어났습니다.")
+            image_map[image["id"]] = image
+        targets = request.get("targets")
+        if not isinstance(targets, list) or len(targets) > 2_000:
+            raise ComparisonError("AI 검증 대상 범위가 올바르지 않습니다.")
+        target_ids = set()
+        for target in targets:
+            if not isinstance(target, dict) or not _ai_label(target.get("id"), 80) or target["id"] in target_ids:
+                raise ComparisonError("AI 검증 대상 식별자가 올바르지 않습니다.")
+            start, end = target.get("start"), target.get("end")
+            if (type(start) is not int or type(end) is not int or not 0 <= start <= end <= len(snapshot)
+                    or target.get("before") != snapshot[start:end]):
+                raise ComparisonError("AI 검증 대상 범위와 원문이 일치하지 않습니다.")
+            image_id, box = target.get("image_id"), target.get("bbox")
+            if image_id is not None and (not isinstance(image_id, str) or image_id not in image_map):
+                raise ComparisonError("AI 검증 대상의 이미지 근거가 없습니다.")
+            if box is not None:
+                if image_id is None:
+                    raise ComparisonError("AI 검증 대상 좌표의 기준 이미지가 없습니다.")
+                image = image_map[image_id]
+                crop = image["source_bbox"]
+                if (not _ai_box(box, image["source_width"], image["source_height"])
+                        or not (crop[0] <= box[0] < box[2] <= crop[2] and crop[1] <= box[1] < box[3] <= crop[3])):
+                    raise ComparisonError("AI 검증 대상 좌표가 전송한 이미지 영역을 벗어났습니다.")
+            target_ids.add(target["id"])
+        proposals = review.get("proposals")
+        if not isinstance(proposals, list) or len(proposals) > 2_000:
+            raise ComparisonError("AI 교정 후보 목록이 올바르지 않습니다.")
+        if review["status"] != "completed" and proposals:
+            raise ComparisonError("실패·취소된 AI 응답에는 적용 가능한 교정 후보를 저장할 수 없습니다.")
+        proposal_ids = set()
+        for proposal in proposals:
+            if (not isinstance(proposal, dict) or not _ai_label(proposal.get("id"))
+                    or proposal["id"] in proposal_ids
+                    or proposal.get("kind") not in ("recognition", "traditional", "punctuation")
+                    or type(proposal.get("uncertain")) is not bool):
+                raise ComparisonError("AI 교정 후보의 형식이 올바르지 않습니다.")
+            start, end = proposal.get("start"), proposal.get("end")
+            _text(proposal.get("before")); _text(proposal.get("after")); _text(proposal.get("reason"))
+            if (type(start) is not int or type(end) is not int or not 0 <= start <= end <= len(snapshot)
+                    or proposal["before"] != snapshot[start:end] or proposal["before"] == proposal["after"]
+                    or not any(t["start"] <= start <= end <= t["end"] for t in targets)):
+                raise ComparisonError("AI 교정 후보가 지정한 범위·원문과 일치하지 않습니다.")
+            proposal_ids.add(proposal["id"])
+        superseded = review.get("metadata", {}).get("superseded_proposal_ids", [])
+        if (not isinstance(superseded, list) or any(not _ai_label(value) for value in superseded)
+                or len(superseded) != len(set(superseded)) or len(superseded) > 2_000):
+            raise ComparisonError("AI 교정 후보의 대체 근거가 올바르지 않습니다.")
+        for identifier in superseded:
+            if identifier in proposal_ids:
+                raise ComparisonError("대체 후보는 이전 후보와 다른 식별자를 사용해야 합니다.")
+            matches = [(old, p) for old in previous for p in old["proposals"] if p["id"] == identifier]
+            if len(matches) != 1:
+                raise ComparisonError("대체할 이전 AI 교정 후보를 찾을 수 없습니다.")
+            old, proposal = matches[0]
+            prior = old["request"]
+            if (review["status"] != "completed" or prior["snapshot_sha256"] != request["snapshot_sha256"]
+                    or prior.get("scope_fingerprint") != request.get("scope_fingerprint")
+                    or prior["baseline_run_id"] != baseline or prior["runs"] != references
+                    or not any(p["start"] <= proposal["start"] <= proposal["end"] <= p["end"] for p in proposals)):
+                raise ComparisonError("서로 다른 원문·판독 근거의 AI 후보를 대체할 수 없습니다.")
+        lineage = review.get("metadata", {}).get("provisional_visual_proposal_ids", [])
+        if (not isinstance(lineage, list) or any(not _ai_label(value) for value in lineage)
+                or len(lineage) != len(set(lineage)) or len(lineage) > 2_000):
+            raise ComparisonError("AI 후속 검토의 앞 단계 근거 목록이 올바르지 않습니다.")
+        for identifier in lineage:
+            matches = [(old, p) for old in previous for p in old["proposals"] if p["id"] == identifier]
+            if len(matches) != 1:
+                raise ComparisonError("AI 후속 검토의 앞 단계 후보를 찾을 수 없습니다.")
+            old, proposal = matches[0]
+            prior = old["request"]
+            if (_ai_phase(review) != "editorial" or _ai_phase(old) != "visual" or proposal["uncertain"]
+                    or old["status"] != "completed" or prior["snapshot_sha256"] != request["snapshot_sha256"]
+                    or prior.get("scope_fingerprint") != request.get("scope_fingerprint")
+                    or prior["baseline_run_id"] != baseline or prior["runs"] != references
+                    or not any(t["start"] <= proposal["start"] <= proposal["end"] <= t["end"] for t in targets)):
+                raise ComparisonError("AI 후속 검토의 앞 단계 원문·범위·판독 근거가 일치하지 않습니다.")
+
+    def _validate_ai_state(self, page, number, runs):
+        reviews, decisions = page.get("ai_reviews", []), page.get("ai_decisions", [])
+        if not isinstance(reviews, list) or not isinstance(decisions, list):
+            raise ComparisonError("AI 검증·결정 이력 형식이 올바르지 않습니다.")
+        review_map, previous = {}, []
+        for review in reviews:
+            self._validate_ai_review(review, number, runs, previous)
+            if review["id"] in review_map:
+                raise ComparisonError("AI 검증 식별자가 중복되었습니다.")
+            review_map[review["id"]] = review
+            previous.append(review)
+        states, decision_ids = {}, set()
+        edits = {edit["id"]: edit for edit in page["edits"] if isinstance(edit, dict) and isinstance(edit.get("id"), str)}
+        accepted_edits = set()
+        for decision in decisions:
+            if (not isinstance(decision, dict) or not isinstance(decision.get("id"), str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", decision["id"]) or decision["id"] in decision_ids
+                    or not _ai_label(decision.get("at")) or not isinstance(decision.get("review_id"), str)
+                    or decision.get("review_id") not in review_map
+                    or decision.get("decision") not in ("accepted", "rejected", "undone")):
+                raise ComparisonError("AI 교정 결정 이력이 올바르지 않습니다.")
+            review = review_map[decision["review_id"]]
+            proposal = next((p for p in review["proposals"] if p["id"] == decision.get("proposal_id")), None)
+            if proposal is None or review["status"] != "completed":
+                raise ComparisonError("AI 교정 결정의 후보 연결이 올바르지 않습니다.")
+            key = (review["id"], proposal["id"])
+            before = states.get(key, "pending")
+            if decision["decision"] == "undone":
+                edit = edits.get(decision.get("undo_edit_id")) if isinstance(decision.get("undo_edit_id"), str) else None
+                if (before != "accepted" or edit is None or edit.get("kind") != "undo"
+                        or edit.get("undo_of") != decision.get("edit_id")):
+                    raise ComparisonError("AI 교정 되돌리기 연결이 올바르지 않습니다.")
+                states[key] = "pending"
+            else:
+                if before != "pending":
+                    raise ComparisonError("이미 처리한 AI 교정 후보의 결정이 중복되었습니다.")
+                if decision["decision"] == "accepted":
+                    edit = edits.get(decision.get("edit_id")) if isinstance(decision.get("edit_id"), str) else None
+                    if (proposal["uncertain"] or edit is None or edit.get("kind") != "ai_accept"
+                            or edit.get("ai_review_id") != review["id"] or edit.get("ai_proposal_id") != proposal["id"]):
+                        raise ComparisonError("AI 후보 채택과 사람 교정 이력의 연결이 일치하지 않습니다.")
+                    before_text = edit.get("before")
+                    if before_text is None:
+                        baseline = runs.get(review["request"]["baseline_run_id"])
+                        before_text = baseline["raw"]["text"] if baseline else ""
+                    start, end = edit.get("applied_start"), edit.get("applied_end")
+                    if (not isinstance(before_text, str) or type(start) is not int or type(end) is not int
+                            or not 0 <= start <= end <= len(before_text)
+                            or before_text[start:end] != proposal["before"]
+                            or edit.get("after") != before_text[:start] + proposal["after"] + before_text[end:]):
+                        raise ComparisonError("AI 후보 채택 범위와 실제 교정문이 일치하지 않습니다.")
+                    accepted_edits.add(edit["id"])
+                states[key] = decision["decision"]
+            decision_ids.add(decision["id"])
+        if any(edit.get("kind") == "ai_accept" and edit.get("id") not in accepted_edits for edit in edits.values()):
+            raise ComparisonError("AI 교정 이력에 해당하는 채택 결정이 없습니다.")
 
     def _validate_suggestion(self, suggestion, runs):
         if not isinstance(suggestion, dict) or suggestion.get("baseline_run_id") not in runs:
@@ -691,6 +938,10 @@ class ComparisonProject:
                         suggestion.pop("decided_at", None)
                         suggestion.pop("selected_engine", None)
                 page["decisions"].append({"suggestion_id": identifier, "at": _now(), "decision": "undone"})
+            elif edit["kind"] == "ai_accept":
+                page.setdefault("ai_decisions", []).append({"id": uuid.uuid4().hex, "at": _now(),
+                    "review_id": edit["ai_review_id"], "proposal_id": edit["ai_proposal_id"], "decision": "undone",
+                    "edit_id": edit["id"], "undo_edit_id": page["edits"][-1]["id"]})
             self._invalidate_review(page, "edit-undone")
             self._revision += 1
             return True
@@ -763,6 +1014,204 @@ class ComparisonProject:
         _text(message)
         with self._lock:
             self._page(number)["last_errors"][str(engine)] = message
+            self._revision += 1
+
+    def record_ai_review(self, number, record):
+        """Append the exact AI answer and anchored proposals without editing text.
+
+        Responses remain recoverable if a drive disconnects during a paid call.
+        Their logical source/raw hashes are checked here; applying a proposal
+        additionally requires the live original and current evidence to match.
+        """
+        self._check_page(number)
+        review = _json_copy(record)
+        if not isinstance(review, dict):
+            raise ComparisonError("AI 검증 기록은 JSON 객체여야 합니다.")
+        review.setdefault("id", uuid.uuid4().hex)
+        review.setdefault("created_at", _now())
+        if isinstance(review.get("proposals"), list):
+            for proposal in review["proposals"]:
+                if isinstance(proposal, dict):
+                    proposal.setdefault("id", uuid.uuid4().hex)
+        try:
+            current_hash = ocr.file_sha256(self.source_path)
+            source_state = "verified" if current_hash == self.source_sha256 else "changed"
+        except OSError:
+            source_state = "unavailable"
+        review["source_state_on_record"] = source_state
+        unsigned = {key: value for key, value in review.items() if key != "record_sha256"}
+        expected = _digest(unsigned)
+        if "record_sha256" in review and review["record_sha256"] != expected:
+            raise ComparisonError("AI 원시 응답·요청 보존 해시가 일치하지 않습니다.")
+        review["record_sha256"] = expected
+        with self._lock:
+            page = self._pages.get(number, _blank(number))
+            reviews = page.get("ai_reviews", [])
+            if any(old["id"] == review["id"] for old in reviews):
+                raise ComparisonError("AI 검증 식별자가 이미 있습니다.")
+            runs = {run["id"]: run for run in page["runs"]}
+            self._validate_ai_review(review, number, runs, reviews)
+            self._pages[number] = page
+            page.setdefault("ai_reviews", reviews)
+            page.setdefault("ai_decisions", [])
+            reviews.append(review)
+            self._revision += 1
+            return review["id"]
+
+    @staticmethod
+    def _ai_evidence_stale(page, review):
+        request = review["request"]
+        if request["baseline_run_id"] != page["baseline_run_id"]:
+            return "AI 검증 뒤 기준 판독이 변경되었습니다. 다시 검증하세요."
+        references = {reference["engine"]: reference for reference in request["runs"]}
+        current = _latest_runs(page)
+        # Cloud comparison uses the active local readings. Adding read-only
+        # imported AI history must not invalidate those local image readings.
+        if any(engine in ENGINES for engine in references):
+            expected_engines = {engine for engine, run in current.items() if engine in ENGINES and run.get("active", True)}
+            if expected_engines != (set(references) & set(ENGINES)):
+                return "AI 검증 뒤 참여한 로컬 판독 목록이 변경되었습니다. 다시 검증하세요."
+        for engine, reference in references.items():
+            run = current.get(engine)
+            if (run is None or run["id"] != reference["run_id"] or run["raw_sha256"] != reference["raw_sha256"]
+                    or (engine in ENGINES and not run.get("active", True))):
+                return "AI 검증 뒤 원시 OCR 근거가 변경되었습니다. 다시 검증하세요."
+        return ""
+
+    @staticmethod
+    def _ai_decision(page, review_id, proposal_id):
+        decision = next((d["decision"] for d in reversed(page.get("ai_decisions", []))
+                         if d["review_id"] == review_id and d["proposal_id"] == proposal_id), "pending")
+        return "pending" if decision == "undone" else decision
+
+    def _ai_generations(self, page):
+        latest = {}
+        for review in page.get("ai_reviews", []):
+            key = _ai_batch_key(review)
+            if key is not None:
+                latest[key] = review["id"]
+        visual = []
+        for review in page.get("ai_reviews", []):
+            key = _ai_batch_key(review)
+            if (review["status"] != "completed" or _ai_phase(review) != "visual"
+                    or (key is not None and latest[key] != review["id"])
+                    or self._ai_evidence_stale(page, review)):
+                continue
+            for proposal in review["proposals"]:
+                if (not proposal["uncertain"]
+                        and self._ai_decision(page, review["id"], proposal["id"]) != "rejected"):
+                    visual.append((review, proposal))
+        return latest, visual
+
+    @staticmethod
+    def _ai_lineage_stale(review, visual):
+        if _ai_phase(review) != "editorial":
+            return ""
+        request, metadata = review["request"], review.get("metadata", {})
+        captured = set(metadata.get("provisional_visual_proposal_ids", metadata.get("superseded_proposal_ids", [])))
+        expected = {p["id"] for old, p in visual
+                    if old["request"].get("scope_fingerprint") == request.get("scope_fingerprint")
+                    and old["request"]["snapshot_sha256"] == request["snapshot_sha256"]
+                    and old["request"]["baseline_run_id"] == request["baseline_run_id"]
+                    and any(t["start"] <= p["start"] <= p["end"] <= t["end"] for t in request["targets"])}
+        if captured != expected:
+            return "AI 후속 검토가 참조한 앞 단계 판독이 갱신되거나 거절되었습니다. 다시 검증하세요."
+        return ""
+
+    def ai_proposals(self, number, include_decided=False):
+        with self._lock:
+            page = self.page(number)
+            reviews = page.get("ai_reviews", [])
+            latest, visual = self._ai_generations(page)
+            active = [r for r in reviews if r["status"] == "completed"
+                      and (_ai_batch_key(r) is None or latest[_ai_batch_key(r)] == r["id"])
+                      and not self._ai_lineage_stale(r, visual)]
+            superseded = {identifier for review in active
+                          for identifier in review.get("metadata", {}).get("superseded_proposal_ids", [])}
+            source_reason = ""
+            if any(r["status"] == "completed" and r.get("source_state_on_record") != "verified" for r in reviews):
+                try:
+                    self.validate_source()
+                except SourceChangedError as exc:
+                    source_reason = str(exc)
+            result = []
+            for review in reviews:
+                if review["status"] != "completed":
+                    continue
+                key = _ai_batch_key(review)
+                generation_stale = key is not None and latest[key] != review["id"]
+                lineage_reason = self._ai_lineage_stale(review, visual)
+                stale_reason = (source_reason or self._ai_evidence_stale(page, review)
+                                or ("같은 범위의 새 AI 검증 시도가 있습니다. 이전 후보는 이력으로 보존합니다." if generation_stale else "")
+                                or lineage_reason)
+                for proposal in review["proposals"]:
+                    decision = self._ai_decision(page, review["id"], proposal["id"])
+                    replaced = proposal["id"] in superseded or generation_stale
+                    if not include_decided and (decision != "pending" or replaced):
+                        continue
+                    reason, manual_conflict = stale_reason, False
+                    if generation_stale:
+                        reason = stale_reason
+                    elif replaced:
+                        reason = "뒤 단계 AI 검토의 통합 후보가 이 후보를 대체했습니다."
+                    elif proposal["uncertain"]:
+                        reason = "AI가 판독을 확정하지 못했습니다. 원본과 직접 대조하여 교정하세요."
+                    elif not reason and decision == "pending":
+                        try:
+                            self._mapped_span(review["request"]["snapshot_text"], self.text(number), proposal["start"], proposal["end"])
+                        except ComparisonError as exc:
+                            reason = str(exc)
+                            manual_conflict = True
+                    target = next((t for t in review["request"]["targets"]
+                                   if t["start"] <= proposal["start"] <= proposal["end"] <= t["end"]), None)
+                    result.append({**copy.deepcopy(proposal), "review_id": review["id"], "provider": review["provider"],
+                                   "model": review["model"], "decision": decision, "superseded": replaced,
+                                   "generation_stale": generation_stale, "lineage_stale": bool(lineage_reason),
+                                   "stale": bool(stale_reason) or manual_conflict, "applicable": decision == "pending" and not reason,
+                                   "blocked_reason": reason, "bbox": copy.deepcopy(target.get("bbox")) if target else None,
+                                   "image_id": target.get("image_id") if target else None})
+            return result
+
+    def accept_ai_proposal(self, number, review_id, proposal_id):
+        with self._lock:
+            self.validate_source()
+            self._check_page(number)
+            page = self._pages.get(number)
+            if page is None:
+                raise ComparisonError("처리할 수 있는 AI 교정 후보가 없습니다.")
+            view = next((p for p in self.ai_proposals(number, include_decided=True)
+                         if p["review_id"] == review_id and p["id"] == proposal_id), None)
+            if view is None or not view["applicable"]:
+                raise ComparisonError(view["blocked_reason"] if view and view["blocked_reason"] else "처리할 수 있는 AI 교정 후보가 없습니다.")
+            review = next(r for r in page["ai_reviews"] if r["id"] == review_id)
+            current = self.text(number)
+            start, end = self._mapped_span(review["request"]["snapshot_text"], current, view["start"], view["end"])
+            if current[start:end] != view["before"]:
+                raise ComparisonError("AI 후보의 변경 전 문장이 현재 교정문과 다릅니다.")
+            replacement = current[:start] + view["after"] + current[end:]
+            changed = self._set_text(number, replacement, "ai:" + review_id + ":" + proposal_id, kind="ai_accept",
+                                     extra={"ai_review_id": review_id, "ai_proposal_id": proposal_id,
+                                            "applied_start": start, "applied_end": end})
+            if not changed:
+                raise ComparisonError("현재 교정문에 적용할 변경이 없습니다.")
+            page["ai_decisions"].append({"id": uuid.uuid4().hex, "at": _now(), "review_id": review_id,
+                                         "proposal_id": proposal_id, "decision": "accepted", "edit_id": page["edits"][-1]["id"]})
+            self._revision += 1
+            return replacement
+
+    def reject_ai_proposal(self, number, review_id, proposal_id):
+        with self._lock:
+            self._check_page(number)
+            page = self._pages.get(number)
+            if page is None:
+                raise ComparisonError("처리할 수 있는 AI 교정 후보가 없습니다.")
+            review = next((r for r in page.get("ai_reviews", []) if r["id"] == review_id), None)
+            if (review is None or review["status"] != "completed"
+                    or not any(p["id"] == proposal_id for p in review["proposals"])
+                    or self._ai_decision(page, review_id, proposal_id) != "pending"):
+                raise ComparisonError("처리할 수 있는 AI 교정 후보가 없습니다.")
+            page.setdefault("ai_decisions", []).append({"id": uuid.uuid4().hex, "at": _now(), "review_id": review_id,
+                                                        "proposal_id": proposal_id, "decision": "rejected"})
             self._revision += 1
 
     def to_dict(self):

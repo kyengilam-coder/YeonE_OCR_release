@@ -178,6 +178,90 @@ def test_source_allowlist_retains_current_upstream_license_inventory():
     assert all(release.source_allowed(path.relative_to(root).as_posix()) for path in files)
 
 
+def reference_tree():
+    files = {release.AB_REFERENCE_ROOT + name: "# preserved synthetic source: " + name + "\n"
+             for name in release.AB_REFERENCE_FILES}
+    manifest = {"schema_version": 1, "source_project": "AB_OCR", "source_version": "0.3.0",
+                "private_documents_included": False, "model_files_included": False,
+                "files": {name: hashlib.sha256(files[release.AB_REFERENCE_ROOT + name].encode()).hexdigest()
+                          for name in release.AB_REFERENCE_FILES}}
+    files[release.AB_REFERENCE_MANIFEST] = json.dumps(manifest)
+    files["references/README.md"] = "Historical reference; current product is YeonE_OCR.\n"
+    return files, manifest
+
+
+def test_reference_snapshot_preserves_complete_public_inventory_and_hashes():
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads((root / release.AB_REFERENCE_MANIFEST).read_text(encoding="utf-8"))
+    assert len(release.AB_REFERENCE_FILES) == 52
+    assert set(manifest["files"]) == release.AB_REFERENCE_FILES
+    snapshot = root / release.AB_REFERENCE_ROOT
+    public_files = {path.relative_to(snapshot).as_posix() for path in snapshot.rglob("*")
+                    if path.is_file() and "__pycache__" not in path.parts and path.name != "SOURCE_MANIFEST.json"}
+    assert public_files == release.AB_REFERENCE_FILES
+    for name, expected in manifest["files"].items():
+        path = snapshot / name
+        assert not path.is_symlink()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected, name
+        assert release.source_allowed(release.AB_REFERENCE_ROOT + name), name
+
+
+def test_source_archive_preserves_committed_reference_and_excludes_unlisted_payloads(tmp_path, monkeypatch):
+    files, _ = reference_tree()
+    private = {release.AB_REFERENCE_ROOT + name: "private synthetic payload" for name in (
+        "docs/source.pdf", "docs/result.json", "tests/source.png", "ab_ocr/private_record.py",
+        "scripts/unknown-lock.json", "work/result.py", "models/chinese.pth")}
+    private["references/AB_OCR_0.4.0/ab_ocr/ocr.py"] = "unlisted future source"
+    committed_tree(monkeypatch, extra_files={**files, **private})
+    # The committed archive is authoritative even if a local reference differs.
+    local = tmp_path / release.AB_REFERENCE_ROOT / "ab_ocr/ocr.py"
+    local.parent.mkdir(parents=True)
+    local.write_text("uncommitted local bytes", encoding="utf-8")
+    output = tmp_path / "source.zip"
+    result = release.create_source_archive(tmp_path, output, "0.7.1")
+    assert result["files"] == 7 + 54
+    with zipfile.ZipFile(output) as archive:
+        for name, content in files.items():
+            assert archive.read("YeonE_OCR-0.7.1/" + name) == content.encode()
+        for name in private:
+            assert not release.source_allowed(name)
+            assert "YeonE_OCR-0.7.1/" + name not in archive.namelist()
+
+
+@pytest.mark.parametrize("tamper", ["file", "hash", "inventory", "missing"])
+def test_source_archive_rejects_reference_tampering_before_writing_output(tmp_path, monkeypatch, tamper):
+    files, manifest = reference_tree()
+    source = release.AB_REFERENCE_ROOT + "ab_ocr/ocr.py"
+    if tamper == "file":
+        files[source] += "# modified after manifest\n"
+    elif tamper == "hash":
+        manifest["files"]["ab_ocr/ocr.py"] = "0" * 64
+    elif tamper == "inventory":
+        private = "docs/private-record.json"
+        manifest["files"][private] = hashlib.sha256(b"private synthetic record").hexdigest()
+        files[release.AB_REFERENCE_ROOT + private] = "private synthetic record"
+    else:
+        files.pop(source)
+    files[release.AB_REFERENCE_MANIFEST] = json.dumps(manifest)
+    committed_tree(monkeypatch, extra_files=files)
+    output = tmp_path / "source.zip"
+    with pytest.raises(ValueError, match="Committed AB_OCR reference"):
+        release.create_source_archive(tmp_path, output, "0.7.1")
+    assert not output.exists()
+
+
+def test_source_allowlist_preserves_required_golden_fixtures_and_notice_supplements():
+    root = Path(__file__).resolve().parents[1]
+    actual = {path.relative_to(root).as_posix() for path in (root / "tests/golden").glob("*.json")}
+    assert actual == release.SOURCE_TEST_FIXTURES
+    required = release.SOURCE_TEST_FIXTURES | release.SOURCE_LICENSE_SUPPLEMENTS
+    for name in required:
+        assert (root / name).is_file(), name
+        assert release.source_allowed(name), name
+    assert not release.source_allowed("tests/golden/private-record.json")
+    assert not release.source_allowed("packaging/license_supplements/hanja/private-record.json")
+
+
 def test_prepare_covers_every_published_payload_with_checksums(tmp_path, monkeypatch):
     committed_tree(monkeypatch)
     repo = tmp_path / "repo"

@@ -1,24 +1,29 @@
-# Windows 0.7.4 배포
+# Windows 0.9.0 배포
 
-Windows 10/11 x64 사용자는 [공개 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.7.4)의 `YeonE_OCR-0.7.4-Setup-x64.exe`로 설치합니다. Python과 실행에 필요한 패키지를 포함합니다. 기본 설치 경로는 `%LOCALAPPDATA%\Programs\YeonE_OCR`이며 관리자 권한을 요구하지 않는 사용자별 설치입니다. 시작 메뉴 바로가기를 만들고 바탕 화면 바로가기는 선택 사항으로 둡니다.
+0.9.0 다운로드 주소는 [v0.9.0 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)다. 배포 완료 후 아래 자산을 이 주소에서 받는다. 공개 완료 여부와 실제 파일은 GitHub 릴리스 화면에서 확인한다.
 
-설치 프로그램은 프로그램 파일을 설치합니다. API 키·설정은 기존 `사용자 폴더\.yeone_ocr\config.json`을 사용하고, 원본과 OCR 기록·HWPX는 기존 문서 옆 결과 폴더에 남습니다. 붙여넣은 스크린샷은 `%LOCALAPPDATA%\YeonE_OCR\screenshots`에 원래 해상도의 RGB PNG로 보관하며, 각 원본 옆에 결과 폴더를 만듭니다. 업데이트와 제거 대상으로 이 사용자 자료를 등록하지 않습니다. API 키는 각 사용자가 입력하며 API 이용료는 별도입니다.
+| 자산 | 용도 |
+|---|---|
+| `YeonE_OCR-0.9.0-Setup-x64.exe` | Windows 10/11 x64 사용자별 설치 |
+| `YeonE_OCR-Windows-x64.exe` | 설치 없이 실행하는 포터블·기존 자동 업데이트 자산 |
+| `YeonE_OCR-0.9.0-source.zip` | 배포 커밋의 소스·테스트·빌드 자료·AB 원본 소스 보존 사본 |
+| `YeonE_OCR-0.9.0-licenses.zip` | 제3자 고지와 라이선스 원문 |
+| `update.json` | 기존 포터블 업데이트 형식의 버전·파일 크기·SHA-256 |
+| `SHA256SUMS.txt` | 배포 자산의 SHA-256 목록 |
 
-0.7.4은 **[일반 OCR]·[책갈피 OCR]·[이미지(스크린샷) OCR]·[설정]**의 네 탭을 제공합니다. 일반 탭의 [PDF 고르기…]는 PDF를, 이미지 탭의 [이미지 고르기…]는 PNG·JPG 등을 선택합니다. `Win+Shift+S` 캡처는 이미지 탭의 [스크린샷 붙여넣기] 또는 `Ctrl+Shift+V`로 불러오고, 인접한 [원본 보기]로 확인한 뒤 [한 번에 인식]을 누릅니다. 세 작업 탭의 원본 선택은 각각 유지합니다. 붙여넣기는 원본만 저장·선택하며 모델 호출은 인식을 실행할 때 시작합니다.
+앱 실행에 필요한 Python과 패키지는 설치판·포터블에 포함한다. 로컬 세 엔진의 별도 실행 환경과 공개 모델은 [로컬 엔진 안내](LOCAL_OCR.md)에 따라 설치한다. 모델 가중치와 큰 엔진 환경을 앱 설치 파일에 넣지 않는다.
 
-판독기·모델·API 키·읽기 방향·세부 옵션·문서 설정, 책갈피 교정 정책·메모·재판독과 고급 도구는 네 번째 [설정]에 모았습니다. 각 작업 탭에는 현재 판독기·모델·읽기 방향 요약과 [설정 바꾸기]를 표시하며, 설정 아래의 [설정 저장]·[OCR로 돌아가기]로 저장하고 작업 탭에 복귀합니다. 쪽 범위와 인쇄 쪽수 보정은 원본을 고르는 작업 탭에 둡니다.
+## 설치와 사용자 자료
 
-이미지 탭의 **[입력 비우기]**는 선택 원본·쪽 범위·인쇄 쪽수 보정·강제 재판독과 저장 위치·진행 표시를 초기화하여 새 이미지 입력을 기다립니다. 디스크의 원본·판독 기록·HWPX와 진행 기록 이력은 보존합니다. 다른 작업 탭의 원본, API·모델·문서 설정도 유지하며 모델을 호출하지 않습니다.
+설치 파일은 `%LOCALAPPDATA%\Programs\YeonE_OCR`에 관리자 권한 없이 설치하고 시작 메뉴 바로가기를 만든다. 바탕 화면 바로가기는 선택 사항이다. 기존 설치를 갱신할 때는 OCR을 끝내거나 중지하여 완료 기록을 저장한 뒤 프로그램을 닫고 새 설치 파일을 같은 위치에 실행한다. 포터블은 기존 자동 업데이트 절차를 사용할 수 있다.
 
-이미지 탭의 **HWPX 저장** 줄에 저장 폴더의 전체 경로를 표시하고 **[HWPX 바로 열기]·[저장 폴더]**를 제공합니다. 캡처의 기본 HWPX 경로는 `%LOCALAPPDATA%\YeonE_OCR\screenshots\screenshot-<hash>_png_YeonE_OCR\out\screenshot-<hash>.hwpx`입니다. 0.7.2의 저장 위치를 유지하며 같은 픽셀은 같은 원본과 판독 기록을 재사용합니다. 다른 캡처는 별도로 저장하고, 기존 저장 파일이 수정되었으면 보존하고 새 파일을 만듭니다.
+API 키·설정은 기존 `사용자 폴더\.yeone_ocr\config.json`, OCR·교정 기록과 출력 문서는 원본 옆 작업 폴더를 사용한다. 붙여넣은 원본 이미지는 `%LOCALAPPDATA%\YeonE_OCR\screenshots`에 보관한다. 이 사용자 자료를 업데이트·제거 대상으로 등록하지 않는다. API 키와 이용 권한은 사용자가 설정하며 API 이용료는 별도다.
 
-이미지용 **[읽기 방향]**은 일반·책갈피 OCR과 별도로 기억하며 기본은 **자동 판정**입니다. 글자층을 먼저 활용하고 없거나 부족하면 내 PC에서 실제 이미지의 글줄 간격·배치로 가로·세로 방향을 판정합니다. 추가 API 호출이나 비용은 없습니다. 빈 화면·그림 위주·가로와 세로 근거가 비슷해 확정하기 어려운 경우에는 이유를 알리고 세로쓰기 기본값을 사용합니다. 필요하면 이미지 탭의 [설정 바꾸기]에서 방향을 직접 고르십시오. 새 붙여넣기는 쪽 범위·인쇄 쪽수 보정·강제 재판독을 초기화하고 직접 고른 이미지 방향은 유지합니다.
-
-판정 근거가 없는 구버전의 세로쓰기 저장값은 이미지 근거가 확실할 때 다시 평가합니다. 완료·부분 판독 기록은 보존하고 자동으로 강제 재판독하지 않으며, 처리 내용은 진행 기록에 안내합니다. 수동으로 지정한 방향은 유지합니다.
+기존 일반 OCR·책갈피 OCR·이미지 OCR·설정 탭과 세로 읽기를 유지한다. **3엔진 비교·교정**은 현재 원본으로 원본 대조 편집 창을 연다. 로컬 인식은 외부에 전송하지 않는다. 별도 AI 검증은 제공사·모델·문서 범위·이미지와 호출 상한을 확인한 뒤 실행하고, 결과를 교정 제안으로 보존한다. [통합 기능](INTEGRATION.md)과 [AI 검증 정책](AI_REVIEW.md)에 사용·저장 범위를 설명한다.
 
 ## 빌드
 
-Windows x64, 64비트 Python, 준비된 빌드 가상환경과 Inno Setup 6의 `ISCC.exe`가 필요합니다. `tools/build_windows.ps1` 자체는 패키지나 빌드 도구를 설치하지 않습니다. 실제 배포에 사용한 Python 의존성 버전은 `packaging/requirements-windows.lock.txt`로 고정합니다.
+Windows x64, 64비트 Python, 빌드 가상환경과 Inno Setup 6의 `ISCC.exe`가 필요하다. `tools/build_windows.ps1`은 빌드 도구나 의존성을 자동 설치하지 않는다. 의존성은 `packaging/requirements-windows.lock.txt`를 사용한다.
 
 ```powershell
 python -m venv work\windows-release\venv
@@ -26,52 +31,61 @@ python -m venv work\windows-release\venv
 & .\work\windows-release\venv\Scripts\python.exe .\tools\build_notices.py
 & .\tools\build_windows.ps1 `
   -Python .\work\windows-release\venv\Scripts\python.exe `
-  -InnoCompiler .\work\windows-release\toolchain\InnoSetup\ISCC.exe
+  -InnoCompiler .\work\windows-release\toolchain\InnoSetup\ISCC.exe `
+  -WorkRoot .\work\windows-ai-0.9 `
+  -OutputDirectory .\dist\0.9.0
 ```
 
-이미 설치된 Inno Setup의 `ISCC.exe` 경로를 지정해도 됩니다. `-SkipInstaller`를 사용하면 앱 실행 파일까지만 만듭니다. `-WorkRoot`와 `-OutputDirectory`로 빌드 중간 경로와 최종 출력 폴더를 바꿀 수 있습니다.
+이미 설치한 Inno Setup의 경로를 지정해도 된다. `-SkipInstaller`는 실행 파일까지만 만들고 설치 파일은 생략한다. `-WorkRoot`·`-OutputDirectory`를 생략하는 스크립트 기본 경로는 각각 `work/windows-release`·`dist`이므로, 위 예제는 0.9.0 결과를 이전 빌드와 분리해 둔다.
 
-`packaging/YeonE_OCR.spec`은 설치판용 폴더 묶음과 기존 자동 업데이트용 단일 실행 파일을 만듭니다. `packaging/YeonE_OCR.iss`가 폴더 묶음으로 설치 파일을 만듭니다. 기본 출력은 `dist/YeonE_OCR-0.7.4-Setup-x64.exe`, `dist/YeonE_OCR-Windows-x64.exe`, `dist/SHA256SUMS.txt`입니다.
+`packaging/YeonE_OCR.spec`은 설치용 폴더 묶음과 포터블을 만들고, `packaging/YeonE_OCR.iss`는 폴더 묶음으로 설치 파일을 만든다. 앱 버전은 `0.9.0`, 설치 파일·태그·업데이트 manifest도 같은 버전이어야 한다. Inno Setup 파일을 직접 사용할 때의 버전 기본값도 `0.9.0`이다.
 
-자료 수집은 앱 패키지, 명시한 사전·문서 서식·아이콘·규칙 데이터 및 설치된 의존성으로 제한합니다. 저장소 전체나 사용자 홈·설정·실제 원본 문서·저장한 스크린샷·OCR 작업 폴더를 데이터 트리로 묶지 않습니다. 고대비 문서 아이콘은 실행 파일과 설치 파일, 시작 메뉴 바로가기에 적용됩니다.
+실행 파일에는 앱과 명시적으로 허용한 사전·문서 서식·아이콘·규칙·안내 문서를 포함한다. 저장소 전체나 사용자 홈, 설정, 실제 문서·캡처·판독 기록·작업 폴더를 묶지 않는다. 통합 전 AB 소스 보존 사본은 **소스 ZIP**의 `references/AB_OCR_0.3.0`에 포함하며 앱 런타임으로 불러오지 않는다. [보존 안내](../references/README.md)
 
 ## 검증
 
-빌드 스크립트는 소스의 오프라인 점검을 먼저 실행하고, 두 종류의 생성된 실행 파일에 같은 점검을 실행합니다. 결과 JSON은 기본 `work/windows-release/smoke`에 저장합니다. 점검이 실패하면 이후 설치 파일 생성 단계를 진행하지 않습니다.
+빌드 스크립트는 소스에서 오프라인 자체 검사를 한 뒤 설치용 실행 파일과 포터블에서 같은 검사를 실행한다. 결과는 `work/windows-ai-0.9/smoke/{source,onedir,portable}.json`에 남긴다. 실패하면 후속 설치 파일 생성으로 진행하지 않는다.
+
+0.9.0 검증 기준 결과는 다음과 같다. 문서·소스·의존성을 바꾸면 다시 빌드하고 동일성을 재검사한다.
+
+- 기능 통합 기준: **61개 모듈·고유 테스트 1,080개 통과**, 실패·오류·건너뜀·미완료 0개. 공개 소스 정리와 추가 검사 뒤의 결과는 [릴리스 기록](release-notes.md)에 이어 기록한다.
+- 소스·설치용 실행 파일·포터블: **오프라인 자체 검사 각각 26개 통과**. 로컬 비교와 편집·복구, AI의 모의 이미지 재검증과 번체·부호 제안, 사람의 채택·되돌리기·재열기를 포함한다.
+- 두 실행 파일: **앱 모듈 각각 75개**, 명시적 리소스 **17개**, 라이선스 참조 **162개**가 소스와 일치한다. 기준 보고서는 `work/windows-ai-0.9/verify-build.json`이다.
+- 실제 연어OCR 창: 공개 합성 원본·모의 HTTP로 두 단계 AI 검증, 제안 채택·기각·되돌리기, 저장·재열기와 TXT·HWPX·DOCX 출력을 확인했다. 원본·원시 OCR·AI 응답은 유지됐으며 1440×930·1080×720 화면을 확인했다.
+- Gemini·OpenAI·Anthropic의 실제 SDK 직렬화와 거절 응답 보존은 외부 연결을 막은 메모리 HTTP로 확인했다. **실제 유료 API의 인증·문헌 인식 정확도는 검증하지 않았다.**
 
 ```powershell
-$check = Start-Process -FilePath .\dist\YeonE_OCR-Windows-x64.exe `
+$check = Start-Process -FilePath .\dist\0.9.0\YeonE_OCR-Windows-x64.exe `
   -ArgumentList '--smoke-test', '"C:\검증\연어OCR-smoke.json"' `
   -WindowStyle Hidden -Wait -PassThru
 $check.ExitCode
 Get-Content -LiteralPath 'C:\검증\연어OCR-smoke.json' -Encoding UTF8
-Get-FileHash -LiteralPath .\dist\YeonE_OCR-0.7.4-Setup-x64.exe -Algorithm SHA256
+Get-FileHash -LiteralPath .\dist\0.9.0\YeonE_OCR-0.9.0-Setup-x64.exe -Algorithm SHA256
 ```
 
-숨긴 Tk 창과 아이콘, 제공사 SDK와 내장 자료, 합성 문서의 PDF/HWPX/DOCX 처리를 검사합니다. 실제 사용자 설정과 API 키를 쓰지 않고 유료 모델 호출도 하지 않습니다. 이 점검은 실제 스캔의 글자 정확도나 각 제공사의 온라인 인증을 보장하지 않습니다. 설치·바로가기·제거 검증은 생성된 설치 파일로 별도 수행하고, 릴리스에 실제 실행한 검증과 미실행 검증을 구분해 적습니다.
+이 자체 검사는 사용자 설정·키와 유료 모델을 사용하지 않는다. 실제 스캔의 글자 정확도, 각 제공사의 온라인 인증, Windows 설치·재설치·제거 검증은 별도이며 실제 수행 여부를 릴리스에 구분해서 기록한다. 이번 개발 검증에서는 기존 사용자 설치를 변경하지 않았다.
 
-0.7.4의 자동 테스트는 **661개와 하위 테스트 154개가 통과**했고 건너뛴 검사는 없습니다. 이미지 입력 비우기의 화면 초기화·파일 보존, 작업별 방향 설정, 픽셀 기반 가로·세로 판정과 기존 OCR 기능을 검사했습니다. 전체 런타임 코드의 Ruff `E9,F63,F7,F82`와 변경 앱·테스트 파일의 `E9,F` 검사도 통과했습니다.
+## 소스와 공개 배포
 
-최종 소스 실행·설치용 실행파일·단일 실행파일은 **오프라인 검사 각각 21개를 통과**했습니다. 새 이미지 방향 검사에는 API 호출 없는 가로·세로 판정이 포함됩니다. 두 실행파일의 앱 모듈 **각각 49개**가 최신 소스와 일치하고, 동봉 README·고지문 및 라이선스 참조 **162개**도 원본과 일치했습니다. 100% 배율의 **960×640** Tk 창에서 이미지 탭의 네 입력 버튼이 잘리지 않았으며 실제 버튼으로 입력 비우기·작업별 읽기 방향 연결을 확인했습니다. 공개 저장소 커밋 `0b59439`의 CI도 통과했습니다.
+공개 저장소는 [kyengilam-coder/YeonE_OCR_release](https://github.com/kyengilam-coder/YeonE_OCR_release), 0.9.0 배포 태그는 `v0.9.0`이다. 소스를 커밋한 뒤 다음 명령으로 **그 커밋**의 소스 ZIP·라이선스 ZIP·업데이트 manifest와 전체 SHA-256 목록을 만든다.
 
-Windows 설치파일 생성을 완료했으며 두 앱 실행파일의 제품 버전은 `0.7.4`로 확인했습니다.
+```powershell
+python tools/prepare_windows_release.py dist/0.9.0 --revision HEAD
+```
 
-이번 로컬 배포 준비에서는 사용자의 기존 설치를 보존하기 위해 설치·재설치·제거 검증을 다시 실행하지 않았습니다. 실제 유료 OCR API는 호출하지 않았으며 실제 문서의 인식 정확도는 이번 오프라인 검사 범위에 포함하지 않았습니다. 이전 버전의 설치 검증과 이번 버전의 오프라인 검사를 구분하여 보고합니다.
+별도 체크아웃은 `--repo <경로>`를 지정한다. 소스 ZIP은 커밋의 허용 목록만 담고 `SOURCE_REVISION.txt`에 버전과 커밋을 기록한다. 공개 테스트의 골든 JSON·라이선스 보완 자료·AB 소스 보존 사본도 포함하되 개인 자료와 모델은 제외한다. `.github/workflows/windows-release.yml`은 수동 실행 시 검사·빌드·설치 검증과 배포 자료 생성을 거쳐 공개 릴리스를 만든다. 문서에 다운로드 주소가 있다고 게시가 완료된 것은 아니므로, 게시 후 실제 자산과 SHA-256을 대조한다.
 
-## 기존 배포와 업데이트
-
-공개 배포 저장소는 [kyengilam-coder/YeonE_OCR_release](https://github.com/kyengilam-coder/YeonE_OCR_release)이며 태그는 `v0.7.4`입니다. 기존 `YeonE_OCR-Windows-x64.exe`와 `update.json`의 자산 이름·형식을 유지하여 기존 단일 실행 파일이 새 버전을 찾을 수 있게 합니다. 설치판용 파일을 단일 실행 파일의 자동 업데이트 자산으로 등록하지 않습니다.
-
-설치판은 새 설치 파일을 같은 위치에 실행해 갱신합니다. 단일 실행 파일은 기존 자동 업데이트 절차를 이용할 수 있습니다. 어느 방식이든 작업 중인 OCR을 먼저 마치거나 중지하여 기록을 저장합니다. 사용자의 판독 기록을 새 버전 소스와 함께 배포하지 않습니다.
-
-실행 파일과 함께 해당 소스·빌드 스크립트, 라이선스 자료와 SHA-256을 보관합니다. `update.json`은 최종 단일 실행 파일의 정확한 바이트 크기·SHA-256을 사용해야 합니다. 수정된 앱 버전, 설치 파일 버전, 릴리스 태그와 manifest 버전이 모두 `0.7.4`로 맞는지 확인합니다. 비공개 개발 저장소의 가시성을 바꾸지 않고 공개 배포 저장소에 배포용 자료만 반영합니다.
-
-배포할 소스를 커밋한 뒤 `python tools/prepare_windows_release.py dist --revision HEAD`를 실행하면 자동 업데이트 manifest, 소스 ZIP, 라이선스 ZIP과 전체 SHA-256 목록을 만듭니다. 소스 ZIP은 커밋의 배포 대상 경로만 담고 사용자 설정·작업 폴더·문서를 제외합니다. 별도 체크아웃을 배포한다면 `--repo <체크아웃 경로>`로 지정합니다. `.github/workflows/windows-release.yml`은 수동 실행 시 테스트·빌드·설치 검사 후 같은 자료를 만들어 릴리스를 게시합니다.
+`update.json`은 최종 포터블의 정확한 바이트 크기와 SHA-256을 사용한다. 기존 자산 이름·형식을 유지하고 설치 파일을 포터블 자동 업데이트 자산으로 등록하지 않는다. 실행 파일과 함께 그 소스·빌드 스크립트·라이선스 자료를 같은 버전으로 보관한다.
 
 ## 제3자 고지와 서명
 
-`tools/build_notices.py`를 빌드에 사용하는 가상환경의 Python으로 실행하면 설치된 패키지 메타데이터를 기준으로 이름·버전·선언된 라이선스·프로젝트 URL을 수집합니다. `packaging/THIRD_PARTY_NOTICES.txt`와 `packaging/third_party_licenses`에 원문 라이선스·고지 및 메타데이터를 저장합니다. Python의 `LICENSE.txt`, 설치된 Tcl/Tk 고지와 PyInstaller 부트로더 고지도 포함합니다. 메타데이터가 요구한 간접 의존성 중 일부는 실행 파일에서 제외될 수 있으므로 고지 목록은 최종 실행 파일의 모듈 목록과 동일하다는 뜻은 아닙니다.
+빌드 가상환경의 Python으로 `tools/build_notices.py`를 실행하면 설치된 패키지의 이름·버전·선언된 라이선스·프로젝트 URL과 원문 자료를 `packaging/THIRD_PARTY_NOTICES.txt`·`packaging/third_party_licenses`에 모은다. Python·Tcl/Tk·PyInstaller 부트로더 고지도 포함한다. 이 고지 목록은 최종 실행 파일의 모듈 목록과 같다는 뜻은 아니다.
 
-`hanja` wheel에 빠진 라이선스 원문은 기존 배포의 보완 자료를 `packaging/license_supplements/hanja`에 출처와 함께 보존합니다. 메타데이터에 라이선스 이름이 없으면 이를 임의로 추정하지 않습니다. 기존 배포의 `DISTRIBUTION_NOTICE.txt`가 명시한 선택과 각 구성 요소의 원문 고지는 유지하며, 앱에 새로운 라이선스를 지정하는 문서로 사용하지 않습니다.
+`hanja` wheel에서 빠진 원문은 `packaging/license_supplements/hanja`에 출처와 함께 보존한다. 라이선스 이름을 임의로 추정하거나 앱의 새 라이선스를 지정하지 않으며, 기존 `DISTRIBUTION_NOTICE.txt`의 선택과 각 원문 고지를 유지한다.
 
-현재 설치 파일과 실행 파일은 코드 서명되지 않았습니다. 코드 서명을 추가하면 서명된 최종 파일로 SHA-256과 업데이트 manifest를 다시 생성해야 합니다. `SHA256SUMS.txt`는 게시된 파일과 내려받은 파일이 같은지 비교하는 자료이며 코드 서명 대신 게시자의 신원을 인증하지 않습니다.
+설치 파일과 실행 파일은 코드 서명되지 않았다. 서명을 추가하면 서명한 최종 파일로 해시와 업데이트 manifest를 다시 만든다. SHA-256은 게시 파일과 내려받은 파일의 바이트 일치를 확인하며 게시자의 신원을 인증하는 코드 서명을 대신하지 않는다.
+
+## 이전 버전 기록
+
+- **0.8.0 로컬 통합판:** 설치·포터블 자체 검사 각각 25개, 앱 모듈 각각 74개·리소스 15개·라이선스 참조 162개 일치를 확인했다. 원본 설치를 교체하거나 당시 인터넷에 게시하지 않았다. 상세 기록은 [0.8.0 릴리스 기록](release-notes.md)에 보존한다.
+- **0.7.4 Windows 공개판:** 자동 테스트 661개와 하위 테스트 154개, 소스·두 실행 파일 자체 검사 각각 21개를 통과했다. 앱 모듈 각각 49개와 라이선스 참조 162개 일치를 확인했고 공개 커밋 `0b59439`의 CI가 통과했다. 이 수치는 0.9.0 검증 결과와 구분한다. [0.7.4 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.7.4)

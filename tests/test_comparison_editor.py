@@ -1,9 +1,13 @@
 """Hosted editor behavior, tested with synthetic documents and no OCR/API calls."""
 from pathlib import Path
+import copy
+from dataclasses import asdict
+import json
 import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from PIL import Image
@@ -274,6 +278,170 @@ class HostedComparisonEditor(unittest.TestCase):
         finally:
             if previously_enabled:
                 gc.enable()
+
+    def test_open_ai_options_reads_host_settings_only_on_ui_thread_and_sends_nothing(self):
+        called = []
+        main_thread = threading.get_ident()
+        def settings():
+            called.append(threading.get_ident())
+            return {"provider": "openai", "model": "synthetic-model", "api_key": "synthetic-key"}
+        self.editor.on_ai_settings = settings
+        with mock.patch.object(self.editor, "_prepare_ai") as prepare:
+            self.editor.open_ai_verification()
+            self.assertEqual(called, [main_thread])
+            dialogs = [child for child in self.editor.winfo_children() if child.winfo_class() == "Toplevel"]
+            self.assertEqual(len(dialogs), 1)
+            widgets = []
+            def collect(widget):
+                widgets.extend(widget.winfo_children())
+                for child in widget.winfo_children():
+                    collect(child)
+            collect(dialogs[0])
+            policy_checks = [widget for widget in widgets if widget.winfo_class() == "TCheckbutton" and ("번체" in widget.cget("text") or "중문부호" in widget.cget("text"))]
+            self.assertEqual(len(policy_checks), 2)
+            self.assertTrue(all(widget.instate(["selected"]) for widget in policy_checks))
+            dialogs[0].destroy()
+            prepare.assert_not_called()
+
+    def test_declining_concrete_ai_plan_never_starts_transmission(self):
+        plan = SimpleNamespace(summary={"pages": [1], "calls": 2, "targets": 1, "images": 1},
+            settings=SimpleNamespace(provider="openai", model="synthetic-model"),
+            policy=SimpleNamespace(traditional=True, punctuation=True))
+        with mock.patch("yeone_ocr.comparison_editor.messagebox.askyesno", return_value=False) as confirm, mock.patch.object(self.editor, "_run_ai_plan") as run:
+            self.editor._confirm_ai_plan(plan, "synthetic-secret", self.project)
+            run.assert_not_called()
+        displayed = confirm.call_args.args[1]
+        self.assertIn("synthetic-model", displayed)
+        self.assertIn(str(self.source), displayed)
+        self.assertIn("2회", displayed)
+        self.assertIn("번체 후보: 포함", displayed)
+        self.assertNotIn("synthetic-secret", displayed)
+
+    def test_ai_settings_have_no_implicit_provider_or_model_fallback(self):
+        self.editor.on_ai_settings = lambda: {"provider": "openai", "model": None, "api_key": "synthetic-key"}
+        self.editor.open_ai_verification()
+        self.assertIn("준비되지", self.editor.status.get())
+        self.assertFalse(self.editor.busy)
+
+    def ai_plan(self, *, editorial=False):
+        from yeone_ocr.comparison_ai import AISettings, ReviewPolicy, prepare_plan
+        return prepare_plan(self.project, [1], ReviewPolicy(traditional=editorial, punctuation=editorial),
+            settings=AISettings(provider="openai", model="synthetic-model"))
+
+    def ai_response(self, plan, *, uncertain=False):
+        batch = plan.batches[0]
+        target = batch["targets"][0]
+        proposal = {"start": target["start"], "end": target["end"], "before": target["before"],
+                    "after": "乙", "reason": "synthetic image evidence", "kind": "recognition", "uncertain": uncertain}
+        return json.dumps({"items": [{"target_id": target["id"], "uncertain": uncertain, "note": "synthetic", "proposals": [proposal]}]}, ensure_ascii=False)
+
+    def add_ai_review(self, *, uncertain=False):
+        plan = self.ai_plan()
+        target = plan.batches[0]["targets"][0]
+        record = {"provider": "openai", "model": "synthetic-model", "policy": asdict(plan.policy),
+            "status": "completed", "request": copy.deepcopy(plan.batches[0]), "response_text": self.ai_response(plan, uncertain=uncertain),
+            "proposals": [{"start": target["start"], "end": target["end"], "before": target["before"], "after": "乙",
+                           "reason": "synthetic image evidence", "kind": "recognition", "uncertain": uncertain}]}
+        return self.project.record_ai_review(1, record)
+
+    def select_ai_first(self):
+        self.editor._populate_page()
+        self.editor.proposal_notebook.select(1)
+        identifier = self.editor.ai_tree.get_children()[0]
+        self.editor.ai_tree.selection_set(identifier)
+        self.editor._ai_selected()
+
+    def test_ai_accept_undo_reopen_preserves_raw_response_and_original_ocr(self):
+        self.readings()
+        self.add_ai_review()
+        before = self.project.page(1)
+        self.select_ai_first()
+        self.assertFalse(self.editor.ai_accept_button.instate(["disabled"]))
+        self.editor.accept_ai_proposal()
+        self.assertEqual(self.project.text(1), "甲乙丙丁")
+        self.assertEqual(self.project.page(1)["runs"], before["runs"])
+        self.assertEqual(self.project.page(1)["ai_reviews"], before["ai_reviews"])
+        self.assertEqual(self.project.page(1)["ai_decisions"][-1]["decision"], "accepted")
+        self.editor.undo_edit()
+        self.assertEqual(self.project.text(1), "甲錯丙丁")
+        self.assertEqual(self.project.page(1)["ai_decisions"][-1]["decision"], "undone")
+        self.assertTrue(self.editor._write_recovery())
+        from yeone_ocr.comparison import ComparisonProject
+        reopened = ComparisonProject.load(self.editor._recovery_path)
+        self.assertEqual(reopened.page(1)["ai_reviews"], before["ai_reviews"])
+        self.assertEqual(reopened.page(1)["runs"], before["runs"])
+
+    def test_uncertain_ai_proposal_is_blocked_until_manually_reviewed(self):
+        self.readings()
+        self.add_ai_review(uncertain=True)
+        self.select_ai_first()
+        self.assertTrue(self.editor.ai_accept_button.instate(["disabled"]))
+        self.editor.accept_ai_proposal()
+        self.assertEqual(self.project.text(1), "甲錯丙丁")
+        self.assertEqual(self.project.page(1)["ai_decisions"], [])
+
+    def test_ai_cancel_checkpoints_first_real_pipeline_response_without_second_call(self):
+        self.readings()
+        plan = self.ai_plan(editorial=True)
+        self.project.save(self.folder / "ai-review.yeone-compare.json")
+        before = self.project.page(1)["runs"]
+        response = self.ai_response(plan)
+        entered, release = threading.Event(), threading.Event()
+        caller_threads = []
+        def request(*_args, **_kwargs):
+            caller_threads.append(threading.get_ident())
+            entered.set()
+            release.wait(3)
+            return response, True, {}
+        with mock.patch("yeone_ocr.comparison_ai.create_client", return_value=SimpleNamespace(close=lambda: None)), mock.patch("yeone_ocr.comparison_ai._request", side_effect=request) as remote:
+            self.editor._run_ai_plan(self.project, plan, "synthetic-key")
+            self.assertTrue(entered.wait(3))
+            self.editor.cancel()
+            release.set()
+            self.pump(lambda: not self.editor.busy)
+            self.assertEqual(remote.call_count, 1)
+        self.assertNotEqual(caller_threads, [threading.get_ident()])
+        self.assertEqual(self.project.text(1), "甲錯丙丁")
+        self.assertIn("중지됨", self.editor.status.get())
+        from yeone_ocr.comparison import ComparisonProject
+        reopened = ComparisonProject.load(self.folder / "ai-review.yeone-compare.json")
+        self.assertEqual(len(reopened.page(1)["ai_reviews"]), 1)
+        self.assertEqual(reopened.page(1)["ai_reviews"][0]["response_text"], response)
+        self.assertEqual(reopened.page(1)["runs"], before)
+        self.assertTrue(self.editor._recovery_path.exists())
+
+    def test_ai_preparation_has_no_remote_calls_and_preserves_selected_budget(self):
+        self.readings()
+        with mock.patch("yeone_ocr.comparison_ai.create_client") as client, mock.patch("yeone_ocr.comparison_ai._request") as remote, mock.patch.object(self.editor, "_confirm_ai_plan") as confirm:
+            self.editor._prepare_ai([1], None, {"traditional": True, "punctuation": True}, "openai", "synthetic-model", "synthetic-secret", max_calls=50)
+            self.pump(lambda: not self.editor.busy)
+            client.assert_not_called()
+            remote.assert_not_called()
+            confirm.assert_called_once()
+            plan = confirm.call_args.args[0]
+            self.assertEqual(plan.settings.max_calls, 50)
+            self.assertEqual(plan.settings.max_total_output_tokens, 50 * 4096)
+        self.assertNotIn("synthetic-secret", json.dumps(self.project.to_dict(), ensure_ascii=False))
+
+    def test_rejecting_ai_proposal_preserves_text_and_raw_answer(self):
+        self.readings()
+        self.add_ai_review()
+        original = self.project.page(1)["ai_reviews"]
+        self.select_ai_first()
+        self.editor.reject_ai_proposal()
+        self.assertEqual(self.project.text(1), "甲錯丙丁")
+        self.assertEqual(self.project.page(1)["ai_reviews"], original)
+        self.assertEqual(self.project.page(1)["ai_decisions"][-1]["decision"], "rejected")
+
+    def test_ai_source_crop_highlight_uses_original_render_coordinates(self):
+        self.readings()
+        self.add_ai_review()
+        self.editor._preview = Image.new("RGB", (150, 200), "white")
+        self.editor._origin, self.editor._image_scale = (8, 10), 2
+        self.select_ai_first()
+        rectangle = self.editor.canvas.find_withtag("evidence")
+        self.assertEqual(len(rectangle), 1)
+        self.assertEqual(self.editor.canvas.coords(rectangle[0]), [18.0, 30.0, 258.0, 65.0])
 
 
 if __name__ == "__main__":

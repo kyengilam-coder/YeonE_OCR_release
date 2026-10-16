@@ -250,6 +250,80 @@ def run(report_path: Path) -> int:
                     "audit": "candidate → undo → manual", "storage": "project and recovery reopen", "network_calls": 0}
         check("local-comparison-project", comparison_project_probe)
 
+        def comparison_ai_probe():
+            from types import SimpleNamespace
+            from .comparison import ComparisonProject
+            from .comparison_ai import AISettings, ReviewPolicy, prepare_plan, run_plan
+            from ab_ocr.ocr import file_sha256
+            source = folder / "image.png"
+            project = ComparisonProject.open(source)
+            original = "误汉,樂一\ufe00한글"
+            for engine, text in (("tesseract", original), ("rapidocr", "论汉,樂一\ufe00한글"),
+                                 ("easyocr", "论汉,樂一\ufe00한글")):
+                raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
+                       "coordinate_system": "rendered-image pixels, xyxy", "text": text,
+                       "words": [{"text": text, "bbox": [1, 1, 63, 47], "confidence": None,
+                                  "block": 1, "paragraph": 1, "line": 1}],
+                       "source_path": str(source), "source_sha256": file_sha256(source), "page_number": 1,
+                       "image_width": 64, "image_height": 48, "engine_version": "offline-ai-fixture",
+                       "languages": "chi_tra", "psm": 6 if engine == "tesseract" else None,
+                       "duration_seconds": 0, "preprocessing": {}, "engine_metadata": {"synthetic": True}}
+                project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                                 "engine_root": None, "policy": "local-three-engine-v1"})
+            project.compare_page(1, baseline="tesseract")
+            raw_runs = project.page(1)["runs"]
+            settings = AISettings(provider="openai", model="offline-vision-fixture", max_calls=2)
+            policy = ReviewPolicy(traditional=True, punctuation=True)
+            plan = prepare_plan(project, [1], policy, settings=settings)
+            assert plan.summary["calls"] == 2
+            requests = []
+            def request(**kwargs):
+                requests.append(kwargs)
+                assert kwargs["model"] == settings.model and kwargs["store"] is False
+                parts = kwargs["input"][0]["content"]
+                assert any(item["type"] == "input_image" for item in parts)
+                prompt = parts[0]["text"]
+                data = json.loads(prompt.split("Source DATA (JSON):\n", 1)[1].rsplit("\nReturn JSON", 1)[0])
+                items = []
+                for target in data["targets"]:
+                    patches = [(0, 1, "误", "论", "recognition")] if data["phase"] == "visual" else [
+                        (0, 1, "误", "論", "traditional"), (1, 2, "汉", "漢", "traditional"),
+                        (2, 3, ",", "，", "punctuation")]
+                    proposals = [{"start": start, "end": end, "before": before, "after": after,
+                                  "kind": kind, "reason": "offline synthetic protocol fixture", "uncertain": False}
+                                 for start, end, before, after, kind in patches
+                                 if target["start"] <= start <= end <= target["end"]]
+                    items.append({"target_id": target["id"], "uncertain": False,
+                                  "note": "offline fixture", "proposals": proposals})
+                return SimpleNamespace(output_text=json.dumps({"items": items}, ensure_ascii=False),
+                                       status="completed", usage=None, model=settings.model, id="offline-response")
+            client = SimpleNamespace(responses=SimpleNamespace(create=request), close=lambda: None)
+            checkpoints = []
+            outcome = run_plan(project, plan, api_key="offline-fixture-key",
+                               client_factory=lambda *_: client, on_result=checkpoints.append)
+            assert outcome["completed"] == 2 and outcome["failed"] == 0 and len(requests) == 2
+            assert len(checkpoints) == 2 and project.text(1) == original
+            reviews = project.page(1)["ai_reviews"]
+            assert len(reviews) == 2 and project.page(1)["runs"] == raw_runs
+            for ending in ("論", "漢", "，"):
+                proposal = next(item for item in project.ai_proposals(1) if item["after"] == ending)
+                project.accept_ai_proposal(1, proposal["review_id"], proposal["id"])
+            assert project.text(1) == "論漢，樂一\ufe00한글"
+            for _ in range(3):
+                assert project.undo_edit(1)
+            assert project.text(1) == original and project.page(1)["ai_reviews"] == reviews
+            target = folder / "ai-comparison.yeone-compare.json"
+            project.save(target)
+            reopened = ComparisonProject.load(target)
+            assert reopened.page(1)["runs"] == raw_runs and reopened.page(1)["ai_reviews"] == reviews
+            assert "offline-fixture-key" not in target.read_text(encoding="utf-8")
+            resumed = prepare_plan(reopened, [1], policy, settings=settings)
+            assert resumed.summary["calls"] == 0
+            return {"stages": "image disagreement → whole-page traditional/punctuation proposals",
+                    "mock_requests": 2, "human_accepts_and_undos": 3, "raw_and_ai_records": "unchanged",
+                    "storage": "reopened; credential excluded; completed requests reused", "network_calls": 0}
+        check("comparison-ai-proposals-offline", comparison_ai_probe)
+
         def comparison_resources_probe():
             from ab_ocr.runtime import resource_root, worker_path
             checked = []

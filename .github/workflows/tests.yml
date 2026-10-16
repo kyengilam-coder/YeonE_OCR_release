@@ -1,4 +1,4 @@
-# YeonE_OCR 단위 검사. 모델 호출 없이 스키마·병합·검증·도판 외곽 맞춤·HWPX 조립을 확인한다.
+# Product tests are scoped to tests/; historical AB sources have their own cwd.
 name: tests
 on:
   push:
@@ -6,12 +6,41 @@ on:
   workflow_dispatch:
 jobs:
   test:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.5"
+          cache: pip
+          cache-dependency-path: packaging/requirements-windows.lock.txt
+      - run: python -m pip install -r packaging/requirements-windows.lock.txt ruff==0.17.0
+      - name: Lint runtime and tools
+        run: python -m ruff check yeone_ocr ab_ocr tools --select E9,F63,F7,F82
+      - name: Run all product tests in isolated offline processes
+        run: python -B -X utf8 tools/check_regression.py --output work/ci-regression
+      - name: Check preserved AB sources independently
+        working-directory: references/AB_OCR_0.3.0
+        run: python -B -X utf8 -m unittest discover -s tests -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-offline-regression
+          path: work/ci-regression
+          retention-days: 14
+  portable:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
+      - run: python -m pip install -r requirements.txt pytest
+      - name: Check portable product logic (platform-specific cases may skip)
+        run: python -B -X utf8 -m pytest tests -q --capture=sys
