@@ -444,33 +444,35 @@ class Command(unittest.TestCase):
             self.assertNotIn("suspects", r); self.assertEqual([a["choice"] for a in r["adjudications"]], ["玄"])
 
     def test_gui_estimate_counts_suspects(self):
-        """창의 3차 확인 대화가 합의 의심 자리 수와 그 묶음 호출 수도 미리 센다(모델 없이)."""
+        """3차 판별 비용 창의 셈(costplan, 모델 없이): 〔a/b〕 자리와 합의 의심 자리·묶음 호출. 새로 물을 곳이 없으면 창은 실행하지 않고 알린다."""
+        from types import SimpleNamespace
         from unittest import mock
-        try:
-            from yeone_ocr import gui
-        except Exception as e:                       # tkinter 가 없는 환경
-            self.skipTest(f"gui 를 불러오지 못함: {e}")
+        from yeone_ocr.costplan import PlanInput, count_plan
         with tempfile.TemporaryDirectory() as td:
             doc, work = self._mark_work(td, pages=3); doc.close()
             for pg in (2, 3):                                                                   # 〔a/b〕 는 1쪽에만
                 r = work.load_record(pg); r["merged"] = rec([self.LINE.replace("日月", "曰月"), self.LINE, self.LINE], page=pg)["merged"]
                 r["merged"]["regions"][0]["bbox"] = [60, 780, 380, 960]; work.save_record(pg, r)
-            app = gui.App.__new__(gui.App)
-            var = lambda v: Namespace(get=lambda v=v: v)
-            app._need_records = lambda *a: True; app._prepare_env = lambda: True
-            app.v_reader = var("gemini"); app.pdf = lambda: work.pdf_path.as_posix(); app.work = lambda: Path(work.dir); app.v_pages = var("")
-            app.v_suspects = var(True); app.v_blind = var(False)
-            shown = []
-            with mock.patch.object(gui.messagebox, "askyesno", lambda title, msg: shown.append(msg) or False):
-                app.do_adjudicate()
-            self.assertIn("자리 1곳", shown[0]); self.assertIn("합의 판독 의심) 3곳", shown[0]); self.assertIn("묶음 호출 약 3회 더", shown[0])
+            inp = PlanInput(kind="adjudicate", pdf=work.pdf_path.as_posix(), work_dir=str(work.dir), reader="gemini", model="gemini-2.5-pro")
+            plan = count_plan(inp)
+            got = {r["step"]: (r["items"], r["calls"]) for r in plan["rows"]}
+            self.assertEqual(got, {"glyph": (1, [1, 2]), "suspect": (3, [3, 6])})            # 합의 의심 3곳 — 쪽마다 묶음 1회, 낱개 재질문 최대 3회 더
             for pg in (1, 2, 3):                                                                # 새로 물을 곳이 없으면 묻지 않고 알린다
                 r = work.load_record(pg); r["merged"] = rec([self.LINE] * 3, page=pg)["merged"]; work.save_record(pg, r)
-            info = []
-            with mock.patch.object(gui.messagebox, "askyesno", lambda *a: self.fail("물을 자리가 없는데 물음")), \
-                    mock.patch.object(gui.messagebox, "showinfo", lambda title, msg: info.append(msg)):
-                app.do_adjudicate()
-            self.assertIn("새로 물을 곳이 없습니다", info[0])
+            plan = count_plan(inp)
+            self.assertEqual(sum(r["calls"][1] for r in plan["rows"]), 0)
+            try:
+                from yeone_ocr import gui
+            except Exception as e:                       # tkinter 가 없는 환경
+                self.skipTest(f"gui 를 불러오지 못함: {e}")
+            app = SimpleNamespace(_plan_seq=1, _plan_wait=None, _planning=True, buttons=[], running=False, cfg={}, fx_setting=lambda: (None, ""),
+                                  _append=lambda s: None, v_status=mock.Mock(), work=lambda: Path(work.dir))
+            app._lock_for_plan = gui.App._lock_for_plan.__get__(app)
+            go = mock.Mock(); info = []
+            with mock.patch.object(gui.messagebox, "showinfo", lambda title, msg: info.append(msg)), \
+                    mock.patch.object(gui, "CostDialog", side_effect=AssertionError("물을 곳이 없는데 비용 창")):
+                gui.App._plan_done(app, 1, "adjudicate", ("ok", plan), go)
+            self.assertIn("새로 물을 곳이 없습니다", info[0]); go.assert_not_called()
 
     def test_no_suspects_and_cap(self):
         with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as resources:

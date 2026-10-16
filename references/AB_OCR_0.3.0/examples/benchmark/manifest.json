@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "평가기 동작 확인용 합성 전사문",
+  "description": "사람이 입력한 작은 예제입니다. 실제 문서 OCR 결과 또는 ABBYY 정확도 벤치마크가 아닙니다.",
+  "synthetic": true,
+  "metadata": {"purpose": "evaluator smoke example", "source": "handwritten synthetic text fixtures", "accuracy_evidence": false},
+  "engines": [
+    {"id": "synthetic-a", "name": "합성 결과 A (실제 엔진 아님)", "version": "fixture-1", "settings": {}, "metadata": {"real_ocr": false}},
+    {"id": "synthetic-b", "name": "합성 결과 B (실제 엔진 아님)", "version": "fixture-1", "settings": {}, "metadata": {"real_ocr": false}}
+  ],
+  "pages": [
+    {"id": "mixed", "reference": "mixed.reference.txt", "outputs": {"synthetic-a": "mixed.a.txt", "synthetic-b": "mixed.b.txt"}, "tags": ["hangul-hanja-mixed", "synthetic"], "split": "dev", "metadata": {"truth_review": "synthetic literal"}},
+    {"id": "variants", "reference": "variants.reference.txt", "outputs": {"synthetic-a": "variants.a.txt", "synthetic-b": "variants.b.txt"}, "tags": ["hanja-variants", "extended-hanja", "synthetic"], "split": "test", "metadata": {"truth_review": "synthetic literal"}},
+    {"id": "blank", "reference": "blank.reference.txt", "outputs": {"synthetic-a": "blank.a.txt", "synthetic-b": "blank.b.txt"}, "tags": ["blank-reference", "synthetic"], "split": "test", "metadata": {"truth_review": "intentionally empty"}}
+  ]
+}

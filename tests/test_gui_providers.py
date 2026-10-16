@@ -69,11 +69,13 @@ class ProviderSettings(unittest.TestCase):
             app = types.SimpleNamespace(_need_pdf=lambda: True, _prepare_env=lambda: True,
                 v_reader=Var("anthropic"), v_model=Var("claude-custom"), pdf=lambda: "book.pdf", work=lambda: "work",
                 _pages=lambda: [], _build_opts=lambda: [], _cap_opts=lambda: ["--max-calls", "12"],
-                start=lambda argv, label: calls.append(argv))
+                _with_plan=lambda kind, go: go([]), start=lambda argv, label: calls.append(argv), _save_book=lambda create=False: None,
+                v_skipany=Var(False), v_ctxmodel=Var(True))
+            app._answered_opts = gui.App._answered_opts.__get__(app)
             gui.App.do_build(app)
             from yeone_ocr.cli import build_parser
             args = build_parser().parse_args(calls[0])
-            self.assertEqual((args.reader, args.model, args.max_calls), ("anthropic", "claude-custom", 12))
+            self.assertEqual((args.reader, args.model, args.max_calls, args.skip_answered), ("anthropic", "claude-custom", 12, "same-model"))
 
 
 if __name__ == "__main__":

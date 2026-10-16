@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "distribution_url": "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.3/tesseract-ocr-w64-setup-5.5.3.20260724.exe",
+  "distribution_filename": "tesseract-ocr-w64-setup-5.5.3.20260724.exe",
+  "distribution_sha256": "bee9e3434bd94fd65387d9be28cd467a41f61b1275383b55b0f59a1331270ae4",
+  "distribution_digest_source": "https://api.github.com/repos/tesseract-ocr/tesseract/releases/tags/5.5.3",
+  "engine_sha256": "c66f0f12ed76f6aa455dac97684bbc86756d6a732380bee09122454cfda3f420",
+  "models_commit": "e12c65a915945e4c28e237a9b52bc4a8f39a0cec",
+  "models_family": "tessdata_best",
+  "models": [
+    {
+      "language": "kor",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/kor.traineddata",
+      "sha256": "f888d4038348a0c3d25151e7f452bda0d74ca275b18cab146798bcbb94084fff",
+      "bytes": 12528128
+    },
+    {
+      "language": "chi_tra",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/chi_tra.traineddata",
+      "sha256": "1aa60488574cafa69486d919284f079ca9b68fcc7f6ad8dc1ff1b318dfd97028",
+      "bytes": 12985735
+    },
+    {
+      "language": "chi_sim",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/chi_sim.traineddata",
+      "sha256": "4fef2d1306c8e87616d4d3e4c6c67faf5d44be3342290cf8f2f0f6e3aa7e735b",
+      "bytes": 13077423
+    },
+    {
+      "language": "eng",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata",
+      "sha256": "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba",
+      "bytes": 15400601
+    },
+    {
+      "language": "kor_vert",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/kor_vert.traineddata",
+      "sha256": "e6c72327617c0bf195a9a8b631827bf102c75735bbb932126e6fa1c4656c7568",
+      "bytes": 3964469
+    },
+    {
+      "language": "chi_tra_vert",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/chi_tra_vert.traineddata",
+      "sha256": "bbe518f94b9e3852109113507357bfe7e257834d88d2d1ead44178046bcd2181",
+      "bytes": 12985521
+    },
+    {
+      "language": "chi_sim_vert",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/chi_sim_vert.traineddata",
+      "sha256": "ea672a78157199c333aa12ec4e74550077689b545df5fc770903716850c8b2e5",
+      "bytes": 13077507
+    },
+    {
+      "language": "osd",
+      "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/osd.traineddata",
+      "sha256": "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff",
+      "bytes": 10562727
+    }
+  ],
+  "models_license": {
+    "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/LICENSE",
+    "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+  }
+}

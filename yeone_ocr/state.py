@@ -9,6 +9,11 @@ HUMAN_ONLY = {"원본 대조 완료(사람)"}   # 프로그램이 스스로 붙�
 
 WARN = lambda msg: print(msg, flush=True)      # 깨진 파일을 치웠을 때의 한 줄 알림('주의:'). 창 프로그램은 stdout 을 모으므로 그대로 보인다
 
+BOOK_SETTINGS = "book_settings.json"           # 결과 폴더의 책별 설정(창이 읽고 쓴다 — 명령줄은 읽지 않고 창이 늘 선택지로 넘긴다). 원본이 바뀌어 보관할 때도 그대로 둔다
+BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
+             "mode": ("auto", "vertical", "horizontal_zh")}           # 값의 꼴(tuple = 허용 값). '다시 판독'(force)은 넣지 않는다 — 책마다 남으면 모르는 새 다시 산다
+LAST_COST = "last_cost.json"                   # 결과 폴더의 마지막 실행 전 비용 어림(창의 장부 — 실행을 고른 뒤에만 쓴다). 결과물이 아니라 원본이 바뀌어 보관할 때도 그대로 둔다
+
 
 def _tmp_path(path: Path) -> Path:
     """같은 폴더의 숨긴 임시 이름(스레드마다 다르게). 이름이 '.' 으로 시작해 p*.json 같은 찾기에 걸리지 않는다."""
@@ -53,6 +58,114 @@ def free_name(path: Path) -> Path:
         k += 1
 
 
+def _book_ok(shape, v) -> bool:
+    return v in shape if isinstance(shape, tuple) else type(v) is shape          # type 으로 본다: bool 은 int 의 하위 꼴, 1 이 True 로 들어오지 않게
+
+
+def _read_book_file(path: Path, warn=None) -> dict:
+    """book_settings.json 을 검사 전 그대로. 없으면 {}. 쓰다 만 JSON·맨 위가 {…} 가 아니면 .broken(free_name) 으로 옮기고 한 줄 알림, {}.
+    읽기 오류(권한·네트워크 폴더)는 그대로 올린다 — 못 읽은 파일을 빈 것으로 보고 덮어쓰지 않게."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")                                  # -sig: 메모장이 붙인 BOM 도 받는다
+    except FileNotFoundError:
+        return {}
+    try:
+        got = json.loads(text)
+        if isinstance(got, dict):
+            return got
+    except ValueError:
+        pass
+    bad = free_name(path.with_name(BOOK_SETTINGS + ".broken"))                       # 앞서 치운 것은 덮지 않는다
+    try: os.replace(path, bad)
+    except OSError: pass
+    (warn or WARN)(f"주의: 책별 설정 {path} 이(가) 깨져 있어(쓰다 만 JSON) {bad.name} 으로 옮겼습니다. 이 책은 지금 창의 문서 설정을 씁니다(저장하면 새로 남김).")
+    return {}
+
+
+def load_book_settings(work_dir, *, warn=None) -> dict:
+    """결과 폴더의 책별 설정 {열쇠: 값} — 없으면 {}. 꼴이 틀린 값·모르는 열쇠는 빼고 준다(파일은 그대로).
+    쓰다 만 JSON 이면 book_settings.json.broken(free_name) 으로 옮기고 WARN 한 줄, {}. 폴더를 만들지 않는다(고르기·미리 보기에서 불러도 된다)."""
+    return clean_book_values(_read_book_file(Path(work_dir) / BOOK_SETTINGS, warn))
+
+
+def clean_book_values(raw: dict) -> dict:
+    """책별 값 가운데 아는 열쇠·맞는 꼴만(파일에서 읽은 것·창이 기억해 둔 것 모두)."""
+    return {k: v for k, v in raw.items() if k in BOOK_KEYS and _book_ok(BOOK_KEYS[k], v)} if isinstance(raw, dict) else {}
+
+
+def save_book_settings(work_dir, new: dict, loaded: dict | None = None, *, create: bool = False, warn=None) -> dict | None:
+    """파일을 새로 읽어 new 가운데 loaded(이 창이 읽었거나 마지막으로 쓴 값)와 다른 열쇠와 파일에 없는 열쇠만 얹고 원자적으로 쓴다(write_atomic).
+    다른 창이 그 사이 바꾼 다른 열쇠·모르는 열쇠는 그대로(gui.merge_config 와 같은 규칙). 결과 폴더가 없으면 create 일 때만 만든다(아니면 None — 고르기만 해서는
+    폴더가 생기지 않게). 돌려주는 값: 쓴 뒤 파일의 BOOK_KEYS 값들."""
+    d = Path(work_dir)
+    if not d.is_dir():
+        if not create:
+            return None
+        d.mkdir(parents=True, exist_ok=True)
+    path = d / BOOK_SETTINGS; loaded = loaded or {}
+    disk = _read_book_file(path, warn)
+    base = {k: v for k, v in disk.items() if k not in ("schema_version", "saved_by", "updated")}
+    out = dict(base)
+    for k, shape in BOOK_KEYS.items():
+        if k in new and _book_ok(shape, new[k]) and (k not in disk or not _book_ok(shape, disk[k]) or new[k] != loaded.get(k)):   # 꼴이 틀린 값은 읽을 때 빠지므로 창의 값이 쓰인 것
+            out[k] = new[k]
+    if out != base:                                          # 바뀐 것이 없으면 쓰지 않는다(책을 바꿀 때마다 시각만 바뀌는 쓰기를 하지 않게)
+        from . import __version__
+        write_atomic(path, json.dumps({"schema_version": 1, "saved_by": __version__, "updated": time.strftime("%Y-%m-%d %H:%M:%S"), **out},
+                                      ensure_ascii=False, indent=1))
+    return {k: out[k] for k, shape in BOOK_KEYS.items() if k in out and _book_ok(shape, out[k])}
+
+
+def target_pages(pdf: str, pages: str = "") -> list[int]:
+    """대상 쪽 번호(1부터) — 쪽 수는 원본만 센다(이미지 파일은 1쪽, 이미지 폴더는 이미지 수, PDF 는 pymupdf). 쪽 범위를 읽지 못하면 ValueError."""
+    from .pdfio import image_sources, parse_pages
+    src = Path(pdf)
+    images = image_sources(src)
+    if images:
+        n = len(images)
+    elif src.is_dir():
+        raise ValueError(f"폴더에 이미지가 없습니다: {src}")
+    else:
+        import pymupdf
+        with pymupdf.open(str(src)) as doc:
+            n = len(doc)
+    return list(parse_pages((pages or "").strip() or None, n))
+
+
+def page_marks(work, pages: list[int], force: bool = False) -> dict[int, str]:
+    """쪽 띠(실행 전)의 칸 상태 {쪽: 'record'|'fail'|'remain'}: 판독 기록(readings/p###.json)이 있으면 record(다시 판독이면 remain),
+    기록이 없고 상태에 '판독 확인 필요'가 있으면 fail(cmd_read 의 두 갈래 — '판독 실패(다시 시도 가능)'·'판독 중 예외' — 모두 기록 없이 이 상태만 남김),
+    그 밖에는 remain. 읽기만 하고 폴더·파일을 만들지 않는다."""
+    w = Path(work)
+    rd = w / "readings"
+    have = {int(p.stem[1:]) for p in rd.glob("p*.json") if p.stem[1:].isdigit()} if rd.is_dir() else set()
+    try:
+        st = json.loads((w / "state.json").read_text(encoding="utf-8")).get("pages", {})
+    except (OSError, ValueError, AttributeError):
+        st = {}
+    out = {}
+    for n in pages:
+        if n in have:
+            out[n] = "remain" if force else "record"
+        elif "판독 확인 필요" in ((st.get(str(n)) or {}).get("statuses") or []):
+            out[n] = "fail"
+        else:
+            out[n] = "remain"
+    return out
+
+
+def book_counts(pdf: str, work, pages: str = "", force: bool = False) -> dict:
+    """책 카드의 수치 {target: 대상 쪽 수, records: 그 가운데 판독 기록이 있는 쪽, to_read: 새로 읽을 쪽(다시 판독이면 대상 전부)}.
+    쪽 수는 원본만 센다(이미지 파일은 1쪽, 이미지 폴더는 이미지 수, PDF 는 pymupdf — 이미지를 PDF 로 만들지 않아 빠르다).
+    기록은 readings/p###.json 이 있는지만 본다(읽지 않음 — 수백 쪽도 금방). 원본이 바뀌어 옮겨질 기록까지 맞게 세는 것은 비용 어림(costplan)이다.
+    폴더·파일을 만들지 않는다. 쪽 범위를 읽지 못하면 ValueError."""
+    target = target_pages(pdf, pages)
+    rd = Path(work) / "readings"
+    have = {int(p.stem[1:]) for p in rd.glob("p*.json") if p.stem[1:].isdigit()} if rd.is_dir() else set()
+    records = sum(1 for k in target if k in have)
+    return {"target": len(target), "records": records, "to_read": len(target) if force else len(target) - records}
+
+
 def default_work_dir(pdf_path: str) -> Path:
     """--work 가 없을 때의 결과 폴더. 창의 work_dir_for 와 같은 규칙: PDF 는 work/<이름>, 이미지는 work/<이름>_<확장자>,
     이미지 폴더는 work/<폴더>_이미지(같은 이름끼리 판독 기록이 섞이지 않게)."""
@@ -94,8 +207,9 @@ class Work:
             return
         for d in (self.pages_dir, self.textlayer_dir, self.readings_dir, self.crops_dir, self.out_dir):
             d.mkdir(parents=True, exist_ok=True)
-        # 새 작업만 원본 지문을 등록한다. 조회용 Work 생성으로 기존 자료를 옮기지 않는다.
-        if not any(self.dir.iterdir()) or all(d.is_dir() and not any(d.iterdir()) for d in self.dir.iterdir()):
+        # 새 작업만 원본 지문을 등록한다. 조회용 Work 생성으로 기존 자료를 옮기지 않는다. 창이 실행 직전에 남긴 책별 설정만 있는 폴더도 새 작업이다
+        entries = [d for d in self.dir.iterdir() if d.name not in (BOOK_SETTINGS, LAST_COST)]
+        if not entries or all(d.is_dir() and not any(d.iterdir()) for d in entries):
             self.ensure_source()
 
     def page_lock(self, page: int):
@@ -166,7 +280,8 @@ class Work:
                     for src in reversed(moved):
                         os.replace(archive / src.name, src)
                     raise
-                WARN(f"주의: 원본·영상 설정이 바뀌었거나 이전 결과의 원본을 검증할 수 없어 {archive} 에 보관했습니다. 새로 처리합니다.")
+                WARN(f"주의: 원본·영상 설정이 바뀌었거나 이전 결과의 원본을 검증할 수 없어 {archive} 에 보관했습니다. 새로 처리합니다."
+                     + (f" 책별 설정({BOOK_SETTINGS})은 그대로 둡니다." if (root / BOOK_SETTINGS).is_file() else ""))   # 원본을 바꿔 넣어도 양식·짜임 규칙을 잃지 않게(names 에 없음)
             for d in (self.pages_dir, self.textlayer_dir, self.readings_dir, self.crops_dir, self.out_dir):
                 d.mkdir(parents=True, exist_ok=True)
             if previous != current:

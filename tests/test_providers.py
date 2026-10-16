@@ -87,12 +87,29 @@ class SDKReaders(unittest.TestCase):
             reader, create, _ = self.fake(provider, {"items": [{"id": "a", "choice": "云"}, {"id": "b", "choice": "wrong"},
                                                                {"id": "c", "choice": "云"}, {"id": "c", "choice": "雲"}]})
             items = [{"id": key, "context": "詩雲：", "source": "雲", "candidates": ["云", "雲"]} for key in "abc"]
-            self.assertEqual(reader.resolve_text_choices(items), {"a": "云"})
+            self.assertEqual(reader.resolve_text_choices(items), {"a": "云", "b": ""})          # 후보 밖 답 = 못 고름, 중복 답 = 답 없음
             self.assertEqual(reader._system, "OCR guide")
             sent = create.call_args.kwargs
             content = (sent.get("input") or sent["messages"])[0]["content"]
             self.assertEqual(len(content), 1)
             self.assertIn("text", content[0])
+
+    def test_openai_json_mode_requests_name_json_in_the_input(self):
+        """OpenAI 는 json_object 형식을 쓸 때 입력 글에 'json' 낱말이 없으면 400 으로 거절한다(instructions 는 세지 않음)."""
+        reader, create, response = self.fake("openai", {"items": [{"id": "a", "choice": "云"}]})
+        real = create.side_effect
+
+        def server(**kw):
+            texts = [c.get("text", "") for m in kw["input"] for c in m["content"] if isinstance(c, dict)]
+            if not any("json" in t.lower() for t in texts):
+                e = RuntimeError("Response input messages must contain the word 'json'"); e.status_code = 400
+                raise e
+            return response if real is None else real(**kw)
+        create.side_effect = server
+        items = [{"id": "a", "context": "詩雲：", "source": "雲", "candidates": ["云", "雲"]}]
+        self.assertEqual(reader.resolve_text_choices(items), {"a": "云"})       # 문맥 교정(0.7.4 까지 400)
+        response.output_text = json.dumps(page().model_dump(by_alias=True), ensure_ascii=False)
+        self.assertEqual(len(reader.read_page(self.image, "book.pdf", 1, 1).regions), 2)   # 판독도 같은 규칙을 지킨다
 
     def test_gemini_text_choices_uses_same_cap_and_dedicated_prompt(self):
         reader = rg.GeminiReader.__new__(rg.GeminiReader)
@@ -150,7 +167,7 @@ class SDKReaders(unittest.TestCase):
     def test_simplified_source_cannot_be_confirmed_as_traditional(self):
         reader, _, _ = self.fake("openai", {"items": [{"id": "a", "choice": "发"}]})
         self.assertEqual(reader.resolve_text_choices([{"id": "a", "source": "发", "context": "头发", "candidates": ["发", "發", "髮"],
-                                                       "source_is_valid_traditional": False}]), {})
+                                                       "source_is_valid_traditional": False}]), {"a": ""})
 
     def test_owned_document_closed_on_error_borrowed_document_kept_open(self):
         document = mock.Mock()

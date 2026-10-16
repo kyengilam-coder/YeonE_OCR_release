@@ -99,12 +99,25 @@ def check_hwpx_file(path: str) -> list[dict]:
             issues.append({"level": "error", "rule": "필수 항목", "where": path, "msg": f"{need} 없음"})
     if any(n.startswith("word/") for n in names):
         issues.append({"level": "error", "rule": "DOCX 구조", "where": path, "msg": "word/ 폴더가 있음 — DOCX 를 이름만 바꾼 파일"})
-    # 개요 스타일 문단이 있으면 한컴이 "가. 나. 다." 자동 번호를 붙여 원본에 없는 글자가 보인다
-    import re
+    # 개요·번호 문단 모양이면 한컴이 "1. 가. 나." 자동 번호를 붙여 원본에 없는 글자가 보인다. 번호는 문단 모양(paraPr)의 머리 종류에서 오므로
+    # 그것을 본다 — 사용자 양식의 스타일(제목-장·본경 원문 …)은 번호가 없으면 써도 된다. XML 로 읽는다: 속성 차례(id 가 앞인지 뒤인지)에 매이지 않게.
+    import xml.etree.ElementTree as ET
+    HH = "{http://www.hancom.co.kr/hwpml/2011/head}"; HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+    numbered = set()
+    try:
+        for ppr in ET.fromstring(z.read("Contents/header.xml")).iter(f"{HH}paraPr"):
+            hd = ppr.find(f".//{HH}heading")
+            if hd is not None and (hd.get("type") or "NONE").upper() in ("OUTLINE", "NUMBER", "BULLET"):
+                numbered.add(ppr.get("id"))
+    except (KeyError, ET.ParseError):
+        pass
     for n in names:
         if n.startswith("Contents/section") and n.endswith(".xml"):
-            xml = z.read(n).decode("utf-8", "replace")
-            bad = [m for m in re.findall(r'<hp:p\b[^>]*styleIDRef="(\d+)"', xml) if m != "0"]
+            try:
+                root = ET.fromstring(z.read(n))
+            except ET.ParseError as e:
+                issues.append({"level": "error", "rule": "XML 해석", "where": n, "msg": f"XML 로 읽을 수 없음: {e}"}); continue
+            bad = [p for p in root.iter(f"{HP}p") if p.get("paraPrIDRef") in numbered]
             if bad:
-                issues.append({"level": "error", "rule": "개요 문단", "where": n, "msg": f"바탕글이 아닌 스타일 문단 {len(bad)}개 — 자동 번호가 붙을 수 있음"})
+                issues.append({"level": "error", "rule": "개요 문단", "where": n, "msg": f"개요·번호 문단 모양 문단 {len(bad)}개 — 자동 번호가 붙을 수 있음"})
     return issues

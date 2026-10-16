@@ -1,4 +1,4 @@
-"""GUI 미리보기·색인의 소유 PDF/HWPX 핸들은 성공·오류 모두에서 닫힌다(Tk 창·모델 호출 없음)."""
+"""GUI 비용 어림(costplan)·색인의 소유 PDF/HWPX 핸들은 성공·오류 모두에서 닫힌다(Tk 창·모델 호출 없음)."""
 import queue
 import sys
 import tempfile
@@ -51,17 +51,16 @@ class GuiResources(unittest.TestCase):
         self.assertTrue(self.docs)
         self.assertTrue(all(doc.is_closed for doc in self.docs))
 
-    def test_estimate_closes_pdf_on_success_and_bad_page_spec(self):
-        app = SimpleNamespace(pdf=lambda: str(self.pdf), work=lambda: self.root / "result", cfg={}, fx_setting=lambda: (None, ""),
-                              v_pages=var("1"), v_up=var("2"), v_second=var(True), v_model=var("x"), v_model2=var("auto"),
-                              v_cache=var(True), v_force=var(False), v_reader=var("gemini"))
-        with patch("yeone_ocr.pdfio.open_pdf", side_effect=self.open_pdf), patch("yeone_ocr.estimate.estimate", return_value={"ok": True}):
-            self.assertEqual(gui.App.estimate_data(app), {"ok": True})
+    def test_cost_plan_closes_pdf_on_success_and_bad_page_spec(self):
+        from yeone_ocr.costplan import PlanInput, count_plan
+        inp = PlanInput(kind="read", pdf=str(self.pdf), work_dir=str(self.root / "result"), pages="1", reader="gemini", model="x")
+        with patch("yeone_ocr.pdfio.open_pdf", side_effect=self.open_pdf):
+            self.assertEqual(count_plan(inp)["errors"], [])
             self.assert_closed()
-            app.v_pages = var("invalid")
-            with self.assertRaises(ValueError):
-                gui.App.estimate_data(app)
+            inp.pages = "invalid"
+            self.assertEqual(count_plan(inp)["errors"][0]["step"], "plan")                    # 쪽 범위 오류도 닫고 '전체 실패'로 알린다
             self.assert_closed()
+        self.assertFalse((self.root / "result").exists())
 
     def test_style_previews_close_hwpx_even_when_reading_fails(self):
         source = self.root / "book.hwpx"
@@ -114,26 +113,25 @@ class GuiResources(unittest.TestCase):
                      patch.object(gui.simpledialog, "askstring", side_effect=prompt):
                     gui.App.do_collate(app, False)
 
-    def test_adjudication_preview_closes_pdf_before_confirming_or_reporting_error(self):
+    def test_adjudication_plan_closes_pdf_and_never_writes_the_layer(self):
+        """3차 판별 비용 어림: 합의 의심 셈은 PDF 가 열린 동안 하고(글자층 파일을 쓰는 cli._load_layer 는 부르지 않음), 끝나면(기록이 깨져도) PDF 를 닫는다."""
+        from yeone_ocr.costplan import PlanInput, count_plan
         page = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", paragraphs=[Paragraph(columns=[Column(n=1, t="甲〔入/人〕乙")])])])
         rec = {"pdf_page": 1, "merged": page.model_dump()}
-        app = SimpleNamespace(_need_records=lambda _: True, _prepare_env=lambda: True, v_reader=var("gemini"), v_suspects=var(True),
-                              v_pages=var("1"), v_blind=var(False), pdf=lambda: str(self.pdf), work=lambda: self.root / "result")
+        inp = PlanInput(kind="adjudicate", pdf=str(self.pdf), work_dir=str(self.root / "result"), pages="1", reader="gemini")
         for bad_record in (False, True):
             with self.subTest(bad_record=bad_record):
-                work = SimpleNamespace(dir=self.root, records=lambda _: [{"merged": {}}] if bad_record else [rec])
-                def prompt(*args, **kw):
-                    self.assert_closed()
-                    return False
-                def layer(work, doc, page):
-                    self.assertFalse(doc.is_closed)
-                    return {"plain": "甲人乙"}
+                work = SimpleNamespace(dir=self.root, out_dir=self.root / "out", source_matches=lambda dpi=None: True,
+                                       textlayer_path=lambda n: self.root / "없음.json", records=lambda pages, repair=True: [{"merged": {}}] if bad_record else [rec])
+                def pending(rec, layer, *a):
+                    self.assertTrue(self.docs and not self.docs[-1].is_closed)
+                    return 0
                 with patch("yeone_ocr.pdfio.open_pdf", side_effect=self.open_pdf), patch("yeone_ocr.state.Work", return_value=work), \
-                     patch("yeone_ocr.cli._load_layer", side_effect=layer), patch("yeone_ocr.adjudicate.suspects_pending", return_value=0), \
-                     patch("yeone_ocr.adjudicate.suspect_freq", return_value={}), patch.object(gui.messagebox, "askyesno", side_effect=prompt), \
-                     patch.object(gui.messagebox, "showerror", side_effect=prompt):
-                    gui.App.do_adjudicate(app)
+                     patch("yeone_ocr.cli._load_layer", side_effect=AssertionError("글자층 파일을 쓰면 안 됨")), \
+                     patch("yeone_ocr.adjudicate.suspects_pending", side_effect=pending), patch("yeone_ocr.adjudicate.suspect_freq", return_value={}):
+                    plan = count_plan(inp)
                 self.assert_closed()
+                self.assertEqual([e["step"] for e in plan["errors"]], ["glyph", "suspect"] if bad_record else [])
 
 
 if __name__ == "__main__":

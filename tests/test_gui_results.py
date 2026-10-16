@@ -135,6 +135,28 @@ class ResultFilesGui(unittest.TestCase):
                 self.assertIn("synthetic shell error", self.error.call_args.args[1])
                 self.assertTrue(result.is_file())
 
+    def test_collated_copy_opens_a_read_only_copy_while_collating(self):
+        """[교정본 열기]는 실행 중에도 눌리지만, 그때는 [▶ HWPX 전체 교정]이 구획마다 다시 쓰는 <이름>_교정.hwpx 대신 읽기용 사본을 연다
+        (한컴이 교정본을 쥐면 다음 구획 저장이 막혀 전체 교정이 멈추고, 그 구획의 교정·모델 호출이 헛된다)."""
+        original = self.root / "본초학 양식.hwpx"; original.write_bytes(b"original")
+        collated = self.root / "본초학 양식_교정.hwpx"
+        logs = []
+        app = SimpleNamespace(v_hwpx=Var(str(original)), running=False, _append=logs.append)
+        self.gui.App.open_collated(app)
+        self.open_path.assert_not_called(); self.info.assert_called_once()                         # 아직 없음
+        collated.write_bytes(b"collated")
+        self.gui.App.open_collated(app)
+        self.open_path.assert_called_once_with(collated)
+        self.open_path.reset_mock(); app.running = True
+        self.gui.App.open_collated(app)
+        copy = self.open_path.call_args.args[0]
+        self.assertNotEqual(copy, collated); self.assertIn("_보기_", copy.name); self.assertEqual(copy.read_bytes(), b"collated")
+        self.assertTrue(logs and "읽기용 사본" in logs[-1])
+        copy.unlink()
+        self.open_path.side_effect = OSError("synthetic shell error"); app.running = False
+        self.gui.App.open_collated(app)
+        self.error.assert_called_once(); self.assertIn("synthetic shell error", self.error.call_args.args[1])
+
     def test_clearing_source_does_not_keep_old_location_or_open_old_result(self):
         app = self.app()
         self.result(self.source.stem)

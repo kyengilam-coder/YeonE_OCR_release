@@ -40,13 +40,22 @@ def render_normalization_report(report: dict) -> str:
         [item.get("source", ""), " / ".join(item.get("candidates") or []),
          item.get("choice") or "보류 · 원문 유지", item.get("original_context", item.get("context", ""))]
         for item in report.get("decisions", [])])
-    stages = {"opencc_s2t": "간체→번체", "msr": "매크로 부호 규칙", "yun_context": "云/雲 문맥", "model_context": "모델 문맥 판정"}
+    stages = {"opencc_s2t": "간체→번체", "msr": "중문부호 규칙", "yun_context": "云/雲 문맥", "model_context": "모델 문맥 판정"}
     changes = table(["위치", "교정 전", "교정 후", "처리", "근거"], [
         [location(item), item.get("before", ""), item.get("after", ""), stages.get(item.get("stage"), "문맥 교정"),
-         item.get("reason") or (f"매크로 규칙 {item['rule_id']}" if item.get("rule_id") else "간체→번체 변환")]
+         item.get("reason") or (f"치환 규칙 {item['rule_id']}" if item.get("rule_id") else "간체→번체 변환")]
         for item in report.get("changes", [])])
     error = f'<p class="notice">{esc(reader["error"])}</p>' if reader.get("error") else ""
+    other = (f"다른 모델이 앞서 고른 답을 그대로 씀 {int(reader.get('other_hits') or 0):,}건 · 다른 모델이 고르지 못해 원문대로 둠 "
+             f"{int(reader.get('other_remembered') or 0):,}건 (이번 모델로 다시 물으려면 창에서 「다른 모델이 이미 물은 자리·후보는 다시 묻지 않기」를 끄거나 "
+             "명령줄 --skip-answered same-model)<br>"
+             if reader.get("other_hits") or reader.get("other_remembered") else "")
     link = f'<a href="{quote(str(output), safe="")}">HWPX 열기</a>' if output else ""
+    options = report.get("options")
+    selected = (" · ".join(f"{label} {'켬' if options.get(key) else '끔'}" for key, label in
+                (("traditional", "간체→번체"), ("yun", "云/雲"), ("punctuation", "중문부호"))) if isinstance(options, dict) else "")
+    selected_html = f"자동 교정: {esc(selected)}<br>" if selected else ""
+    custom_html = "중문부호: 사용자 규칙 적용(규칙 원문은 JSON 보고에 보존)<br>" if report.get("custom_punctuation") else ""
     return f'''<!doctype html><html lang="ko"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>문맥 교정 기록 · {esc(output)}</title>
@@ -64,8 +73,8 @@ th{{background:#e9e5dc;white-space:nowrap}}td{{min-width:60px}}a{{color:#245e9d}
 <span>문맥 판정 {len(report.get('decisions', [])):,}건</span></div>
 <p>이 보고는 OCR 원문과 최종 문서의 차이를 보여 줍니다. 매크로의 한자 치환은 문맥 판정의 후보로만 사용합니다.
 판정이 확실하지 않은 글자는 원문을 유지했습니다. 모델의 문맥 판단도 원본 대조가 필요할 수 있습니다.</p>
-<p class="meta">문맥 모델: {esc(reader.get('provider', '없음'))} / {esc(reader.get('model', ''))}<br>
-치환 규칙: {esc(report.get('msr_source', ''))} · {int(report.get('rule_count', 0))}개<br>
+<p class="meta">문맥 모델: {esc(reader.get('provider', '없음'))} / {esc(reader.get('model', ''))}<br>{other}
+{selected_html}{custom_html}치환 규칙: {esc(report.get('msr_source', ''))} · {int(report.get('rule_count', 0))}개<br>
 원문 판독 기록은 별도로 보존됩니다.</p>{error}
 <h2>확인할 자리</h2>{review}<h2>문단별 교정 전후</h2>{changed}
 <details><summary>문맥 판정 전체</summary>{decisions}</details>

@@ -8,3 +8,7 @@ build/
 dist/
 .test-tmp*/
 *.egg-info/
+/tools/tesseract/
+/tools/rapidocr/
+/tools/easyocr/
+/downloads/

@@ -212,6 +212,24 @@ class AdjudicateItems(unittest.TestCase):
 
 class Parser(unittest.TestCase):
     """한 번에 인식·전체 교정의 명령줄: 모드는 auto 가 기본, 3차 판별·자형 판별은 끌 수 있다."""
+    def test_skip_answered_values_and_provider_guess(self):
+        """--skip-answered: adjudicate·build·run 에 하나씩(run 은 겹치지 않게), 기본 any-model. 옛 호출(값 없음)도 any-model. collate 에는 없다."""
+        from yeone_ocr import cli, estimate
+        from yeone_ocr.providers import provider_of_model
+        ap = cli.build_parser()
+        for cmd in ("adjudicate", "build", "run"):
+            self.assertEqual(ap.parse_args([cmd, "x.pdf"]).skip_answered, "any-model", cmd)
+            a = ap.parse_args([cmd, "x.pdf", "--skip-answered", "same-model"])
+            self.assertEqual(a.skip_answered, "same-model"); self.assertFalse(cli.skip_any(a))
+        self.assertTrue(cli.skip_any(Namespace())); self.assertTrue(cli.skip_any(ap.parse_args(["run", "x.pdf"])))
+        self.assertFalse(hasattr(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx"]), "skip_answered"))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            ap.parse_args(["run", "x.pdf", "--skip-answered", "never"])
+        self.assertEqual([provider_of_model(m) for m in ("gemini-2.5-pro", "models/gemini-3-flash", "claude-sonnet-4-6", "gpt-4.1 (3차)", "o3-mini",
+                                                         "chatgpt-4o", "mock", "", None)],
+                         ["gemini", "gemini", "anthropic", "openai", "openai", "openai", "", "", ""])
+        self.assertIs(estimate._model_provider, provider_of_model)                       # 비용 어림과 같은 짐작
+
     def test_defaults_and_switches(self):
         from yeone_ocr.cli import build_parser
         ap = build_parser()
@@ -740,6 +758,227 @@ class AdjudicateCommand(unittest.TestCase):
         finally:
             cli.make_glyph_readers = old
 
+    def _undecided_reader(self, model):
+        import threading
+        from yeone_ocr.schema import GlyphChoice
+        class Fake:
+            n_429 = 0; cache_note = ""; thinking = "low"
+            def __init__(self): self.model = model; self.asked = 0; self._tls = threading.local()
+            def usage_begin(self): self._tls.u = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "cached_tokens": 0}
+            def usage_end(self): u = getattr(self._tls, "u", None) or {}; self._tls.u = None; return u
+            def adjudicate_many(self, crops, h, p):
+                self.asked += len(crops); self._tls.u["calls"] += 1
+                return {sid: GlyphChoice(choice="", evidence="뭉개짐", window="") for sid, _, _ in crops}
+            def adjudicate(self, crop, ask, h, p):
+                self.asked += 1; self._tls.u["calls"] += 1
+                return GlyphChoice(choice="", evidence="뭉개짐", window="")
+        return Fake()
+
+    def test_rerun_does_not_buy_sites_the_same_model_already_left_undecided(self):
+        """다시 실행해도 같은 모델이 앞서 답했지만 못 가린 〔a/b〕 자리는 다시 묻지 않는다(0.7.4: [▶] 를 누를 때마다 책 전체를 다시 물었다).
+        다른 모델도 기본(--skip-answered any-model)은 묻지 않고, same-model 이거나 --readjudicate 면 다시 묻는다."""
+        from yeone_ocr import cli
+        old = cli.make_glyph_readers
+        try:
+            with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+                doc, work = self._work(td)
+                handles.callback(doc.close)
+                def run(model, **kw):
+                    fake = self._undecided_reader(model); cli.make_glyph_readers = lambda args: (fake, None)
+                    args = Namespace(pdf=work.pdf_path.as_posix(), work=str(work.dir), pages=None, dpi=300, mode="vertical", reader="gemini", model=model,
+                                     thinking_budget=None, no_cache=True, max_sites=0, zoom=6, batch_sites=8, workers=2, workers_start=2,
+                                     adjudicate_model="", adjudicate_thinking="low", no_suspects=True, **kw)
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        rc = cli.cmd_adjudicate(args, work, doc, standalone=True)
+                    self.assertEqual(rc, 0, buf.getvalue())
+                    return fake.asked, buf.getvalue()
+                asked, _ = run("gpt-4.1")
+                self.assertEqual(asked, 4)                                                    # 2쪽 × 2자리, 모두 못 가림
+                asked, out = run("gpt-4.1")
+                self.assertEqual(asked, 0); self.assertIn("결론 난 미정 자리 4곳은 다시 묻지 않음", out)
+                self.assertEqual(len(work.load_record(1)["adjudications"]), 2)                # 같은 기록을 다시 쌓지 않는다
+                r1 = work.load_record(1); r1["adjudications"] = r1["adjudications"][:1]; work.save_record(1, r1)   # 한 쪽에 결론 난 자리와 새 자리가 섞임
+                self.assertEqual(run("gpt-4.1")[0], 1)                                        # 새 자리만 묻는다(adjudicate_page 에도 건너뛸 모델이 넘어감)
+                self.assertEqual(len(work.load_record(1)["adjudications"]), 2)
+                asked, out = run("gemini-2.5-pro")                                            # 다른 모델도 기본은 다시 사지 않는다(any-model)
+                self.assertEqual(asked, 0); self.assertIn("결론 난 미정 자리 4곳은 다시 묻지 않음(다른 모델이 물은 것 포함", out)
+                self.assertIn("--skip-answered same-model", out)
+                self.assertEqual(run("gemini-2.5-pro", skip_answered="same-model")[0], 4)     # 이번 모델로 다시 묻기
+                self.assertEqual(run("gpt-4.1", readjudicate=True)[0], 4)                     # 일부러 다시 묻기(any-model 보다 앞섬)
+                self.assertEqual(run("gemini-2.5-pro", skip_answered="same-model")[0], 0)
+                asked, out = run("claude-test", readjudicate=True, skip_answered="any-model")
+                self.assertEqual(asked, 4); self.assertNotIn("다시 묻지 않음", out)
+        finally:
+            cli.make_glyph_readers = old
+
+    def test_answered_sites_rules(self):
+        """다시 묻지 않을 자리: 그 모델이 답했지만 못 가린 자리(창 어긋남·눈가림 불일치 포함)와 문턱보다 작아 묻지 않은 자리.
+        호출 실패·눈가림 확인 실패·다른 모델·이미 고른 자리·문턱을 낮춘 저해상 자리는 넣지 않는다."""
+        from yeone_ocr.adjudicate import answered_sites, pending_sites, site_key
+        key = lambda i: {"region_id": "b1", "col_index": i, "a": "黃", "b": "黄", "pre": "天地玄", "post": "宇宙洪荒"}
+        rec = {"adjudications": [
+            {**key(0), "model": "m", "choice": "", "evidence": "뭉개짐"},
+            {**key(1), "model": "m", "choice": "", "evidence": "조각 위치가 어긋남(보인 글: 甲) — x"},
+            {**key(2), "model": "m", "choice": "", "evidence": "판별 실패: 묶음 호출 실패: 429"},
+            {**key(3), "model": "m", "choice": "", "evidence": "눈가림 확인 실패(응답 없음) — 확정 보류"},
+            {**key(4), "model": "other", "choice": "", "evidence": "뭉개짐"},
+            {**key(5), "model": "m", "choice": "黃", "evidence": "획"},
+            {**key(6), "choice": "", "evidence": "저해상: 원본 글자 약 9px(문턱 16px)", "em_px": 9.0},
+            {**key(7), "choice": "", "evidence": "저해상: 원본 글자 약 14px(문턱 16px)", "em_px": 14.0}]}
+        got = answered_sites(rec, {"m"}, min_px=12)
+        self.assertEqual(got, {site_key(key(0)), site_key(key(1)), site_key(key(6))})
+        self.assertEqual(answered_sites(rec, set(), min_px=0), set())
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+            doc, work = self._work(td); handles.callback(doc.close)
+            r = work.load_record(1)
+            sites, skipped = pending_sites(r, {"m"})
+            self.assertEqual((len(sites), skipped), (2, 0))
+            r["adjudications"] = [{**{k: getattr(sites[0], k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "m", "choice": "", "evidence": "x"}]
+            sites2, skipped = pending_sites(r, {"m"})
+            self.assertEqual(([x.mark for x in sites2], skipped), ([sites[1].mark], 1))
+            self.assertEqual(len(pending_sites(r, ())[0]), 2)                                  # 모델을 주지 않으면(--readjudicate) 모두
+            s = sites[1]; e = {**{k: getattr(s, k) for k in ("region_id", "col_index", "a", "b", "post", "char_index")}, "model": "m", "choice": "", "evidence": "x"}
+            swap = {"黃": "黄", "黄": "黃"}
+            e["pre"] = (s.pre[:-1] + swap.get(s.pre[-1], "甲")) if s.pre else ""                 # 곁 자리의 답이 반영돼 앞 글 한 자가 바뀐 기록
+            r["adjudications"].append(e)
+            self.assertEqual(pending_sites(r, {"m"})[1], 2)                                     # 그래도 같은 자리로 보아 다시 사지 않는다
+            e["char_index"] = s.char_index + 9
+            self.assertEqual(pending_sites(r, {"m"})[1], 1)                                     # 글자 번호가 멀면 다른 자리
+
+    def test_answered_sites_any_model(self):
+        """--skip-answered any-model: 다른 모델(모델 칸이 없는 0.6.x 기록 포함)이 답했지만 못 가린 자리도 건너뛴다. 호출이 실패한 자리는 어느 모델이든 다시 묻는다.
+        모델 집합이 비면(--readjudicate) any_model 이어도 모두 묻는다."""
+        from yeone_ocr.adjudicate import answered_sites, pending_sites, site_key
+        key = lambda i: {"region_id": "b1", "col_index": i, "a": "黃", "b": "黄", "pre": "天地玄", "post": "宇宙洪荒"}
+        rec = {"adjudications": [
+            {**key(0), "model": "m", "choice": "", "evidence": "뭉개짐"},
+            {**key(1), "model": "other", "choice": "", "evidence": "뭉개짐"},
+            {**key(2), "choice": "", "evidence": "획이 보이지 않음"},                                       # 0.6.x: 모델 칸 없음
+            {**key(3), "model": "other", "choice": "", "evidence": "판별 실패: 묶음 호출 실패: 429"},
+            {**key(4), "model": "other", "choice": "", "evidence": "눈가림 확인 실패(응답 없음) — 확정 보류"},
+            {**key(5), "model": "other", "choice": "黃", "evidence": "획"}]}
+        self.assertEqual(answered_sites(rec, {"m"}, any_model=True), {site_key(key(0)), site_key(key(1)), site_key(key(2))})
+        self.assertEqual(answered_sites(rec, {"m"}), {site_key(key(0))})                                 # 기본(same-model)은 그 모델 것만
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+            doc, work = self._work(td); handles.callback(doc.close)
+            r = work.load_record(1)
+            sites, _ = pending_sites(r, {"m"})
+            r["adjudications"] = [{**{k: getattr(sites[0], k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "other", "choice": "", "evidence": "x"}]
+            self.assertEqual(pending_sites(r, {"m"}, any_model=True)[1], 1)
+            self.assertEqual(pending_sites(r, {"m"})[1], 0)
+            self.assertEqual(pending_sites(r, set(), any_model=True), (sites, 0))                     # --readjudicate 가 앞선다
+
+    def test_mock_reader_counts_honour_skip_answered(self):
+        """mock 판독기로 세기만 해도(호출 없음) 다른 모델이 못 가린 자리를 any-model 이면 빼고 same-model 이면 센다."""
+        from yeone_ocr import cli
+        from yeone_ocr.adjudicate import find_sites
+        with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+            doc, work = self._work(td); handles.callback(doc.close)
+            r = work.load_record(1); x = find_sites(PageReading.model_validate(r["merged"]))[0]
+            r["adjudications"] = [{**{k: getattr(x, k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "gpt-4.1", "choice": "", "evidence": "뭉개짐"}]
+            work.save_record(1, r)
+            for value, want in (("any-model", "〔a/b〕 자리 3곳"), ("same-model", "〔a/b〕 자리 4곳")):
+                args = cli.build_parser().parse_args(["adjudicate", work.pdf_path.as_posix(), "--work", str(work.dir), "--reader", "mock", "--no-suspects",
+                                                      "--mode", "vertical", "--skip-answered", value])
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.cmd_adjudicate(args, work, doc, standalone=True), 0)
+                self.assertIn(want, buf.getvalue(), value)
+
+    def test_window_asks_before_buying_third_pass_on_rerun(self):
+        """[▶ 한 번에 인식] 전 비용 창의 3차 판별 셈(count_plan): 이미 판독한 쪽의 자리·호출 어림, 앞서 물어 못 가린 자리는 모델을 바꿔도 건너뜀(끄면 다시 삼),
+        다시 판독은 모두 새로 읽는 셈. 창에서 [아니요]=--no-adjudicate(문맥 교정 모델이 켜져 있으면 + --no-context-model) · [취소]=실행 안 함."""
+        from types import SimpleNamespace
+        from unittest import mock
+        from yeone_ocr.adjudicate import find_sites
+        from yeone_ocr.costplan import PlanInput, count_plan
+        with tempfile.TemporaryDirectory() as td:
+            doc, work = self._work(td); doc.close()
+            def plan(model="gpt-4.1", **kw):
+                return count_plan(PlanInput(kind="run", pdf=work.pdf_path.as_posix(), work_dir=str(work.dir), reader="openai", model=model, **kw))
+            def glyph(p, scope="have"):
+                return next(r for r in p["rows"] if r["step"] == "glyph" and r["scope"] == scope)
+            self.assertEqual((glyph(plan())["items"], glyph(plan())["calls"]), (4, [2, 6]))      # 쪽마다 8자리씩 묶어 2회, 낱개로 최대 4회 더
+            r = work.load_record(1)                                                             # 1쪽 두 자리는 gpt-4.1 이 이미 물어 못 가림
+            r["adjudications"] = [{**{k: getattr(x, k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "gpt-4.1", "choice": "", "evidence": "x"}
+                                  for x in find_sites(PageReading.model_validate(r["merged"]))]
+            work.save_record(1, r)
+            p = plan()
+            self.assertEqual((glyph(p)["items"], p["skipped"]["glyph"], p["skipped"]["glyph_other"]), (2, 2, 0))
+            p = plan("gemini-2.5-pro")                                                          # 모델을 바꿔도 기본은 그 2곳을 사지 않는다
+            self.assertEqual((glyph(p)["items"], p["skipped"]["glyph_other"]), (2, 2))
+            self.assertEqual(glyph(plan("gemini-2.5-pro", skip_any_model=False))["items"], 4)   # 끄면 이번 모델로 다시 묻는다(호출 듦)
+            self.assertEqual(glyph(plan(skip_any_model=False))["items"], 2)                     # 같은 모델이 물은 것은 끄더라도 건너뜀
+            forced = plan(force=True)                                                           # 다시 판독: 기록 쪽 셈 대신 새로 읽을 쪽 어림
+            self.assertFalse([r for r in forced["rows"] if r["scope"] == "have"])
+            self.assertEqual(glyph(forced, "new")["label"], "3차 · 글자 판별 — 새로 읽을 2쪽(어림)")
+            # 창: [아니요] 면 run 명령에 --no-adjudicate(+ 문맥 교정 모델이 켜져 있으면 --no-context-model), [취소] 면 실행하지 않음
+            try:
+                from yeone_ocr import gui
+            except Exception as e:
+                self.skipTest(f"gui 를 불러오지 못함: {e}")
+            var = lambda v: Namespace(get=lambda v=v: v)
+            app = gui.App.__new__(gui.App)
+            app.v_reader = var("openai"); app.v_model = var("gpt-4.1"); app.v_pages = var(""); app.v_skipany = var(True)
+            app.pdf = lambda: work.pdf_path.as_posix(); app.work = lambda: Path(work.dir)
+            app._need_pdf = app._prepare_env = lambda: True
+            app._pages = app._read_opts = app._build_opts = lambda: []; app._glyph_opts = lambda suspects=False: []
+            app._answered_opts = lambda: ["--skip-answered", "any-model"]
+            app.nb = mock.Mock(); started = []; app.start = lambda argv, label: started.append(argv); app._save_book = mock.Mock()
+            app.cfg = {}; app._fx = None; app._append = lambda s: None; app.v_status = mock.Mock(); app.wait_window = lambda d: None
+            app.buttons = []; app.running = False; app._plan_wait = None; app._plan_seq = 1
+            for ctx, want in ((True, ["--no-adjudicate", "--no-context-model"]), (False, ["--no-adjudicate"])):
+                p = plan(context_model=ctx)
+                app._with_plan = lambda kind, go, p=p: gui.App._plan_done(app, 1, kind, ("ok", p), go)
+                with mock.patch.object(gui, "CostDialog", lambda *a, **k: SimpleNamespace(choice="without")):
+                    app.do_run()
+                self.assertEqual(started[-1][-len(want):], want, ctx)
+                self.assertEqual(started[-1][started[-1].index("--skip-answered") + 1], "any-model")   # 창은 늘 넘긴다
+                app._save_book.assert_called_with(create=True)
+            n, saved = len(started), app._save_book.call_count
+            with mock.patch.object(gui, "CostDialog", lambda *a, **k: SimpleNamespace(choice=None)):
+                app.do_run()
+            self.assertEqual((len(started), app._save_book.call_count), (n, saved))             # [취소]: 실행도 책별 설정 저장도 없음
+
+    def test_auto_counts_sites_after_flash_name_is_known_and_keeps_old_stats(self):
+        """--adjudicate-model auto: flash 가 앞서 물어 못 가린 자리는 세기 전에 '다시 묻지 않을' 집합에 든다(전에는 세고 나서 더해 〔a/b〕 수가 많이 찍히고,
+        물을 것이 없는 쪽도 adjudicate_page 를 거쳐 앞 실행의 adjudicate_stats 가 0 으로 덮였다)."""
+        from yeone_ocr import cli
+        from yeone_ocr.adjudicate import find_sites
+        old = cli.make_glyph_readers
+        try:
+            with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
+                doc, work = self._work(td); handles.callback(doc.close)
+                stats = {"sites": 2, "decided": 0, "undecided": 2, "failed": 0}
+                for pg in (1, 2):
+                    r = work.load_record(pg)
+                    r["adjudications"] = [{**{k: getattr(x, k) for k in ("region_id", "col_index", "a", "b", "pre", "post")}, "model": "flash", "choice": "", "evidence": "뭉개짐"}
+                                          for x in find_sites(PageReading.model_validate(r["merged"]))]
+                    r["adjudicate_stats"] = dict(stats); work.save_record(pg, r)
+                flash, pro = self._undecided_reader("flash"), self._undecided_reader("pro")
+                cli.make_glyph_readers = lambda args: (flash, pro)
+                args = Namespace(pdf=work.pdf_path.as_posix(), work=str(work.dir), pages=None, dpi=300, mode="vertical", reader="gemini", model="pro",
+                                 thinking_budget=None, no_cache=True, max_sites=0, zoom=6, batch_sites=8, workers=2, workers_start=2,
+                                 adjudicate_model="auto", adjudicate_thinking="low", no_suspects=True)
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.cmd_adjudicate(args, work, doc, standalone=True), 0)
+                out = buf.getvalue()
+                self.assertIn("판별할 〔a/b〕 자리가 없습니다", out); self.assertIn("결론 난 미정 자리 4곳은 다시 묻지 않음", out)
+                self.assertNotIn("〔a/b〕 4곳", out)
+                self.assertEqual((flash.asked, pro.asked), (0, 0))
+                self.assertEqual(work.load_record(1)["adjudicate_stats"], stats)
+                r = work.load_record(1); r["adjudications"] = r["adjudications"][:1]; work.save_record(1, r)   # 1쪽에 아직 묻지 않은 자리 하나
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    self.assertEqual(cli.cmd_adjudicate(args, work, doc, standalone=True), 0)
+                self.assertIn("1쪽 · 〔a/b〕 1곳", buf.getvalue())
+                self.assertEqual(flash.asked, 1)
+                self.assertEqual(work.load_record(2)["adjudicate_stats"], stats)                               # 물을 것이 없는 쪽은 그대로
+        finally:
+            cli.make_glyph_readers = old
+
     def test_run_adaptive_throttles_and_stops_on_fatal(self):
         import contextlib, io
         from yeone_ocr import cli
@@ -815,6 +1054,10 @@ class ProgressTracker(unittest.TestCase):
         t = Tracker("run", now=0.0)
         t.update("build", 3, 5); self.assertIn("문서 만들기 3/4쪽", t.text(now=1.0))    # 전체 5 = 4쪽 + 조립 한 번
         t.update("build", 4, 5); self.assertIn("문서 만들기 · 문서 조립", t.text(now=1.0))
+        f = t.frac; t.update("normalize", 1200, 9000)                                  # 문서 조립 중 문맥 교정: 막대는 그대로, 글로 몇 건째인지
+        self.assertEqual(t.frac, f); self.assertIn("문서 만들기 · 문맥 교정 1,200/9,000건", t.text(now=1.0))
+        self.assertEqual(t.eta(now=500.0), ""); self.assertIn("지난 시간", t.live_text(now=500.0))   # 판독 속도로 '약 1분' 이라 하지 않는다
+        t.update("normalize", 9000, 9000); self.assertIn("문서 만들기 · 문서 조립", t.text(now=1.0))
         t.update("review", 0, 1); self.assertTrue(t.text(now=1.0).endswith("검수 화면"))  # 0/1쪽 같은 뜻 없는 셈은 빼고
         i = Tracker("install", now=0.0)
         self.assertAlmostEqual(i.update("resolve", 10, 10), 0.3)                       # 확인만 끝나면 30%(예전: 몇 초 만에 90%)

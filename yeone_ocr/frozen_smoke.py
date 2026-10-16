@@ -15,6 +15,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+import time
 import traceback
 
 
@@ -49,6 +50,7 @@ def run(report_path: Path) -> int:
         from .normalization import rule_data
         from .prompts import load_guide
         from .collate.reading import reading
+        from .presets import resolve_preset, BUILTIN
         from opencc import OpenCC
         import certifi
         guide = load_guide()
@@ -61,7 +63,9 @@ def run(report_path: Path) -> int:
         assert korean == "대계", korean
         rules = rule_data()
         assert len(rules["rules"]) >= 100
-        return {"guide_chars": len(guide), "msr_rules": len(rules["rules"]), "hanja": korean, "opencc": "漢書"}
+        assert all(resolve_preset(i).label for i in BUILTIN)                # 짜임 규칙 내장 파일(data/preset_*.json)이 꾸러미에 — 없으면 本草 짜임을 잃는다
+        assert resolve_preset("kaibao").source_re.search("所在有之。　唐附")
+        return {"guide_chars": len(guide), "msr_rules": len(rules["rules"]), "hanja": korean, "opencc": "漢書", "presets": list(BUILTIN)}
     check("bundled-data", data_probe)
 
     def sdk_probe():
@@ -203,6 +207,197 @@ def run(report_path: Path) -> int:
             assert (work / "out" / "fixture_normalization.html").is_file()
             return {"pipeline": "mock PDF → OCR records → HWPX/DOCX → normalization/review", "network_calls": 0}
         check("offline-ocr-pipeline", pipeline_probe)
+
+        def comparison_project_probe():
+            from .comparison import ComparisonProject
+            from ab_ocr.ocr import file_sha256
+            source = folder / "image.png"
+            project = ComparisonProject.open(source)
+            source_hash = file_sha256(source)
+            texts = {"tesseract": "漢樂一\ufe00，", "rapidocr": "漢樂一\ufe00，", "easyocr": "漢樂一\ufe00。"}
+            for engine, text in texts.items():
+                raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
+                       "coordinate_system": "rendered-image pixels, xyxy",
+                       "text": text, "words": [{"text": text, "bbox": [1, 1, 63, 47],
+                           "confidence": None, "block": 1, "paragraph": 1, "line": 1}],
+                       "source_path": str(source), "source_sha256": source_hash,
+                       "page_number": 1, "image_width": 64, "image_height": 48,
+                       "engine_version": "offline-smoke-fixture", "languages": "chi_tra",
+                       "psm": 6 if engine == "tesseract" else None, "duration_seconds": 0,
+                       "preprocessing": {}, "engine_metadata": {"synthetic": True}}
+                project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                                 "engine_root": None, "policy": "local-three-engine-v1"})
+            original_runs = project.page(1)["runs"]
+            suggestions = project.compare_page(1, baseline="tesseract")
+            candidate = next(item for item in suggestions if item["candidates"]["rapidocr"] != item["baseline_text"])
+            project.accept_candidate(1, candidate["id"], "rapidocr")
+            assert project.text(1) != texts["tesseract"]
+            assert project.undo_edit(1)
+            assert project.text(1) == texts["tesseract"]
+            corrected = "人手校正，樂一\ufe00。\n한글 원문"
+            project.set_text(1, corrected, reason="offline-smoke-human-fixture")
+            target = folder / "comparison.yeone-compare.json"
+            project.save(target)
+            reopened = ComparisonProject.load(target)
+            assert reopened.text(1) == corrected
+            assert reopened.page(1)["runs"] == original_runs
+            assert [edit["kind"] for edit in reopened.page(1)["edits"]] == ["candidate", "undo", "manual"]
+            recovery = folder / "comparison-recovery.yeone-compare.json"
+            reopened.save_recovery(recovery)
+            assert ComparisonProject.load(recovery).text(1) == corrected
+            assert file_sha256(source) == source_hash
+            return {"raw_runs": 3, "unicode": "compatibility ideograph and variation selector preserved",
+                    "audit": "candidate → undo → manual", "storage": "project and recovery reopen", "network_calls": 0}
+        check("local-comparison-project", comparison_project_probe)
+
+        def comparison_ai_probe():
+            from types import SimpleNamespace
+            from .comparison import ComparisonProject
+            from .comparison_ai import AISettings, ReviewPolicy, prepare_plan, run_plan
+            from ab_ocr.ocr import file_sha256
+            source = folder / "image.png"
+            project = ComparisonProject.open(source)
+            original = "误汉,樂一\ufe00한글"
+            for engine, text in (("tesseract", original), ("rapidocr", "论汉,樂一\ufe00한글"),
+                                 ("easyocr", "论汉,樂一\ufe00한글")):
+                raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
+                       "coordinate_system": "rendered-image pixels, xyxy", "text": text,
+                       "words": [{"text": text, "bbox": [1, 1, 63, 47], "confidence": None,
+                                  "block": 1, "paragraph": 1, "line": 1}],
+                       "source_path": str(source), "source_sha256": file_sha256(source), "page_number": 1,
+                       "image_width": 64, "image_height": 48, "engine_version": "offline-ai-fixture",
+                       "languages": "chi_tra", "psm": 6 if engine == "tesseract" else None,
+                       "duration_seconds": 0, "preprocessing": {}, "engine_metadata": {"synthetic": True}}
+                project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                                 "engine_root": None, "policy": "local-three-engine-v1"})
+            project.compare_page(1, baseline="tesseract")
+            raw_runs = project.page(1)["runs"]
+            settings = AISettings(provider="openai", model="offline-vision-fixture", max_calls=2)
+            policy = ReviewPolicy(traditional=True, punctuation=True)
+            plan = prepare_plan(project, [1], policy, settings=settings)
+            assert plan.summary["calls"] == 2
+            requests = []
+            def request(**kwargs):
+                requests.append(kwargs)
+                assert kwargs["model"] == settings.model and kwargs["store"] is False
+                parts = kwargs["input"][0]["content"]
+                assert any(item["type"] == "input_image" for item in parts)
+                prompt = parts[0]["text"]
+                data = json.loads(prompt.split("Source DATA (JSON):\n", 1)[1].rsplit("\nReturn JSON", 1)[0])
+                items = []
+                for target in data["targets"]:
+                    patches = [(0, 1, "误", "论", "recognition")] if data["phase"] == "visual" else [
+                        (0, 1, "误", "論", "traditional"), (1, 2, "汉", "漢", "traditional"),
+                        (2, 3, ",", "，", "punctuation")]
+                    proposals = [{"start": start, "end": end, "before": before, "after": after,
+                                  "kind": kind, "reason": "offline synthetic protocol fixture", "uncertain": False}
+                                 for start, end, before, after, kind in patches
+                                 if target["start"] <= start <= end <= target["end"]]
+                    items.append({"target_id": target["id"], "uncertain": False,
+                                  "note": "offline fixture", "proposals": proposals})
+                return SimpleNamespace(output_text=json.dumps({"items": items}, ensure_ascii=False),
+                                       status="completed", usage=None, model=settings.model, id="offline-response")
+            client = SimpleNamespace(responses=SimpleNamespace(create=request), close=lambda: None)
+            checkpoints = []
+            outcome = run_plan(project, plan, api_key="offline-fixture-key",
+                               client_factory=lambda *_: client, on_result=checkpoints.append)
+            assert outcome["completed"] == 2 and outcome["failed"] == 0 and len(requests) == 2
+            assert len(checkpoints) == 2 and project.text(1) == original
+            reviews = project.page(1)["ai_reviews"]
+            assert len(reviews) == 2 and project.page(1)["runs"] == raw_runs
+            for ending in ("論", "漢", "，"):
+                proposal = next(item for item in project.ai_proposals(1) if item["after"] == ending)
+                project.accept_ai_proposal(1, proposal["review_id"], proposal["id"])
+            assert project.text(1) == "論漢，樂一\ufe00한글"
+            for _ in range(3):
+                assert project.undo_edit(1)
+            assert project.text(1) == original and project.page(1)["ai_reviews"] == reviews
+            target = folder / "ai-comparison.yeone-compare.json"
+            project.save(target)
+            reopened = ComparisonProject.load(target)
+            assert reopened.page(1)["runs"] == raw_runs and reopened.page(1)["ai_reviews"] == reviews
+            assert "offline-fixture-key" not in target.read_text(encoding="utf-8")
+            resumed = prepare_plan(reopened, [1], policy, settings=settings)
+            assert resumed.summary["calls"] == 0
+            return {"stages": "image disagreement → whole-page traditional/punctuation proposals",
+                    "mock_requests": 2, "human_accepts_and_undos": 3, "raw_and_ai_records": "unchanged",
+                    "storage": "reopened; credential excluded; completed requests reused", "network_calls": 0}
+        check("comparison-ai-proposals-offline", comparison_ai_probe)
+
+        def comparison_resources_probe():
+            from ab_ocr.runtime import resource_root, worker_path
+            checked = []
+            for engine in ("rapidocr", "easyocr"):
+                worker = worker_path(engine)
+                assert worker.is_file(), f"Missing application-owned worker: {worker.name}"
+                compile(worker.read_text(encoding="utf-8"), worker.name, "exec")
+                checked.append(worker.name)
+            for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py",
+                         "rapidocr-lock.json", "install_easyocr.py", "easyocr-lock.json"):
+                resource = resource_root() / "scripts" / name
+                assert resource.is_file(), f"Missing installer resource: {name}"
+                if name.endswith(".json"):
+                    assert isinstance(json.loads(resource.read_text(encoding="utf-8")), dict)
+                else:
+                    compile(resource.read_text(encoding="utf-8"), name, "exec")
+                checked.append(name)
+            return {"application_resources": checked, "external_models_loaded": False, "network_calls": 0}
+        check("local-comparison-worker-resources", comparison_resources_probe)
+
+        def comparison_cli_probe():
+            from .comparison_cli import parse_pages
+            from .cli import build_parser
+            assert parse_pages("1-2,4", 4) == [1, 2, 4]
+            rejected = []
+            for invalid in ("0", "5", "3-1", "1-", "wrong"):
+                try:
+                    parse_pages(invalid, 4)
+                except ValueError:
+                    rejected.append(invalid)
+                else:
+                    raise AssertionError("Invalid page scope was accepted")
+            args = build_parser().parse_args(["compare-engines", str(folder / "image.png"),
+                                              "--pages", "1", "--profile", "mixed", "--direction", "vertical"])
+            assert callable(args.fn) and args.profile == "mixed" and args.direction == "vertical"
+            return {"command": "compare-engines", "strict_invalid_ranges_rejected": len(rejected),
+                    "ocr_executed": False, "network_calls": 0}
+        check("local-comparison-cli-scope", comparison_cli_probe)
+
+        def comparison_editor_probe():
+            import tkinter as tk
+            from .comparison import ComparisonProject
+            from .comparison_editor import ComparisonEditor
+            project = ComparisonProject.load(folder / "comparison.yeone-compare.json")
+            original = project.text(1)
+            raw_runs = project.page(1)["runs"]
+            root = tk.Tk()
+            root.withdraw()
+            editor = None
+            try:
+                editor = ComparisonEditor(root, project=project, work_dir=folder / "editor-work",
+                                          engine_root=folder / "no-installed-models")
+                editor.withdraw()
+                deadline = time.monotonic() + 5
+                while editor._preview is None and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(.02)
+                assert editor._preview is not None, "Original image preview did not render"
+                assert editor.master is root and isinstance(editor, tk.Toplevel)
+                editor.text.insert("end-1c", "，確認")
+                editor.text.edit_modified(True)
+                editor._commit_text()
+                assert project.text(1) == original + "，確認"
+                editor.undo_edit()
+                assert project.text(1) == original
+                assert project.page(1)["runs"] == raw_runs
+                assert editor.request_close()
+                return {"window": "hosted Toplevel", "preview": "rendered original",
+                        "editing": "manual change and undo; raw runs unchanged", "network_calls": 0}
+            finally:
+                if editor is not None and editor.winfo_exists():
+                    editor.destroy()
+                root.destroy()
+        check("local-comparison-editor-offline", comparison_editor_probe)
 
     report["ok"] = all(item["ok"] for item in report["checks"])
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

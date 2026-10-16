@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source_project": "AB_OCR",
+  "source_version": "0.3.0",
+  "source_files": {
+    "ab_ocr/__init__.py": "6f6885076e886e1223a9fe4235080834b41bfe554a82a5dbcc6bba5334d5b72c",
+    "ab_ocr/ocr.py": "bc8d3e9cfbd0b63ffd4619c1d10264f1dc405ee73990efb5456eac8979fc2072",
+    "ab_ocr/local_engines.py": "b58a6b588d79fddfc93ab099ee3d1c54a9aab23fdf7d57acb3b07c6d13d61459",
+    "ab_ocr/rapidocr_worker.py": "d9ebaea0b9f7698bc982f92d3b723d2b52607e3b7d77f3f97f185075b04d8843",
+    "ab_ocr/easyocr_worker.py": "0ab43a42363961fe2dcc73fd018b0161082c04360dbbcdcd9b4e5f26c00ec221",
+    "ab_ocr/evaluation.py": "e4b7f590b4c814e5a7693e4166eaf6df60896a05efd1a3f02559dffc069454e1",
+    "ab_ocr/reports.py": "59ca70930e6e620f9992aa1d04f661e49024236c498c9dfc367824765fe8b3b0",
+    "ab_ocr/document.py": "11998b6887ccec9df557cc56bd6a5703148c1dea0466b30e08c57c950f101148",
+    "ab_ocr/benchmark.py": "3aa242da69fe107688c82e0c638c18b24c9292bbe1e74f1ca6dea3e489d39bae",
+    "scripts/install_tesseract.py": "671bc898f104fde97ab47c6f28646eee834eeaca6ea9f462acb92dea510ef31c",
+    "scripts/tesseract-lock.json": "c55fd9626c0640dceec582a279ea8383f1af0ea873a8593a41df68e77c49fb06",
+    "scripts/install_rapidocr.py": "f0034e7725088649c97ea84988c75df8fc58cbec544d616b47feddb0786a998f",
+    "scripts/install_easyocr.py": "2f6418908f62d0542b453c4ac9ce35537d4a757930b265cf46d762562d4041e8",
+    "scripts/easyocr-lock.json": "f0c0571af869de029f7a359c6dd1d3378fe7ecca9e18d2f1079d6403227434ef"
+  },
+  "adaptations": [
+    "Explicit engine homes per call; no source-project imports",
+    "Frozen resource worker paths and isolated subprocess Python",
+    "Standalone installers accept --root",
+    "Python 3.10 compatible worker hashing"
+  ],
+  "private_documents_included": false,
+  "model_files_included": false
+}

@@ -1,0 +1,2 @@
+# The historical reference manifest records the original bytes, including CRLF.
+/references/AB_OCR_0.3.0/** -text whitespace=cr-at-eol

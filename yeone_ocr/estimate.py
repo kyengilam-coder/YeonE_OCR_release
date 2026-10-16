@@ -2,13 +2,14 @@
 
 Gemini 기준 기본값은 768×768 타일마다 258 토큰이다(작은 이미지는 258). 다른 제공사는 이 값을 참고치로만 쓴다.
 지침 전문은 호출마다 함께 들어가며, Gemini 지침 캐시를 쓰면 그 부분은 캐시 입력 단가로 과금된다.
-단가는 내장 요금표(PRICES, 기준일 PRICES_DATE)에서 모델 이름으로 찾고,
+단가는 내장 요금표(PRICES, 기준일 PRICES_DATE · Gemini 는 PRICES_DATE_GEMINI)에서 모델 이름으로 찾고,
 사용자가 설정에 넣은 값이 있으면 그것을 먼저 쓴다. 환율은 무료 공개 API 로 자동 조회하고 실패하면 기본값을 쓴다.
 추정일 뿐이며, 생각(thinking) 토큰은 출력으로 과금되어 편차가 크다. 캐시 보관료(시간당 몇 센트)는 넣지 않는다.
 """
 from __future__ import annotations
 import json, math, re, urllib.request
-from pathlib import Path
+
+from .providers import provider_of_model
 
 TILE, TOKENS_PER_TILE = 768, 258
 CHARS_PER_TOKEN = 1.3            # 한글·한자 위주 글의 대략치
@@ -18,8 +19,15 @@ PROMPT_TOK = 300                 # 지시문(지침 제외) 토큰
 THINK_HIGH = 2.5                 # pro 계열 1차(영역 분류) 생각 토큰까지 넣은 높은 쪽 배수
 THINK_HIGH_LOW = 1.5             # 2차(생각 줄임) 높은 쪽 배수
 
-PRICES_DATE = "2026-10"
-# USD / 100만 토큰. in=입력(텍스트·이미지, 20만 토큰 이하 구간), out=출력(생각 토큰 포함), cached=캐시 입력. 요금표: https://ai.google.dev/pricing
+PRICES_DATE = "2026-10-15"          # Anthropic·OpenAI 줄을 공식 요금표·모델 페이지에서 확인한 날
+PRICES_DATE_GEMINI = "2026-10"      # Gemini 줄을 확인한 때(앞 판) — 2026-10-15 에는 요금표에 닿지 못해 다시 확인하지 못함
+PRICE_SOURCES = {"gemini": "https://ai.google.dev/gemini-api/docs/pricing", "anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
+                 "openai": "https://developers.openai.com/api/docs/models/gpt-4.1 (모델마다 같은 꼴의 모델 페이지 — Standard 단가)"}
+# USD / 100만 토큰. in=입력(텍스트·이미지, 20만 토큰 이하 구간), out=출력(생각 토큰 포함), cached=캐시 입력(캐시 적중). 출처는 PRICE_SOURCES.
+# Anthropic 은 PRICES_DATE 에 공식 요금표에서 확인한 것만(은퇴·제한 공개 모델은 뺌). Gemini 는 PRICES_DATE_GEMINI 의 공식 요금표 값.
+# 가리키는 모델이 바뀌는 별칭(gemini-pro-latest·gemini-flash-latest·gemini-flash-lite-latest — 2026년에 3.x 로 옮겨 감)은 넣지 않는다(옛 단가로 싸게 보이지 않게
+# '단가 없음' → 직접 입력). OpenAI 는 공식 모델 페이지에서 확인한 네 모델만(gpt-4.1·gpt-4.1-mini·gpt-5·gpt-5-mini) — 그 밖의 모델은 직접 입력.
+# 창의 [단가·환율 고치기] 나 --price-in/--price-out 으로 넣은 값(cfg['prices'])이 언제나 먼저다.
 PRICES: dict[str, dict[str, float]] = {
     "gemini-3.1-pro":        {"in": 2.00, "out": 12.00, "cached": 0.20},
     "gemini-3-pro":          {"in": 2.00, "out": 12.00, "cached": 0.20},
@@ -30,9 +38,24 @@ PRICES: dict[str, dict[str, float]] = {
     "gemini-2.5-flash":      {"in": 0.30, "out": 2.50, "cached": 0.075},
     "gemini-2.0-flash-lite": {"in": 0.075, "out": 0.30, "cached": 0.019},
     "gemini-2.0-flash":      {"in": 0.10, "out": 0.40, "cached": 0.025},
-    "gemini-pro-latest":     {"in": 1.25, "out": 10.00, "cached": 0.31},
-    "gemini-flash-lite-latest": {"in": 0.10, "out": 0.40, "cached": 0.025},
-    "gemini-flash-latest":   {"in": 0.30, "out": 2.50, "cached": 0.075},
+    "claude-fable-5-1":      {"in": 10.00, "out": 50.00, "cached": 0.25},
+    "claude-fable-5":        {"in": 10.00, "out": 50.00, "cached": 1.00},
+    "claude-opus-5-5":       {"in": 4.00, "out": 20.00, "cached": 0.20},
+    "claude-opus-5":         {"in": 5.00, "out": 25.00, "cached": 0.50},
+    "claude-opus-4-8":       {"in": 5.00, "out": 25.00, "cached": 0.50},
+    "claude-opus-4-7":       {"in": 5.00, "out": 25.00, "cached": 0.50},
+    "claude-opus-4-6":       {"in": 5.00, "out": 25.00, "cached": 0.50},
+    "claude-opus-4-5":       {"in": 5.00, "out": 25.00, "cached": 0.50},
+    "claude-sonnet-5-5":     {"in": 2.00, "out": 10.00, "cached": 0.20},
+    "claude-sonnet-5":       {"in": 2.00, "out": 10.00, "cached": 0.20},
+    "claude-sonnet-4-6":     {"in": 3.00, "out": 15.00, "cached": 0.30},
+    "claude-sonnet-4-5":     {"in": 3.00, "out": 15.00, "cached": 0.30},
+    "claude-haiku-5-5":      {"in": 0.10, "out": 0.50, "cached": 0.01},      # 10만 토큰 이하 프롬프트 구간(이 프로그램의 호출은 훨씬 작다)
+    "claude-haiku-4-5":      {"in": 1.00, "out": 5.00, "cached": 0.10},
+    "gpt-4.1":               {"in": 2.00, "out": 8.00, "cached": 0.50},
+    "gpt-4.1-mini":          {"in": 0.40, "out": 1.60, "cached": 0.10},
+    "gpt-5":                 {"in": 1.25, "out": 10.00, "cached": 0.125},
+    "gpt-5-mini":            {"in": 0.25, "out": 2.00, "cached": 0.025},
 }
 DEFAULT_FX_KRW = 1400.0          # 환율 조회에 실패했을 때
 FX_URLS = ("https://open.er-api.com/v6/latest/USD", "https://api.frankfurter.app/latest?from=USD&to=KRW")
@@ -50,11 +73,14 @@ def _norm_model(model: str) -> str:
 
 
 def default_price(model: str) -> dict | None:
-    """내장 요금표에서 모델 이름에 가장 길게 들어맞는 항목. 없으면 None."""
+    """내장 요금표에서 모델 이름에 들어맞는 항목. 없으면 None.
+    Gemini 는 가장 길게 들어맞는 앞머리(gemini-3.1-pro-preview → gemini-3.1-pro), 다른 제공사는 이름이 같거나 날짜 꼬리만 붙은 것만
+    (claude-sonnet-4-5-20250929) — 앞머리로 찾으면 claude-opus-5-6 같은 새 모델을 claude-opus-5 단가로 잘못 셈한다."""
     m = _norm_model(model)
     best = None
     for key in PRICES:
-        if m.startswith(key) and (best is None or len(key) > len(best)):
+        hit = m.startswith(key) if key.startswith("gemini-") else (m == key or re.fullmatch(re.escape(key) + r"-(\d{8}|\d{4}-\d{2}-\d{2})", m))
+        if hit and (best is None or len(key) > len(best)):
             best = key
     return dict(PRICES[best], key=best) if best else None
 
@@ -77,28 +103,29 @@ def resolve_price(model: str, prices: dict | None) -> dict | None:
         return {"in": pin, "out": pout, "cached": cached, "source": "직접 입력", "key": model}
     d = default_price(model)
     if d:
-        d["source"] = f"내장 요금표 {PRICES_DATE}"
+        d["source"] = f"내장 요금표 {PRICES_DATE_GEMINI if d['key'].startswith('gemini-') else PRICES_DATE}"
     return d
 
 
 def guess_second_model(primary: str, second: str) -> str:
-    """비용 어림용 2차 모델 이름. 'auto' 는 1차와 같은 세대(또는 가장 가까운 아래 세대)의 flash 로 본다."""
+    """비용 어림용 2차 모델 이름. 'auto' 는 실행 때의 자동 선택(reader_gemini.pick_second_model)과 같은 규칙을 요금표 이름에 쓴다: 1차와 같은 세대의
+    flash(lite 제외), 없으면 더 새 세대 flash 가운데 가장 새 것, 그것도 없으면 1차 모델 그대로(gemini-3.1-pro 는 같은 세대 flash 가 없어 3.1-pro 로 2차를 읽는다
+    — 아래 세대 flash 로 셈하면 2차가 4배 싸게 보인다). 1차가 flash 면 1차 그대로. 실제 선택은 실행 때 모델 목록으로 한다(진행 기록 '2차 판독 모델 자동 선택')."""
     s = (second or "").strip()
     if s and s.lower() != "auto":
         return s
     if not s:
         return primary
     p = _norm_model(primary)
-    if "flash" in p:
-        return primary
     m = re.search(r"gemini-(\d+(?:\.\d+)?)", p)
-    ver = float(m.group(1)) if m else 0.0
-    cands = []
-    for key in PRICES:
-        mm = re.search(r"gemini-(\d+(?:\.\d+)?)-flash$", key)
-        if mm and float(mm.group(1)) <= ver:
-            cands.append((float(mm.group(1)), key))
-    return max(cands)[1] if cands else primary
+    if "flash" in p or not m:
+        return primary
+    flashes = [(float(mm.group(1)), key) for key in PRICES if (mm := re.fullmatch(r"gemini-(\d+(?:\.\d+)?)-flash", key))]
+    same = [key for _, key in flashes if key.startswith(f"gemini-{m.group(1)}-")]
+    if same:
+        return same[0]
+    newer = [(v, key) for v, key in flashes if v >= float(m.group(1))]
+    return max(newer)[1] if newer else primary
 
 
 def fetch_fx_krw(timeout: float = 4.0) -> tuple[float, str] | None:
@@ -123,15 +150,7 @@ def _cost(tok_in: float, tok_cached: float, tok_out: float, price: dict) -> floa
     return tok_in / 1e6 * price["in"] + tok_cached / 1e6 * price.get("cached", price["in"]) + tok_out / 1e6 * price["out"]
 
 
-def _model_provider(model: str) -> str:
-    name = _norm_model(model).split(" (")[0]
-    if name.startswith("gemini-"):
-        return "gemini"
-    if name.startswith("claude-"):
-        return "anthropic"
-    if name.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4")):
-        return "openai"
-    return ""
+_model_provider = provider_of_model           # 모델 이름 → 제공사 짐작(문맥 교정 재사용 기록도 같은 규칙으로 — providers 한곳)
 
 
 def _compatible_usage(record: dict, reader: str, model: str) -> bool:
@@ -143,6 +162,9 @@ def _compatible_usage(record: dict, reader: str, model: str) -> bool:
     names = list((record.get("usage") or {}).get("by_model") or {})
     if any(_model_provider(name) not in ("", reader) for name in names):
         return False
+    reads = {_norm_model(n.split(" (")[0]) for n in names if "(3차" not in n}
+    if model and reads and _norm_model(model) not in reads:                # 기록에 1차 모델 칸이 없는 옛 기록: 판독 실측 모델 이름으로 가린다
+        return False                                                       # (다른 모델의 토큰을 그 모델 단가로 셈해 '지금 모델' 비용처럼 보이지 않게)
     # 제공사 기록이 없던 옛 Gemini 기록도 이어 읽는다. 새 제공사에서는 출처 없는 실측을 쓰지 않는다.
     return reader == "gemini" or record.get("reader") == reader or any(_model_provider(name) == reader for name in names)
 
@@ -150,8 +172,9 @@ def _compatible_usage(record: dict, reader: str, model: str) -> bool:
 def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pass: bool = True, model: str = "",
              second_model: str = "", use_cache: bool = True, prices: dict | None = None, fx_krw: float | None = None,
              fx_source: str = "", records: list[dict] | None = None, page_size_px: tuple[int, int] | None = None,
-             guide_chars: int | None = None, reader: str = "gemini") -> dict:
-    """쪽 범위에 대한 호출·토큰·비용 어림. records 에 usage 가 있는 쪽이 있으면 그 평균으로 보정한다."""
+             guide_chars: int | None = None, reader: str = "gemini", force: bool = False) -> dict:
+    """쪽 범위에 대한 호출·토큰·비용 어림. records 에 usage 가 있는 쪽이 있으면 그 평균으로 보정한다.
+    force(다시 판독)면 고른 쪽을 모두 새로 읽는 셈이지만 평균은 그대로 records 에서 낸다. 단계 줄(rows)의 cached_low·cached_high 는 그 가운데 캐시 입력."""
     from .pdfio import open_pdf, page_image
     from .prompts import system_prompt
     n = len(pages)
@@ -163,15 +186,18 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
            "rows": [], "price_lines": [], "notes": []}
     if n == 0:
         return out
-    done = {r["pdf_page"] for r in (records or []) if "pass1" in r and not r.get("pass2_failed")}
+    done = set() if force else {r["pdf_page"] for r in (records or []) if "pass1" in r and not r.get("pass2_failed")}
     todo = [p for p in pages if p not in done]
     out["already_read"] = n - len(todo)
-    redo = sorted(r["pdf_page"] for r in (records or []) if r.get("pass2_failed") and r["pdf_page"] in pages)
+    redo = [] if force else sorted(r["pdf_page"] for r in (records or []) if r.get("pass2_failed") and r["pdf_page"] in pages)
     if redo:                                               # 2차가 덜 된 쪽은 다시 읽는다 — 보통 덜 된 영역의 2차만이라 실제는 이보다 적다(1차 설정·모델이 바뀌었으면 1차도)
         out["notes"].append(f"2차가 덜 된 쪽 {len(redo)}개는 다 읽는 셈으로 잡았습니다(실제로는 덜 된 영역의 2차만 다시 묻는 일이 많아 더 적음).")
     m2 = (guess_second_model(model, second_model) if reader == "gemini" else
           model if (second_model or "").strip().lower() in ("", "auto") else second_model.strip()) if second_pass else model
     out["second_model"] = m2
+    if second_pass and reader == "gemini" and (second_model or "").strip().lower() == "auto" and m2 == model and "flash" not in _norm_model(model):
+        out["notes"].append(f"2차 auto: 요금표에 1차와 같은 세대(또는 더 새) flash 가 없어 실행 때처럼 1차 모델({model})로 2차를 읽는 셈입니다"
+                            "(실행 때 모델 목록에 그런 flash 가 있으면 그것을 고르며 진행 기록 '2차 판독 모델 자동 선택' 에 남습니다).")
     p1 = resolve_price(model, prices)
     p2 = resolve_price(m2, prices)
     usd_low = usd_high = 0.0
@@ -220,7 +246,8 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
                                 "model": name, "calls": round(b.get("calls", 0) * scale),
                                 "in_low": round(b["prompt_tokens"] * scale * 0.85), "in_high": round(b["prompt_tokens"] * scale * 1.15),
                                 "out_low": round(b["out"] * scale * 0.7), "out_high": round(b["out"] * scale * 1.3),
-                                "usd_low": c * 0.8 if c is not None else None, "usd_high": c * 1.25 if c is not None else None})
+                                "usd_low": c * 0.8 if c is not None else None, "usd_high": c * 1.25 if c is not None else None,
+                                "cached_low": round(b["cached_tokens"] * scale), "cached_high": round(b["cached_tokens"] * scale)})
         if not any(u.get("by_model") for u in measured) and m2 != model:
             out["notes"].append("이전 판 기록이라 모델별 실측이 없어 전부 1차 단가로 계산했습니다.")
     else:
@@ -255,12 +282,15 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
         lo2, hi2 = pass_cost(in2, out2, p2, 1.4, THINK_HIGH_LOW) if second_pass else (0.0, 0.0)
         if priced:
             usd_low, usd_high = lo1 + lo2, hi1 + hi2
+        g_t = round(guide_tok * t) if use_cache else 0                       # 지침 캐시 입력(쪽마다 1차·2차 각 한 번)
         out["rows"].append({"label": "1차 · 쪽 전체 판독", "model": model, "calls": t, "in_low": round(in1 * t), "in_high": round(in1 * t * 1.4),
-                            "out_low": round(out1 * t), "out_high": round(out1 * THINK_HIGH * t), "usd_low": lo1, "usd_high": hi1})
+                            "out_low": round(out1 * t), "out_high": round(out1 * THINK_HIGH * t), "usd_low": lo1, "usd_high": hi1,
+                            "cached_low": g_t, "cached_high": g_t})
         if second_pass:
             out["rows"].append({"label": "2차 · 확대 조각 확인", "model": m2 + (" (auto)" if (second_model or "").strip().lower() == "auto" else ""),
                                 "calls": t, "in_low": round(in2 * t), "in_high": round(in2 * t * 1.4),
-                                "out_low": round(out2 * t), "out_high": round(out2 * THINK_HIGH_LOW * t), "usd_low": lo2, "usd_high": hi2})
+                                "out_low": round(out2 * t), "out_high": round(out2 * THINK_HIGH_LOW * t), "usd_low": lo2, "usd_high": hi2,
+                                "cached_low": g_t, "cached_high": g_t})
 
     if priced:
         out["usd_low"], out["usd_high"] = usd_low, usd_high
@@ -277,7 +307,8 @@ def estimate(pdf_path: str, pages: list[int], *, upscale: float = 2.0, second_pa
         names = ", ".join(sorted(missing_prices))
         out["notes"].append(f"단가를 모르는 모델({names})이 있어 총금액을 내지 못했습니다. 해당 모델의 입력·출력 단가(USD/100만 토큰)를 직접 넣으면 계산합니다.")
     out["notes"].append("추정치입니다. 제공사별 이미지 처리·추론 토큰·캐시 정책에 따라 실제 청구액은 달라지며, 캐시 보관료는 넣지 않았습니다.")
-    out["notes"].append("최종 HWPX·DOCX의 한자 문맥 교정에는 추가 모델 호출이 생길 수 있으며, 그 비용은 이 OCR 어림에 포함되지 않습니다.")
+    out["notes"].append("판독 뒤 이어지는 3차 글자 판별(〔a/b〕 자리마다 자형 조각·합의 의심)과 최종 HWPX·DOCX 의 한자 문맥 교정에는 추가 모델 호출이 생기며, "
+                        "그 비용은 이 OCR 어림에 포함되지 않습니다. 이미 판독한 쪽에서는 실행 전 확인 창이 그 수를 따로 보이고, 둘 다 [설정]에서 끌 수 있습니다.")
     return out
 
 

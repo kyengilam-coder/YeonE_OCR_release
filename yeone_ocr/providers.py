@@ -21,3 +21,16 @@ def provider_name(provider: str | None) -> str:
 def default_model(provider: str = "gemini") -> str:
     p = provider_name(provider)
     return os.environ.get(MODEL_ENV_KEYS[p], "").strip() or DEFAULT_MODELS[p]
+
+
+def provider_of_model(model: str | None) -> str:
+    """모델 이름으로 제공사를 짐작한다: gemini-→gemini · claude-→anthropic · gpt-·chatgpt-·o1·o3·o4→openai, 모르면 ''.
+    ' (3차)' 같은 꼬리말과 'models/' 앞머리는 떼고 본다(사용량 기록의 모델 열쇠·재사용 기록의 모델 이름)."""
+    name = (model or "").strip().lower().removeprefix("models/").split(" (")[0]
+    if name.startswith("gemini-"):
+        return "gemini"
+    if name.startswith("claude-"):
+        return "anthropic"
+    if name.startswith(("gpt-", "chatgpt-", "o1", "o3", "o4")):
+        return "openai"
+    return ""

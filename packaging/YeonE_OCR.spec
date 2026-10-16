@@ -23,6 +23,16 @@ VERSION_PARTS = tuple(int(part) for part in VERSION.split(".")) + (0,)
 
 datas = collect_data_files("yeone_ocr", includes=["지침.md", "data/*.json", "assets/*.ico", "assets/*.png", "assets/*.svg"])
 datas += [(str(ROOT / "README.md"), ".")]
+# Isolated engine Python processes need real script files rather than modules
+# inside the executable's PYZ. Keep this explicit resource allowlist; never
+# collect engine environments, models, work records or private source documents.
+for name in ("rapidocr_worker.py", "easyocr_worker.py"):
+    datas.append((str(ROOT / "ab_ocr" / name), "ab_ocr"))
+for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py", "rapidocr-lock.json",
+             "install_easyocr.py", "easyocr-lock.json"):
+    datas.append((str(ROOT / "scripts" / name), "scripts"))
+for name in ("LOCAL_OCR.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
+    datas.append((str(ROOT / "docs" / name), "docs"))
 for name in ("THIRD_PARTY_NOTICES.txt", "requirements-windows.lock.txt"):
     resource = ROOT / "packaging" / name
     if resource.exists():
@@ -50,12 +60,12 @@ def runtime_module(name):
 
 # SDKs resolve resource/model classes dynamically. These explicit packages also
 # include hwpx/data/Skeleton.hwpx, OpenCC dictionaries, hanja/table.yml and DOCX templates.
-for package in ("yeone_ocr", "google.genai", "openai", "anthropic", "hwpx", "opencc", "hanja", "docx"):
+for package in ("yeone_ocr", "ab_ocr", "google.genai", "openai", "anthropic", "hwpx", "opencc", "hanja", "docx"):
     package_datas, package_binaries, package_imports = collect_all(
         package, include_py_files=False, filter_submodules=runtime_module,
         exclude_datas=["**/tests/**", "**/test/**", "**/examples/**", "**/__pycache__/**"], on_error="warn once")
     # Local resources were allowlisted above; never broaden that set implicitly.
-    if package != "yeone_ocr":
+    if package not in ("yeone_ocr", "ab_ocr"):
         datas += package_datas
     binaries += package_binaries
     hiddenimports += package_imports

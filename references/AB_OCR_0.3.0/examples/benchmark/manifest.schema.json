@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AB_OCR benchmark corpus manifest v1",
+  "type": "object",
+  "required": ["schema_version", "name", "engines", "pages"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "synthetic": {"type": "boolean", "default": false},
+    "metadata": {"type": "object"},
+    "engines": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["id"], "properties": {
+      "id": {"type": "string", "minLength": 1, "maxLength": 160},
+      "name": {"type": "string", "minLength": 1},
+      "version": {"type": ["string", "null"]},
+      "settings": {"type": "object"}, "metadata": {"type": "object"}
+    }}},
+    "pages": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["id", "reference", "split"], "properties": {
+      "id": {"type": "string", "minLength": 1, "maxLength": 160},
+      "reference": {"type": "string", "minLength": 1, "description": "UTF-8 text, relative to manifest directory; traversal outside is forbidden."},
+      "outputs": {"type": "object", "additionalProperties": {"type": ["string", "null"]}, "description": "Declared engine ID to UTF-8 output path. Omitted or null output is an explicit missing page, never a perfect score."},
+      "tags": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+      "split": {"enum": ["dev", "test"]}, "metadata": {"type": "object"}
+    }}}
+  }
+}

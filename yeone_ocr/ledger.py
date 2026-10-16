@@ -13,8 +13,8 @@
 from __future__ import annotations
 import json, re, collections
 from pathlib import Path
+from .marks import MARK_AB
 
-MARK_AB = re.compile(r"〔([^〔〕/]{1,2})/([^〔〕]{1,2})〕")
 CJK = re.compile(r"[一-鿿㐀-䶿豈-﫿]")
 
 
@@ -80,12 +80,12 @@ def ledger_text(led: dict, top: int = 30) -> list[str]:
         return ["- (판독 기록·대조 결과가 없어 장부가 비어 있음)"]
     out = [f"- 바탕: 판독 기록 {led.get('pages', 0)}쪽 · 책갈피 OCR 대조 {led.get('sections', 0)}구획 · 글자 쌍 {len(rows)}종 {sum(r['count'] for r in rows)}건",
            "- 장부는 '다르게 읽힌 자리'의 통계이며 어느 쪽이 맞는지는 원본 확인으로 정합니다(지침 21).", ""]
-    out.append("| 건수 | 출처 | 왼쪽 → 오른쪽 | 갈래 | 예 |")
+    out.append("| 건수 | 출처 | 글자 (출처 순서대로 ↔) | 갈래 | 예 |")
     out.append("|---|---|---|---|---|")
     for r in rows[:top]:
         ex = r["examples"][0]["ctx"] if r["examples"] else ""
         kinds = " ".join(f"{k}{v}" for k, v in sorted(r["kinds"].items())) if r.get("kinds") else ""
-        out.append(f"| {r['count']} | {r['source']} | {r['a']} → {r['b']} | {kinds} | {ex[:40]} |")
+        out.append(f"| {r['count']} | {r['source']} | {r['a']} ↔ {r['b']} | {kinds} | {ex[:40]} |")
     if len(rows) > top:
         out.append(f"| … | | {len(rows) - top}종 더 | | |")
     return out

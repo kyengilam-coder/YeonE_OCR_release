@@ -18,10 +18,10 @@ from typing import Callable
 import unicodedata
 
 from .blocks import Block
+from .marks import MARK_RE
 
 RULE_FILE = Path(__file__).with_name("data") / "normalization_260929.json"
 RULE_VERSION = "260929"
-MARK_RE = re.compile(r"〔[^〔〕]*〕")
 # 匹配大小寫는 원본 매크로가 0으로 지정: O뿐 아니라 o도 대상이다.
 _SAFE_FLAGS = {
     "MatchCase": 0, "AllWordForms": 0, "SeveralWords": 0, "UseWildCards": 0,
@@ -101,6 +101,59 @@ def rule_data() -> dict:
     if data.get("flags") != _SAFE_FLAGS or not data.get("rules"):
         raise ValueError("동봉된 MSR 치환 데이터가 손상되었거나 지원되지 않습니다.")
     return data
+
+
+def default_punctuation_rules() -> list[dict]:
+    """창에서 편집할 수 있는 기본 부호 규칙 사본. 순서와 공백을 보존한다."""
+    return [{"find": r["find"], "replace": r["replace"]}
+            for r in rule_data()["rules"] if _punctuation_rule(r)]
+
+
+def validate_punctuation_rules(value) -> list[dict]:
+    """부호·기호·공백의 순서 있는 리터럴 치환만 허용한다(코드/정규식 실행 없음)."""
+    if isinstance(value, dict):
+        value = value.get("rules")
+    if not isinstance(value, list):
+        raise ValueError("중문부호 규칙은 목록 또는 {\"rules\": [...]} 형식이어야 합니다.")
+    rules = []
+    for index, rule in enumerate(value, 1):
+        if not isinstance(rule, dict) or not isinstance(rule.get("find"), str) or not rule["find"]:
+            raise ValueError(f"중문부호 규칙 {index}: 찾을 문자열(find)을 입력하십시오.")
+        if not isinstance(rule.get("replace"), str):
+            raise ValueError(f"중문부호 규칙 {index}: 바꿀 문자열(replace)이 필요합니다(삭제는 빈 문자열).")
+        if set(rule) - {"id", "find", "replace"}:
+            raise ValueError(f"중문부호 규칙 {index}: find·replace 외 검색 옵션은 지원하지 않습니다.")
+        if not _punctuation_rule(rule):
+            raise ValueError(f"중문부호 규칙 {index}: 부호·기호·공백만 사용할 수 있습니다.")
+        rules.append(dict(id=f"custom-{index}", find=rule["find"], replace=rule["replace"]))
+    return rules
+
+
+def load_punctuation_rules(path: str | Path) -> list[dict]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"중문부호 규칙 파일을 읽을 수 없습니다: {path} ({type(exc).__name__})") from exc
+    return validate_punctuation_rules(value)
+
+
+@dataclass(frozen=True)
+class NormalizationOptions:
+    traditional: bool = True
+    yun: bool = True
+    punctuation: bool = True
+    # None=기본 부호 규칙, []=부호 치환 없음. 한자 MSR 후보는 traditional을 따른다.
+    punctuation_rules: list[dict] | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.traditional or self.yun or self.punctuation
+
+    def rules(self) -> list[dict]:
+        bundled = rule_data()["rules"]
+        punctuation = (validate_punctuation_rules(self.punctuation_rules)
+                       if self.punctuation_rules is not None else [r for r in bundled if _punctuation_rule(r)])
+        return ([r for r in bundled if not _punctuation_rule(r)] if self.traditional else []) + (punctuation if self.punctuation else [])
 
 
 def _opencc_converter() -> Callable[[str], str]:
@@ -290,11 +343,12 @@ def _semantic_proposals(result: TextResult, original: str, start: int, converted
                                          reason="겹치는 간체 후보를 확정하지 못하여 원문을 보존함", rule_ids=sorted(set(ids))))
 
 
-def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules: list[dict]) -> TextResult:
+def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules: list[dict],
+                  options: NormalizationOptions) -> TextResult:
     from .collate.zh import ambiguous_map
-    ambiguous = ambiguous_map()
+    ambiguous = ambiguous_map() if options.traditional else {}
     result = TextResult(text, list(range(start, start + len(text))))
-    converted = converter(text)
+    converted = converter(text) if options.traditional else text
     replacements = []
     # 1:多 글자와 云/雲은 원래 글자를 보존하고 아래에서 문맥 후보로 보낸다.
     if len(text) == len(converted):
@@ -326,7 +380,7 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
             matches.append((match.start(), match.end(), replace, {"rule_id": rule["id"]}))
         if matches:
             _replace_spans(result, matches, "msr")
-    for match in re.finditer("[云雲]", result.text):
+    for match in re.finditer("[云雲]", result.text) if options.yun else ():
         choice, reason = _yun_choice(result.text, match.start())
         # 「陶雲中暑…」의 雲中은 인용 경계를 가로지를 수도 있다. 어구 목록은
         # 참고 근거로만 주며, 모든 云/雲은 전체 앞뒤 문맥을 보는 모델이 결정한다.
@@ -338,9 +392,12 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
     return result
 
 
-def _prepare_text(text: str, converter: Callable[[str], str]) -> TextResult:
+def _prepare_text(text: str, converter: Callable[[str], str], rules: list[dict] | None = None,
+                  options: NormalizationOptions | None = None) -> TextResult:
     """본문만 정리하고 〔의심 후보/작업 표시〕는 원문 그대로 보존한다."""
-    rules = rule_data()["rules"]
+    options = options or NormalizationOptions()
+    if rules is None:
+        rules = options.rules()
     result = TextResult("", [], source_text=text)
     pos = 0
     # 닫지 않은 의심 괄호도 끝까지 보존한다.
@@ -351,7 +408,7 @@ def _prepare_text(text: str, converter: Callable[[str], str]) -> TextResult:
     if unclosed >= 0:
         segments.append((unclosed, len(text)))
     for begin, end in segments + [(len(text), len(text))]:
-        normal = _normal_plain(text[pos:begin], pos, converter, rules)
+        normal = _normal_plain(text[pos:begin], pos, converter, rules, options)
         offset = len(result.text)
         result.proposals.extend(dict(p, begin=p["begin"] + offset, end=p["end"] + offset) for p in normal.proposals)
         result.text += normal.text + text[begin:end]
@@ -362,7 +419,8 @@ def _prepare_text(text: str, converter: Callable[[str], str]) -> TextResult:
 
 
 def _resolve(results: list[TextResult], resolver: Callable | None, report: dict) -> None:
-    """문맥 후보를 32건씩 보내고, 요청한 ID와 정확히 같은 후보 문자열만 반영한다."""
+    """문맥 후보를 묶어(기본 32건, resolver.batch_size 가 있으면 그만큼) 보내고, 요청한 ID와 정확히 같은 후보 문자열만 반영한다.
+    resolver.progress(끝난 수, 전체 수)가 있으면 시작과 묶음마다 알린다(수천 건이면 오래 걸리므로)."""
     entries, requests = [], []
     for result in results:
         for proposal in result.proposals:
@@ -380,8 +438,12 @@ def _resolve(results: list[TextResult], resolver: Callable | None, report: dict)
             entries.append((result, proposal, request_id))
     decisions = {}
     if resolver is not None:
-        for begin in range(0, len(requests), 32):
-            batch = requests[begin:begin + 32]
+        size = max(1, int(getattr(resolver, "batch_size", 32) or 32))
+        tell = getattr(resolver, "progress", None)
+        if tell and requests:
+            tell(0, len(requests))
+        for begin in range(0, len(requests), size):
+            batch = requests[begin:begin + size]
             try:
                 response = resolver(batch)
                 if not isinstance(response, dict):
@@ -394,6 +456,8 @@ def _resolve(results: list[TextResult], resolver: Callable | None, report: dict)
                 # API의 예외 문자열에는 URL/키가 담길 수 있으므로 종류만 보고한다.
                 report.setdefault("resolver_errors", []).append(dict(type=type(exc).__name__,
                     count=len(batch), message="문맥 판별을 완료하지 못하여 원문을 보존했습니다."))
+            if tell:
+                tell(min(len(requests), begin + size), len(requests))
     replacements = {}
     for result, proposal, request_id in entries:
         begin, end = proposal["begin"], proposal["end"]
@@ -416,34 +480,42 @@ def _resolve(results: list[TextResult], resolver: Callable | None, report: dict)
 
 
 def normalize_text(text: str, *, converter: Callable[[str], str] | None = None,
-                   resolver: Callable | None = None) -> TextResult:
-    result = _prepare_text(text, converter or _opencc_converter())
+                   resolver: Callable | None = None, options: NormalizationOptions | None = None) -> TextResult:
+    options = options or NormalizationOptions()
+    converter = (converter or _opencc_converter()) if options.traditional else str
+    result = _prepare_text(text, converter, options.rules(), options)
     _resolve([result], resolver, {})
     return result
 
 
 def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | None = None,
-                     resolver: Callable | None = None) -> tuple[list[Block], dict]:
+                     resolver: Callable | None = None,
+                     options: NormalizationOptions | None = None) -> tuple[list[Block], dict]:
     """문서용 사본과 JSON으로 저장할 감사 기록을 돌려준다. 원본 Block/판독 기록은 변경하지 않는다.
 
     원래의 문자 위치를 추적하므로 MSR가 부호 뒤에 공백을 넣어도 색·밑줄·메모가 따라간다.
     여러 서식 run으로 갈라지기 전 문단 단위로 처리하여 어구 변환과 문맥 판별이 끊기지 않는다.
     """
-    converter = converter or _opencc_converter()
+    options = options or NormalizationOptions()
+    converter = (converter or _opencc_converter()) if options.traditional else str
     output = deepcopy(blocks)
     data = rule_data()
+    rules = options.rules()
     report = {"schema_version": 1, "rule_version": RULE_VERSION,
               "msr_source": data["source_name"], "msr_sha256": data["sha256"],
-              "rule_count": len(data["rules"]), "changes": [], "review": [], "blocks": [], "decisions": []}
+              "rule_count": len(rules), "changes": [], "review": [], "blocks": [], "decisions": [],
+              "options": {"traditional": options.traditional, "yun": options.yun, "punctuation": options.punctuation},
+              "punctuation_rules": [dict(r) for r in rules if _punctuation_rule(r)],
+              "custom_punctuation": options.punctuation_rules is not None}
     prepared = []
     for index, block in enumerate(output):
         where = dict(block=index, page=block.page, type=block.type)
         if block.type in ("para", "heading"):
-            prepared.append((block, None, _prepare_text(block.text, converter), block.text, where))
+            prepared.append((block, None, _prepare_text(block.text, converter, rules, options), block.text, where))
         elif block.type == "table":
             for ri, row in enumerate(block.rows):
                 for ci, cell in enumerate(row):
-                    prepared.append((block, (ri, ci), _prepare_text(cell, converter), cell, dict(**where, row=ri, column=ci)))
+                    prepared.append((block, (ri, ci), _prepare_text(cell, converter, rules, options), cell, dict(**where, row=ri, column=ci)))
     for _, _, result, _, location in prepared:
         result.location = location
     _resolve([item[2] for item in prepared], resolver, report)
@@ -456,20 +528,7 @@ def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | N
 
     for block, cell, result, old, where in prepared:
         if cell is None:
-            block.text = result.text
-            # 같은 원문 글자에서 나온 출력 범위를 모두 포함시킨다.
-            mapped = {}
-            for new, source in enumerate(result.origins):
-                mapped.setdefault(source, []).append(new)
-            spans = []
-            for begin, end, kind in block.spans:
-                covered = [new for source in range(begin, end) for new in mapped.get(source, [])]
-                if covered:
-                    spans.append((min(covered), max(covered) + 1, kind))
-            block.spans = spans
-            block.memos = [(mapped[offset][0] if offset in mapped else
-                            min(len(block.text) - 1, max(0, offset)), message)
-                           for offset, message in block.memos]
+            block.remap(result.text, result.origins)                   # 같은 원문 글자에서 나온 출력 범위를 모두 덮게 등급·메모·쓰임 범위·책갈피를 옮긴다
             record(result, old, where)
         else:
             block.rows[cell[0]][cell[1]] = result.text
