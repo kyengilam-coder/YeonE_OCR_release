@@ -92,7 +92,7 @@ class ImageInputPreview(ttk.Frame):
     찬 상자: FIELD 판 + LINE 1 테두리, 그림을 8px 여백 안 가운데로, 오른쪽 아래 '두 번 눌러 크게 보기'. 초점이면 테두리 INK 2px.
     상자 아래 쪽 넘기기 줄([◀ 이전] '현재 / 전체쪽' [다음 ▶]) — 붙여넣어 뒤에 쪽이 붙으면 show_last_page 로 마지막 쪽을 보인다.
     경로는 상자에 적지 않는다(책 카드 제목 줄의 파일 이름·풍선과 결과 저장 칸이 대신)."""
-    COLORS = {"PANEL": "#fcfaf5", "QUIET": "#f6f1e6", "FIELD": "#ffffff", "LINE": "#e2d9c8", "EDGE": "#8f8271", "INK": "#221c18", "MUTED": "#6b6054"}
+    COLORS = {"PANEL": "#fcfaf5", "QUIET": "#f6f1e6", "FIELD": "#ffffff", "LINE": "#e2d9c8", "EDGE": "#8f8271", "INK": "#221c18", "MUTED": "#574d42"}
     EMPTY_LINES = ("Win+Shift+S로 캡처한 이미지를 여기에 붙여넣으세요",
                    "상자를 누르고 Ctrl+V · 오른쪽 버튼 메뉴로도 · 계속 붙이면 뒤에 쪽이 붙음")
     FOCUS_LINE = "Ctrl+V를 누르면 붙여 넣습니다"

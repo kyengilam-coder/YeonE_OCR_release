@@ -1457,10 +1457,10 @@ class App(tk.Tk):
     # ---------- 화면 ----------
     FONT_CANDIDATES = ("Pretendard", "Pretendard Variable", "맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR", "NanumGothic", "나눔고딕")
     MONO_CANDIDATES = ("D2Coding", "D2Coding ligature", "Cascadia Mono", "Consolas", "Noto Sans Mono CJK KR", "Menlo", "DejaVu Sans Mono")
-    DISPLAY_CANDIDATES = ("바탕", "Batang", "Noto Serif CJK KR", "AppleMyungjo", "Nanum Myeongjo")    # 책 제목·금액·큰 숫자(16pt 이상에만 — 작은 굵은 바탕은 거칠다)
+    LOG_CANDIDATES = ("D2Coding", "D2Coding ligature", "Noto Sans Mono CJK KR")    # 진행 기록: 한글이 든 고정폭 글꼴이 있을 때만(Consolas 는 한글을 굴림으로 대신 그려 흐리다)
     # 색 토큰(밝은 판, 대비는 WCAG 식으로 잰 값 — 디자인 명세 §2). 인주(SEAL)는 돈 드는 단추와 도장에만, 실패는 RED 테두리 + '!'(채우지 않음).
     PALETTE = dict(BG="#f3eee3", PANEL="#fcfaf5", QUIET="#f6f1e6", FIELD="#ffffff", DIS_FIELD="#f0ebe1", LINE="#e2d9c8", HAIR="#efe8db",
-                   STRIPE="#faf7f0", RULE="#cbbfa9", EDGE="#8f8271", INK="#221c18", INK_HI="#3d342e", MUTED="#6b6054",
+                   STRIPE="#faf7f0", RULE="#cbbfa9", EDGE="#8f8271", INK="#221c18", INK_HI="#3d342e", MUTED="#574d42",
                    SEAL="#b8391f", SEAL_HI="#93291a", SEAL_SOFT="#f5e2db", SEAL_LINE="#f0c9bd", BAND="#7f7262",
                    GREEN="#2f6f4a", BLUE="#2b5a8c", RED="#8c1d18", WARN="#875a12", SEL="#f1e5c9")
     # 예전 이름 → 새 토큰(아직 옛 이름을 쓰는 화면도 새 색으로). 옻칠(ACC)은 먹(INK)으로, 금빛 선(GOLD)은 없앰.
@@ -1498,15 +1498,17 @@ class App(tk.Tk):
         sys_base = "맑은 고딕" if sys.platform.startswith("win") else ("Apple SD Gothic Neo" if sys.platform == "darwin" else "Noto Sans CJK KR")
         base = self._pick_font(self.FONT_CANDIDATES, sys_base)
         mono = self._pick_font(self.MONO_CANDIDATES, "Consolas" if sys.platform.startswith("win") else "DejaVu Sans Mono")
-        disp = self._pick_font(self.DISPLAY_CANDIDATES, base)       # 바탕이 없으면 본문 글꼴 굵게
+        disp = base                                                 # 책 제목·금액·큰 숫자도 본문 글꼴 굵게(명조 계열은 화면에서 흐려 읽기 어렵다)
+        log = self._pick_font(self.LOG_CANDIDATES, base)
         F = self.fonts = {"APP": (disp, 16, "bold"), "TITLE": (disp, 21, "bold"), "BIG": (disp, 24, "bold"), "NUM": (disp, 16, "bold"), "DLG": (disp, 16, "bold"),
                           "UNIT": (base, 12), "SECTION": (base, 11, "bold"), "SEAL": (base, 11, "bold"), "SEAL_S": (base, 9, "bold"), "USD": (base, 13, "bold"),
                           "TAB": (base, 11), "TAB_ON": (base, 11, "bold"), "RUN": (base, 11, "bold"), "BTN_L": (base, 11), "BTN_L_B": (base, 11, "bold"),
-                          "BODY": (base, 10), "BODY_B": (base, 10, "bold"), "CAP": (base, 9), "CAP_B": (base, 9, "bold"), "MONO": (mono, 10), "MONO_L": (mono, 11)}
+                          "BODY": (base, 10), "BODY_B": (base, 10, "bold"), "CAP": (base, 10), "CAP_B": (base, 10, "bold"), "MONO": (mono, 10), "MONO_L": (mono, 11),
+                          "LOG": (log, 10)}
         self.font_base, self.font_small, self.font_h = F["BODY"], F["CAP"], F["BODY_B"]
         self.font_title, self.font_sub, self.font_big = F["APP"], F["BODY"], (base, 12, "bold")
         self.font_card, self.font_btn_h = F["SECTION"], F["RUN"]
-        self.font_mono = F["MONO"]
+        self.font_mono = F["MONO"]; self.font_log = F["LOG"]
         # 기본 글꼴을 한글 글꼴로 바꾼다. (option_add("*Font") 는 ttk 이름표의 스타일 글꼴까지 덮어써 카드 제목·안내 글의 굵기·크기가 사라졌다)
         try:
             from tkinter import font as tkfont
@@ -4450,7 +4452,7 @@ class App(tk.Tk):
         nb = self.nb = ttk.Notebook(b, style="Hidden.TNotebook"); nb.pack(fill="both", expand=True, pady=(P(4), 0))
         nb.bind("<<NotebookTabChanged>>", lambda _e: self.v_nb.set(nb.index("current")))
         lf = tk.Frame(nb, bg=C["PANEL"])
-        self.log = tk.Text(lf, height=6, wrap="word", state="disabled", font=self.font_mono, bg=C["PANEL"], fg=C["MUTED"], relief="flat",
+        self.log = tk.Text(lf, height=6, wrap="word", state="disabled", font=self.font_log, bg=C["PANEL"], fg=C["INK_HI"], relief="flat",
                            borderwidth=0, highlightthickness=0, padx=P(10), pady=P(4), insertbackground=C["INK"], spacing1=1, spacing3=1,
                            selectbackground=C["SEL"], selectforeground=C["INK"])
         self.log.tag_configure("now", foreground=C["INK"])
