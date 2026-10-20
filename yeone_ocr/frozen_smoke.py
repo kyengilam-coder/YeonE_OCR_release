@@ -573,10 +573,33 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
     assert manual_protected_paragraphs(target) == {index}
     reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
     assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == "甲辛丙丁壬己"
+    # A single length-changing replacement crosses normal/red/author styles.
+    # This used to raise the same error as a manual edit in a real OCR paragraph.
+    before_cross_style = target.read_bytes()
+    saved = reopened.save({index: "甲子丑寅卯辰巳己"})
+    assert saved.backup_path.read_bytes() == before_cross_style
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts()[index] == "甲子丑寅卯辰巳己"
+        inspector = Editor(book, memo="none")
+        styles = [inspector._char_pr(slot.run.get("charPrIDRef"))
+                  for slot in _slots(book.paragraphs[index].element) for _ in slot.text]
+        assert all(_tag_of(style) not in {"#0B7A3B", "#1F4FBF", "#C00000"} for style in styles)
+        assert _canon(styles[0]) == baseline["甲"] and _canon(styles[-1]) == baseline["己"]
+        assert all(etree.tostring(book.paragraphs[i].element) == data for i, data in untouched.items())
+    finally:
+        book.doc.close()
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == "甲子丑寅卯辰巳己"
+    history = json.loads(manual_history_path(target).read_text("utf-8"))
+    assert history["correction_events"][-1]["before"] == "甲辛丙丁壬己"
+    assert history["correction_events"][-1]["after"] == "甲子丑寅卯辰巳己"
+    assert manual_protected_paragraphs(target) == {index}
     assert all(path.read_bytes() == data for path, data in originals.items())
     return {"edited_marks_cleared": True, "mixed_author_styles_restored": True,
             "untouched_marks_and_paragraphs_preserved": True, "existing_copy_and_backup_preserved": True,
             "manual_history_and_protection_retained": True, "saved_file_reopened": True,
+            "cross_style_length_change_saved_and_reopened": True,
             "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
 
 

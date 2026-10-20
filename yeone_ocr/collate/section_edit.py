@@ -282,7 +282,13 @@ def _readonly_reason(paragraph, heading: bool) -> str:
 
 
 def _replace_text(paragraph, text: str) -> None:
-    """Apply diff hunks backwards to existing slots, retaining all XML nodes."""
+    """Apply diff hunks backwards, retaining nodes and ordered style boundaries.
+
+    Within a length-changing replacement, distribute the new text over the
+    affected slots in proportion to their old lengths. This also preserves the
+    positions of memo/markpen boundaries relative to the replacement. Unchanged
+    characters retain their exact slots; a pure insertion uses its adjacent slot.
+    """
     before = paragraph_text(paragraph)
     # Existing literal separators are text, unlike hp:tab/hp:lineBreak atoms.
     # Permit retaining/removing these old separators while rejecting new ones.
@@ -299,17 +305,22 @@ def _replace_text(paragraph, text: str) -> None:
         if not slots:
             raise SectionEditError("문단의 글 조각을 찾지 못했습니다.")
         affected = [slot for slot in slots if slot.end > start and slot.start < end]
-        if end - start == k - j:
+        if end > start:
+            old_length, new_length = end - start, k - j
             for slot in affected:
                 lo, hi = max(start, slot.start), min(end, slot.end)
-                slot.text = slot.text[:lo - slot.start] + text[j + lo - start:j + hi - start] + slot.text[hi - slot.start:]
+                # ceil maps an old slot boundary to the first replacement
+                # character belonging to the following slot. The inverse
+                # mapping is shared by _align_style_choices below.
+                left = ((lo - start) * new_length + old_length - 1) // old_length
+                right = ((hi - start) * new_length + old_length - 1) // old_length
+                slot.text = slot.text[:lo - slot.start] + text[j + left:j + right] + slot.text[hi - slot.start:]
             continue
-        if len({slot.run.get("charPrIDRef") for slot in affected}) > 1 and text[j:k]:
-            raise SectionEditError("서로 다른 글자 서식에 걸친 길이 변경은 한 번에 저장할 수 없습니다. 서식별로 나누어 고쳐 주십시오.")
-        slot = Editor._locate(slots, start)
+        # Deletion leaves empty runs in place. At the end of nonempty text,
+        # inherit its last visible character rather than a trailing empty run's
+        # style, matching the adjacent source choice used for grade cleanup.
+        slot = Editor._locate([slot for slot in slots if slot.text] or slots, start)
         at = max(0, min(len(slot.text), start - slot.start))
-        # Existing editor helper deletes text only; controls and style runs stay.
-        Editor._delete_range(None, paragraph, start, end)
         slot.text = slot.text[:at] + text[j:k] + slot.text[at:]
     if paragraph_text(paragraph) != text:
         raise SectionEditError("문단의 글자 위치를 안전하게 맞추지 못했습니다.")
@@ -346,20 +357,19 @@ def _without_grade(style):
 
 def _align_style_choices(before: str, after: str, choices: list[frozenset[str]],
                          empty_choices: frozenset[str]) -> list[frozenset[str]]:
-    """Carry source styles through text edits without inventing style boundaries.
-
-    Equal-length replacements retain each character's style. A length-changing
-    replacement carries all affected source choices; the surviving run's font
-    and other unaffected attributes can disambiguate them later.
-    """
+    """Carry source styles using the same ordered mapping as _replace_text."""
     result = []
     for op, a, b, c, d in SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
         if op == "equal" or b - a == d - c:
             result.extend(choices[a:b])
+        elif b > a and d > c:
+            # Never merge all source styles into an ambiguous set: OCR red
+            # overlays can hide real bold/normal differences. Each replacement
+            # character instead inherits one position's original style.
+            result.extend(choices[a + offset * (b - a) // (d - c)]
+                          for offset in range(d - c))
         elif d > c:
-            candidates = frozenset().union(*choices[a:b])
-            if not candidates:
-                candidates = choices[min(a, len(choices) - 1)] if choices else empty_choices
+            candidates = choices[min(a, len(choices) - 1)] if choices else empty_choices
             result.extend([candidates] * (d - c))
     return result
 
@@ -435,7 +445,8 @@ class _ManualGradeStyles:
         source_slots = _slots(original)
         choices = [frozenset({slot.run.get("charPrIDRef", "0")})
                    for slot in source_slots for _ in slot.text]
-        empty_choices = frozenset(slot.run.get("charPrIDRef", "0") for slot in source_slots)
+        # Editor._locate inserts into the last empty slot when no text remains.
+        empty_choices = frozenset({source_slots[-1].run.get("charPrIDRef", "0")}) if source_slots else frozenset()
         choices = _align_style_choices(paragraph_text(original), before, choices, empty_choices)
         after = paragraph_text(corrected)
         choices = _align_style_choices(before, after, choices, empty_choices)

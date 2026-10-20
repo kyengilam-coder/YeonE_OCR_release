@@ -142,15 +142,117 @@ class ManualSectionEditing(unittest.TestCase):
         self.assertIsNone(saved[0].find(HH + "bold"))
         self.assertIsNotNone(saved[3].find(HH + "bold"))
 
-    def test_ambiguous_original_style_boundary_fails_without_publishing(self):
+    def test_cross_style_contraction_restores_original_styles_hidden_by_ocr(self):
+        baseline = self.styles_at(self.source, 3)
         self.mark_copy(index=3, grade="red")
         before = self.corrected.read_bytes()
         # Red makes both original normal and bold runs look identical.
-        with self.assertRaisesRegex(SectionEditError, "원본 글자 서식"):
-            self.open().save({3: "X"})
-        self.assertEqual(self.corrected.read_bytes(), before)
-        self.assertFalse(manual_history_path(self.corrected).exists())
-        self.assertFalse(self.corrected.with_suffix(".bak.hwpx").exists())
+        result = self.open().save({3: "XYZ"})
+        self.assertEqual(result.backup_path.read_bytes(), before)
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[3]), "XYZ")
+        self.assertEqual([_style_key(s) for s in self.styles_at(self.corrected, 3)],
+                         [_style_key(s) for s in baseline[:3]])
+        self.assertEqual(manual_protected_paragraphs(self.corrected), {3})
+
+    def test_cross_style_expansion_clears_only_changed_ocr_marks(self):
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3, grade="red")
+        marked = self.styles_at(self.corrected, 3)
+        self.open().save({3: "ALONGD"})
+        saved = self.styles_at(self.corrected, 3)
+        expected = [marked[0], baseline[1], baseline[1],
+                    baseline[2], baseline[2], marked[3]]
+        self.assertEqual([_style_key(s) for s in saved], [_style_key(s) for s in expected])
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[3]), "ALONGD")
+
+    def test_cross_style_expansion_keeps_target_font_size_and_italic(self):
+        def resized_green(editor, pid):
+            green = editor._style_for(pid, "green")
+            return editor.doc.styles.ensure_run(base_char_pr_id=green, size=17, italic=True)
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3, transform=resized_green)
+        self.open().save({3: "LONGER"})
+        saved = self.styles_at(self.corrected, 3)
+        self.assertEqual(len(saved), 6)
+        for index, style in enumerate(saved):
+            source = baseline[0 if index < 3 else 2]
+            self.assertEqual(style.get("height"), "1700")
+            self.assertIsNotNone(style.find(HH + "italic"))
+            self.assertEqual(style.find(HH + "bold") is not None, index >= 3)
+            self.assertEqual(style.get("textColor"), source.get("textColor"))
+            self.assertEqual(style.get("shadeColor"), source.get("shadeColor"))
+            for name in ("underline", "strikeout"):
+                self.assertEqual(_style_key(style.find(HH + name)),
+                                 _style_key(source.find(HH + name)))
+
+    def test_cross_style_edit_after_ocr_already_changed_run_lengths(self):
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3)
+        target = _Archive(self.corrected.read_bytes())
+        slots = _slots(target.paragraphs[3])
+        slots[0].text, slots[1].text = "AXYB", "ZD"
+        target.write(self.corrected, {"Contents/section0.xml"})
+        marked = self.styles_at(self.corrected, 3)
+        self.open().save({3: "AKLMNOPD"})
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[3]), "AKLMNOPD")
+        expected = [marked[0]] + [baseline[0]] * 5 + [baseline[2], marked[-1]]
+        self.assertEqual([_style_key(s) for s in self.styles_at(self.corrected, 3)],
+                         [_style_key(s) for s in expected])
+
+    def test_cross_style_length_change_preserves_memo_and_markpen_boundaries(self):
+        source = _Archive(self.source.read_bytes())
+        paragraph = source.paragraphs[4]
+        text = next(slot.t for slot in _slots(paragraph) if slot.text)
+        text.text = "A"
+        begin = etree.SubElement(text, HP + "markpenBegin", color="#ABCDEF")
+        begin.tail = "B"
+        end = etree.SubElement(text, HP + "markpenEnd")
+        end.tail = "CD"
+        second_run = Editor._split_after(None, paragraph, _slots(paragraph)[1], 2)
+        second_run.set("charPrIDRef", _slots(source.paragraphs[3])[-1].run.get("charPrIDRef"))
+        source.write(self.source, {"Contents/section0.xml"})
+        original = self.source.read_bytes()
+        baseline = self.styles_at(self.source, 4)
+        self.mark_copy(index=4)
+        before = _Archive(self.corrected.read_bytes()).paragraphs[4]
+        controls = [etree.tostring(node) for node in before.iter(HP + "ctrl")]
+        self.open().save({4: "LONGER"})
+        saved = _Archive(self.corrected.read_bytes()).paragraphs[4]
+        self.assertEqual(paragraph_text(saved), "LONGER")
+        self.assertEqual([etree.tostring(node) for node in saved.iter(HP + "ctrl")], controls)
+        for tag in ("markpenBegin", "markpenEnd"):
+            self.assertEqual(len(list(saved.iter(HP + tag))), 1)
+        self.assertEqual([slot.start for slot in _slots(saved) if slot.holder.tag == HP + "markpenBegin"], [2])
+        self.assertEqual([slot.start for slot in _slots(saved) if slot.holder.tag == HP + "markpenEnd"], [3])
+        self.assertEqual([_style_key(s) for s in self.styles_at(self.corrected, 4)],
+                         [_style_key(baseline[0])] * 3 + [_style_key(baseline[2])] * 3)
+        self.assertEqual(self.source.read_bytes(), original)
+
+    def test_restoring_empty_mixed_style_paragraph_uses_last_existing_slot(self):
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3)
+        session = self.open()
+        session.save({3: ""})
+        session.save({3: "Restored"})
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[3]), "Restored")
+        self.assertEqual([_style_key(s) for s in self.styles_at(self.corrected, 3)],
+                         [_style_key(baseline[-1])] * len("Restored"))
+
+    def test_append_after_deleting_last_style_inherits_visible_neighbor_with_or_without_ocr(self):
+        baseline = self.styles_at(self.source, 3)
+        for marked in (False, True):
+            with self.subTest(marked=marked):
+                self.corrected.unlink(missing_ok=True)
+                manual_history_path(self.corrected).unlink(missing_ok=True)
+                if marked:
+                    self.mark_copy(index=3)
+                session = self.open()
+                session.save({3: "AB"})
+                session.save({3: "ABX"})
+                saved = _Archive(self.corrected.read_bytes()).paragraphs[3]
+                self.assertEqual(paragraph_text(saved), "ABX")
+                self.assertEqual([s.text for s in _slots(saved) if s.text], ["AB", "X"] if marked else ["ABX"])
+                self.assertEqual(_style_key(self.styles_at(self.corrected, 3)[-1]), _style_key(baseline[1]))
 
     def test_insert_delete_and_restore_keep_only_remaining_untouched_marks(self):
         self.mark_copy(grade="blue")
@@ -247,11 +349,31 @@ class ManualSectionEditing(unittest.TestCase):
         self.assertEqual(paragraph_text(saved.paragraphs[3]), "")
         self.assertEqual([dict(s.run.attrib) for s in _slots(saved.paragraphs[3])], attributes)
 
-    def test_ambiguous_cross_style_length_change_is_rejected_without_writing(self):
-        with self.assertRaises(SectionEditError):
-            self.open().save({3: "LONGER"})
-        self.assertFalse(self.corrected.exists())
-        self.assertFalse(manual_history_path(self.corrected).exists())
+    def test_cross_style_length_change_keeps_nodes_and_distributes_new_text(self):
+        original = self.source.read_bytes()
+        before = _Archive(original)
+        attributes = [dict(s.run.attrib) for s in _slots(before.paragraphs[3])]
+        self.open().save({3: "LONGER"})
+        saved = _Archive(self.corrected.read_bytes())
+        self.assertEqual([s.text for s in _slots(saved.paragraphs[3])], ["LON", "GER"])
+        self.assertEqual([dict(s.run.attrib) for s in _slots(saved.paragraphs[3])], attributes)
+        self.assertEqual(self.source.read_bytes(), original)
+        for name, data in before.entries.items():
+            if name != "Contents/section0.xml":
+                self.assertEqual(saved.entries[name], data, name)
+        for index in range(len(before.paragraphs)):
+            if index != 3:
+                self.assertEqual(etree.tostring(saved.paragraphs[index]), etree.tostring(before.paragraphs[index]))
+        self.assertEqual(manual_protected_paragraphs(self.corrected), {3})
+
+    def test_cross_style_replacement_can_shrink_to_one_character(self):
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3)
+        self.open().save({3: "X"})
+        saved = _Archive(self.corrected.read_bytes()).paragraphs[3]
+        self.assertEqual(paragraph_text(saved), "X")
+        self.assertEqual(len(_slots(saved)), 2)  # Empty second run remains.
+        self.assertEqual(_style_key(self.styles_at(self.corrected, 3)[0]), _style_key(baseline[0]))
 
     def test_existing_corrected_copy_accumulates_edits_and_keeps_backup(self):
         session = self.open()
@@ -432,13 +554,16 @@ class ManualSectionEditing(unittest.TestCase):
         self.assertEqual(len(session._replace_plans), 1)
         self.assertGreater(session.save(kept.changes, replacement_plan=kept).saved_count, 0)
 
-    def test_replace_preview_skips_unsafe_style_changes_and_unrelated_outside_body(self):
+    def test_replace_preview_accepts_cross_style_change_but_skips_unrelated_body(self):
         target = _Archive(self.source.read_bytes())
         _slots(target.paragraphs[7])[0].text = "Entirely divergent 皰 replacement with unrelated contents"
         target.write(self.corrected, {"Contents/section0.xml"})
         session = self.open()
         plan = session.preview_replace("BC", "LONG", scope="document")
-        self.assertEqual((plan.matches, plan.skipped_count, plan.skipped[0].index), (0, 1, 3))
+        self.assertEqual((plan.matches, plan.skipped_count), (1, 0))
+        self.assertEqual(plan.changes, {3: "ALONGD"})
+        session.save(plan.changes, replacement_plan=plan)
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[3]), "ALONGD")
         plan = session.preview_replace("皰", "疱", scope="document")
         self.assertEqual((plan.matches, plan.skipped_count, plan.skipped[0].index), (0, 1, 7))
         self.assertIn("위치 대응", plan.skipped[0].reason)

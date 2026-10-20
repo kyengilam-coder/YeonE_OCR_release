@@ -10,6 +10,7 @@ import zipfile
 import pytest
 
 from tools import prepare_windows_release as release
+from tools import verify_release_bundle as bundle
 
 
 def pe_bytes(machine=0x8664):
@@ -339,6 +340,113 @@ def test_prepare_covers_every_published_payload_with_checksums(tmp_path, monkeyp
     with zipfile.ZipFile(output / "YeonE_OCR-0.7.1-licenses.zip") as archive:
         assert "THIRD_PARTY_LICENSES/dependency/LICENSE" in archive.namelist()
         assert archive.read("DISTRIBUTION_NOTICE.txt") == b"distribution notice"
+
+
+def prepared_bundle(tmp_path, monkeypatch):
+    committed_tree(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / "yeone_ocr").mkdir(parents=True)
+    (repo / "yeone_ocr/__init__.py").write_text('__version__ = "0.7.1"\n', encoding="utf-8")
+    license_tree(repo)
+    output = tmp_path / "dist"
+    output.mkdir()
+    (output / release.PORTABLE_NAME).write_bytes(pe_bytes())
+    (output / "YeonE_OCR-0.7.1-Setup-x64.exe").write_bytes(pe_bytes(0x014C))
+    release.prepare(output, repo)
+    return output
+
+
+def test_release_bundle_seals_all_six_assets_and_verifies_without_changes(tmp_path, monkeypatch):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    original = {path.name: path.read_bytes() for path in output.iterdir()}
+    sealed = bundle.seal(output, "0.7.1", "a" * 40)
+    assert set(original) == bundle.artifact_names("0.7.1")
+    receipt = json.loads((output / bundle.RECEIPT).read_text(encoding="utf-8"))
+    assert set(receipt["artifacts"]) == set(original)
+    before_verify = {path.name: path.read_bytes() for path in output.iterdir()}
+    result = bundle.verify(output, "0.7.1", "a" * 40, sealed["receipt_sha256"])
+    assert result == {"ok": True, "version": "0.7.1", "commit": "a" * 40, "artifacts": sorted(original)}
+    assert {name: (output / name).read_bytes() for name in original} == original
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before_verify
+
+
+@pytest.mark.parametrize("name", sorted(bundle.artifact_names("0.7.1")))
+def test_release_bundle_rejects_changed_asset_bytes(tmp_path, monkeypatch, name):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    sealed = bundle.seal(output, "0.7.1", "a" * 40)
+    with (output / name).open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(ValueError):
+        bundle.verify(output, "0.7.1", "a" * 40, sealed["receipt_sha256"])
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "directory", "receipt", "wrong-receipt-hash",
+                                    "wrong-version", "wrong-commit", "self-consistent-replacement"])
+def test_release_bundle_rejects_wrong_inventory_or_build_identity(tmp_path, monkeypatch, change):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    sealed = bundle.seal(output, "0.7.1", "a" * 40)
+    version, commit, receipt_hash = "0.7.1", "a" * 40, sealed["receipt_sha256"]
+    if change == "missing":
+        (output / release.PORTABLE_NAME).unlink()
+    elif change == "extra":
+        (output / "unverified.exe").write_bytes(pe_bytes())
+    elif change == "directory":
+        (output / "update.json").unlink()
+        (output / "update.json").mkdir()
+    elif change == "receipt":
+        (output / bundle.RECEIPT).write_text("{}", encoding="utf-8")
+    elif change == "wrong-receipt-hash":
+        receipt_hash = "0" * 64
+    elif change == "wrong-version":
+        version = "0.7.2"
+    elif change == "wrong-commit":
+        commit = "b" * 40
+    else:
+        # Checksums and updater metadata alone are insufficient: all release
+        # bytes must still match the independently bound build-job receipt.
+        with (output / release.PORTABLE_NAME).open("ab") as stream:
+            stream.write(b"replacement")
+        release.make_update_manifest(output, version)
+        release.write_checksums(output, [output / name for name in bundle.artifact_names(version)
+                                         if name != "SHA256SUMS.txt"])
+    with pytest.raises(ValueError):
+        bundle.verify(output, version, commit, receipt_hash)
+
+
+def test_release_bundle_seal_rejects_source_archive_from_another_commit(tmp_path, monkeypatch):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="commit"):
+        bundle.seal(output, "0.7.1", "b" * 40)
+    assert not (output / bundle.RECEIPT).exists()
+
+
+def test_release_workflow_runs_complete_tests_and_one_build_before_verified_publication():
+    import re
+    root = Path(__file__).resolve().parents[1]
+    text = (root / ".github/workflows/windows-release.yml").read_text(encoding="utf-8")
+    jobs = dict(re.findall(r"^  (\w+):\n(.*?)(?=^  \w+:\n|\Z)",
+                           text.split("\njobs:\n", 1)[1], flags=re.MULTILINE | re.DOTALL))
+    assert set(jobs) == {"regression", "build", "publish"}
+    regression, build, publish = (jobs[name] for name in ("regression", "build", "publish"))
+    assert "needs:" not in regression and "needs:" not in build
+    command = next(line for line in regression.splitlines() if "tools/check_regression.py" in line)
+    assert "--workers 2" in command and "--fail-fast" in command and "--prioritize" in command
+    assert "--module " not in command  # Priorities cannot narrow full coverage.
+    assert "if: always()" in regression and "windows-release-regression" in regression
+    assert "needs: [regression, build]" in publish
+    assert "needs.regression.result == 'success'" in publish
+    assert "needs.build.result == 'success'" in publish
+    assert text.count("./tools/build_windows.ps1") == 1
+    assert "./tools/test_windows_installer.ps1" in build and "-PreviousInstaller" in build
+    assert "v1.0.2" in build
+    assert "verify_release_bundle.py seal dist --commit $env:GITHUB_SHA" in build
+    assert "compression-level: 0" in build and "if-no-files-found: error" in build
+    assert "artifact-ids: ${{ needs.build.outputs.artifact_id }}" in publish
+    assert "${{ needs.build.outputs.receipt_sha256 }}" in publish
+    assert "verify_release_bundle.py verify dist --commit $env:GITHUB_SHA --receipt-sha256" in publish
+    assert publish.index("verify_release_bundle.py verify") < publish.index("gh release create")
+    assert "contents: write" not in build and "contents: write" not in regression
+    assert "contents: write" in publish
 
 
 import unittest  # noqa: E402  (unittest discover 도 거두게 — 위의 시험은 pytest 꼴)
