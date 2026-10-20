@@ -539,6 +539,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._split_ratio = .5
         self._split_initialized = False
         self._split_dragging = False
+        self._split_capture_pending = False
         self._change_jobs = {}
         self._executor = pdf_worker
         self._alignment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bookmark-location")
@@ -853,6 +854,13 @@ class BookmarkSectionEditor(tk.Toplevel):
         if available is None:
             return
         minimum = min(360, available // 2)
+        if self._split_capture_pending:
+            # The release binding runs before Tk finishes placing the children.
+            # Capture here, after geometry idle work, so a stale second-pane x
+            # cannot be mistaken for a wider sash and move the user's divider.
+            position = max(minimum, min(available - minimum, self.panes.sashpos(0)))
+            self._split_ratio = position / available
+            self._split_capture_pending = False
         position = max(minimum, min(available - minimum, round(available * self._split_ratio)))
         first_layout = not self._split_initialized
         self._split_initialized = True
@@ -866,17 +874,20 @@ class BookmarkSectionEditor(tk.Toplevel):
     def _split_drag_end(self, _event=None):
         dragging = self._split_dragging
         self._split_dragging = False
-        available = self._split_space()
-        if dragging and available:
-            minimum = min(360, available // 2)
-            position = max(minimum, min(available - minimum, self.panes.sashpos(0)))
-            self._split_ratio = position / available
+        if dragging:
+            self._split_capture_pending = True
+            if self._split_job is not None:
+                # An older resize/map callback may precede this drag's geometry
+                # work. Requeue behind it before reading the final pane positions.
+                self.after_cancel(self._split_job)
+                self._split_job = None
         self._schedule_split()
 
     def reset_comparison_layout(self):
         """Restore the two visible panels without touching text, drafts or zoom."""
         self._split_ratio = .5
         self._split_initialized = False
+        self._split_capture_pending = False
         self._schedule_split()
         self.v_status.set("원본 PDF와 교정문을 같은 너비로 나란히 배치합니다.")
 

@@ -586,6 +586,8 @@ class SectionEditorTk(unittest.TestCase):
 
     def test_delayed_first_show_keeps_two_panels_after_hidden_initial_callback(self):
         # Exercise the real 120 ms callback while the new window is withdrawn.
+        # A 1024px desktop can constrain the requested default 1280px window.
+        self.editor.geometry("1024x768")
         finished = "section_layout_delay_finished"
         self.root.tk.setvar(finished, False)
         self.editor.after(180, lambda: self.root.tk.setvar(finished, True))
@@ -599,7 +601,9 @@ class SectionEditorTk(unittest.TestCase):
         self.editor.deiconify()
         self.root.update()
         self.assertTrue(self.editor._split_initialized)
-        self.assertGreater(self.editor.pdf_panel.winfo_width(), 500)
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+        self.assertLessEqual(self.editor.winfo_width(), 1024)
         self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
 
     def test_reload_and_remap_recover_collapsed_panes_without_changing_drafts(self):
@@ -622,14 +626,19 @@ class SectionEditorTk(unittest.TestCase):
         self.assertEqual(self.session.calls, [])
 
     def test_user_divider_ratio_survives_resize_reload_and_explicit_reset_preserves_edits(self):
+        self.editor.geometry("1024x768")
         self.editor.deiconify()
         self.root.update()
         panes = self.editor.panes
+        available = self.editor._split_space()
+        wanted = round(available * .45)
+        self.editor._schedule_split()  # A resize callback already queued before the drag.
         panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
-        panes.event_generate("<B1-Motion>", x=430, y=20)
-        panes.event_generate("<ButtonRelease-1>", x=430, y=20)
+        panes.event_generate("<B1-Motion>", x=wanted, y=20)
+        panes.event_generate("<ButtonRelease-1>", x=wanted, y=20)
         self.root.update()
-        self.assertLess(self.editor._split_ratio, .4)
+        self.assertLessEqual(abs(panes.sashpos(0) - wanted), 1)
+        self.assertAlmostEqual(self.editor._split_ratio, .45, delta=2 / available)
         ratio = self.editor._split_ratio
         self.editor.geometry("1600x900")
         self.root.update()
@@ -654,7 +663,32 @@ class SectionEditorTk(unittest.TestCase):
         self.assertFalse(self.editor.v_match_pdf_font.get())
         self.assertEqual(self.session.calls, [])
 
+    def test_pending_divider_capture_waits_for_visible_geometry_and_reset_can_override_it(self):
+        self.editor.geometry("1001x768")
+        self.editor.deiconify()
+        self.root.update()
+        panes = self.editor.panes
+        for target in (430, 460):
+            panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
+            panes.event_generate("<B1-Motion>", x=target, y=20)
+            panes.event_generate("<ButtonRelease-1>", x=target, y=20)
+            self.assertTrue(self.editor._split_capture_pending)
+            if target == 430:
+                self.editor.withdraw()
+                self.root.update()
+                self.assertTrue(self.editor._split_capture_pending)
+                self.editor.deiconify()
+                self.root.update()
+                self.assertFalse(self.editor._split_capture_pending)
+                self.assertLessEqual(abs(panes.sashpos(0) - target), 1)
+            else:
+                self.editor.reset_comparison_layout()
+                self.root.update()
+                self.assertFalse(self.editor._split_capture_pending)
+                self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+
     def test_closing_hidden_window_cancels_pending_layout_callback(self):
+        self.editor._split_capture_pending = True
         self.editor._schedule_split()
         pending = self.editor._split_job
         self.assertIsNotNone(pending)

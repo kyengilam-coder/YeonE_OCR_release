@@ -981,9 +981,10 @@ def bookmark_layout_probe(folder: Path) -> dict:
         y = max(1, window.panes.winfo_height() // 2)
         wanted = int(window.panes.winfo_width() * .58)
         window.panes.event_generate("<ButtonPress-1>", x=sash + 2, y=y)
-        window.panes.event_generate("<B1-Motion>", x=wanted, y=y)
-        window.panes.event_generate("<ButtonRelease-1>", x=wanted, y=y)
+        window.panes.event_generate("<B1-Motion>", x=wanted + 2, y=y)
+        window.panes.event_generate("<ButtonRelease-1>", x=wanted + 2, y=y)
         root.update()
+        assert abs(window.panes.sashpos(0) - wanted) <= 1
         selected_ratio = window.panes.sashpos(0) / window.panes.winfo_width()
         assert .53 < selected_ratio < .64, selected_ratio
         assert window.reload()
