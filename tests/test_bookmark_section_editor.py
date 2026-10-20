@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import pymupdf
 from PIL import Image
 
-from yeone_ocr.collate.section_editor import (BookmarkSectionEditor, ChangeReviewDialog,
+from yeone_ocr.collate.section_editor import (BookmarkSectionEditor, ChangeReviewDialog, BodyExportScopeDialog,
     CorrectionHistoryDialog, FindReplaceDialog, _copy_control_key, join_paragraph_lines, render_pdf_page)
 from test_ops import _real_tk
 
@@ -39,6 +39,14 @@ class FakeSession:
                 paragraph.corrected_text = changes[paragraph.index]
         return SimpleNamespace(path=self.corrected_path, saved_count=len(changes),
                                backup_path=self.corrected_path.with_suffix(".bak.hwpx"), reports_stale=True)
+
+    def export_text(self, changes, *, scope="section"):
+        texts = {p.index: p.corrected_text for p in self.paragraphs}
+        if scope == "document":
+            texts.update({0: "문서 앞부분", 99: self.external_text, 100: "문서 뒷부분"})
+        elif scope != "section":
+            raise ValueError("Unknown export scope")
+        return "\n\n".join(changes.get(index, texts[index]) for index in sorted(texts))
 
     def preview_replace(self, find, replacement, *, scope, paragraph_index, changes, previous_plan=None, match=None):
         if not find:
@@ -577,7 +585,7 @@ class SectionEditorTk(unittest.TestCase):
         self.assertTrue(self.editor.dirty)
         self.assertEqual(self.session.calls, [])
 
-    def test_export_changes_keeps_exact_unicode_and_external_drafts_without_saving(self):
+    def test_export_body_has_all_paragraphs_and_drafts_without_before_after_labels(self):
         self.edit(11, "수정 疱𠀀漢\ufe00\r\n보관\t내용")
         self.editor._external_changes[99] = "구획 밖 수정𠀀"
         self.editor._baseline[99] = "구획 밖 수정 전"
@@ -590,8 +598,12 @@ class SectionEditorTk(unittest.TestCase):
         self.assertTrue(self.editor.export_changes(path))
         self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
         exported = path.read_bytes().decode("utf-8-sig")
-        self.assertIn("문단 12\n수정 전\n上藥入粳米\n\n수정 후\n" + drafts[11], exported)
-        self.assertIn("문단 100\n수정 전\n구획 밖 수정 전\n\n수정 후\n" + drafts[99], exported)
+        self.assertEqual(exported, "瀉白散\n\n" + drafts[11] + "\n\n氣喘咳嗽")
+        document_path = self.folder / "whole-document.txt"
+        self.assertTrue(self.editor.export_changes(document_path, scope="document"))
+        self.assertEqual(document_path.read_bytes().decode("utf-8-sig"),
+                         "문서 앞부분\n\n瀉白散\n\n" + drafts[11] + "\n\n氣喘咳嗽\n\n"
+                         + drafts[99] + "\n\n문서 뒷부분")
         self.assertEqual(self.editor._changes(), drafts)
         self.assertTrue(self.editor.dirty)
         self.assertEqual(corrected.read_bytes(), b"existing corrected snapshot")
@@ -603,8 +615,13 @@ class SectionEditorTk(unittest.TestCase):
     def test_export_cancel_and_write_failure_leave_drafts_and_previous_text_untouched(self):
         self.edit(11, "보관할 수정")
         drafts = self.editor._changes()
-        with patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=""):
+        with patch.object(self.editor, "_choose_export_scope", return_value="section"), \
+                patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=""):
             self.assertFalse(self.editor.export_changes())
+        with patch.object(self.editor, "_choose_export_scope", return_value=None), \
+                patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename") as choose_file:
+            self.assertFalse(self.editor.export_changes())
+            choose_file.assert_not_called()
         path = self.folder / "draft.txt"
         path.write_bytes(b"previous export")
         with patch("yeone_ocr.collate.section_editor.os.replace", side_effect=PermissionError("synthetic locked file")):
@@ -635,12 +652,32 @@ class SectionEditorTk(unittest.TestCase):
                                     self.session.corrected_path)
         self.addCleanup(lambda: dialog.destroy() if dialog.winfo_exists() else None)
         path = self.folder / "review.txt"
-        with patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=str(path)):
+        with patch.object(self.editor, "_choose_export_scope", return_value="section"), \
+                patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=str(path)):
             dialog.export_button.invoke()
         self.assertTrue(dialog.winfo_exists())
         self.assertFalse(dialog.accepted)
-        self.assertIn("수정 후 疱", path.read_text(encoding="utf-8-sig"))
+        self.assertEqual(path.read_text(encoding="utf-8-sig"), "瀉白散\n\n수정 후 疱\n\n氣喘咳嗽")
         self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_unchanged_body_can_be_exported_and_scope_dialog_restores_review_grab(self):
+        self.assertEqual(str(self.editor.export_button.cget("state")), "normal")
+        path = self.folder / "unchanged.txt"
+        self.assertTrue(self.editor.export_changes(path))
+        self.assertEqual(path.read_text(encoding="utf-8-sig"), "瀉白散\n\n上藥入粳米\n\n氣喘咳嗽")
+        self.assertFalse(self.editor.dirty)
+        review = ChangeReviewDialog(self.editor, {}, self.editor._baseline, self.session.corrected_path)
+        self.addCleanup(lambda: review.destroy() if review.winfo_exists() else None)
+        def select_document():
+            dialog = next(child for child in review.winfo_children() if isinstance(child, BodyExportScopeDialog))
+            self.assertEqual(dialog.v_scope.get(), "section")
+            dialog.v_scope.set("document")
+            dialog.accept_button.invoke()
+        self.root.after_idle(select_document)
+        self.assertEqual(self.editor._choose_export_scope(review, "section"), "document")
+        self.assertIs(self.editor.grab_current(), review)
+        self.assertFalse(review.accepted)
         self.assertEqual(self.session.calls, [])
 
     def test_copy_and_export_controls_fit_minimum_window_width(self):

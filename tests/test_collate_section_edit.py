@@ -388,6 +388,100 @@ class ManualSectionEditing(unittest.TestCase):
         self.assertEqual(set(history["paragraphs"]), {"2", "4"})
         self.assertTrue(manual_history_path(self.corrected).with_suffix(".bak.json").exists())
 
+    def test_export_section_contains_complete_current_body_without_edit_labels_or_writes(self):
+        session = self.open()
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+        changes = {2: "수정한 漢文\n둘째 줄", 7: "Other section draft"}
+        original_changes = changes.copy()
+        exported = session.export_text(changes)
+        self.assertEqual(exported, "\n\n".join([
+            "瀉白散", changes[2], "ABCD", "Memo body text.", "Before\tAfter",
+        ]))
+        self.assertEqual(changes, original_changes)
+        self.assertEqual({path.name: path.read_bytes() for path in self.root.iterdir()}, before)
+        self.assertEqual(next(p.corrected_text for p in session.paragraphs if p.index == 2), "Alpha beta gamma.")
+
+    def test_export_document_uses_saved_corrections_and_all_unsaved_replacement_drafts(self):
+        session = self.open()
+        session.save({2: "Saved correction."})
+        plan = session.preview_replace("Other", "Outside draft", scope="document",
+                                       changes={4: "Memo pending correction."})
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+        exported = session.export_text(plan.changes, scope="document")
+        expected = [paragraph_text(p) for p in _Archive(self.corrected.read_bytes()).paragraphs]
+        expected[4], expected[7] = "Memo pending correction.", "Outside draft section remains here."
+        self.assertEqual(exported, "\n\n".join(expected))
+        self.assertIn("Saved correction.", exported)
+        self.assertIn("葦莖湯", exported)
+        self.assertIn("Second physical section.", exported)
+        self.assertEqual({path.name: path.read_bytes() for path in self.root.iterdir()}, before)
+        self.assertEqual(session._generation, 1)
+        session._check_plan(plan)  # Export neither consumes nor invalidates a preview.
+
+    def test_export_includes_table_note_and_textbox_body_but_excludes_memos_and_page_furniture(self):
+        source = _Archive(self.source.read_bytes())
+        paragraph = source.paragraphs[4]
+        run = paragraph.find(HP + "run")
+
+        def body(parent, text):
+            sublist = etree.SubElement(parent, HP + "subList")
+            child = etree.SubElement(sublist, HP + "p", id="9000", paraPrIDRef="0", styleIDRef="0")
+            child_run = etree.SubElement(child, HP + "run", charPrIDRef=run.get("charPrIDRef"))
+            etree.SubElement(child_run, HP + "t").text = text
+
+        table = etree.SubElement(run, HP + "tbl")
+        row = etree.SubElement(table, HP + "tr")
+        for text in ("First table cell.", "Second table cell."):
+            body(etree.SubElement(row, HP + "tc"), text)
+        control = etree.SubElement(run, HP + "ctrl")
+        body(etree.SubElement(control, HP + "footNote"), "Footnote body.")
+        body(etree.SubElement(run, HP + "drawText"), "Text box body.")
+        body(etree.SubElement(control, HP + "header"), "Repeated header.")
+        body(etree.SubElement(control, HP + "footer"), "Repeated footer.")
+        body(etree.SubElement(control, HP + "fieldBegin", type="MEMO"), "App correction memo.")
+        source.write(self.source, {"Contents/section0.xml"})
+        session = self.open()
+        self.assertFalse(next(p.editable for p in session.paragraphs if p.index == 4))
+        before = self.source.read_bytes()
+        for scope in ("section", "document"):
+            with self.subTest(scope=scope):
+                text = session.export_text({}, scope=scope)
+                self.assertIn("Memo body text.\n\nFirst table cell.\n\nSecond table cell."
+                              "\n\nFootnote body.\n\nText box body.", text)
+                for excluded in ("Keep this user comment.", "App correction memo.",
+                                 "Repeated header.", "Repeated footer."):
+                    self.assertNotIn(excluded, text)
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertFalse(self.corrected.exists())
+
+    def test_export_uses_snapshot_even_when_actual_document_and_history_change(self):
+        session = self.open()
+        session.save({2: "Saved correction."})
+        expected = [paragraph_text(p) for p in _Archive(self.corrected.read_bytes()).paragraphs]
+        expected[2] = "Still recoverable unsaved draft."
+        self.source.write_bytes(b"externally changed source")
+        self.corrected.write_bytes(b"externally changed corrected document")
+        manual_history_path(self.corrected).write_text("invalid external history", encoding="utf-8")
+        before = {path.name: path.read_bytes() for path in self.root.iterdir()}
+        for scope in ("section", "document"):
+            with self.subTest(scope=scope):
+                rows = expected[session.start:session.end] if scope == "section" else expected
+                self.assertEqual(session.export_text({2: expected[2]}, scope=scope), "\n\n".join(rows))
+        self.assertEqual({path.name: path.read_bytes() for path in self.root.iterdir()}, before)
+
+    def test_export_allows_plain_text_overlays_but_validates_indices_and_values(self):
+        session = self.open()
+        self.assertEqual(session.export_text({1: "Draft heading", 2: "", 5: "Plain\ttext\nlines"}),
+                         "Draft heading\n\n\n\nABCD\n\nMemo body text.\n\nPlain\ttext\nlines")
+        for changes, scope in ((None, "section"), ({-1: "bad"}, "section"),
+                               ({len(session._source.paragraphs): "bad"}, "document"),
+                               ({True: "bad"}, "section"), ({2: None}, "section"),
+                               ({"2": "bad"}, "document"), ({}, "changed")):
+            with self.subTest(changes=changes, scope=scope), self.assertRaises(SectionEditError):
+                session.export_text(changes, scope=scope)
+        self.assertFalse(self.corrected.exists())
+        self.assertFalse(manual_history_path(self.corrected).exists())
+
     def test_noop_does_not_create_output_or_change_existing_bytes(self):
         session = self.open()
         result = session.save({2: session.paragraphs[1].corrected_text})

@@ -23,7 +23,7 @@ import zipfile
 
 from lxml import etree
 
-from .hwpx_edit import HP, HH, Editor, _local, _slots, _tag_of, paragraph_text
+from .hwpx_edit import HP, HH, INLINE_ATOMS, Editor, _local, _slots, _tag_of, paragraph_text
 from .sections import HwpxBook, normalize_name, resolve_anchor_index
 from . import zh
 
@@ -279,6 +279,52 @@ def _readonly_reason(paragraph, heading: bool) -> str:
             elif kind not in ("bookmark",):
                 return "필드·각주·그림·표가 있는 문단은 구조 보존을 위해 읽기 전용입니다."
     return ""
+
+
+def _export_body_paragraph(paragraph) -> str:
+    """Flatten visible body text, including tables/notes, but not memo content.
+
+    Table cells, notes and text boxes follow their XML order, separated by blank
+    lines. Headers/footers are page furniture, not body paragraphs. This export
+    view does not change the direct paragraph numbering used by HWPX editing.
+    """
+    def nested(node):
+        kind = _local(node.tag)
+        if (kind in ("header", "footer")
+                or kind == "fieldBegin" and node.get("type") == "MEMO"):
+            return
+        if node.tag == HP + "p":
+            yield _export_body_paragraph(node)
+        else:
+            for child in node:
+                yield from nested(child)
+
+    blocks, inline = [], []
+    for run in paragraph:
+        if _local(run.tag) != "run":
+            continue
+        for child in run:
+            kind = _local(child.tag)
+            if kind == "t":
+                inline.append(child.text or "")
+                for sub in child:
+                    name = _local(sub.tag)
+                    inline.append(INLINE_ATOMS.get(name, "" if name in (
+                        "markpenBegin", "markpenEnd", "insertBegin", "insertEnd",
+                        "deleteBegin", "deleteEnd") else "".join(sub.itertext())))
+                    inline.append(sub.tail or "")
+            elif kind == "tab" or kind == "ctrl" and (child.get("id") or "").lower() == "tab":
+                inline.append("\t")
+            else:
+                embedded = list(nested(child))
+                if embedded:
+                    if inline:
+                        blocks.append("".join(inline))
+                        inline = []
+                    blocks.extend(embedded)
+    if inline:
+        blocks.append("".join(inline))
+    return "\n\n".join(blocks)
 
 
 def _replace_text(paragraph, text: str) -> None:
@@ -565,6 +611,26 @@ class SectionEditSession:
             reason = _readonly_reason(target.paragraphs[i], i in self._heads)
             self.paragraphs.append(ParagraphEdit(i, paragraph_text(self._source.paragraphs[i]),
                                                 paragraph_text(target.paragraphs[i]), not reason, reason))
+
+    def export_text(self, changes: dict[int, str], *, scope: str = "section") -> str:
+        """Return current body text, including unsaved edits, without saving.
+
+        The session snapshot supplies unchanged paragraphs and headings. Export
+        remains available after an external file change or a failed HWPX save;
+        it does not re-read those files, authorize edits, or update history.
+        """
+        if scope not in ("section", "document"):
+            raise SectionEditError("내보낼 범위는 현재 구획 전체 또는 교정 문서 전체로 선택하십시오.")
+        if not isinstance(changes, dict):
+            raise SectionEditError("내보낼 문단과 글자를 확인할 수 없습니다.")
+        for index, text in changes.items():
+            if (type(index) is not int or not 0 <= index < len(self._source.paragraphs)
+                    or not isinstance(text, str)):
+                raise SectionEditError("내보낼 문단 번호와 글자를 확인할 수 없습니다.")
+        target = _Archive(self._target_bytes or self._source_bytes)
+        indices = range(self.start, self.end) if scope == "section" else range(len(target.paragraphs))
+        return "\n\n".join(changes[index] if index in changes else _export_body_paragraph(target.paragraphs[index])
+                          for index in indices)
 
     def _assert_unchanged(self, *, published_history: bytes | None = None) -> None:
         expected_history = self._history_bytes if published_history is None else published_history

@@ -758,9 +758,13 @@ def bookmark_replace_probe(folder: Path) -> dict:
         draft_path = folder / "bookmark-unsaved-draft.txt"
         assert window.export_changes(draft_path)
         backup_text = draft_path.read_text(encoding="utf-8-sig")
-        assert f"문단 {local + 1}" in backup_text and f"문단 {outside + 1}" in backup_text
-        assert expected_draft.replace("皰", "疱") in backup_text and "他段疱疹。" in backup_text
-        assert "수정 전" in backup_text and "수정 후" in backup_text
+        assert backup_text == ("瀉白散\n\n" + expected_draft.replace("皰", "疱") + "\n\n保留原文。")
+        document_path = folder / "bookmark-whole-document.txt"
+        assert window.export_changes(document_path, scope="document")
+        assert document_path.read_text(encoding="utf-8-sig") == "\n\n".join([
+            "", "瀉白散", expected_draft.replace("皰", "疱"), "保留原文。",
+            "皰疹別方", "他段疱疹。", "保留皰\t原文",
+        ])
         assert window._changes() == before_copy and window.dirty and target.read_bytes() == before
         assert not manual_history_path(target).exists()
         window.withdraw()

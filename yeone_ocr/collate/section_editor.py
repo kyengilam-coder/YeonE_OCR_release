@@ -161,6 +161,38 @@ def render_pdf_page(path: str, page_number: int, width: int, zoom: float | None)
         return picture
 
 
+class BodyExportScopeDialog(tk.Toplevel):
+    """Choose the whole section or document without changing the editor."""
+    def __init__(self, parent, *, colors, scope="section"):
+        super().__init__(parent)
+        self.selected_scope = None
+        self.title("본문 내보내기")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.configure(bg=colors["BG"])
+        self.v_scope = tk.StringVar(self, value=scope)
+        tk.Label(self, text="내보낼 본문 범위", bg=colors["BG"], fg=colors["INK"],
+                 font=("Malgun Gothic", 13, "bold")).pack(anchor="w", padx=22, pady=(20, 8))
+        tk.Label(self, text="제목과 수정하지 않은 문단도 포함합니다.\n"
+                 "미저장 수정을 반영한 본문만 TXT로 보관합니다.",
+                 bg=colors["BG"], fg=colors["MUTED"], justify="left").pack(anchor="w", padx=22, pady=(0, 10))
+        for value, label in (("section", "현재 구획 전체"), ("document", "교정본 문서 전체")):
+            ttk.Radiobutton(self, text=label, value=value, variable=self.v_scope).pack(anchor="w", padx=22, pady=4)
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=22, pady=18)
+        ttk.Button(buttons, text="취소", command=self.destroy).pack(side="right")
+        self.accept_button = ttk.Button(buttons, text="TXT 파일 선택", command=self._accept)
+        self.accept_button.pack(side="right", padx=(0, 8))
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.grab_set()
+        self.accept_button.focus_set()
+
+    def _accept(self):
+        self.selected_scope = self.v_scope.get()
+        self.destroy()
+
+
 class ChangeReviewDialog(tk.Toplevel):
     """A read-only before/after review. File writing stays in the editor."""
     def __init__(self, parent, changes: dict[int, str], baseline: dict[int, str], target: Path):
@@ -198,9 +230,7 @@ class ChangeReviewDialog(tk.Toplevel):
         buttons = tk.Frame(self, bg=parent.colors["BG"])
         buttons.grid(row=3, column=0, sticky="ew", padx=22, pady=18)
         self.export_button = ttk.Button(
-            buttons, text="텍스트로 보관",
-            command=lambda: parent.export_changes(changes=dict(changes), baseline=dict(baseline),
-                                                  dialog_parent=self))
+            buttons, text="본문 내보내기", command=lambda: parent.export_changes(dialog_parent=self))
         self.export_button.pack(side="left")
         ttk.Button(buttons, text="확인 · 교정본에 저장", command=self._accept,
                    style="Ink.TButton").pack(side="right")
@@ -657,7 +687,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
         self.history_button = ttk.Button(actions, text="수정 기록 보기", command=self.show_correction_history)
         self.history_button.pack(side="left", padx=(0, 7))
-        self.export_button = ttk.Button(actions, text="수정 내용 보관", command=self.export_changes, state="disabled")
+        self.export_button = ttk.Button(actions, text="본문 내보내기", command=self.export_changes)
         self.export_button.pack(side="left", padx=(0, 7))
         self.revert_button = ttk.Button(actions, text="이번 수정 취소", command=self.revert_changes, state="disabled")
         self.revert_button.pack(side="left", padx=(0, 7))
@@ -1222,7 +1252,7 @@ class BookmarkSectionEditor(tk.Toplevel):
                              fg=self.colors["ACCENT"] if index in changes else self.colors["MUTED"])
         state = "normal" if changes and not self.busy else "disabled"
         self.save_button.configure(state=state); self.revert_button.configure(state=state)
-        self.export_button.configure(state="normal" if changes else "disabled")
+        self.export_button.configure(state="disabled" if self._saving else "normal")
         self.reload_button.configure(state="disabled" if self.busy else "normal")
         self.find_button.configure(state="disabled" if self.busy else "normal")
 
@@ -1590,22 +1620,34 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.v_status.set(f"구획 전체 {len(self._editors)}문단을 복사했습니다. 미저장 수정도 포함합니다.")
         return True
 
-    def export_changes(self, path=None, *, changes=None, baseline=None, dialog_parent=None):
-        """Keep an exact before/after TXT copy; this never saves the HWPX."""
+    def _choose_export_scope(self, parent, scope):
+        previous_grab = self.grab_current()
+        dialog = BodyExportScopeDialog(parent, colors=self.colors, scope=scope)
+        try:
+            self.wait_window(dialog)
+            return dialog.selected_scope
+        finally:
+            if previous_grab is not None:
+                try:
+                    if previous_grab.winfo_exists():
+                        previous_grab.grab_set()
+                except tk.TclError:
+                    pass
+
+    def export_changes(self, path=None, *, scope="section", dialog_parent=None):
+        """Export only the complete current body text, including unsaved edits."""
         if self._closed:
             return False
         parent = dialog_parent or self
-        changes = self._changes() if changes is None else dict(changes)
-        baseline = self._baseline if baseline is None else baseline
-        if not changes:
-            messagebox.showinfo("수정 내용 보관", "보관할 미저장 수정이 없습니다.", parent=parent)
-            return False
         if path is None:
+            scope = self._choose_export_scope(parent, scope)
+            if scope is None:
+                return False
             target = Path(self.session.corrected_path)
             path = filedialog.asksaveasfilename(
-                parent=parent, title="미저장 수정 내용을 텍스트로 보관", defaultextension=".txt",
+                parent=parent, title="수정이 반영된 본문을 TXT로 내보내기", defaultextension=".txt",
                 filetypes=[("텍스트 파일", "*.txt")], initialdir=str(target.parent),
-                initialfile=target.stem + "_수정내용.txt")
+                initialfile=target.stem + ("_전체본문.txt" if scope == "document" else "_구획본문.txt"))
             if not path:
                 return False
         temporary = None
@@ -1620,19 +1662,14 @@ class BookmarkSectionEditor(tk.Toplevel):
             if any(path.resolve() == item.resolve() or
                    (path.exists() and item.exists() and path.samefile(item)) for item in protected):
                 raise ValueError("원본·교정본·수정 기록을 보관 파일로 덮어쓸 수 없습니다.")
-            parts = ["연어OCR · 미저장 수정 내용", f"교정 대상: {corrected.name}",
-                     "이 파일은 보관용 텍스트이며 교정본 HWPX에 저장된 결과가 아닙니다.", ""]
-            for index in sorted(changes):
-                if index not in baseline:
-                    raise ValueError("수정 전 문단을 확인하지 못했습니다. 입력한 내용은 그대로 남아 있습니다.")
-                parts.extend([f"문단 {index + 1}", "수정 전", baseline[index], "", "수정 후", changes[index], "", ""])
+            text = self.session.export_text(self._changes(), scope=scope)
             descriptor, filename = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
             temporary = Path(filename)
             with os.fdopen(descriptor, "w", encoding="utf-8-sig", newline="") as stream:
-                stream.write("\n".join(parts))
+                stream.write(text)
             os.replace(temporary, path)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("수정 내용을 보관하지 못했습니다",
+            messagebox.showerror("본문을 내보내지 못했습니다",
                                  f"{exc}\n\n입력한 수정은 이 창에 남아 있습니다.", parent=parent)
             return False
         finally:
@@ -1641,7 +1678,8 @@ class BookmarkSectionEditor(tk.Toplevel):
                     temporary.unlink(missing_ok=True)
                 except OSError:
                     pass
-        self.v_status.set(f"수정 내용 보관됨 · {path.name} · 교정본은 아직 저장하지 않았습니다.")
+        label = "교정본 문서 전체" if scope == "document" else "현재 구획 전체"
+        self.v_status.set(f"{label} 본문 내보냄 · {path.name} · 교정본은 저장하지 않았습니다.")
         return True
 
     def _confirm_changes(self, changes):
