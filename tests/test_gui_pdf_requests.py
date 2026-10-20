@@ -58,6 +58,7 @@ class RequestGui(unittest.TestCase):
 
     def test_invalid_enabled_rule_file_blocks_before_api_preparation(self):
         app = SimpleNamespace(_need_pdf=lambda: True, v_punctuation=Var(True),
+                              pdf=lambda: str(self.root / "source.pdf"),
                               v_punctuation_rules=Var(str(self.root / "missing.json")),
                               _prepare_env=mock.Mock(), v_ctxmodel=Var(False))
         with mock.patch.object(self.gui.messagebox, "showerror") as error:
