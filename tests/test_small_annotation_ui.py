@@ -2,7 +2,9 @@
 import copy
 import gc
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import time
@@ -164,6 +166,8 @@ class FakeService:
 class DialogBoundary(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            raise unittest.SkipTest("Real Tk dialogs require an X display on Linux.")
         cls.root = tk.Tk()
         cls.root.withdraw()
 

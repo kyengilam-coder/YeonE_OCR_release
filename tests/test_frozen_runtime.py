@@ -14,6 +14,28 @@ from yeone_ocr import gui, launcher, runtime, state, updater, windows_app
 
 
 class FrozenRuntime(unittest.TestCase):
+    def test_windows_redirected_cli_logs_preserve_unicode_in_utf8(self):
+        text = "판독 — 樂𠀀漢\U000e0100"
+        output = io.BytesIO()
+        errors = io.BytesIO()
+        stdout = io.TextIOWrapper(output, encoding="cp949")
+        stderr = io.TextIOWrapper(errors, encoding="cp949")
+        stdin = io.StringIO("unchanged input")
+        try:
+            with mock.patch.object(sys, "platform", "win32"), \
+                 mock.patch.object(sys, "stdout", stdout), \
+                 mock.patch.object(sys, "stderr", stderr), \
+                 mock.patch.object(sys, "stdin", stdin):
+                runtime.ensure_standard_streams()
+                print(text, flush=True)
+                print(text, file=sys.stderr, flush=True)
+                self.assertIs(sys.stdin, stdin)
+            self.assertEqual(output.getvalue().decode("utf-8").strip(), text)
+            self.assertEqual(errors.getvalue().decode("utf-8").strip(), text)
+        finally:
+            stdout.close()
+            stderr.close()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

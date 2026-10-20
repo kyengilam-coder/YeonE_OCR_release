@@ -142,11 +142,17 @@ class NewLocalEngines(unittest.TestCase):
                                           "engine_metadata": {"generation_complete": True}}), encoding="utf-8")
 
         with patch.object(local_engines, "inspect_engine", return_value=info), \
-                patch.object(ocr, "_run", side_effect=complete_worker):
+                patch.object(ocr, "_run", side_effect=complete_worker), \
+                patch("ab_ocr.gpu_queue.GPULease") as lease:
+            # This checks portable inventory evidence, not the Windows mutex.
+            # Real GPU ownership and cancellation have their own platform tests.
+            lease.return_value.__enter__.return_value.evidence.return_value = {"fixture": "synthetic GPU lease"}
             result = local_engines.recognize_local_file(source, engine="glmocr", languages="kor+chi_tra",
                                                        page_number=1, dpi=300, timeout=10,
                                                        should_stop=None, engine_root=self.root)
+            lease.assert_called_once_with("glmocr", should_stop=None)
             metadata = result.engine_metadata
+            self.assertEqual(metadata["gpu_lease"], {"fixture": "synthetic GPU lease"})
             self.assertNotIn("runtime_files", metadata)
             self.assertNotIn("runtime_files", metadata["installation"])
             self.assertEqual(metadata["runtime_inventory"]["files"], 200)
