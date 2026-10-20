@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
+import weakref
 import zipfile
 
 from lxml import etree
@@ -29,6 +30,13 @@ from . import zh
 
 class SectionEditError(ValueError):
     """The requested edit cannot safely preserve document structure."""
+
+    def __init__(self, message: str, *, paragraph_index: int | None = None,
+                 offset: int | None = None, character: str | None = None):
+        super().__init__(message)
+        self.paragraph_index = paragraph_index
+        self.offset = offset
+        self.character = character
 
 
 class ConflictError(SectionEditError):
@@ -61,6 +69,57 @@ class SaveResult:
     @property
     def corrected_path(self) -> Path:
         return self.path
+
+
+@dataclass(frozen=True)
+class ReplaceEntry:
+    index: int
+    before: str
+    after: str
+    count: int
+
+
+@dataclass(frozen=True)
+class ReplaceSkip:
+    index: int
+    reason: str
+    count: int
+
+
+@dataclass(frozen=True)
+class ReplacePlan:
+    """A preview tied to one session snapshot; creating it never writes files."""
+    find: str
+    replacement: str
+    scope: str
+    entries: tuple[ReplaceEntry, ...]
+    skipped: tuple[ReplaceSkip, ...]
+    _drafts: tuple[tuple[int, str, str], ...]
+    _generation: int
+
+    @property
+    def changes(self) -> dict[int, str]:
+        return {index: after for index, _, after in self._drafts}
+
+    @property
+    def baseline(self) -> dict[int, str]:
+        return {index: before for index, before, _ in self._drafts}
+
+    @property
+    def before(self) -> dict[int, str]:
+        return {entry.index: entry.before for entry in self.entries}
+
+    @property
+    def matches(self) -> int:
+        return sum(entry.count for entry in self.entries)
+
+    @property
+    def skipped_count(self) -> int:
+        return sum(entry.count for entry in self.skipped)
+
+    @property
+    def paragraph_count(self) -> int:
+        return len(self.entries)
 
 
 def _path(path) -> str:
@@ -225,8 +284,14 @@ def _readonly_reason(paragraph, heading: bool) -> str:
 def _replace_text(paragraph, text: str) -> None:
     """Apply diff hunks backwards to existing slots, retaining all XML nodes."""
     before = paragraph_text(paragraph)
-    if any(c in text for c in "\r\n\t") or any(ord(c) < 32 for c in text):
-        raise SectionEditError("문단 안에는 줄바꿈·탭·제어 문자를 새로 넣을 수 없습니다. 문단별로 글자만 고쳐 주십시오.")
+    # Existing literal separators are text, unlike hp:tab/hp:lineBreak atoms.
+    # Permit retaining/removing these old separators while rejecting new ones.
+    existing = iter(c for c in before if _text_control(c))
+    for offset, char in enumerate(text):
+        if _text_control(char) and not any(old == char for old in existing):
+            raise SectionEditError(
+                "문단 안에는 줄바꿈·탭·제어 문자를 새로 넣을 수 없습니다. 문단별로 글자만 고쳐 주십시오.",
+                offset=offset, character=char)
     for op, start, end, j, k in reversed(SequenceMatcher(None, before, text, autojunk=False).get_opcodes()):
         if op == "equal":
             continue
@@ -251,6 +316,10 @@ def _replace_text(paragraph, text: str) -> None:
     for child in list(paragraph):
         if _local(child.tag) in ("linesegarray", "lineSegArray"):
             paragraph.remove(child)
+
+
+def _text_control(char: str) -> bool:
+    return ord(char) < 32 or char in "\u2028\u2029"
 
 
 def _style_key(element) -> tuple:
@@ -472,6 +541,9 @@ class SectionEditSession:
                     raise SectionEditError(f"{i + 1}번 문단의 원문과 교정본 내용이 크게 달라 위치 대응을 확인할 수 없습니다.")
         self._source = source
         self._history = history
+        self._protected = protected
+        self._generation = 0
+        self._replace_plans: weakref.WeakValueDictionary[int, ReplacePlan] = weakref.WeakValueDictionary()
         self._refresh_paragraphs(target)
         self._assert_unchanged()
         return self
@@ -493,25 +565,130 @@ class SectionEditSession:
             if _fingerprint(path) != expected:
                 raise ConflictError(f"편집 중 파일이 외부에서 변경되었습니다: {path.name}\n저장하지 않았습니다. 다시 불러와 변경 내용을 확인하십시오.")
 
-    def save(self, changes: dict[int, str]) -> SaveResult:
-        self._assert_unchanged()
+    def _check_plan(self, plan: ReplacePlan) -> None:
+        if (not isinstance(plan, ReplacePlan) or self._replace_plans.get(id(plan)) is not plan
+                or plan._generation != self._generation):
+            raise ConflictError("바꾸기 미리보기 이후 문서가 달라졌습니다. 다시 찾아 바꿀 내용을 확인하십시오.")
+
+    def _validated_changes(self, changes: dict[int, str],
+                           replacement_plan: ReplacePlan | None) -> dict[int, str]:
+        if replacement_plan is not None:
+            self._check_plan(replacement_plan)
+        if not isinstance(changes, dict):
+            raise SectionEditError("편집할 문단과 글자를 확인할 수 없습니다.")
         rows = {p.index: p for p in self.paragraphs}
+        approved = replacement_plan.changes if replacement_plan is not None else {}
+        baseline = replacement_plan.baseline if replacement_plan is not None else {}
         edits = {}
         for index, text in changes.items():
-            if type(index) is not int or index not in rows or not isinstance(text, str):
+            if type(index) is not int or not isinstance(text, str):
                 raise SectionEditError("선택한 구획 안의 문단만 편집할 수 있습니다.")
+            if index not in rows:
+                if index not in approved or text != approved[index]:
+                    raise SectionEditError("다른 구획은 찾아 바꾸기에서 미리 확인한 내용만 저장할 수 있습니다.")
+                if text != baseline[index]:
+                    edits[index] = text
+                continue
             row = rows[index]
             if text == row.corrected_text:
                 continue
             if not row.editable:
                 raise SectionEditError(f"{index + 1}번 문단: {row.readonly_reason}")
             edits[index] = text
+        return edits
+
+    def _alignment_reason(self, index: int, current: str) -> str:
+        old = paragraph_text(self._source.paragraphs[index])
+        if index not in self._protected and old != current and max(len(old), len(current)) >= 12:
+            left, right = zh.compare_key(normalize_name(old)), zh.compare_key(normalize_name(current))
+            if SequenceMatcher(None, left, right, autojunk=False).ratio() < 0.45:
+                return "원문과 교정본 내용이 크게 달라 위치 대응을 확인할 수 없습니다."
+        return ""
+
+    def preview_replace(self, find: str, replacement: str, *, scope: str = "section",
+                        paragraph_index: int | None = None, changes: dict[int, str] | None = None,
+                        previous_plan: ReplacePlan | None = None,
+                        match: tuple[int, int] | None = None) -> ReplacePlan:
+        """Preview literal body-text replacement, including current unsaved edits.
+
+        Only a plan created by this snapshot can authorize changes outside its
+        displayed section. Callers may discard a preview without invalidating
+        the earlier plan that their current draft was based on.
+        """
+        self._assert_unchanged()
+        if not isinstance(find, str) or not find:
+            raise SectionEditError("찾을 글자를 입력하십시오.")
+        if not isinstance(replacement, str):
+            raise SectionEditError("바꿀 글자를 확인하십시오.")
+        if any(_text_control(char) for char in find + replacement):
+            raise SectionEditError("찾을 글자와 바꿀 글자에는 줄바꿈·탭·제어 문자를 넣을 수 없습니다.")
+        if scope not in {"paragraph", "section", "document"}:
+            raise SectionEditError("찾아 바꾸기 범위를 확인하십시오.")
+        if scope == "paragraph" and (type(paragraph_index) is not int
+                                      or not self.start <= paragraph_index < self.end):
+            raise SectionEditError("현재 구획에서 바꿀 문단을 선택하십시오.")
+        drafts = self._validated_changes(changes or {}, previous_plan)
+        target = _Archive(self._target_bytes or self._source_bytes)
+        indices = (range(len(target.paragraphs)) if scope == "document" else
+                   range(self.start, self.end) if scope == "section" else [paragraph_index])
+        if match is not None:
+            if (not isinstance(match, tuple) or len(match) != 2
+                    or any(type(value) is not int for value in match)
+                    or match[0] not in indices or match[1] < 0):
+                raise SectionEditError("선택한 찾기 위치가 범위와 다릅니다. 다시 찾으십시오.")
+            indices = [match[0]]
+        entries, skipped = [], []
+        grade_styles = _ManualGradeStyles(self._source, target)
+        for index in indices:
+            paragraph = target.paragraphs[index]
+            saved = paragraph_text(paragraph)
+            before = drafts.get(index, saved)
+            count = before.count(find)
+            if match is not None:
+                offset = match[1]
+                if before[offset:offset + len(find)] != find:
+                    raise ConflictError("찾은 글자가 수정되었습니다. 다시 찾으십시오.")
+                count = 1
+                after = before[:offset] + replacement + before[offset + len(find):]
+            else:
+                after = before.replace(find, replacement) if count else before
+            if not count:
+                continue
+            reason = (_readonly_reason(paragraph, index in self._heads)
+                      or self._alignment_reason(index, saved))
+            if not reason:
+                try:
+                    trial = deepcopy(paragraph)
+                    _replace_text(trial, after)
+                    grade_styles.clear_changed(self._source.paragraphs[index], trial, saved)
+                except SectionEditError as exc:
+                    reason = str(exc)
+            if reason:
+                skipped.append(ReplaceSkip(index, reason, count))
+                continue
+            entries.append(ReplaceEntry(index, before, after, count))
+            if after == saved:
+                drafts.pop(index, None)
+            else:
+                drafts[index] = after
+        plan = ReplacePlan(find, replacement, scope, tuple(entries), tuple(skipped),
+                           tuple((index, paragraph_text(target.paragraphs[index]), after)
+                                 for index, after in sorted(drafts.items())), self._generation)
+        self._replace_plans[id(plan)] = plan
+        return plan
+
+    def save(self, changes: dict[int, str], *, replacement_plan: ReplacePlan | None = None) -> SaveResult:
+        self._assert_unchanged()
+        edits = self._validated_changes(changes, replacement_plan)
         if not edits:
             return SaveResult(self.corrected_path, 0, None, bool(self._history["paragraphs"]))
         target = _Archive(self._target_bytes or self._source_bytes)
         history = deepcopy(self._history)
+        outside = any(not self.start <= index < self.end for index in edits)
+        history_section = "교정본 전체" if outside else self.section_name
+        history_start, history_end = (0, len(target.paragraphs)) if outside else (self.start, self.end)
         history.update(paragraph_count=len(target.paragraphs), source=_path(self.source_path),
-                       section=self.section_name, updated=time.strftime("%Y-%m-%d %H:%M:%S"))
+                       section=history_section, updated=time.strftime("%Y-%m-%d %H:%M:%S"))
         changed_parts = set()
         correction_edits = []
         grade_styles = _ManualGradeStyles(self._source, target)
@@ -519,8 +696,12 @@ class SectionEditSession:
             paragraph = target.paragraphs[index]
             before = paragraph_text(paragraph)
             old_hash = _text_hash(before)
-            _replace_text(paragraph, text)
-            grade_styles.clear_changed(self._source.paragraphs[index], paragraph, before)
+            try:
+                _replace_text(paragraph, text)
+                grade_styles.clear_changed(self._source.paragraphs[index], paragraph, before)
+            except SectionEditError as exc:
+                raise SectionEditError(f"{index + 1}번 문단: {exc}", paragraph_index=index,
+                                       offset=exc.offset, character=exc.character) from exc
             record = history["paragraphs"].setdefault(str(index), {"signature": _signature(paragraph), "text_hashes": []})
             record["text_hashes"] = sorted(set(record["text_hashes"]) | {old_hash, _text_hash(text)})
             correction_edits.append({"paragraph": index, "signature": _signature(paragraph),
@@ -530,7 +711,7 @@ class SectionEditSession:
         learning_warning = append_corrections(
             history, correction_edits, pdf_path=_path(self.pdf_path), pdf_sha256=self._pdf_hash,
             source_path=_path(self.source_path), source_sha256=_sha(self._source_bytes),
-            section=self.section_name, start=self.start, end=self.end,
+            section=history_section, start=history_start, end=history_end,
         )
         self.corrected_path.parent.mkdir(parents=True, exist_ok=True)
         history_path = manual_history_path(self.corrected_path)
@@ -584,6 +765,9 @@ class SectionEditSession:
             for path in stages:
                 path.unlink(missing_ok=True)
         self._target_bytes, self._history_bytes, self._history = new_bytes, history_bytes, history
+        self._protected.update(edits)
+        self._generation += 1
+        self._replace_plans.clear()
         self._refresh_paragraphs(verified)
         memory = memory_from_snapshot(history, verified.paragraphs, self._pdf_hash, history_path)
         return SaveResult(self.corrected_path, len(edits), backup, True,

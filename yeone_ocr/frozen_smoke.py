@@ -580,6 +580,134 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
             "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
 
 
+def bookmark_replace_probe(folder: Path) -> dict:
+    """Recover paragraph input and replace through the shipped comparison UI."""
+    import tkinter as tk
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from lxml import etree
+    from .collate import section_editor
+    from .collate.collate import Item
+    from .collate.hwpx_edit import Editor, HP, _canon, _slots, _tag_of
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import (
+        SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
+    )
+
+    source = folder / "bookmark-replace.hwpx"
+    target = folder / "bookmark-replace_교정.hwpx"
+    pdf_path = folder / "bookmark-replace.pdf"
+    document = HwpxDocument.new()
+    try:
+        normal = document.styles.ensure_run(size=11)
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph("單純皰疹。皰液。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.add_paragraph("保留原文。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.add_heading("皰疹別方", level=1)
+        document.add_paragraph("他段皰疹。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        special = document.add_paragraph("保留皰", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        etree.SubElement(special.element.find(HP + "run").find(HP + "t"), HP + "tab").tail = "原文"
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=18)
+        pdf.save(pdf_path)
+    originals = {path: path.read_bytes() for path in (source, pdf_path)}
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        local = book.texts().index("單純皰疹。皰液。")
+        outside = book.texts().index("他段皰疹。")
+        editor = Editor(book, memo="none")
+        baseline = _canon(editor._char_pr(normal))
+        marks = [
+            Item("B1", "mark", index, offset, offset + 1, "皰", "疱", "", note="확인")
+            for index in (local, outside)
+            for offset, char in enumerate(book.texts()[index]) if char == "皰"
+        ]
+        assert all(item.ok for item in editor.apply(marks))
+        editor.save_copy(str(target))
+    finally:
+        book.doc.close()
+    before = target.read_bytes()
+    snapshot = _Archive(before)
+    untouched = {i: etree.tostring(p) for i, p in enumerate(snapshot.paragraphs) if i not in (local, outside)}
+    root = tk.Tk()
+    root.withdraw()
+    window = dialog = None
+    try:
+        window = section_editor.BookmarkSectionEditor(
+            root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 1))
+        window.withdraw()
+        field = window._editors[local]
+        field.delete("1.0", "end")
+        field.insert("1.0", "單純皰疹。皰液。\r\n確認\t句。")
+        prompt = section_editor.messagebox.askyesno
+        confirmations = []
+        try:
+            section_editor.messagebox.askyesno = lambda *args, **kwargs: confirmations.append(args) or True
+            assert window._prepare_paragraph_input()
+        finally:
+            section_editor.messagebox.askyesno = prompt
+        expected_draft = "單純皰疹。皰液。 確認 句。"
+        assert confirmations and field.get("1.0", "end-1c") == expected_draft
+        dialog = section_editor.FindReplaceDialog(window)
+        dialog.withdraw()
+        dialog.v_find.set("皰")
+        dialog.v_replace.set("疱")
+        assert dialog.preview() and dialog.plan.matches == 2
+        dialog.v_scope.set("교정본 전체")
+        assert dialog.preview()
+        plan = dialog.plan
+        assert plan.matches == 3 and plan.paragraph_count == 2 and plan.skipped_count == 2
+        assert target.read_bytes() == before and not manual_history_path(target).exists()
+        assert dialog.replace_all()
+        assert target.read_bytes() == before
+        assert field.get("1.0", "end-1c") == expected_draft.replace("皰", "疱")
+        window._confirm_changes = lambda changes: changes == plan.changes
+        assert window.save() and not window.dirty
+    finally:
+        if dialog is not None:
+            dialog.destroy()
+        if window is not None:
+            window.destroy()
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    assert target.with_suffix(".bak.hwpx").read_bytes() == before
+    saved = _Archive(target.read_bytes())
+    assert all(etree.tostring(saved.paragraphs[i]) == data for i, data in untouched.items())
+    for name, data in snapshot.entries.items():
+        if name != "Contents/header.xml" and name not in {part for part, _ in snapshot.locations}:
+            assert saved.entries[name] == data
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts()[local] == "單純疱疹。疱液。 確認 句。"
+        assert book.texts()[outside] == "他段疱疹。"
+        inspector = Editor(book, memo="none")
+        restored = [inspector._char_pr(slot.run.get("charPrIDRef"))
+                    for index in (local, outside) for slot in _slots(book.paragraphs[index].element)
+                    for char in slot.text if char == "疱"]
+        assert len(restored) == 3 and all(_canon(style) == baseline for style in restored)
+        assert all(_tag_of(style) not in {"#0B7A3B", "#1F4FBF", "#C00000"} for style in restored)
+    finally:
+        book.doc.close()
+    assert manual_protected_paragraphs(target) == {local, outside}
+    history = json.loads(manual_history_path(target).read_text("utf-8"))
+    assert {entry["paragraph"] for entry in history["correction_events"]} == {local, outside}
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == local) == "單純疱疹。疱液。 確認 句。"
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    return {"editable_occurrences": 3, "readonly_skipped": 2,
+            "input_line_join_preserved_text": True, "section_and_document_scopes": True,
+            "pending_edits_preserved": True, "edited_marks_cleared": True,
+            "source_and_other_content_preserved": True, "existing_copy_and_backup_preserved": True,
+            "manual_history_and_protection_retained": True, "saved_file_reopened": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
 def bookmark_cursor_probe(folder: Path) -> dict:
     """Exercise real cursor mapping, PDF overlays and matching text size."""
     import os
@@ -890,6 +1018,7 @@ def run(report_path: Path) -> int:
         check("human-correction-memory", lambda: correction_memory_probe(folder))
         check("bookmark-color-only-and-memo-cleanup", lambda: color_only_collation_probe(folder))
         check("manual-edit-style-cleanup", lambda: manual_style_cleanup_probe(folder))
+        check("bookmark-find-replace-and-paragraph-input", lambda: bookmark_replace_probe(folder))
         check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))

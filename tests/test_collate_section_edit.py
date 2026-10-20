@@ -1,5 +1,7 @@
 """Manual section editing: XML preservation, atomic save and conflict checks."""
 from copy import deepcopy
+from dataclasses import replace
+import gc
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+import weakref
 
 from lxml import etree
 
@@ -297,6 +300,189 @@ class ManualSectionEditing(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(SectionEditError):
                 self.open().save(change)
         self.assertFalse(self.corrected.exists())
+
+    def rewrite_source(self, texts):
+        source = _Archive(self.source.read_bytes())
+        for index, text in texts.items():
+            slots = _slots(source.paragraphs[index])
+            slots[0].text = text
+            for slot in slots[1:]:
+                slot.text = ""
+        source.write(self.source, {source.locations[index][0] for index in texts})
+
+    def test_existing_literal_separators_do_not_block_character_correction(self):
+        self.rewrite_source({2: "甲皰\n乙皰\t丙皰\r丁皰\u2028戊皰\u2029己皰"})
+        session = self.open()
+        before = next(p.corrected_text for p in session.paragraphs if p.index == 2)
+        session.save({2: before.replace("皰", "疱")})
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[2]),
+                         before.replace("皰", "疱"))
+
+    def test_new_literal_separators_are_rejected_with_paragraph_number(self):
+        self.rewrite_source({2: "甲皰\n乙皰\t丙皰"})
+        for text in ("甲疱\n乙皰\t丙皰\n", "甲疱\t乙皰\n丙皰", "甲疱\u2028乙皰"):
+            with self.subTest(text=text), self.assertRaisesRegex(SectionEditError, "3번 문단"):
+                self.open().save({2: text})
+        self.assertFalse(self.corrected.exists())
+        with self.assertRaises(SectionEditError) as raised:
+            self.open().save({2: "甲疱\n乙皰\t丙皰\n"})
+        self.assertEqual((raised.exception.paragraph_index, raised.exception.offset,
+                          raised.exception.character), (2, 8, "\n"))
+
+    def test_existing_literal_separator_can_be_explicitly_removed(self):
+        self.rewrite_source({2: "甲皰\n乙皰"})
+        self.open().save({2: "甲疱 乙皰"})
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[2]), "甲疱 乙皰")
+
+    def test_replace_preview_scope_counts_readonly_skips_and_no_writes(self):
+        self.rewrite_source({2: "皰 text 皰", 4: "Memo 皰", 5: "Tab 皰", 7: "Other 皰"})
+        session = self.open()
+        source = self.source.read_bytes()
+        paragraph = session.preview_replace("皰", "疱", scope="paragraph", paragraph_index=2)
+        self.assertEqual((paragraph.matches, paragraph.paragraph_count, paragraph.skipped_count), (2, 1, 0))
+        section = session.preview_replace("皰", "疱")
+        self.assertEqual((section.matches, section.paragraph_count, section.skipped_count), (3, 2, 1))
+        self.assertEqual(section.skipped[0].index, 5)
+        document = session.preview_replace("皰", "疱", scope="document")
+        self.assertEqual((document.matches, document.paragraph_count, document.skipped_count), (4, 3, 1))
+        self.assertEqual(document.changes, {2: "疱 text 疱", 4: "Memo 疱", 7: "Other 疱"})
+        self.assertEqual(self.source.read_bytes(), source)
+        self.assertFalse(self.corrected.exists())
+        self.assertFalse(manual_history_path(self.corrected).exists())
+        find_only = session.preview_replace("皰", "皰", scope="document")
+        self.assertEqual((find_only.matches, find_only.skipped_count), (4, 1))
+        self.assertEqual(find_only.changes, {})
+
+    def test_whole_document_replace_preserves_source_backups_history_and_marks(self):
+        self.rewrite_source({2: "皰 text 皰", 7: "Other 皰"})
+        self.mark_copy(index=7, grade="red")
+        source = self.source.read_bytes()
+        marked = self.styles_at(self.corrected, 7)
+        old = self.corrected.read_bytes()
+        session = self.open()
+        plan = session.preview_replace("皰", "疱", scope="document")
+        result = session.save(plan.changes, replacement_plan=plan)
+        self.assertEqual(result.saved_count, 2)
+        self.assertEqual(result.backup_path.read_bytes(), old)
+        self.assertEqual(self.source.read_bytes(), source)
+        self.assertEqual(manual_protected_paragraphs(self.corrected), {2, 7})
+        saved = _Archive(self.corrected.read_bytes())
+        before = _Archive(old)
+        self.assertEqual(paragraph_text(saved.paragraphs[7]), "Other 疱")
+        self.assertEqual(saved.entries["Contents/section1.xml"], before.entries["Contents/section1.xml"])
+        self.assertEqual(saved.entries["BinData/manual-test.bin"], before.entries["BinData/manual-test.bin"])
+        styles = self.styles_at(self.corrected, 7)
+        self.assertEqual([_style_key(s) for s in styles[:6]], [_style_key(s) for s in marked[:6]])
+        self.assertNotEqual(_tag_of(styles[6]), "#C00000")
+        history = json.loads(manual_history_path(self.corrected).read_text("utf-8"))
+        from yeone_ocr.correction_memory import correction_records
+        records = correction_records(history, saved.paragraphs, session._pdf_hash)
+        self.assertEqual({entry["paragraph"] for entry in records}, {2, 7})
+        self.assertTrue(all(entry["section"] == "교정본 전체" for entry in records))
+
+    def test_replace_preview_includes_unsaved_changes_and_single_match(self):
+        self.rewrite_source({2: "皰 text 皰", 7: "Other 皰 皰"})
+        session = self.open()
+        plan = session.preview_replace("皰", "疱", changes={2: "皰 revised 皰"},
+                                       scope="document", match=(7, 8))
+        self.assertEqual(plan.matches, 1)
+        self.assertEqual(plan.entries[0].before, "Other 皰 皰")
+        self.assertEqual(plan.changes, {2: "皰 revised 皰", 7: "Other 皰 疱"})
+        second = session.preview_replace("皰", "疱", scope="document",
+                                         changes=plan.changes, previous_plan=plan)
+        self.assertEqual(second.changes, {2: "疱 revised 疱", 7: "Other 疱 疱"})
+        # Merely opening and cancelling another preview must not invalidate it.
+        session.preview_replace("text", "words")
+        session.save(second.changes, replacement_plan=second)
+        saved = _Archive(self.corrected.read_bytes())
+        self.assertEqual(paragraph_text(saved.paragraphs[2]), "疱 revised 疱")
+        self.assertEqual(paragraph_text(saved.paragraphs[7]), "Other 疱 疱")
+
+    def test_unapproved_outside_changes_forged_and_stale_plans_are_rejected(self):
+        self.rewrite_source({7: "Other 皰"})
+        session = self.open()
+        plan = session.preview_replace("皰", "疱", scope="document")
+        for changes, approved in ((plan.changes, None), ({7: "Arbitrary"}, plan),
+                                  (plan.changes, replace(plan)),
+                                  (plan.changes, self.open().preview_replace("皰", "疱", scope="document"))):
+            with self.subTest(changes=changes), self.assertRaises(SectionEditError):
+                session.save(changes, replacement_plan=approved)
+        session.save({2: "Alpha better gamma."})
+        with self.assertRaises(ConflictError):
+            session.save(plan.changes, replacement_plan=plan)
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[7]), "Other 皰")
+
+    def test_replace_plan_property_mutation_cannot_authorize_another_change(self):
+        self.rewrite_source({7: "Other 皰"})
+        session = self.open()
+        plan = session.preview_replace("皰", "疱", scope="document")
+        plan.changes[7] = "Injected"
+        self.assertEqual(plan.changes[7], "Other 疱")
+        with self.assertRaises(SectionEditError):
+            session.preview_replace("皰", "疱", scope="document", changes={7: "Injected"}, previous_plan=plan)
+
+    def test_discarded_previews_do_not_accumulate_document_drafts(self):
+        session = self.open()
+        kept = session.preview_replace("a", "A")
+        discarded = session.preview_replace("a", "B")
+        reference = weakref.ref(discarded)
+        del discarded
+        gc.collect()
+        self.assertIsNone(reference())
+        self.assertEqual(len(session._replace_plans), 1)
+        self.assertGreater(session.save(kept.changes, replacement_plan=kept).saved_count, 0)
+
+    def test_replace_preview_skips_unsafe_style_changes_and_unrelated_outside_body(self):
+        target = _Archive(self.source.read_bytes())
+        _slots(target.paragraphs[7])[0].text = "Entirely divergent 皰 replacement with unrelated contents"
+        target.write(self.corrected, {"Contents/section0.xml"})
+        session = self.open()
+        plan = session.preview_replace("BC", "LONG", scope="document")
+        self.assertEqual((plan.matches, plan.skipped_count, plan.skipped[0].index), (0, 1, 3))
+        plan = session.preview_replace("皰", "疱", scope="document")
+        self.assertEqual((plan.matches, plan.skipped_count, plan.skipped[0].index), (0, 1, 7))
+        self.assertIn("위치 대응", plan.skipped[0].reason)
+
+    def test_replace_excludes_heading_and_preserves_literal_case_and_deletion(self):
+        session = self.open()
+        plan = session.preview_replace("白", "黑", scope="document")
+        self.assertEqual((plan.matches, plan.skipped_count), (0, 1))
+        plan = session.preview_replace("a", "", scope="paragraph", paragraph_index=2)
+        self.assertEqual(plan.changes, {2: "Alph bet gmm."})
+        session.save(plan.changes, replacement_plan=plan)
+        self.assertEqual(paragraph_text(_Archive(self.corrected.read_bytes()).paragraphs[2]), "Alph bet gmm.")
+
+    def test_bad_replace_inputs_and_external_change_do_not_write(self):
+        session = self.open()
+        for find, replacement, options in (("", "a", {}), ("a", "\n", {}), ("\t", "a", {}),
+                                            ("a", "b", {"scope": "other"}),
+                                            ("a", "b", {"scope": "paragraph", "paragraph_index": 7}),
+                                            ("a", "b", {"match": (2, 900)})):
+            with self.subTest(options=options), self.assertRaises(SectionEditError):
+                session.preview_replace(find, replacement, **options)
+        self.pdf.write_bytes(b"changed")
+        with self.assertRaises(ConflictError):
+            session.preview_replace("a", "b")
+        self.assertFalse(self.corrected.exists())
+
+    def test_whole_document_failed_publish_preserves_drafts_and_previous_file(self):
+        self.rewrite_source({2: "皰 one", 7: "Other 皰"})
+        self.corrected.write_bytes(self.source.read_bytes())
+        session = self.open()
+        old = self.corrected.read_bytes()
+        plan = session.preview_replace("皰", "疱", scope="document")
+        real_replace = os.replace
+        def fail_document(src, dst):
+            if Path(dst) == self.corrected:
+                raise PermissionError("document locked")
+            return real_replace(src, dst)
+        with patch("yeone_ocr.collate.section_edit.os.replace", side_effect=fail_document), self.assertRaises(PermissionError):
+            session.save(plan.changes, replacement_plan=plan)
+        self.assertEqual(self.corrected.read_bytes(), old)
+        self.assertFalse(manual_history_path(self.corrected).exists())
+        # The same draft can still be saved after the external lock is released.
+        result = session.save(plan.changes, replacement_plan=plan)
+        self.assertEqual(result.saved_count, 2)
 
     def test_reordered_body_and_bad_scope_are_rejected(self):
         archive = _Archive(self.source.read_bytes())

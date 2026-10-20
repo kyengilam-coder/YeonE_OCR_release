@@ -4,12 +4,44 @@ from __future__ import annotations
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import difflib
 from pathlib import Path
+import re
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk, messagebox
 
 
 _PDF_EXECUTOR = None
+
+
+def paragraph_input_issue(text, baseline=""):
+    """Return the first character that cannot belong to one editable paragraph."""
+    existing = iter(char for char in baseline if ord(char) < 32 or char in "\u2028\u2029")
+    for offset, char in enumerate(text):
+        if (ord(char) < 32 or char in "\u2028\u2029") and not any(old == char for old in existing):
+            return offset, char
+    return None
+
+
+def join_paragraph_lines(text, baseline=""):
+    """Join pasted line separators without trimming any surrounding text."""
+    if not baseline:
+        return re.sub(r"\r\n|[\r\n\t\u2028\u2029]", " ", text)
+    old_controls = [char for char in baseline if ord(char) < 32 or char in "\u2028\u2029"]
+    controls = [(offset, char) for offset, char in enumerate(text) if ord(char) < 32 or char in "\u2028\u2029"]
+    added = {offset for offset, _char in controls}
+    for op, _i, _j, first, last in difflib.SequenceMatcher(
+            None, old_controls, [char for _offset, char in controls], autojunk=False).get_opcodes():
+        if op == "equal":
+            added.difference_update(offset for offset, _char in controls[first:last])
+    result = []
+    for offset, char in enumerate(text):
+        if offset in added and char in "\r\n\t\u2028\u2029":
+            if char == "\n" and offset - 1 in added and text[offset - 1] == "\r":
+                continue
+            result.append(" ")
+        else:
+            result.append(char)
+    return "".join(result)
 
 
 def shared_pdf_worker():
@@ -144,6 +176,230 @@ class CorrectionHistoryDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _event: self.destroy())
 
 
+class FindReplaceDialog(tk.Toplevel):
+    """Preview literal replacements and stage them in the editor's existing draft."""
+    SCOPES = {"선택 문단": "paragraph", "현재 구획": "section", "교정본 전체": "document"}
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.editor = parent
+        self.plan = None
+        self._occurrences = []
+        self._occurrence = -1
+        self.title("찾기 · 바꾸기")
+        self.transient(parent)
+        self.geometry("760x600")
+        self.minsize(540, 430)
+        self.configure(bg=parent.colors["BG"])
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(6, weight=1)
+        self.v_find = tk.StringVar()
+        self.v_replace = tk.StringVar()
+        self.v_scope = tk.StringVar(value="현재 구획")
+        self.v_summary = tk.StringVar(value="찾을 글자와 바꿀 글자를 입력하고 미리 보기를 누르세요.")
+        for row, label, variable in ((0, "찾을 글자", self.v_find), (1, "바꿀 글자", self.v_replace)):
+            tk.Label(self, text=label, bg=parent.colors["BG"], fg=parent.colors["INK"]).grid(
+                row=row, column=0, sticky="w", padx=(18, 10), pady=(16 if row == 0 else 8, 0))
+            entry = ttk.Entry(self, textvariable=variable)
+            entry.grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=(16 if row == 0 else 8, 0))
+            if row == 0:
+                self.find_entry = entry
+        tk.Label(self, text="바꿀 범위", bg=parent.colors["BG"], fg=parent.colors["INK"]).grid(
+            row=2, column=0, sticky="w", padx=(18, 10), pady=8)
+        self.scope_choice = ttk.Combobox(self, state="readonly", values=list(self.SCOPES),
+                                         textvariable=self.v_scope, width=22)
+        self.scope_choice.grid(row=2, column=1, sticky="w", pady=8)
+        note = tk.Label(self, text="입력한 글자 그대로 찾습니다. 빈 바꿀 글자는 삭제입니다.\n"
+                       "미리 본 뒤 적용하면 편집 중인 수정에 합쳐집니다. 파일은 ‘변경 확인·저장’에서 저장합니다.",
+                       bg=parent.colors["BG"], fg=parent.colors["MUTED"], anchor="w", justify="left")
+        note.grid(row=3, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 8))
+        note.bind("<Configure>", lambda event: note.configure(wraplength=max(200, event.width)))
+        actions = tk.Frame(self, bg=parent.colors["BG"])
+        actions.grid(row=4, column=0, columnspan=2, sticky="ew", padx=18)
+        self.preview_button = ttk.Button(actions, text="찾기 · 미리 보기", command=self.preview)
+        self.preview_button.pack(side="left")
+        self.next_button = ttk.Button(actions, text="다음 찾기", command=self.find_next, state="disabled")
+        self.next_button.pack(side="left", padx=6)
+        self.undo_button = ttk.Button(actions, text="마지막 바꾸기 취소", command=self.undo,
+                                      state="normal" if parent._replace_undo else "disabled")
+        self.undo_button.pack(side="right")
+        summary = tk.Label(self, textvariable=self.v_summary, bg=parent.colors["BG"],
+                           fg=parent.colors["INK"], anchor="w", justify="left")
+        summary.grid(row=5, column=0, columnspan=2, sticky="ew", padx=18, pady=10)
+        summary.bind("<Configure>", lambda event: summary.configure(wraplength=max(200, event.width)))
+        area = tk.Frame(self, bg=parent.colors["PANEL"])
+        area.grid(row=6, column=0, columnspan=2, sticky="nsew", padx=18)
+        self.preview_text = tk.Text(area, wrap="word", relief="flat", bg=parent.colors["PANEL"],
+                                    fg=parent.colors["INK"], font=("Malgun Gothic", 11), padx=10, pady=8)
+        scrollbar = ttk.Scrollbar(area, command=self.preview_text.yview)
+        self.preview_text.configure(yscrollcommand=scrollbar.set, state="disabled")
+        scrollbar.pack(side="right", fill="y")
+        self.preview_text.pack(side="left", fill="both", expand=True)
+        self.preview_text.tag_configure("heading", foreground=parent.colors["ACCENT"])
+        self.preview_text.tag_configure("before", foreground=parent.colors["MUTED"])
+        self.preview_text.tag_configure("match", background="#fff0aa")
+        buttons = tk.Frame(self, bg=parent.colors["BG"])
+        buttons.grid(row=7, column=0, columnspan=2, sticky="ew", padx=18, pady=14)
+        ttk.Button(buttons, text="닫기 · 계속 편집", command=self.destroy).pack(side="right")
+        self.all_button = ttk.Button(buttons, text="모두 바꾸기 · 편집에 적용", command=self.replace_all,
+                                     state="disabled")
+        self.all_button.pack(side="right", padx=6)
+        self.one_button = ttk.Button(buttons, text="한 곳 바꾸기", command=self.replace_one, state="disabled")
+        self.one_button.pack(side="right")
+        for variable in (self.v_find, self.v_replace, self.v_scope):
+            variable.trace_add("write", self._invalidate)
+        if parent._active in parent._editors:
+            widget = parent._editors[parent._active]
+            try:
+                self.v_find.set(widget.get("sel.first", "sel.last"))
+            except tk.TclError:
+                pass
+        self.bind("<Return>", lambda _event: (self.preview(), "break")[1])
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.find_entry.focus_set()
+
+    def _invalidate(self, *_args):
+        self.plan = None
+        self._occurrences = []
+        self._occurrence = -1
+        for button in (self.all_button, self.one_button, self.next_button):
+            button.configure(state="disabled")
+        self.v_summary.set("조건이 바뀌었습니다. ‘찾기 · 미리 보기’를 눌러 결과를 확인하세요.")
+
+    def _make_plan(self, *, match=None):
+        options = dict(scope=self.SCOPES[self.v_scope.get()], paragraph_index=self.editor._active,
+                       changes=self.editor._changes(), previous_plan=self.editor._replacement_plan)
+        if match is not None:
+            options["match"] = match
+        return self.editor.session.preview_replace(self.v_find.get(), self.v_replace.get(), **options)
+
+    def preview(self):
+        if self.editor.busy or not self.editor._prepare_paragraph_input():
+            return False
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            plan = self._make_plan()
+        except (OSError, ValueError) as exc:
+            self._invalidate()
+            self.v_summary.set(str(exc))
+            return False
+        finally:
+            self.configure(cursor="")
+        self.plan = plan
+        self._preview_draft = self.editor._changes()
+        self._preview_generation = self.editor._snapshot_generation
+        self._occurrences = []
+        needle = self.v_find.get()
+        for entry in plan.entries:
+            offset = 0
+            while needle and (offset := entry.before.find(needle, offset)) >= 0:
+                self._occurrences.append((entry.index, offset))
+                offset += len(needle)
+        self._occurrence = -1
+        skipped = sum(item.count for item in plan.skipped)
+        self.v_summary.set(f"{self.v_scope.get()} · 바꾸기 가능 {plan.matches}곳 / {plan.paragraph_count}문단"
+                           f" · 읽기 전용 등 제외 {skipped}곳\n아직 편집 내용이나 파일을 변경하지 않았습니다.")
+        text = self.preview_text
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        for entry in plan.entries[:100]:
+            text.insert("end", f"문단 {entry.index + 1} · {entry.count}곳\n", "heading")
+            text.insert("end", f"바꾸기 전  {entry.before}\n", "before")
+            text.insert("end", f"바꾸기 후  {entry.after}\n\n")
+        if len(plan.entries) > 100:
+            text.insert("end", f"처음 100문단을 표시합니다. 전체 {len(plan.entries)}문단이 적용 대상입니다.\n\n")
+        for item in plan.skipped[:30]:
+            text.insert("end", f"제외 · 문단 {item.index + 1} · {item.count}곳 · {item.reason}\n", "before")
+        if not plan.entries and not plan.skipped:
+            text.insert("end", "찾는 글자가 없습니다.")
+        text.configure(state="disabled")
+        state = "normal" if plan.matches and self.v_find.get() != self.v_replace.get() else "disabled"
+        self.all_button.configure(state=state)
+        self.one_button.configure(state=state)
+        self.next_button.configure(state="normal" if self._occurrences else "disabled")
+        return True
+
+    def find_next(self):
+        if self.plan is None and not self.preview():
+            return
+        if (self.editor._changes() != self._preview_draft
+                or self.editor._snapshot_generation != self._preview_generation):
+            self._invalidate()
+            self.v_summary.set("편집 내용이 바뀌었습니다. 다시 미리 보기를 눌러 주세요.")
+            return
+        if not self._occurrences:
+            return
+        self._occurrence = (self._occurrence + 1) % len(self._occurrences)
+        index, offset = self._occurrences[self._occurrence]
+        self.v_summary.set(f"{self._occurrence + 1} / {len(self._occurrences)}곳 · 문단 {index + 1}"
+                           + (" · 현재 구획 밖의 문단입니다." if index not in self.editor._editors else ""))
+        if index in self.editor._editors:
+            self.editor._reveal_text(index, offset, len(self.v_find.get()), focus=False)
+        entry = next(item for item in self.plan.entries if item.index == index)
+        text = self.preview_text
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        text.insert("end", f"문단 {index + 1} · 현재 찾은 위치\n", "heading")
+        text.insert("end", entry.before[:offset], "before")
+        text.insert("end", entry.before[offset:offset + len(self.v_find.get())], "match")
+        text.insert("end", entry.before[offset + len(self.v_find.get()):] + "\n\n", "before")
+        text.insert("end", "모두 바꾸기 후\n", "heading")
+        text.insert("end", entry.after)
+        text.configure(state="disabled")
+
+    def _ready(self):
+        if self.plan is None:
+            self.preview()
+            return False
+        if (self.editor.busy or self.editor._changes() != self._preview_draft
+                or self.editor._snapshot_generation != self._preview_generation):
+            self._invalidate()
+            self.v_summary.set("편집 내용이 바뀌었습니다. 다시 미리 보기를 눌러 주세요.")
+            return False
+        return True
+
+    def replace_all(self):
+        if not self._ready():
+            return False
+        count = self.plan.matches
+        self.editor._apply_replacement(self.plan)
+        self._invalidate()
+        self.undo_button.configure(state="normal")
+        self.v_summary.set(f"{count}곳을 편집 내용에 적용했습니다. 파일에 반영하려면 ‘변경 확인·저장’을 누르세요.")
+        return True
+
+    def replace_one(self):
+        if not self._ready() or not self._occurrences:
+            return False
+        position = self._occurrences[max(0, self._occurrence)]
+        try:
+            plan = self._make_plan(match=position)
+        except (OSError, ValueError) as exc:
+            self.v_summary.set(str(exc))
+            return False
+        self.editor._apply_replacement(plan)
+        self._invalidate()
+        self.undo_button.configure(state="normal")
+        self.v_summary.set(f"문단 {position[0] + 1}의 한 곳을 편집에 적용했습니다. 아직 파일에 저장하지 않았습니다.")
+        return True
+
+    def undo(self):
+        if self.editor._undo_replacement():
+            self._invalidate()
+            self.undo_button.configure(state="normal" if self.editor._replace_undo else "disabled")
+            self.v_summary.set("마지막 바꾸기를 취소했습니다. 그 전에 입력한 수정은 유지됩니다.")
+
+    def destroy(self):
+        editor = self.editor
+        if editor is not None and editor._find_dialog is self:
+            editor._find_dialog = None
+        for variable in ("v_find", "v_replace", "v_scope", "v_summary"):
+            setattr(self, variable, None)
+        super().destroy()
+        self.editor = None
+
+
 class BookmarkSectionEditor(tk.Toplevel):
     """Read-only PDF on the left, flowing editable HWPX paragraphs on the right.
 
@@ -179,6 +435,11 @@ class BookmarkSectionEditor(tk.Toplevel):
                 self.colors[key] = inherited[key]
         self._paragraphs = {p.index: p for p in session.paragraphs}
         self._baseline = {p.index: p.corrected_text for p in session.paragraphs}
+        self._external_changes = {}
+        self._replacement_plan = None
+        self._replace_undo = []
+        self._find_dialog = None
+        self._snapshot_generation = 0
         self._editors = {}
         self._cards = {}
         self._markers = {}
@@ -226,6 +487,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.bind("<Destroy>", self._destroyed, add="+")
         self.bind("<Control-s>", self._save_shortcut)
         self.bind("<Control-S>", self._save_shortcut)
+        for shortcut in ("<Control-h>", "<Control-H>", "<Control-f>", "<Control-F>"):
+            self.bind(shortcut, self.open_find_replace)
         self._build()
         self._build_paragraphs()
         self._start_cursor_map()
@@ -262,7 +525,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         head.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 12))
         self._label(head, f"책갈피 OCR  /  대조 편집", muted=True, bg=C["BG"]).pack(anchor="w")
         self._label(head, self.section_name, size=21, bold=True, bg=C["BG"]).pack(anchor="w", pady=(5, 2))
-        self._label(head, f"PDF {self.pdf_pages[0]}–{self.pdf_pages[1]}쪽  ·  HWPX {len(self._paragraphs)}문단  ·  선택한 구획만 편집",
+        self._label(head, f"PDF {self.pdf_pages[0]}–{self.pdf_pages[1]}쪽  ·  HWPX {len(self._paragraphs)}문단  ·  찾기·바꾸기로 전체 교정본도 수정",
                     muted=True, bg=C["BG"]).pack(anchor="w")
         self.panes = ttk.Panedwindow(self, orient="horizontal")
         self.panes.grid(row=1, column=0, sticky="nsew", padx=18)
@@ -356,6 +619,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.file_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
         self.reload_button = self._tool_button(heading, "다시 불러오기", self.reload)
         self.reload_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
+        self.find_button = self._tool_button(heading, "찾기·바꾸기  Ctrl H", self.open_find_replace)
+        self.find_button.grid(row=2, column=0, columnspan=2, sticky="w", pady=(7, 0))
         tools = tk.Frame(panel, bg="#fcfaf5")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
         self.v_match_pdf_font = tk.BooleanVar(value=True)
@@ -411,12 +676,22 @@ class BookmarkSectionEditor(tk.Toplevel):
             editor.pack(fill="x")
             editor.insert("1.0", paragraph.corrected_text)
             editor.tag_configure("changed", background="#e9f2fa", foreground="#235880")
+            editor.tag_configure("input_issue", background="#ffe29b", foreground="#8c271b")
+            editor.tag_configure("search_match", background="#fff0aa")
             editor.edit_modified(False)
             editor.bind("<<Modified>>", lambda _event, i=index: self._modified(i))
             editor.bind("<FocusIn>", lambda _event, i=index: self.select_paragraph(i))
             editor.bind("<Button-1>", lambda _event, i=index: self.select_paragraph(i), add="+")
             editor.bind("<ButtonRelease-1>", lambda _event, i=index: self._schedule_cursor(i), add="+")
             editor.bind("<KeyRelease>", lambda _event, i=index: self._schedule_cursor(i), add="+")
+            for shortcut in ("<Control-h>", "<Control-H>", "<Control-f>", "<Control-F>"):
+                editor.bind(shortcut, self.open_find_replace)
+            editor.bind("<Return>", self._paragraph_return)
+            editor.bind("<KP_Enter>", self._paragraph_return)
+            editor.bind("<Tab>", lambda _event, i=index: self._paragraph_tab(i, 1))
+            editor.bind("<Shift-Tab>", lambda _event, i=index: self._paragraph_tab(i, -1))
+            editor.bind("<<Paste>>", lambda _event, i=index: self._paste_paragraph(i))
+            editor.bind("<<PasteSelection>>", lambda _event, i=index: self._paste_paragraph(i))
             editor.bind("<MouseWheel>", lambda event: self._wheel(self.doc_canvas, event))
             editor.bind("<Button-4>", lambda _event: (self.doc_canvas.yview_scroll(-72, "units"), "break")[1])
             editor.bind("<Button-5>", lambda _event: (self.doc_canvas.yview_scroll(72, "units"), "break")[1])
@@ -511,8 +786,186 @@ class BookmarkSectionEditor(tk.Toplevel):
                 self._update_original()
 
     def _changes(self):
-        return {index: editor.get("1.0", "end-1c") for index, editor in self._editors.items()
-                if self._paragraphs[index].editable and editor.get("1.0", "end-1c") != self._baseline[index]}
+        changes = dict(self._external_changes)
+        changes.update({index: editor.get("1.0", "end-1c") for index, editor in self._editors.items()
+                        if self._paragraphs[index].editable and editor.get("1.0", "end-1c") != self._baseline[index]})
+        return changes
+
+    def _paragraph_return(self, _event=None):
+        self.v_status.set("문단 안에서는 줄바꿈을 넣지 않습니다. 다음 문단으로 이동하려면 Tab을 누르세요.")
+        return "break"
+
+    def _paragraph_tab(self, index, direction):
+        editable = [i for i, paragraph in self._paragraphs.items() if paragraph.editable]
+        if index in editable:
+            position = editable.index(index) + direction
+            if 0 <= position < len(editable):
+                self._reveal_text(editable[position], 0)
+            else:
+                self.save_button.focus_set()
+        return "break"
+
+    def _paste_paragraph(self, index):
+        if self.busy or not self._paragraphs[index].editable:
+            return "break"
+        try:
+            value = self.clipboard_get()
+        except tk.TclError:
+            return "break"
+        joined = join_paragraph_lines(value)
+        issue = paragraph_input_issue(joined)
+        if issue:
+            messagebox.showerror("붙여넣을 글자 확인", f"붙여넣을 내용의 {issue[0] + 1}번째 글자에 "
+                                 f"제어 문자 U+{ord(issue[1]):04X}가 있습니다.\n"
+                                 "내용을 바꾸지 않았습니다. 이 문자를 제외한 글자를 붙여 넣어 주세요.", parent=self)
+            return "break"
+        if joined != value and not messagebox.askyesno(
+                "한 문단으로 붙여넣기", "붙여넣을 내용에 줄바꿈이나 탭이 있습니다.\n"
+                "줄바꿈·탭을 공백으로 바꾸어 한 문단에 붙여 넣을까요?\n"
+                "기존 수정은 유지되며 Ctrl+Z로 이 붙여넣기를 취소할 수 있습니다.", parent=self):
+            return "break"
+        widget = self._editors[index]
+        widget.edit_separator()
+        automatic = widget.cget("autoseparators")
+        widget.configure(autoseparators=False)
+        try:
+            try:
+                start, end = widget.index("sel.first"), widget.index("sel.last")
+                widget.delete(start, end)
+                widget.mark_set("insert", start)
+            except tk.TclError:
+                pass
+            widget.insert("insert", joined)
+        finally:
+            widget.configure(autoseparators=automatic)
+        widget.edit_separator()
+        self._modified(index)
+        return "break"
+
+    def _reveal_text(self, index, offset=0, length=1, *, focus=True):
+        if index not in self._editors:
+            return
+        self.select_paragraph(index)
+        widget = self._editors[index]
+        for editor in self._editors.values():
+            editor.tag_remove("search_match", "1.0", "end")
+        start, end = f"1.0+{offset}c", f"1.0+{offset + length}c"
+        widget.tag_add("search_match", start, end)
+        widget.mark_set("insert", start)
+        widget.see(start)
+        self.update_idletasks()
+        bounds = self.doc_canvas.bbox("all")
+        if bounds and bounds[3] > bounds[1]:
+            y = self._cards[index].winfo_y()
+            self.doc_canvas.yview_moveto(max(0, (y - 20) / (bounds[3] - bounds[1])))
+        if focus:
+            widget.focus_set()
+        self._schedule_cursor(index)
+
+    def _set_draft_text(self, index, value):
+        widget = self._editors[index]
+        if widget.get("1.0", "end-1c") == value:
+            return
+        widget.edit_separator()
+        automatic = widget.cget("autoseparators")
+        widget.configure(autoseparators=False)
+        try:
+            widget.delete("1.0", "end")
+            widget.insert("1.0", value)
+        finally:
+            widget.configure(autoseparators=automatic)
+        widget.edit_separator()
+        widget.edit_modified(False)
+        self._highlight(index)
+
+    def _prepare_paragraph_input(self):
+        """Offer a reversible repair of accidental line breaks, retaining all drafts."""
+        issues = [(index, value, paragraph_input_issue(value, self._baseline.get(index, "")))
+                  for index, value in self._changes().items()
+                  if paragraph_input_issue(value, self._baseline.get(index, ""))]
+        if not issues:
+            return True
+        index, _, (offset, char) = issues[0]
+        self._reveal_text(index, offset)
+        repairs = {i: join_paragraph_lines(value, self._baseline.get(i, "")) for i, value, _issue in issues}
+        unhandled = [(i, paragraph_input_issue(repairs[i], self._baseline.get(i, "")))
+                     for i, _value, _issue in issues
+                     if paragraph_input_issue(repairs[i], self._baseline.get(i, ""))]
+        if unhandled:
+            bad_index, (bad_offset, bad_char) = unhandled[0]
+            self._reveal_text(bad_index, bad_offset)
+            messagebox.showerror("저장할 글자 확인",
+                                 f"문단 {bad_index + 1}의 {bad_offset + 1}번째 글자에 "
+                                 f"제어 문자 U+{ord(bad_char):04X}가 있습니다.\n"
+                                 "해당 위치를 표시했습니다. 이 글자를 지우거나 바꾼 뒤 다시 저장하세요.\n"
+                                 "다른 문단에 입력한 수정은 모두 남아 있습니다.", parent=self)
+            return False
+        if not messagebox.askyesno("줄바꿈·탭 정리",
+                                  f"문단 {index + 1} 등 {len(issues)}개 문단에 줄바꿈이나 탭이 있습니다.\n"
+                                  "해당 문자를 공백으로 바꾸고 변경 내용을 확인할까요?\n\n"
+                                  "다른 글자와 문단은 그대로 두며, 문단에서 Ctrl+Z로 되돌릴 수 있습니다.",
+                                  parent=self):
+            return False
+        for index, value, _issue in issues:
+            if index in self._editors:
+                self._set_draft_text(index, repairs[index])
+            else:
+                self._external_changes[index] = repairs[index]
+        self._update_original()
+        self._update_status()
+        self._schedule_layout()
+        return True
+
+    def open_find_replace(self, _event=None):
+        if self.busy or self._closed:
+            return "break"
+        if self._find_dialog is not None and self._find_dialog.winfo_exists():
+            self._find_dialog.lift()
+            self._find_dialog.find_entry.focus_set()
+        else:
+            self._find_dialog = FindReplaceDialog(self)
+        return "break"
+
+    def _apply_replacement(self, plan):
+        before = self._changes()
+        undo = (before, dict(self._baseline), self._replacement_plan, dict(plan.changes))
+        self._baseline.update(plan.baseline)
+        for index, value in plan.changes.items():
+            if index in self._editors:
+                self._set_draft_text(index, value)
+        # A replacement may revert a previous draft to its saved text.
+        for index in before:
+            if index in self._editors and index not in plan.changes:
+                self._set_draft_text(index, self._baseline[index])
+        self._external_changes = {i: value for i, value in plan.changes.items() if i not in self._editors}
+        self._replacement_plan = plan
+        self._replace_undo.append(undo)
+        self._update_original()
+        self._update_status()
+        self._schedule_layout()
+        self._schedule_cursor(self._active)
+
+    def _undo_replacement(self):
+        if self.busy or not self._replace_undo:
+            return False
+        before, baseline, previous_plan, expected = self._replace_undo[-1]
+        if self._changes() != expected:
+            messagebox.showinfo("바꾸기 취소", "바꾸기 이후에 다른 글자를 수정했습니다.\n"
+                                "그 수정을 먼저 Ctrl+Z로 되돌리면 바꾸기를 취소할 수 있습니다.\n"
+                                "현재 입력한 수정은 그대로 남아 있습니다.", parent=self)
+            return False
+        self._replace_undo.pop()
+        for index in self._editors:
+            if self._paragraphs[index].editable:
+                self._set_draft_text(index, before.get(index, baseline[index]))
+        self._baseline = baseline
+        self._external_changes = {i: value for i, value in before.items() if i not in self._editors}
+        self._replacement_plan = previous_plan
+        self._update_original()
+        self._update_status()
+        self._schedule_layout()
+        self._schedule_cursor(self._active)
+        return True
 
     def _tk_offset(self, widget, text, offset):
         # Text's "+ N chars" advances Unicode characters, unlike Tcl string
@@ -559,7 +1012,9 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     def _update_status(self):
         changes = self._changes()
-        self.v_status.set(f"수정한 문단 {len(changes)}개 · 아직 저장하지 않음" if changes else "저장할 변경 없음")
+        outside = len(self._external_changes)
+        detail = f" · 현재 구획 밖 {outside}개 포함" if outside else ""
+        self.v_status.set(f"수정한 문단 {len(changes)}개{detail} · 아직 저장하지 않음" if changes else "저장할 변경 없음")
         for index, marker in self._markers.items():
             readonly = not self._paragraphs[index].editable
             tail = " · 수정 중" if index in changes else " · 읽기 전용" if readonly else ""
@@ -568,6 +1023,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         state = "normal" if changes and not self.busy else "disabled"
         self.save_button.configure(state=state); self.revert_button.configure(state=state)
         self.reload_button.configure(state="disabled" if self.busy else "normal")
+        self.find_button.configure(state="disabled" if self.busy else "normal")
 
     def toggle_marks(self):
         self._show_marks = not self._show_marks
@@ -631,10 +1087,17 @@ class BookmarkSectionEditor(tk.Toplevel):
         if not messagebox.askyesno("이번 수정 취소", "아직 저장하지 않은 수정을 모두 되돌릴까요?\n마지막으로 저장된 교정문은 그대로 남습니다.", parent=self):
             return
         for index in self._changes():
+            if index not in self._editors:
+                continue
             editor = self._editors[index]
             editor.delete("1.0", "end"); editor.insert("1.0", self._baseline[index])
             editor.edit_reset(); editor.edit_modified(False)
             self._highlight(index)
+        self._external_changes.clear()
+        self._replacement_plan = None
+        self._replace_undo.clear()
+        if self._find_dialog is not None and self._find_dialog.winfo_exists():
+            self._find_dialog._invalidate()
         self._update_original(); self._update_status(); self._schedule_layout()
         self._schedule_cursor(self._active)
 
@@ -930,6 +1393,8 @@ class BookmarkSectionEditor(tk.Toplevel):
     def save(self) -> bool:
         if self.busy or self._closed:
             return False
+        if not self._prepare_paragraph_input():
+            return False
         changes = self._changes()
         if not changes:
             return True
@@ -954,8 +1419,13 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.configure(cursor="watch")
         self.update_idletasks()
         try:
-            result = self.session.save(changes)
+            if self._replacement_plan is None:
+                result = self.session.save(changes)
+            else:
+                result = self.session.save(changes, replacement_plan=self._replacement_plan)
         except (OSError, ValueError) as exc:
+            if getattr(exc, "paragraph_index", None) is not None:
+                self._reveal_text(exc.paragraph_index, getattr(exc, "offset", None) or 0)
             messagebox.showerror("교정본을 저장하지 못했습니다", f"{exc}\n\n입력한 수정은 이 창에 남아 있습니다.", parent=self)
             return False
         finally:
@@ -963,7 +1433,14 @@ class BookmarkSectionEditor(tk.Toplevel):
             self.configure(cursor="")
             self._update_status()
         self._paragraphs = {p.index: p for p in self.session.paragraphs}
+        self._snapshot_generation += 1
         self._baseline = {p.index: p.corrected_text for p in self.session.paragraphs}
+        self._external_changes.clear()
+        self._replacement_plan = None
+        self._replace_undo.clear()
+        if self._find_dialog is not None and self._find_dialog.winfo_exists():
+            self._find_dialog._invalidate()
+            self._find_dialog.undo_button.configure(state="disabled")
         for editor in self._editors.values():
             editor.edit_modified(False)
         self._update_status()
@@ -1021,8 +1498,15 @@ class BookmarkSectionEditor(tk.Toplevel):
         for card in self._cards.values():
             card.destroy()
         self.session = session
+        self._snapshot_generation += 1
         self._paragraphs = {p.index: p for p in session.paragraphs}
         self._baseline = {p.index: p.corrected_text for p in session.paragraphs}
+        self._external_changes.clear()
+        self._replacement_plan = None
+        self._replace_undo.clear()
+        if self._find_dialog is not None and self._find_dialog.winfo_exists():
+            self._find_dialog._invalidate()
+            self._find_dialog.undo_button.configure(state="disabled")
         self._editors.clear(); self._cards.clear(); self._markers.clear()
         self._active = None
         self._build_paragraphs()

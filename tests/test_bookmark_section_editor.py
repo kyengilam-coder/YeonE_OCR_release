@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 import pymupdf
 from PIL import Image
 
-from yeone_ocr.collate.section_editor import BookmarkSectionEditor, ChangeReviewDialog, CorrectionHistoryDialog, render_pdf_page
+from yeone_ocr.collate.section_editor import (BookmarkSectionEditor, ChangeReviewDialog,
+    CorrectionHistoryDialog, FindReplaceDialog, join_paragraph_lines, render_pdf_page)
 from test_ops import _real_tk
 
 
@@ -26,8 +27,9 @@ class FakeSession:
         ]
         self.calls = []
         self.failure = None
+        self.external_text = "他段皰疹"
 
-    def save(self, changes):
+    def save(self, changes, *, replacement_plan=None):
         if self.failure:
             raise self.failure
         self.calls.append(dict(changes))
@@ -36,6 +38,39 @@ class FakeSession:
                 paragraph.corrected_text = changes[paragraph.index]
         return SimpleNamespace(path=self.corrected_path, saved_count=len(changes),
                                backup_path=self.corrected_path.with_suffix(".bak.hwpx"), reports_stale=True)
+
+    def preview_replace(self, find, replacement, *, scope, paragraph_index, changes, previous_plan=None, match=None):
+        if not find:
+            raise ValueError("찾을 글자를 입력하세요.")
+        baseline = {p.index: p.corrected_text for p in self.paragraphs}
+        baseline[99] = self.external_text
+        wanted = ([paragraph_index] if scope == "paragraph" else
+                  list(baseline) if scope == "document" else [p.index for p in self.paragraphs])
+        result = dict(changes)
+        entries, skipped = [], []
+        for index in wanted:
+            before = changes.get(index, baseline[index])
+            count = before.count(find)
+            if not count:
+                continue
+            if index == 10:
+                skipped.append(SimpleNamespace(index=index, reason="제목 읽기 전용", count=count))
+                continue
+            if match is not None:
+                if index != match[0]:
+                    continue
+                offset = match[1]
+                after = before[:offset] + replacement + before[offset + len(find):]
+                count = 1
+            else:
+                after = before.replace(find, replacement)
+            entries.append(SimpleNamespace(index=index, before=before, after=after, count=count))
+            if after != baseline[index]:
+                result[index] = after
+            else:
+                result.pop(index, None)
+        return SimpleNamespace(changes=result, baseline=baseline, entries=tuple(entries), skipped=tuple(skipped),
+                               matches=sum(entry.count for entry in entries), paragraph_count=len(entries))
 
 
 class PdfRendering(unittest.TestCase):
@@ -90,6 +125,7 @@ class SectionEditorTk(unittest.TestCase):
         self.error = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.showerror"))
         self.info = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.showinfo"))
         self.choice = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.askyesnocancel"))
+        self.yes = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.askyesno", return_value=True))
         self.confirm = self.stack.enter_context(patch.object(BookmarkSectionEditor, "_confirm_changes", return_value=True))
         self.can_write = Mock(return_value=True)
         self.saved = Mock()
@@ -290,6 +326,171 @@ class SectionEditorTk(unittest.TestCase):
         finally:
             if dialog.winfo_exists():
                 dialog.destroy()
+
+    def test_newline_repair_retains_other_drafts_and_can_be_undone(self):
+        self.edit(11, "上藥\r\n入粳米\t𠀀")
+        self.edit(12, "氣喘咳嗽。")
+        self.yes.return_value = False
+        self.assertFalse(self.editor.save())
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(self.editor._changes()[11], "上藥\r\n入粳米\t𠀀")
+        self.assertEqual(self.editor._active, 11)
+        self.yes.return_value = True
+        self.confirm.return_value = False
+        self.assertFalse(self.editor.save())
+        self.assertEqual(self.editor._changes(), {11: "上藥 入粳米 𠀀", 12: "氣喘咳嗽。"})
+        self.editor._editors[11].edit_undo()
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "上藥\r\n入粳米\t𠀀")
+        self.assertEqual(join_paragraph_lines(" 甲\r\n乙\t丙\u2028丁\u2029戊 "), " 甲 乙 丙 丁 戊 ")
+
+    def test_unhandled_control_is_located_without_discarding_drafts(self):
+        self.edit(11, "甲\x01乙")
+        self.edit(12, "修改")
+        self.assertFalse(self.editor.save())
+        self.assertIn("문단 12", self.error.call_args.args[1])
+        self.assertIn("U+0001", self.error.call_args.args[1])
+        self.assertEqual(self.editor._changes(), {11: "甲\x01乙", 12: "修改"})
+        self.yes.assert_not_called()
+
+    def test_enter_is_blocked_tab_moves_and_paste_has_reversible_space_join(self):
+        self.editor.deiconify()
+        self.root.update()
+        widget = self.editor._editors[11]
+        widget.focus_force()
+        widget.mark_set("insert", "end-1c")
+        before = widget.get("1.0", "end-1c")
+        widget.event_generate("<Return>")
+        self.root.update()
+        self.assertEqual(widget.get("1.0", "end-1c"), before)
+        widget.event_generate("<Tab>")
+        self.root.update()
+        self.assertEqual(self.editor._active, 12)
+        self.editor.clipboard_clear()
+        self.editor.clipboard_append("皰\r\n液\t𠀀")
+        self.editor._paste_paragraph(12)
+        self.assertIn("皰 液 𠀀", self.editor._editors[12].get("1.0", "end-1c"))
+        self.editor._editors[12].edit_undo()
+        self.assertEqual(self.editor._editors[12].get("1.0", "end-1c"), "氣喘咳嗽")
+
+    def replacement_dialog(self):
+        self.edit(11, "皰疹，皰液。手改")
+        self.edit(12, "原有手改")
+        self.editor.open_find_replace()
+        dialog = self.editor._find_dialog
+        dialog.v_find.set("皰")
+        dialog.v_replace.set("疱")
+        return dialog
+
+    def test_literal_replace_preview_stages_full_document_and_preserves_drafts(self):
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        self.assertTrue(dialog.preview())
+        self.assertEqual(dialog.plan.matches, 3)
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(self.editor._changes()[11], "皰疹，皰液。手改")
+        self.assertTrue(dialog.replace_all())
+        self.assertEqual(self.editor._changes(), {11: "疱疹，疱液。手改", 12: "原有手改", 99: "他段疱疹"})
+        self.assertIn("현재 구획 밖 1개", self.editor.v_status.get())
+        self.assertEqual(len(self.editor._editors), 3)
+        self.assertEqual(self.session.calls, [])
+        self.assertTrue(self.editor.save())
+        self.assertEqual(self.session.calls, [{11: "疱疹，疱液。手改", 12: "原有手改", 99: "他段疱疹"}])
+        self.assertFalse(self.editor.dirty)
+        self.assertEqual(self.editor._replace_undo, [])
+
+    def test_replace_all_undo_retains_drafts_from_before_replacement(self):
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        dialog.preview()
+        dialog.replace_all()
+        self.assertTrue(self.editor._undo_replacement())
+        self.assertEqual(self.editor._changes(), {11: "皰疹，皰液。手改", 12: "原有手改"})
+        self.assertEqual(self.editor._external_changes, {})
+        self.assertEqual(self.session.calls, [])
+
+    def test_replace_preview_stales_if_drafts_change_and_undo_protects_later_edits(self):
+        dialog = self.replacement_dialog()
+        dialog.preview()
+        self.edit(12, "後來修正")
+        self.assertFalse(dialog.replace_all())
+        self.assertEqual(self.editor._changes()[11], "皰疹，皰液。手改")
+        dialog.preview()
+        dialog.replace_all()
+        self.edit(12, "另外修正")
+        self.assertFalse(self.editor._undo_replacement())
+        self.assertEqual(self.editor._changes()[12], "另外修正")
+
+    def test_replace_single_uses_current_match_and_scope_keeps_other_sections(self):
+        dialog = self.replacement_dialog()
+        self.assertTrue(dialog.preview())
+        dialog.find_next()
+        dialog.find_next()
+        self.assertEqual(dialog._occurrence, 1)
+        self.assertTrue(dialog.replace_one())
+        self.assertEqual(self.editor._changes()[11], "皰疹，疱液。手改")
+        self.assertNotIn(99, self.editor._changes())
+        self.assertEqual(self.session.calls, [])
+
+    def test_full_document_drafts_are_reverted_or_retained_on_reload_failure(self):
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        dialog.preview()
+        dialog.replace_all()
+        self.choice.return_value = False
+        self.factory.side_effect = ValueError("外部修改")
+        self.assertFalse(self.editor.reload())
+        self.assertEqual(self.editor._changes()[99], "他段疱疹")
+        self.editor.revert_changes()
+        self.assertFalse(self.editor.dirty)
+        self.assertIsNone(self.editor._replacement_plan)
+        self.assertEqual(self.session.calls, [])
+
+    def test_ctrl_h_does_not_delete_a_character_and_toolbar_fits_minimum_width(self):
+        self.editor.deiconify()
+        self.editor.geometry("900x640")
+        self.root.update()
+        self.editor._initial_split()
+        widget = self.editor._editors[11]
+        widget.focus_force()
+        widget.mark_set("insert", "end-1c")
+        before = widget.get("1.0", "end-1c")
+        widget.event_generate("<Control-h>")
+        self.root.update()
+        self.assertEqual(widget.get("1.0", "end-1c"), before)
+        self.assertTrue(self.editor._find_dialog.winfo_exists())
+        button = self.editor.find_button
+        self.assertGreater(button.winfo_width(), 80)
+        self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                             self.editor.doc_panel.winfo_rootx() + self.editor.doc_panel.winfo_width())
+
+    def test_existing_line_breaks_outside_section_remain_valid_after_replacement(self):
+        self.session.external_text = "他段皰\n疹"
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        dialog.preview()
+        dialog.replace_all()
+        self.assertTrue(self.editor.save())
+        self.assertEqual(self.session.calls[0][99], "他段疱\n疹")
+        self.yes.assert_not_called()
+
+    def test_repair_preserves_preexisting_separator_while_joining_added_tab(self):
+        self.editor._baseline[11] = "甲\n皰"
+        self.edit(11, "甲\n疱\t液")
+        self.assertTrue(self.editor._prepare_paragraph_input())
+        self.assertEqual(self.editor._changes()[11], "甲\n疱 液")
+
+    def test_an_independent_preview_cannot_apply_after_document_reload(self):
+        self.edit(11, "皰疹")
+        self.session.paragraphs[1].corrected_text = "皰疹"
+        self.editor._baseline[11] = "皰疹"
+        dialog = FindReplaceDialog(self.editor)
+        self.addCleanup(lambda: dialog.destroy() if dialog.winfo_exists() else None)
+        dialog.v_find.set("皰")
+        dialog.v_replace.set("疱")
+        self.assertTrue(dialog.preview())
+        self.assertTrue(self.editor.reload())
+        self.assertFalse(dialog.replace_all())
+        self.assertFalse(self.editor.dirty)
 
 
 if __name__ == "__main__":
