@@ -490,6 +490,96 @@ def color_only_collation_probe(folder: Path) -> dict:
             "ocr_calls": 0, "network_calls": 0}
 
 
+def manual_style_cleanup_probe(folder: Path) -> dict:
+    """Restore only human-edited OCR marks while keeping author formatting."""
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from lxml import etree
+    from .collate.collate import Item
+    from .collate.hwpx_edit import Editor, _canon, _slots, _tag_of
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import SectionEditSession, manual_history_path, manual_protected_paragraphs
+
+    source = folder / "manual-style.hwpx"
+    target = folder / "manual-style_교정.hwpx"
+    pdf_path = folder / "manual-style.pdf"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        normal = document.styles.ensure_run(size=11)
+        author = document.styles.ensure_run(size=15, bold=True, color="#A020F0",
+            highlight="#CCDDEE", underline=True, underline_shape="SOLID")
+        paragraph = document.add_paragraph("", style_id_ref=0, include_run=False, inherit_style=False)
+        paragraph.add_run("甲乙丙", char_pr_id_ref=normal)
+        paragraph.add_run("丁戊己", char_pr_id_ref=author)
+        document.add_paragraph("此段待確認。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=18)
+        pdf.save(pdf_path)
+    originals = {path: path.read_bytes() for path in (source, pdf_path)}
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        index = book.texts().index("甲乙丙丁戊己")
+        other = book.texts().index("此段待確認。")
+        editor = Editor(book, memo="none")
+        baseline = {char: _canon(editor._char_pr(slot.run.get("charPrIDRef")))
+                    for slot in _slots(book.paragraphs[index].element) for char in slot.text}
+        applied = editor.apply([
+            Item("A", "replace", index, 1, 2, "乙", "庚", "庚", auto=True),
+            Item("B1", "mark", index, 2, 3, "丙", "辛", "", note="확인"),
+            Item("B1", "mark", index, 4, 5, "戊", "壬", "", note="확인"),
+            Item("B1", "mark", other, 1, 2, "段", "文", "", note="확인"),
+        ])
+        assert all(entry.ok for entry in applied)
+        assert book.texts()[index] == "甲庚丙丁戊己"
+        editor.save_copy(str(target))
+    finally:
+        book.doc.close()
+    before = target.read_bytes()
+    book = HwpxBook(str(target))
+    try:
+        untouched = {i: etree.tostring(p.element) for i, p in enumerate(book.paragraphs) if i != index}
+        inspector = Editor(book, memo="none")
+        marked_before = {char: _canon(inspector._char_pr(slot.run.get("charPrIDRef")))
+                         for slot in _slots(book.paragraphs[index].element) for char in slot.text}
+    finally:
+        book.doc.close()
+    session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    saved = session.save({index: "甲辛丙丁壬己"})
+    assert saved.path == target and saved.backup_path.read_bytes() == before
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts()[index] == "甲辛丙丁壬己"
+        inspector = Editor(book, memo="none")
+        styles = {char: inspector._char_pr(slot.run.get("charPrIDRef"))
+                  for slot in _slots(book.paragraphs[index].element) for char in slot.text}
+        assert _canon(styles["辛"]) == baseline["乙"]
+        assert _canon(styles["壬"]) == baseline["戊"]
+        assert _canon(styles["丙"]) == marked_before["丙"]
+        assert _tag_of(styles["丙"]) == "#C00000"
+        assert _canon(styles["丁"]) == baseline["丁"] and _canon(styles["己"]) == baseline["己"]
+        assert all(etree.tostring(book.paragraphs[i].element) == data for i, data in untouched.items())
+    finally:
+        book.doc.close()
+    history = json.loads(manual_history_path(target).read_text("utf-8"))
+    assert history["correction_events"][-1]["before"] == "甲庚丙丁戊己"
+    assert history["correction_events"][-1]["after"] == "甲辛丙丁壬己"
+    assert manual_protected_paragraphs(target) == {index}
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == "甲辛丙丁壬己"
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    return {"edited_marks_cleared": True, "mixed_author_styles_restored": True,
+            "untouched_marks_and_paragraphs_preserved": True, "existing_copy_and_backup_preserved": True,
+            "manual_history_and_protection_retained": True, "saved_file_reopened": True,
+            "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
+
+
 def bookmark_cursor_probe(folder: Path) -> dict:
     """Exercise real cursor mapping, PDF overlays and matching text size."""
     import os
@@ -799,6 +889,7 @@ def run(report_path: Path) -> int:
         check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
         check("human-correction-memory", lambda: correction_memory_probe(folder))
         check("bookmark-color-only-and-memo-cleanup", lambda: color_only_collation_probe(folder))
+        check("manual-edit-style-cleanup", lambda: manual_style_cleanup_probe(folder))
         check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))

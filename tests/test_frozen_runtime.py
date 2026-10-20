@@ -287,6 +287,19 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_clears_only_manually_edited_ocr_marks(self):
+        from yeone_ocr.frozen_smoke import manual_style_cleanup_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = manual_style_cleanup_probe(self.root)
+        for field in ("edited_marks_cleared", "mixed_author_styles_restored",
+                      "untouched_marks_and_paragraphs_preserved", "existing_copy_and_backup_preserved",
+                      "manual_history_and_protection_retained", "saved_file_reopened",
+                      "source_pdf_and_hwpx_unchanged"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

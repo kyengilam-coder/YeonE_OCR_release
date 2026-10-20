@@ -1,8 +1,9 @@
 """Selected-section manual editing with source preservation and OCR protection.
 
-Only text slots in selected body paragraphs are edited. Existing ZIP members
-outside the changed section XML remain byte-identical. Manual history is a
-durable sibling file so subsequent OCR runs can protect manually edited text.
+Only text slots in selected body paragraphs are edited. OCR marks on manually
+changed text are restored to the source's formatting. Other ZIP members remain
+byte-identical except for the style header when a restored style must be added.
+Manual history is a durable sibling file so later OCR can protect manual edits.
 """
 from __future__ import annotations
 
@@ -252,33 +253,153 @@ def _replace_text(paragraph, text: str) -> None:
             paragraph.remove(child)
 
 
-def _clear_known_grades(original, corrected, source_archive: _Archive, target_archive: _Archive) -> None:
-    """Restore tagged OCR run styles only when the source style is unambiguous.
+def _style_key(element) -> tuple:
+    """Compare style meaning, independent of IDs, namespace prefixes or order."""
+    return (element.tag, tuple(sorted((k, v) for k, v in element.attrib.items() if k != "id")),
+            (element.text or "").strip(), tuple(sorted(_style_key(child) for child in element)))
 
-    A uniformly styled source paragraph supplies its existing style ID. Mixed
-    source formatting is retained as-is rather than guessing which style to use.
-    Memo controls and their historical evidence are always retained.
+
+_GRADE_ATTRIBUTES = ("textColor", "shadeColor")
+_GRADE_CHILDREN = ("bold", "underline", "strikeout")
+_CHAR_PR_TAIL_ORDER = ("italic", "bold", "underline", "strikeout", "outline",
+                       "shadow", "emboss", "engrave", "supscript", "subscript")
+
+
+def _without_grade(style):
+    result = deepcopy(style)
+    for name in _GRADE_ATTRIBUTES:
+        result.attrib.pop(name, None)
+    for child in list(result):
+        if _local(child.tag) in _GRADE_CHILDREN:
+            result.remove(child)
+    return _style_key(result)
+
+
+def _align_style_choices(before: str, after: str, choices: list[frozenset[str]],
+                         empty_choices: frozenset[str]) -> list[frozenset[str]]:
+    """Carry source styles through text edits without inventing style boundaries.
+
+    Equal-length replacements retain each character's style. A length-changing
+    replacement carries all affected source choices; the surviving run's font
+    and other unaffected attributes can disambiguate them later.
     """
-    source_styles = {s.run.get("charPrIDRef", "0") for s in _slots(original) if s.text}
-    if len(source_styles) != 1:
-        return
-    base = next(iter(source_styles))
-    try:
-        src = etree.fromstring(source_archive.entries["Contents/header.xml"])
-        dst = etree.fromstring(target_archive.entries["Contents/header.xml"])
-        original_style = src.find(f".//{HH}charPr[@id='{base}']")
-        target_style = dst.find(f".//{HH}charPr[@id='{base}']")
-        if original_style is None or target_style is None or etree.tostring(original_style) != etree.tostring(target_style):
-            return
-        styles = {e.get("id"): e for e in dst.iter(HH + "charPr")}
-        for run in corrected:
-            if _local(run.tag) != "run":
-                continue
-            style = styles.get(run.get("charPrIDRef"))
-            if style is not None and _tag_of(style) in {"#0B7A3B", "#1F4FBF", "#C00000"} and _tag_of(style) == (style.get("textColor") or "").upper():
-                run.set("charPrIDRef", base)
-    except (KeyError, etree.XMLSyntaxError):
-        return
+    result = []
+    for op, a, b, c, d in SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+        if op == "equal" or b - a == d - c:
+            result.extend(choices[a:b])
+        elif d > c:
+            candidates = frozenset().union(*choices[a:b])
+            if not candidates:
+                candidates = choices[min(a, len(choices) - 1)] if choices else empty_choices
+            result.extend([candidates] * (d - c))
+    return result
+
+
+class _ManualGradeStyles:
+    """Remove only owned OCR overlays, retaining typography and author marks."""
+    def __init__(self, source: _Archive, target: _Archive):
+        parser = etree.XMLParser(resolve_entities=False, no_network=True)
+        try:
+            self.source = etree.fromstring(source.entries["Contents/header.xml"], parser)
+            self.header = etree.fromstring(target.entries["Contents/header.xml"], parser)
+        except (KeyError, etree.XMLSyntaxError) as exc:
+            raise SectionEditError("글자 서식을 확인할 수 없어 교정 표시를 안전하게 지울 수 없습니다.") from exc
+        self.source_styles = {s.get("id"): s for s in self.source.iter(HH + "charPr")}
+        self.styles = {s.get("id"): s for s in self.header.iter(HH + "charPr")}
+        self.target = target
+        self.cache = {}
+
+    def clean_style(self, current_id: str, choices: frozenset[str]) -> str:
+        key = current_id, choices
+        if key in self.cache:
+            return self.cache[key]
+        current = self.styles.get(current_id)
+        if (current is None or _tag_of(current) not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+                or _tag_of(current) != (current.get("textColor") or "").upper()):
+            return current_id  # Author colors and untagged legacy styles are not ours.
+        candidates = [self.source_styles[pid] for pid in sorted(choices) if pid in self.source_styles]
+        if len(candidates) > 1:
+            matches = [s for s in candidates if _without_grade(s) == _without_grade(current)]
+            if matches:
+                candidates = matches
+        restored = {}
+        for base in candidates:
+            style = deepcopy(current)
+            for name in _GRADE_ATTRIBUTES:
+                if name in base.attrib:
+                    style.set(name, base.get(name))
+                else:
+                    style.attrib.pop(name, None)
+            for name in _GRADE_CHILDREN:
+                old = style.find(HH + name)
+                source_child = base.find(HH + name)
+                at = (list(style).index(old) if old is not None else next(
+                    (i for i, child in enumerate(style)
+                     if _local(child.tag) in _CHAR_PR_TAIL_ORDER
+                     and _CHAR_PR_TAIL_ORDER.index(_local(child.tag)) > _CHAR_PR_TAIL_ORDER.index(name)),
+                    len(style)))
+                if old is not None:
+                    style.remove(old)
+                if source_child is not None:
+                    style.insert(at, deepcopy(source_child))
+            restored[_style_key(style)] = style
+        if len(restored) != 1:
+            raise SectionEditError(
+                "서로 다른 원본 글자 서식에 걸쳐 교정 표시를 지울 수 없습니다. 서식별로 나누어 고쳐 주십시오.")
+        signature, wanted = next(iter(restored.items()))
+        pid = next((pid for pid, style in self.styles.items() if _style_key(style) == signature), None)
+        if pid is None:
+            parent = current.getparent()
+            if parent is None or parent.tag != HH + "charProperties":
+                raise SectionEditError("글자 서식 목록을 확인할 수 없어 저장하지 않았습니다.")
+            pid = str(max((int(value) for value in self.styles if value and value.isdigit()), default=-1) + 1)
+            wanted.set("id", pid)
+            parent.append(wanted)
+            parent.set("itemCnt", str(len(parent)))
+            self.styles[pid] = wanted
+            self.target.entries["Contents/header.xml"] = etree.tostring(
+                self.header, encoding="utf-8", xml_declaration=True)
+        self.cache[key] = pid
+        return pid
+
+    def clear_changed(self, original, corrected, before: str) -> None:
+        source_slots = _slots(original)
+        choices = [frozenset({slot.run.get("charPrIDRef", "0")})
+                   for slot in source_slots for _ in slot.text]
+        empty_choices = frozenset(slot.run.get("charPrIDRef", "0") for slot in source_slots)
+        choices = _align_style_choices(paragraph_text(original), before, choices, empty_choices)
+        after = paragraph_text(corrected)
+        choices = _align_style_choices(before, after, choices, empty_choices)
+        changed = [False] * len(after)
+        for op, _, _, a, b in SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+            if op != "equal":
+                changed[a:b] = [True] * (b - a)
+        spans = []
+        for slot in _slots(corrected):
+            current = slot.run.get("charPrIDRef", "0")
+            for offset in range(slot.start, slot.end):
+                pid = self.clean_style(current, choices[offset]) if changed[offset] else current
+                if pid == current:
+                    continue
+                if spans and spans[-1][1] == offset and spans[-1][2] == pid:
+                    spans[-1] = spans[-1][0], offset + 1, pid
+                else:
+                    spans.append((offset, offset + 1, pid))
+        # Split only changed spans. Existing helper moves, never duplicates,
+        # inline markpen nodes, memo/bookmark controls and their text tails.
+        for start, end, pid in reversed(spans):
+            for slot in reversed(_slots(corrected)):
+                lo, hi = max(start, slot.start), min(end, slot.end)
+                if lo >= hi:
+                    continue
+                run_slots = [s for s in _slots(corrected) if s.run is slot.run]
+                if hi < max(s.end for s in run_slots):
+                    Editor._split_after(None, corrected, slot, hi)
+                if lo > min(s.start for s in run_slots):
+                    run = Editor._split_after(None, corrected, slot, lo)
+                else:
+                    run = slot.run
+                run.set("charPrIDRef", pid)
 
 
 def _stage_bytes(destination: Path, data: bytes) -> Path:
@@ -393,12 +514,13 @@ class SectionEditSession:
                        section=self.section_name, updated=time.strftime("%Y-%m-%d %H:%M:%S"))
         changed_parts = set()
         correction_edits = []
+        grade_styles = _ManualGradeStyles(self._source, target)
         for index, text in edits.items():
             paragraph = target.paragraphs[index]
             before = paragraph_text(paragraph)
             old_hash = _text_hash(before)
             _replace_text(paragraph, text)
-            _clear_known_grades(self._source.paragraphs[index], paragraph, self._source, target)
+            grade_styles.clear_changed(self._source.paragraphs[index], paragraph, before)
             record = history["paragraphs"].setdefault(str(index), {"signature": _signature(paragraph), "text_hashes": []})
             record["text_hashes"] = sorted(set(record["text_hashes"]) | {old_hash, _text_hash(text)})
             correction_edits.append({"paragraph": index, "signature": _signature(paragraph),

@@ -10,10 +10,10 @@ import zipfile
 
 from lxml import etree
 
-from yeone_ocr.collate.hwpx_edit import HP, Editor, _slots, paragraph_text
+from yeone_ocr.collate.hwpx_edit import HP, HH, Editor, _slots, _tag_of, paragraph_text
 from yeone_ocr.collate.section_edit import (
     ConflictError, ManualProtectionError, SectionEditError, SectionEditSession,
-    _Archive, manual_history_path, manual_protected_paragraphs,
+    _Archive, _style_key, manual_history_path, manual_protected_paragraphs,
 )
 from yeone_ocr.collate.sections import HwpxBook
 
@@ -57,6 +57,27 @@ class ManualSectionEditing(unittest.TestCase):
     def open(self):
         return SectionEditSession.open(self.pdf, self.source, "瀉白散", 1, 6)
 
+    def mark_copy(self, index=2, grade="red", *, transform=None):
+        book = HwpxBook(str(self.source))
+        try:
+            editor = Editor(book, memo="none")
+            for slot in _slots(book.paragraphs[index].element):
+                pid = editor._style_for(slot.run.get("charPrIDRef"), grade)
+                if transform:
+                    pid = transform(editor, pid)
+                slot.run.set("charPrIDRef", pid)
+            book.paragraphs[index].section.mark_dirty()
+            editor.save_copy(str(self.corrected))
+        finally:
+            book.doc.close()
+
+    def styles_at(self, path, index=2):
+        archive = _Archive(path.read_bytes())
+        header = etree.fromstring(archive.entries["Contents/header.xml"])
+        styles = {style.get("id"): style for style in header.iter(HH + "charPr")}
+        return [styles[slot.run.get("charPrIDRef")] for slot in _slots(archive.paragraphs[index])
+                for _ in slot.text]
+
     def test_save_changes_only_selected_text_and_preserves_zip_members_and_comments(self):
         original = self.source.read_bytes()
         session = self.open()
@@ -90,6 +111,118 @@ class ManualSectionEditing(unittest.TestCase):
         saved = _Archive(self.corrected.read_bytes())
         self.assertEqual([s.text for s in _slots(saved.paragraphs[3])], ["WX", "YZ"])
         self.assertEqual([s.run.get("charPrIDRef") for s in _slots(saved.paragraphs[3])], styles)
+
+    def test_each_grade_is_removed_only_from_replaced_characters(self):
+        baseline = self.styles_at(self.source)
+        for grade in ("green", "blue", "red", "red_ctx"):
+            with self.subTest(grade=grade):
+                manual_history_path(self.corrected).unlink(missing_ok=True)
+                self.mark_copy(grade=grade)
+                before = self.corrected.read_bytes()
+                marked = self.styles_at(self.corrected)
+                result = self.open().save({2: "Alpha zeta gamma."})
+                after = self.styles_at(self.corrected)
+                self.assertEqual(result.backup_path.read_bytes(), before)
+                for position in range(len(after)):
+                    expected = baseline[position] if position == 6 else marked[position]
+                    self.assertEqual(_style_key(after[position]), _style_key(expected), position)
+                self.assertEqual(manual_protected_paragraphs(self.corrected), {2})
+
+    def test_mixed_source_styles_restore_bold_without_clearing_other_marks(self):
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3, grade="red")
+        marked = self.styles_at(self.corrected, 3)
+        self.open().save({3: "XBCY"})
+        saved = self.styles_at(self.corrected, 3)
+        self.assertEqual([_style_key(s) for s in saved],
+                         [_style_key(s) for s in (baseline[0], marked[1], marked[2], baseline[3])])
+        self.assertIsNone(saved[0].find(HH + "bold"))
+        self.assertIsNotNone(saved[3].find(HH + "bold"))
+
+    def test_ambiguous_original_style_boundary_fails_without_publishing(self):
+        self.mark_copy(index=3, grade="red")
+        before = self.corrected.read_bytes()
+        # Red makes both original normal and bold runs look identical.
+        with self.assertRaisesRegex(SectionEditError, "원본 글자 서식"):
+            self.open().save({3: "X"})
+        self.assertEqual(self.corrected.read_bytes(), before)
+        self.assertFalse(manual_history_path(self.corrected).exists())
+        self.assertFalse(self.corrected.with_suffix(".bak.hwpx").exists())
+
+    def test_insert_delete_and_restore_keep_only_remaining_untouched_marks(self):
+        self.mark_copy(grade="blue")
+        baseline = self.styles_at(self.source)[0]
+        session = self.open()
+        session.save({2: "Alpha NEW beta gamma."})
+        styles = self.styles_at(self.corrected)
+        self.assertTrue(all(_style_key(s) == _style_key(baseline) for s in styles[5:9]))
+        self.assertTrue(all(_tag_of(s) == "#1F4FBF" for s in styles[:5] + styles[9:]))
+        session.save({2: "Alpha NEW gamma."})
+        styles = self.styles_at(self.corrected)
+        self.assertTrue(all(_tag_of(s) == "#1F4FBF" for s in styles[:5] + styles[9:]))
+        session.save({2: ""})
+        self.open().save({2: "Restored"})
+        self.assertTrue(all(_style_key(s) == _style_key(baseline) for s in self.styles_at(self.corrected)))
+
+    def test_author_grade_colors_without_ownership_marker_are_preserved(self):
+        def untag(editor, pid):
+            editor._char_pr(pid).find(HH + "strikeout").set("color", "#000000")
+            return pid
+        self.mark_copy(transform=untag)
+        styles = self.styles_at(self.corrected)
+        self.open().save({2: "Alpha zeta gamma."})
+        self.assertEqual([_style_key(s) for s in self.styles_at(self.corrected)],
+                         [_style_key(s) for s in styles])
+
+    def test_restored_style_preserves_target_typography_and_valid_child_order(self):
+        def resized_green(editor, pid):
+            green = editor._style_for(pid, "green")  # Red -> green removes original bold.
+            return editor.doc.styles.ensure_run(base_char_pr_id=green, size=17, italic=True)
+        baseline = self.styles_at(self.source, 3)
+        self.mark_copy(index=3, transform=resized_green)
+        old_header = _Archive(self.corrected.read_bytes()).entries["Contents/header.xml"]
+        self.open().save({3: "ABXY"})
+        saved = self.styles_at(self.corrected, 3)
+        self.assertNotEqual(_Archive(self.corrected.read_bytes()).entries["Contents/header.xml"], old_header)
+        self.assertEqual(saved[2].get("height"), "1700")
+        self.assertIsNotNone(saved[2].find(HH + "italic"))
+        self.assertIsNotNone(saved[2].find(HH + "bold"))
+        for name in ("textColor", "shadeColor"):
+            self.assertEqual(saved[2].get(name), baseline[2].get(name))
+        for name in ("underline", "strikeout"):
+            self.assertEqual(_style_key(saved[2].find(HH + name)),
+                             _style_key(baseline[2].find(HH + name)))
+        tags = [etree.QName(child).localname for child in saved[2]]
+        self.assertLess(tags.index("italic"), tags.index("bold"))
+        self.assertLess(tags.index("bold"), tags.index("underline"))
+        self.assertLess(tags.index("underline"), tags.index("strikeout"))
+        self.assertEqual(saved[2].get("id"), saved[3].get("id"))
+        header = _Archive(self.corrected.read_bytes()).entries["Contents/header.xml"]
+        self.open().save({3: "ABXZ"})
+        self.assertEqual(_Archive(self.corrected.read_bytes()).entries["Contents/header.xml"], header)
+
+    def test_partial_cleanup_preserves_memo_and_markpen_nodes_once(self):
+        source = _Archive(self.source.read_bytes())
+        paragraph = source.paragraphs[4]
+        text = next(slot.t for slot in _slots(paragraph) if slot.text)
+        text.text = "Memo "
+        begin = etree.SubElement(text, HP + "markpenBegin", color="#ABCDEF")
+        begin.tail = "body"
+        end = etree.SubElement(text, HP + "markpenEnd")
+        end.tail = " text."
+        source.write(self.source, {"Contents/section0.xml"})
+        self.mark_copy(index=4)
+        before = _Archive(self.corrected.read_bytes()).paragraphs[4]
+        controls = [etree.tostring(node) for node in before.iter(HP + "ctrl")]
+        self.open().save({4: "Memo bXdy text."})
+        saved = _Archive(self.corrected.read_bytes()).paragraphs[4]
+        self.assertEqual(paragraph_text(saved), "Memo bXdy text.")
+        self.assertEqual([etree.tostring(node) for node in saved.iter(HP + "ctrl")], controls)
+        for tag in ("markpenBegin", "markpenEnd"):
+            self.assertEqual(len(list(saved.iter(HP + tag))), 1)
+        styles = self.styles_at(self.corrected, 4)
+        self.assertNotEqual(_tag_of(styles[6]), "#C00000")
+        self.assertTrue(all(_tag_of(s) == "#C00000" for i, s in enumerate(styles) if i != 6))
 
     def test_empty_paragraph_can_be_restored_without_recreating_its_runs(self):
         session = self.open()

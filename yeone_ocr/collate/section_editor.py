@@ -61,6 +61,7 @@ class ChangeReviewDialog(tk.Toplevel):
                  fg=parent.colors["INK"], font=("Malgun Gothic", 16, "bold")).grid(
                      row=0, column=0, sticky="ew", padx=22, pady=(20, 8))
         tk.Label(self, text=f"문단 {len(changes)}개 · {target.name}\n"
+                 "직접 고친 글자는 OCR 교정 표시를 지우고 원래 서식으로 저장합니다.\n"
                  "수정 전후를 별도 기록하고, 같은 책의 다음 새 판독에 참고합니다. 저장 전 사본도 보관합니다.",
                  anchor="w", justify="left", bg=parent.colors["BG"], fg=parent.colors["MUTED"]).grid(
                      row=1, column=0, sticky="ew", padx=22, pady=(0, 14))

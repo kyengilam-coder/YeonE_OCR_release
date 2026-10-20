@@ -69,9 +69,9 @@ jobs:
           $build = Get-Content -LiteralPath work/windows-release/build-result.json -Raw | ConvertFrom-Json
           $previousDirectory = 'work/windows-release/previous'
           New-Item -ItemType Directory -Force -Path $previousDirectory | Out-Null
-          gh release download v0.12.4 --repo $env:GITHUB_REPOSITORY --pattern 'YeonE_OCR-0.12.4-Setup-x64.exe' --dir $previousDirectory
+          gh release download v0.12.5 --repo $env:GITHUB_REPOSITORY --pattern 'YeonE_OCR-0.12.5-Setup-x64.exe' --dir $previousDirectory
           if ($LASTEXITCODE -ne 0) { throw 'Previous public installer download failed' }
-          ./tools/test_windows_installer.ps1 -Installer "dist/YeonE_OCR-$($build.version)-Setup-x64.exe" -ExpectedVersion $build.version -PreviousInstaller "$previousDirectory/YeonE_OCR-0.12.4-Setup-x64.exe"
+          ./tools/test_windows_installer.ps1 -Installer "dist/YeonE_OCR-$($build.version)-Setup-x64.exe" -ExpectedVersion $build.version -PreviousInstaller "$previousDirectory/YeonE_OCR-0.12.5-Setup-x64.exe"
       - name: Prepare complete release artifacts
         run: |
           & $env:BUILD_PYTHON tools/prepare_windows_release.py dist --revision HEAD
