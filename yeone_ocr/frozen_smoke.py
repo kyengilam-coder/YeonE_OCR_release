@@ -884,6 +884,129 @@ def bookmark_cursor_probe(folder: Path) -> dict:
             "ocr_calls": 0, "network_calls": 0}
 
 
+def bookmark_layout_probe(folder: Path) -> dict:
+    """Keep both comparison panes usable after a delayed first show and reload."""
+    import tkinter as tk
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_editor import BookmarkSectionEditor
+
+    source = folder / "bookmark-layout.hwpx"
+    pdf_path = folder / "bookmark-layout.pdf"
+    body = "天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph(body, style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=760, height=500)
+        page.insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=22)
+        page.insert_text((40, 130), body, fontname="china-t", fontsize=22)
+        pdf.save(pdf_path)
+    original, original_pdf = source.read_bytes(), pdf_path.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        body_index = book.texts().index(body)
+    finally:
+        book.doc.close()
+    root = tk.Tk()
+    root.withdraw()
+    window = None
+    try:
+        window = BookmarkSectionEditor(
+            root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 1))
+        window.attributes("-alpha", 0.0)
+        window.withdraw()
+
+        def pump_until(predicate, message, seconds=8):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                root.update()
+                if predicate():
+                    return
+                time.sleep(.01)
+            raise AssertionError(message)
+
+        # Reproduce the first-show race: the old 120 ms split timer used a
+        # withdrawn Panedwindow's one-pixel geometry and permanently chose zero.
+        delay = time.monotonic() + .3
+        pump_until(lambda: time.monotonic() >= delay, "Delayed-show timer did not complete")
+        assert not window.winfo_ismapped()
+        assert window._image_size is None and window._render_future is None
+        assert int(window._editor_font.cget("size")) == 12
+        window.deiconify()
+
+        def balanced():
+            return (window.pdf_panel.winfo_width() >= 360
+                    and window.doc_panel.winfo_width() >= 360
+                    and abs(window.pdf_panel.winfo_width() - window.doc_panel.winfo_width()) <= 2)
+
+        def display_matches_width():
+            if (window._displayed_page != 1 or window._image_size is None
+                    or window._cursor_map is None or window.pdf_canvas.winfo_width() < 180):
+                return False
+            # This fixture uses fit-to-width, with a 32-pixel image margin.
+            return abs(window._image_size[0] - (window.pdf_canvas.winfo_width() - 32)) <= 2
+
+        pump_until(lambda: balanced() and display_matches_width(),
+                   "Delayed first show did not restore both panes and render the PDF")
+        window.select_paragraph(body_index)
+        pump_until(lambda: int(window._editor_font.cget("size")) < 0,
+                   "Text size did not follow the visible PDF")
+        glyph_width = window._cursor_map.page_font_width(1) * window._image_size[0]
+        assert glyph_width >= 12
+        assert abs(window._editor_font.measure("漢") - glyph_width) <= 2
+
+        # Use real sash events to retain a deliberate user adjustment.
+        sash = window.panes.sashpos(0)
+        y = max(1, window.panes.winfo_height() // 2)
+        wanted = int(window.panes.winfo_width() * .58)
+        window.panes.event_generate("<ButtonPress-1>", x=sash + 2, y=y)
+        window.panes.event_generate("<B1-Motion>", x=wanted, y=y)
+        window.panes.event_generate("<ButtonRelease-1>", x=wanted, y=y)
+        root.update()
+        selected_ratio = window.panes.sashpos(0) / window.panes.winfo_width()
+        assert .53 < selected_ratio < .64, selected_ratio
+        assert window.reload()
+        pump_until(display_matches_width, "Reload did not retain a visible PDF")
+        assert abs(window.panes.sashpos(0) / window.panes.winfo_width() - selected_ratio) < .02
+        assert window._editors[body_index].get("1.0", "end-1c") == body
+
+        # The explicit recovery action must repair an already collapsed pane.
+        window.panes.sashpos(0, 0)
+        root.update_idletasks()
+        window.reset_comparison_layout()
+        pump_until(lambda: balanced() and display_matches_width(),
+                   "Reset did not restore the collapsed PDF pane")
+        window.withdraw()
+        assert window.reload()
+        window.deiconify()
+        pump_until(lambda: balanced() and display_matches_width(),
+                   "Hidden reload and redisplay did not preserve the comparison")
+        glyph_width = window._cursor_map.page_font_width(1) * window._image_size[0]
+        assert glyph_width >= 12 and abs(window._editor_font.measure("漢") - glyph_width) <= 2
+        assert not window.dirty and not window.session.corrected_path.exists()
+        assert source.read_bytes() == original and pdf_path.read_bytes() == original_pdf
+    finally:
+        if window is not None:
+            window.destroy()
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    return {"delayed_first_show_balanced": True, "collapsed_pane_restored": True,
+            "reload_preserves_comparison": True, "pdf_and_font_follow_available_width": True,
+            "manual_resize_preserved": True, "source_pdf_and_hwpx_unchanged": True,
+            "corrected_file_not_created": True, "ocr_calls": 0, "network_calls": 0}
+
+
 def run(report_path: Path) -> int:
     from . import __version__
     report_path = Path(report_path).resolve()
@@ -1080,6 +1203,7 @@ def run(report_path: Path) -> int:
         check("manual-edit-style-cleanup", lambda: manual_style_cleanup_probe(folder))
         check("bookmark-find-replace-and-paragraph-input", lambda: bookmark_replace_probe(folder))
         check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
+        check("bookmark-layout-after-delayed-show-and-reload", lambda: bookmark_layout_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))
 

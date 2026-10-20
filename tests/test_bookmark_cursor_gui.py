@@ -407,6 +407,11 @@ class BookmarkCursorTk(unittest.TestCase):
         self.assertEqual([call[0] for call in self.executors[0].immediate_calls],
                          [validate_pdf_range])
         self.assertEqual(self.executors[0].calls[0][0], self.read_pages)
+        pending = len(self.executors[0].calls)
+        self.editor._submit_render()
+        self.assertEqual(len(self.executors[0].calls), pending)
+        self.editor.deiconify()
+        self.root.update()
         self.editor._submit_render()
         self.assertEqual(self.executors[0].calls[-1][0].__name__, "render_pdf_page")
         self.assertEqual(self.executors[1].calls, [])
@@ -415,6 +420,25 @@ class BookmarkCursorTk(unittest.TestCase):
         self.finish_alignment()
         self.submit()
         self.assertEqual(self.executors[1].calls[-1][0], self.mapping.locate)
+
+    def test_hidden_canvas_cannot_create_a_tiny_render_or_change_matched_font(self):
+        self.ready()
+        self.mapping.page_font_width.return_value = .03
+        before_font = int(self.editor._editor_font.cget("size"))
+        before_calls = len(self.executors[0].calls)
+        self.editor._submit_render()
+        self.assertEqual(len(self.executors[0].calls), before_calls)
+        self.assertEqual(int(self.editor._editor_font.cget("size")), before_font)
+        self.assertIsNone(self.editor._image_size)
+        self.editor.deiconify()
+        self.root.update()
+        self.editor._submit_render()
+        render_call = self.executors[0].calls[-1]
+        self.assertGreaterEqual(render_call[1][2], 180)
+        self.executors[0].finish()
+        self.editor._poll_render()
+        self.assertGreater(self.editor._image_size[0], 300)
+        self.assertLessEqual(abs(self.editor._editor_font.measure("漢") - self.editor._image_size[0] * .03), 1)
 
     def test_two_windows_share_pdf_queue_and_closing_one_keeps_other_requests_alive(self):
         first_index = self.editor._index_future[1]

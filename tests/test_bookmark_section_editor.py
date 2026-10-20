@@ -584,6 +584,83 @@ class SectionEditorTk(unittest.TestCase):
         self.assertEqual(str(preview.cget("state")), "disabled")
         self.assertEqual(self.session.calls, [])
 
+    def test_delayed_first_show_keeps_two_panels_after_hidden_initial_callback(self):
+        # Exercise the real 120 ms callback while the new window is withdrawn.
+        finished = "section_layout_delay_finished"
+        self.root.tk.setvar(finished, False)
+        self.editor.after(180, lambda: self.root.tk.setvar(finished, True))
+        self.root.wait_variable(finished)
+        self.assertFalse(self.editor._split_initialized)
+        self.assertEqual(self.editor.panes.winfo_width(), 1)
+        with patch.object(self.editor._executor, "submit") as submit:
+            self.editor._submit_render()
+        submit.assert_not_called()
+        self.assertEqual(int(self.editor._editor_font.cget("size")), 12)
+        self.editor.deiconify()
+        self.root.update()
+        self.assertTrue(self.editor._split_initialized)
+        self.assertGreater(self.editor.pdf_panel.winfo_width(), 500)
+        self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+
+    def test_reload_and_remap_recover_collapsed_panes_without_changing_drafts(self):
+        self.editor.deiconify()
+        self.root.update()
+        self.editor.panes.sashpos(0, 0)
+        self.assertEqual(self.editor.panes.sashpos(0), 0)
+        self.assertTrue(self.editor.reload())
+        self.root.update()
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.editor.withdraw()
+        self.editor.panes.sashpos(0, 0)
+        self.assertTrue(self.editor.reload())
+        self.edit(11, "아직 저장하지 않은 수정")
+        self.editor.deiconify()
+        self.root.update()
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+        self.assertEqual(self.editor._changes(), {11: "아직 저장하지 않은 수정"})
+        self.assertEqual(self.session.calls, [])
+
+    def test_user_divider_ratio_survives_resize_reload_and_explicit_reset_preserves_edits(self):
+        self.editor.deiconify()
+        self.root.update()
+        panes = self.editor.panes
+        panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
+        panes.event_generate("<B1-Motion>", x=430, y=20)
+        panes.event_generate("<ButtonRelease-1>", x=430, y=20)
+        self.root.update()
+        self.assertLess(self.editor._split_ratio, .4)
+        ratio = self.editor._split_ratio
+        self.editor.geometry("1600x900")
+        self.root.update()
+        self.assertLessEqual(abs(panes.sashpos(0) / self.editor._split_space() - ratio), .002)
+        self.assertTrue(self.editor.reload())
+        self.root.update()
+        self.assertLessEqual(abs(panes.sashpos(0) / self.editor._split_space() - ratio), .002)
+        self.editor.geometry("900x640")
+        self.root.update()
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+        self.edit(11, "수정 보존")
+        self.editor.set_zoom(1.8)
+        self.editor.change_text_size(1)
+        manual_font = int(self.editor._editor_font.cget("size"))
+        self.editor.reset_view_button.invoke()
+        self.root.update()
+        self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+        self.assertEqual(self.editor._changes(), {11: "수정 보존"})
+        self.assertEqual(self.editor._zoom, 1.8)
+        self.assertEqual(int(self.editor._editor_font.cget("size")), manual_font)
+        self.assertFalse(self.editor.v_match_pdf_font.get())
+        self.assertEqual(self.session.calls, [])
+
+    def test_closing_hidden_window_cancels_pending_layout_callback(self):
+        self.editor._schedule_split()
+        pending = self.editor._split_job
+        self.assertIsNotNone(pending)
+        self.editor.destroy()
+        self.assertNotIn(pending, self.root.tk.call("after", "info"))
+
 
 if __name__ == "__main__":
     unittest.main()

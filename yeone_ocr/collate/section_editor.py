@@ -535,6 +535,10 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._position_ensure_visible = False
         self._layout_follow_cursor = False
         self._initial_job = None
+        self._split_job = None
+        self._split_ratio = .5
+        self._split_initialized = False
+        self._split_dragging = False
         self._change_jobs = {}
         self._executor = pdf_worker
         self._alignment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bookmark-location")
@@ -558,6 +562,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.configure(bg=self.colors["BG"])
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Destroy>", self._destroyed, add="+")
+        self.bind("<Map>", lambda event: self._schedule_split() if event.widget is self else None, add="+")
         self.bind("<Control-s>", self._save_shortcut)
         self.bind("<Control-S>", self._save_shortcut)
         for shortcut in ("<Control-h>", "<Control-H>", "<Control-f>", "<Control-F>"):
@@ -596,12 +601,20 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.columnconfigure(0, weight=1); self.rowconfigure(1, weight=1)
         head = tk.Frame(self, bg=C["BG"])
         head.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 12))
-        self._label(head, f"책갈피 OCR  /  대조 편집", muted=True, bg=C["BG"]).pack(anchor="w")
+        heading_tools = tk.Frame(head, bg=C["BG"])
+        heading_tools.pack(fill="x")
+        self._label(heading_tools, "책갈피 OCR  /  대조 편집", muted=True, bg=C["BG"]).pack(side="left")
+        self.reset_view_button = self._tool_button(heading_tools, "좌우 균등", self.reset_comparison_layout)
+        self.reset_view_button.pack(side="right")
         self._label(head, self.section_name, size=21, bold=True, bg=C["BG"]).pack(anchor="w", pady=(5, 2))
         self._label(head, f"PDF {self.pdf_pages[0]}–{self.pdf_pages[1]}쪽  ·  HWPX {len(self._paragraphs)}문단  ·  찾기·바꾸기로 전체 교정본도 수정",
                     muted=True, bg=C["BG"]).pack(anchor="w")
         self.panes = ttk.Panedwindow(self, orient="horizontal")
         self.panes.grid(row=1, column=0, sticky="nsew", padx=18)
+        self.panes.bind("<Configure>", lambda _event: self._schedule_split(), add="+")
+        self.panes.bind("<Map>", lambda _event: self._schedule_split(), add="+")
+        self.panes.bind("<ButtonPress-1>", self._split_drag_start, add="+")
+        self.panes.bind("<ButtonRelease-1>", self._split_drag_end, add="+")
         self.pdf_panel = tk.Frame(self.panes, bg=C["PANEL"], highlightthickness=1, highlightbackground=C["LINE"])
         self.doc_panel = tk.Frame(self.panes, bg=C["PANEL"], highlightthickness=1, highlightbackground=C["LINE"])
         for panel in (self.pdf_panel, self.doc_panel):
@@ -807,12 +820,57 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     def _initial_split(self):
         self._initial_job = None
-        if not self._closed:
-            # Pane widths exclude the theme's separator (5–12 px on Windows).
-            # Balance their usable space, once, rather than centering its edge.
-            difference = self.doc_panel.winfo_width() - self.pdf_panel.winfo_width()
-            self.panes.sashpos(0, self.panes.sashpos(0) + difference // 2)
+        self._restore_split()
+
+    def _schedule_split(self):
+        if not self._closed and self._split_job is None:
+            # An idle callback observes the children after Tk has allocated their
+            # real widths. A withdrawn window's one-pixel width is not a layout.
+            self._split_job = self.after_idle(self._restore_split)
+
+    def _split_space(self):
+        if not self.panes.winfo_ismapped() or self.panes.winfo_width() < 400:
+            return None
+        # Theme separators vary (5–12 px). The second pane starts immediately
+        # after the sash, even when the first pane was previously collapsed.
+        separator = self.doc_panel.winfo_x() - self.panes.sashpos(0)
+        separator = max(1, min(32, separator))
+        return self.panes.winfo_width() - separator
+
+    def _restore_split(self):
+        self._split_job = None
+        if self._closed or self._split_dragging:
+            return
+        available = self._split_space()
+        if available is None:
+            return
+        minimum = min(360, available // 2)
+        position = max(minimum, min(available - minimum, round(available * self._split_ratio)))
+        first_layout = not self._split_initialized
+        self._split_initialized = True
+        if first_layout or self.panes.sashpos(0) != position:
+            self.panes.sashpos(0, position)
             self._request_render()
+
+    def _split_drag_start(self, event):
+        self._split_dragging = self.panes.identify(event.x, event.y) in (0, "0")
+
+    def _split_drag_end(self, _event=None):
+        dragging = self._split_dragging
+        self._split_dragging = False
+        available = self._split_space()
+        if dragging and available:
+            minimum = min(360, available // 2)
+            position = max(minimum, min(available - minimum, self.panes.sashpos(0)))
+            self._split_ratio = position / available
+        self._schedule_split()
+
+    def reset_comparison_layout(self):
+        """Restore the two visible panels without touching text, drafts or zoom."""
+        self._split_ratio = .5
+        self._split_initialized = False
+        self._schedule_split()
+        self.v_status.set("원본 PDF와 교정문을 같은 너비로 나란히 배치합니다.")
 
     def _document_resized(self, event):
         self.doc_canvas.itemconfigure(self._doc_window, width=max(250, event.width))
@@ -1222,6 +1280,10 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._render_job = None
         if self._closed:
             return
+        # A hidden/collapsed canvas can report width 1. Rendering at that width
+        # would also shrink the automatically matched HWPX font to its minimum.
+        if not self.pdf_canvas.winfo_ismapped() or self.pdf_canvas.winfo_width() < 180:
+            return
         if self._render_future is not None:
             self._render_future[1].cancel()
         generation = self._render_generation
@@ -1594,6 +1656,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._update_status()
         self.v_status.set("교정본을 다시 불러왔습니다.")
         self._start_cursor_map()
+        self._schedule_split()
         self._request_render()
         return True
 
@@ -1601,7 +1664,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         if self._closed:
             return
         self._closed = True
-        for job in (self._initial_job, self._render_job, self._poll_job, self._layout_job, self._cursor_job,
+        for job in (self._initial_job, self._split_job, self._render_job, self._poll_job, self._layout_job, self._cursor_job,
                     self._position_job, *self._change_jobs.values()):
             if job is not None:
                 try:

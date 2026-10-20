@@ -317,6 +317,19 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_keeps_comparison_visible_after_delayed_show_and_reload(self):
+        from yeone_ocr.frozen_smoke import bookmark_layout_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = bookmark_layout_probe(self.root)
+        for field in ("delayed_first_show_balanced", "collapsed_pane_restored",
+                      "reload_preserves_comparison", "pdf_and_font_follow_available_width",
+                      "manual_resize_preserved", "source_pdf_and_hwpx_unchanged",
+                      "corrected_file_not_created"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
