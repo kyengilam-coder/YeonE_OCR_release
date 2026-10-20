@@ -136,21 +136,22 @@ def shared_pdf_worker():
 
 
 def validate_pdf_range(path, pdf_pages):
-    import pymupdf
-    with pymupdf.open(path) as document:
+    from ..pdfio import open_pdf
+    with open_pdf(str(path)) as document:
         first, last = map(int, pdf_pages)
         if not 1 <= first <= last <= len(document):
-            raise ValueError("선택 구획의 PDF 쪽 범위를 확인한 뒤 대조 편집을 여십시오.")
+            raise ValueError("선택 범위의 원본 쪽 번호를 확인한 뒤 대조 편집을 여십시오.")
     return first, last
 
 
 def render_pdf_page(path: str, page_number: int, width: int, zoom: float | None):
     """Render one local PDF page off the Tk thread; return a Pillow image."""
     import pymupdf
+    from ..pdfio import open_pdf
     from PIL import Image
-    with pymupdf.open(path) as document:
+    with open_pdf(str(path)) as document:
         if not 1 <= page_number <= len(document):
-            raise ValueError("PDF 쪽 번호가 범위를 벗어났습니다.")
+            raise ValueError("원본 쪽 번호가 범위를 벗어났습니다.")
         page = document[page_number - 1]
         factor = min(4.0, max(.2, zoom if zoom is not None else max(180, width - 32) / page.rect.width))
         # Keep unusually large page dimensions within a predictable memory bound.
@@ -163,7 +164,7 @@ def render_pdf_page(path: str, page_number: int, width: int, zoom: float | None)
 
 class BodyExportScopeDialog(tk.Toplevel):
     """Choose the whole section or document without changing the editor."""
-    def __init__(self, parent, *, colors, scope="section"):
+    def __init__(self, parent, *, colors, scope="section", section_label="현재 구획 전체"):
         super().__init__(parent)
         self.selected_scope = None
         self.title("본문 내보내기")
@@ -176,7 +177,7 @@ class BodyExportScopeDialog(tk.Toplevel):
         tk.Label(self, text="제목과 수정하지 않은 문단도 포함합니다.\n"
                  "미저장 수정을 반영한 본문만 TXT로 보관합니다.",
                  bg=colors["BG"], fg=colors["MUTED"], justify="left").pack(anchor="w", padx=22, pady=(0, 10))
-        for value, label in (("section", "현재 구획 전체"), ("document", "교정본 문서 전체")):
+        for value, label in (("section", section_label), ("document", "교정본 문서 전체")):
             ttk.Radiobutton(self, text=label, value=value, variable=self.v_scope).pack(anchor="w", padx=22, pady=4)
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=22, pady=18)
@@ -261,7 +262,7 @@ class CorrectionHistoryDialog(tk.Toplevel):
                  font=("Malgun Gothic", 16, "bold")).grid(
                      row=0, column=0, sticky="ew", padx=22, pady=(20, 8))
         self.note = tk.Label(
-            self, text="이 구획에서 저장한 수정 전후입니다. 되돌린 이력도 확인할 수 있습니다.\n"
+            self, text=f"이 {parent._scope_noun}에서 저장한 수정 전후입니다. 되돌린 이력도 확인할 수 있습니다.\n"
             "같은 책을 새로 판독할 때 최근의 유효한 짧은 수정 사례를 최대 24개 1차 판독기에 전달합니다.\n"
             "원본 이미지를 확인하는 2차 판독은 독립적으로 진행합니다. 기존 판독 기록은 유지됩니다.",
             anchor="w", justify="left", bg=colors["BG"], fg=colors["MUTED"])
@@ -279,7 +280,7 @@ class CorrectionHistoryDialog(tk.Toplevel):
         self.text.tag_configure("before", foreground=colors["MUTED"])
         self.text.tag_configure("changed", background="#e2edf3", foreground=colors["BLUE"])
         if not records:
-            self.text.insert("end", "이 구획에 저장된 수정 전후 기록이 없습니다.\n\n"
+            self.text.insert("end", f"이 {parent._scope_noun}에 저장된 수정 전후 기록이 없습니다.\n\n"
                              "이 버전부터 대조 편집에서 수정하고 저장하면 기록이 쌓입니다. "
                              "이전 버전의 문단 보호 기록은 그대로 유지됩니다.")
         for record in reversed(records):
@@ -303,6 +304,7 @@ class FindReplaceDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.editor = parent
+        self.SCOPES = {"선택 문단": "paragraph", f"현재 {parent._scope_noun}": "section", "교정본 전체": "document"}
         self.plan = None
         self._occurrences = []
         self._occurrence = -1
@@ -315,7 +317,7 @@ class FindReplaceDialog(tk.Toplevel):
         self.rowconfigure(6, weight=1)
         self.v_find = tk.StringVar()
         self.v_replace = tk.StringVar()
-        self.v_scope = tk.StringVar(value="현재 구획")
+        self.v_scope = tk.StringVar(value=f"현재 {parent._scope_noun}")
         self.v_summary = tk.StringVar(value="찾을 글자와 바꿀 글자를 입력하고 미리 보기를 누르세요.")
         for row, label, variable in ((0, "찾을 글자", self.v_find), (1, "바꿀 글자", self.v_replace)):
             tk.Label(self, text=label, bg=parent.colors["BG"], fg=parent.colors["INK"]).grid(
@@ -454,7 +456,7 @@ class FindReplaceDialog(tk.Toplevel):
         self._occurrence = (self._occurrence + 1) % len(self._occurrences)
         index, offset = self._occurrences[self._occurrence]
         self.v_summary.set(f"{self._occurrence + 1} / {len(self._occurrences)}곳 · 문단 {index + 1}"
-                           + (" · 현재 구획 밖의 문단입니다." if index not in self.editor._editors else ""))
+                           + (f" · 현재 {self.editor._scope_noun} 밖의 문단입니다." if index not in self.editor._editors else ""))
         if index in self.editor._editors:
             self.editor._reveal_text(index, offset, len(self.v_find.get()), focus=False)
         entry = next(item for item in self.plan.entries if item.index == index)
@@ -528,18 +530,29 @@ class BookmarkSectionEditor(tk.Toplevel):
     remains available. The backend preserves document structure, verifies
     snapshots and writes only the cumulative corrected document, with a backup.
     """
-    def __init__(self, parent, *, pdf_path, hwpx_path, section_name, section_start,
-                 section_end, pdf_pages, can_write=None, on_saved=None, heading_styles=None,
-                 anchor_source="auto"):
+    def __init__(self, parent, *, pdf_path, hwpx_path, section_name=None, section_start=None,
+                 section_end=None, pdf_pages=None, can_write=None, on_saved=None, heading_styles=None,
+                 anchor_source="auto", generated=False, generated_page=None, work_dir=None, input_label=None):
         from .section_edit import SectionEditSession
         # Validate/load before creating a window, so the caller can report failure.
         scope_options = {"heading_styles": list(heading_styles) if heading_styles else None, "anchor_source": anchor_source}
         pdf_worker = shared_pdf_worker()
-        session = SectionEditSession.open(str(pdf_path), str(hwpx_path),
-                                          section_name, section_start, section_end, **scope_options)
+        if generated:
+            session = SectionEditSession.open_generated(str(pdf_path), str(hwpx_path), generated_page, work_dir=work_dir)
+            section_name, section_start, section_end = session.section_name, session.start, session.end
+            pdf_pages = session.pdf_pages
+        else:
+            session = SectionEditSession.open(str(pdf_path), str(hwpx_path),
+                                              section_name, section_start, section_end, **scope_options)
         first, last = pdf_worker.submit(validate_pdf_range, pdf_path, pdf_pages).result()
         super().__init__(parent)
         self.session = session
+        self._generated = bool(generated)
+        self._input_label = input_label
+        self._work_dir = str(Path(work_dir).resolve()) if work_dir is not None else None
+        self._scope_noun = "범위" if generated else "구획"
+        self._source_title = ("원본 이미지 폴더" if Path(pdf_path).is_dir() else
+                              "원본 PDF" if Path(pdf_path).suffix.lower() == ".pdf" else "원본 이미지")
         self.pdf_path = str(pdf_path)
         self.hwpx_path = str(hwpx_path)
         self.section_name = section_name
@@ -569,10 +582,12 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._show_original = True
         self._text_size = 12
         self._editor_font = tkfont.Font(self, family="Malgun Gothic", size=self._text_size)
+        self._editor_bold_font = self._editor_font.copy()
+        self._editor_bold_font.configure(weight="bold")
         self._saving = False
         self._reviewing = False
         self._closed = False
-        self._pdf_page = first
+        self._pdf_page = session.page if generated else first
         self._zoom = None
         self._render_generation = 0
         self._render_future = None
@@ -646,6 +661,33 @@ class BookmarkSectionEditor(tk.Toplevel):
             options["width"] = width
         return tk.Button(parent, **options)
 
+    def _scope_caption(self):
+        return (f"원본 {self.pdf_pages[0]}–{self.pdf_pages[1]}쪽  ·  HWPX {len(self._paragraphs)}문단  ·  "
+                "찾기·바꾸기로 전체 교정본도 수정")
+
+    def _sync_generated_controls(self):
+        pages = self.session.generated_pages
+        position = pages.index(self.session.page)
+        self.v_generated_page.set(str(self.session.page))
+        self.scope_choice.configure(values=[str(page) for page in pages])
+        self.scope_previous.configure(state="disabled" if position == 0 else "normal")
+        self.scope_next.configure(state="disabled" if position == len(pages) - 1 else "normal")
+
+    def _change_generated_page(self, offset):
+        pages = self.session.generated_pages
+        position = min(len(pages) - 1, max(0, pages.index(self.session.page) + offset))
+        return self.switch_generated_page(pages[position])
+
+    def switch_generated_page(self, page):
+        if not self._generated or page not in self.session.generated_pages:
+            return False
+        if page == self.session.page:
+            self._sync_generated_controls()
+            return True
+        result = self.reload(generated_page=page)
+        self._sync_generated_controls()
+        return result
+
     def _build(self):
         C = self.colors
         self.columnconfigure(0, weight=1); self.rowconfigure(1, weight=1)
@@ -653,12 +695,14 @@ class BookmarkSectionEditor(tk.Toplevel):
         head.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 12))
         heading_tools = tk.Frame(head, bg=C["BG"])
         heading_tools.pack(fill="x")
-        self._label(heading_tools, "책갈피 OCR  /  대조 편집", muted=True, bg=C["BG"]).pack(side="left")
+        mode = (self._input_label or ("일반 OCR" if Path(self.pdf_path).suffix.lower() == ".pdf" else "이미지 OCR")) if self._generated else "책갈피 OCR"
+        self._label(heading_tools, f"{mode}  /  대조 편집", muted=True, bg=C["BG"]).pack(side="left")
         self.reset_view_button = self._tool_button(heading_tools, "좌우 균등", self.reset_comparison_layout)
         self.reset_view_button.pack(side="right")
-        self._label(head, self.section_name, size=21, bold=True, bg=C["BG"]).pack(anchor="w", pady=(5, 2))
-        self._label(head, f"PDF {self.pdf_pages[0]}–{self.pdf_pages[1]}쪽  ·  HWPX {len(self._paragraphs)}문단  ·  찾기·바꾸기로 전체 교정본도 수정",
-                    muted=True, bg=C["BG"]).pack(anchor="w")
+        self.section_title = self._label(head, self.section_name, size=21, bold=True, bg=C["BG"])
+        self.section_title.pack(anchor="w", pady=(5, 2))
+        self.scope_label = self._label(head, self._scope_caption(), muted=True, bg=C["BG"])
+        self.scope_label.pack(anchor="w")
         self.panes = ttk.Panedwindow(self, orient="horizontal")
         self.panes.grid(row=1, column=0, sticky="nsew", padx=18)
         self.panes.bind("<Configure>", lambda _event: self._schedule_split(), add="+")
@@ -702,7 +746,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         panel.columnconfigure(0, weight=1); panel.rowconfigure(2, weight=1)
         heading = tk.Frame(panel, bg=self.colors["PANEL"])
         heading.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 9))
-        self._label(heading, "원본 PDF", bold=True, size=11).pack(anchor="w")
+        self._label(heading, self._source_title, bold=True, size=11).pack(anchor="w")
         self._label(heading, Path(self.pdf_path).name, muted=True, size=9).pack(anchor="w", pady=(3, 0))
         tools = tk.Frame(panel, bg="#fcfaf5")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
@@ -753,26 +797,59 @@ class BookmarkSectionEditor(tk.Toplevel):
         heading = tk.Frame(panel, bg=self.colors["PANEL"])
         heading.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 9))
         heading.columnconfigure(0, weight=1)
-        self._label(heading, "교정본 HWPX", bold=True, size=11).grid(row=0, column=0, sticky="w")
+        title = tk.Frame(heading, bg=self.colors["PANEL"])
+        title.grid(row=0, column=0, sticky="w")
+        self._label(title, "교정본 HWPX", bold=True, size=11).pack(side="left")
+        self.path_button = self._tool_button(title, "경로 보기", self.show_corrected_path)
+        self.path_button.pack(side="left", padx=(8, 0))
         self.file_label = self._label(heading, Path(self.session.corrected_path).name, muted=True, size=9)
         self.file_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
         self.reload_button = self._tool_button(heading, "다시 불러오기", self.reload)
         self.reload_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
         self.find_button = self._tool_button(heading, "찾기·바꾸기  Ctrl H", self.open_find_replace)
         self.find_button.grid(row=2, column=0, sticky="w", pady=(7, 0))
-        self.copy_section_button = self._tool_button(heading, "구획 전체 복사", self.copy_section_text)
+        self.copy_section_button = self._tool_button(heading, f"{self._scope_noun} 전체 복사", self.copy_section_text)
         self.copy_section_button.grid(row=2, column=1, sticky="e", padx=(8, 0), pady=(7, 0))
+        if self._generated:
+            scope = tk.Frame(heading, bg=self.colors["PANEL"])
+            scope.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(7, 0))
+            self._label(scope, "편집 범위", size=9, muted=True).pack(side="left", padx=(0, 7))
+            self.scope_previous = self._tool_button(scope, "‹", lambda: self._change_generated_page(-1), width=2)
+            self.scope_previous.pack(side="left")
+            self.v_generated_page = tk.StringVar(value=str(self.session.page))
+            self.scope_choice = ttk.Combobox(scope, textvariable=self.v_generated_page, width=6, state="readonly",
+                                            values=[str(page) for page in self.session.generated_pages])
+            self.scope_choice.pack(side="left", padx=4)
+            self.scope_choice.bind("<<ComboboxSelected>>", lambda _event: self.switch_generated_page(int(self.v_generated_page.get())))
+            self.scope_next = self._tool_button(scope, "›", lambda: self._change_generated_page(1), width=2)
+            self.scope_next.pack(side="left")
+            self._label(scope, "원본 쪽 기준", size=9, muted=True).pack(side="left", padx=7)
+            self._sync_generated_controls()
         tools = tk.Frame(panel, bg="#fcfaf5")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
+        font_tools = tk.Frame(tools, bg="#fcfaf5")
+        font_tools.pack(fill="x")
         self.v_match_pdf_font = tk.BooleanVar(value=True)
-        self.font_check = tk.Checkbutton(tools, text="PDF 글자 크기 맞춤", variable=self.v_match_pdf_font,
+        self.font_check = tk.Checkbutton(font_tools, text="원본 글자 크기 맞춤" if self._generated else "PDF 글자 크기 맞춤", variable=self.v_match_pdf_font,
                                         command=self._sync_text_size, bg="#fcfaf5", activebackground="#fcfaf5",
                                         fg=self.colors["INK"], font=("Malgun Gothic", 9), highlightthickness=0)
         self.font_check.pack(side="left")
-        self._tool_button(tools, "가+", self.toggle_text_size, width=2).pack(side="right")
-        self._tool_button(tools, "가−", lambda: self.change_text_size(-1), width=2).pack(side="right", padx=2)
-        self.marks_button = self._tool_button(tools, "차이 켜짐", self.toggle_marks)
-        self.marks_button.pack(side="right", padx=4)
+        self._tool_button(font_tools, "가+", self.toggle_text_size, width=2).pack(side="right")
+        self._tool_button(font_tools, "가−", lambda: self.change_text_size(-1), width=2).pack(side="right", padx=2)
+        mark_tools = tk.Frame(tools, bg="#fcfaf5")
+        mark_tools.pack(fill="x", pady=(4, 0))
+        self.marks_button = self._tool_button(mark_tools, "교정 표시 켜짐", self.toggle_marks)
+        self.marks_button.pack(side="left")
+        self._label(mark_tools, "파일에 저장된 표시", muted=True, size=9, bg="#fcfaf5").pack(side="left", padx=8)
+        legend = tk.Frame(tools, bg="#fcfaf5")
+        legend.pack(fill="x", pady=(4, 0))
+        self.mark_legend = []
+        for label, color in (("초록 · 자형 확정", "#0B7A3B"), ("파랑 · 자동 교정\n(확인 권장)", "#1F4FBF"),
+                             ("빨강 · 확인 필요", "#C00000")):
+            item = self._label(legend, label, size=8, bg="#fcfaf5")
+            item.configure(fg=color)
+            item.pack(side="left", anchor="n", padx=(0, 9))
+            self.mark_legend.append(item)
         area = tk.Frame(panel, bg=self.colors["PANEL"])
         area.grid(row=2, column=0, sticky="nsew")
         area.columnconfigure(0, weight=1); area.rowconfigure(0, weight=1)
@@ -817,7 +894,6 @@ class BookmarkSectionEditor(tk.Toplevel):
                              height=2, padx=0, pady=3, spacing1=2, spacing3=4, undo=paragraph.editable, maxundo=100)
             editor.pack(fill="x")
             editor.insert("1.0", paragraph.corrected_text)
-            editor.tag_configure("changed", background="#e9f2fa", foreground="#235880")
             editor.tag_configure("input_issue", background="#ffe29b", foreground="#8c271b")
             editor.tag_configure("search_match", background="#fff0aa")
             bind_text_copy(editor, on_status=self._copy_status)
@@ -1204,14 +1280,36 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     def _highlight(self, index):
         editor = self._editors[index]
-        editor.tag_remove("changed", "1.0", "end")
-        if not self._show_marks:
-            return
-        original = self._paragraphs[index].original_text
+        for name in editor.tag_names():
+            if name.startswith("saved_style_"):
+                editor.tag_remove(name, "1.0", "end")
+        paragraph = self._paragraphs[index]
         current = editor.get("1.0", "end-1c")
-        for tag, _, _, start, end in difflib.SequenceMatcher(None, original, current, autojunk=False).get_opcodes():
-            if tag != "equal" and end > start:
-                editor.tag_add("changed", self._tk_offset(editor, current, start), self._tk_offset(editor, current, end))
+        # Display the saved corrected file's styles, not differences from the
+        # original document. Human edits lose correction marks immediately;
+        # only unchanged pieces retain their saved formatting as offsets shift.
+        equal = difflib.SequenceMatcher(None, paragraph.corrected_text, current, autojunk=False).get_matching_blocks()
+        for number, span in enumerate(getattr(paragraph, "corrected_styles", ())):
+            name = f"saved_style_{number}"
+            marked = span.kind in ("green", "blue", "red")
+            show_color = self._show_marks or not marked
+            editor.tag_configure(name, foreground=span.foreground if show_color else "",
+                                 background=span.background if show_color else "",
+                                 font=self._editor_bold_font if span.bold else self._editor_font,
+                                 underline=span.underline)
+            for old, new, length in equal:
+                start, end = max(span.start, old), min(span.end, old + length)
+                if start < end:
+                    editor.tag_add(name, self._tk_offset(editor, current, new + start - old),
+                                   self._tk_offset(editor, current, new + end - old))
+        # Newly created style tags must not hide finding, input repair or the
+        # user's selection; none of these presentation tags modifies the draft.
+        for name in ("search_match", "input_issue", "sel"):
+            editor.tag_raise(name)
+        self._schedule_layout()
+
+    def show_corrected_path(self):
+        messagebox.showinfo("교정본 전체 경로", str(Path(self.session.corrected_path).resolve()), parent=self)
 
     def select_paragraph(self, index):
         if index not in self._paragraphs:
@@ -1221,7 +1319,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         if previous in self._cards:
             self._cards[previous].configure(highlightbackground=self.colors["PANEL"])
         self._cards[index].configure(highlightbackground="#c9b395")
-        self.v_compare.set(f"선택 문단 · {index + 1}  /  원본 HWPX")
+        origin = "인식 결과 HWPX" if self._generated else "원본 HWPX"
+        self.v_compare.set(f"문단 {index + 1} · {origin} (차이 표시)")
         self._update_original()
         self._schedule_cursor(index)
 
@@ -1243,7 +1342,7 @@ class BookmarkSectionEditor(tk.Toplevel):
     def _update_status(self):
         changes = self._changes()
         outside = len(self._external_changes)
-        detail = f" · 현재 구획 밖 {outside}개 포함" if outside else ""
+        detail = f" · 현재 {self._scope_noun} 밖 {outside}개 포함" if outside else ""
         self.v_status.set(f"수정한 문단 {len(changes)}개{detail} · 아직 저장하지 않음" if changes else "저장할 변경 없음")
         for index, marker in self._markers.items():
             readonly = not self._paragraphs[index].editable
@@ -1258,7 +1357,7 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     def toggle_marks(self):
         self._show_marks = not self._show_marks
-        self.marks_button.configure(text="차이 켜짐" if self._show_marks else "차이 꺼짐")
+        self.marks_button.configure(text="교정 표시 켜짐" if self._show_marks else "교정 표시 꺼짐")
         for index in self._editors:
             self._highlight(index)
 
@@ -1271,6 +1370,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._text_size = (max(-128, min(-8, current - 2 * direction)) if current < 0
                            else max(8, min(48, current + 2 * direction)))
         self._editor_font.configure(size=self._text_size)
+        self._editor_bold_font.configure(size=self._text_size)
         self._cursor_scroll_pending = self._cursor_location is not None
         self._layout_follow_cursor |= self._cursor_location is not None
         self._schedule_layout()
@@ -1300,6 +1400,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         if int(self._editor_font.cget("size")) != -pixels:
             self._text_size = -pixels
             self._editor_font.configure(size=-pixels)
+            self._editor_bold_font.configure(size=-pixels)
             self._cursor_scroll_pending = self._cursor_location is not None
             self._layout_follow_cursor |= self._cursor_location is not None
             self._schedule_layout()
@@ -1341,8 +1442,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         if not from_cursor:
             self._cancel_cursor_request()
             self._clear_cursor_marker()
-            self.pdf_note.configure(text="PDF 쪽을 직접 이동했습니다. 오른쪽 커서를 움직이면 다시 위치를 찾습니다."
-                                    if self.v_follow_cursor.get() else "커서 따라가기 꺼짐 · PDF를 자유롭게 탐색합니다.")
+            self.pdf_note.configure(text="원본 쪽을 직접 이동했습니다. 오른쪽 커서를 움직이면 다시 위치를 찾습니다."
+                                    if self.v_follow_cursor.get() else "커서 따라가기 꺼짐 · 원본을 자유롭게 탐색합니다.")
         page = min(self.pdf_pages[1], max(self.pdf_pages[0], int(page)))
         if page != self._pdf_page:
             self._pdf_page = page
@@ -1401,7 +1502,7 @@ class BookmarkSectionEditor(tk.Toplevel):
                     self._displayed_page = None
                     self.pdf_canvas.delete("all")
                     self.pdf_canvas.create_text(20, 25, anchor="nw", width=max(180, self.pdf_canvas.winfo_width() - 40),
-                                                text=f"PDF를 표시하지 못했습니다.\n{exc}", fill=self.colors["INK"])
+                                                text=f"원본을 표시하지 못했습니다.\n{exc}", fill=self.colors["INK"])
         self._poll_cursor()
         self._poll_job = self.after(60, self._poll_render)
 
@@ -1433,9 +1534,12 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.pdf_note.configure(text="원본의 글자 위치를 연결하고 있습니다.")
         # PyMuPDF extraction and rendering share one isolated process. CPU
         # alignment never opens a PDF and stays off the Tk thread.
+        options = {"work_dir": self._work_dir} if self._generated else {}
         self._index_future = (self._alignment_generation, self._executor.submit(
-            read_cursor_pages, self.pdf_path, self.pdf_pages))
-        self._cursor_requested = self.v_follow_cursor.get() and self._active is not None
+            read_cursor_pages, self.pdf_path, self.pdf_pages, **options))
+        # A generated scope may share its paragraphs with earlier source pages.
+        # Keep the explicitly selected page visible until the user moves a caret.
+        self._cursor_requested = not self._generated and self.v_follow_cursor.get() and self._active is not None
 
     def _cancel_cursor_request(self):
         self._cursor_generation += 1
@@ -1458,7 +1562,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._cancel_cursor_request()
         self._clear_cursor_marker()
         if not self.v_follow_cursor.get():
-            self.pdf_note.configure(text="커서 따라가기 꺼짐 · PDF를 자유롭게 탐색합니다.")
+            self.pdf_note.configure(text="커서 따라가기 꺼짐 · 원본을 자유롭게 탐색합니다.")
         elif self._cursor_map is not None:
             self._schedule_cursor(self._active)
         elif self._alignment_future is None and self._index_future is None:
@@ -1483,7 +1587,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         if mapping is None:
             return
         if not mapping.available:
-            self.pdf_note.configure(text="이 구획에 사용할 수 있는 PDF 글자 위치 정보가 없습니다.")
+            self.pdf_note.configure(text=f"이 {self._scope_noun}에 사용할 수 있는 원본 글자 위치 정보가 없습니다.")
             return
         widget = self._editors[self._active]
         current = widget.get("1.0", "end-1c")
@@ -1514,6 +1618,9 @@ class BookmarkSectionEditor(tk.Toplevel):
                     self._sync_text_size()
                     if self.v_follow_cursor.get() and self._cursor_requested:
                         self._schedule_cursor(self._active)
+                    elif self._generated:
+                        self.pdf_note.configure(text="오른쪽 글자를 클릭하면 대응 위치를 표시합니다."
+                                                if self._cursor_map.available else "이 범위에 사용할 수 있는 원본 위치 정보가 없습니다.")
                 except Exception:
                     self.pdf_note.configure(text="원본의 글자 위치를 불러오지 못했습니다. 커서 따라가기를 다시 켜서 재시도할 수 있습니다.")
         pending = self._cursor_future
@@ -1617,12 +1724,12 @@ class BookmarkSectionEditor(tk.Toplevel):
         value = "\n\n".join(self._editors[index].get("1.0", "end-1c") for index in sorted(self._editors))
         if not copy_text_value(self, value):
             return False
-        self.v_status.set(f"구획 전체 {len(self._editors)}문단을 복사했습니다. 미저장 수정도 포함합니다.")
+        self.v_status.set(f"{self._scope_noun} 전체 {len(self._editors)}문단을 복사했습니다. 미저장 수정도 포함합니다.")
         return True
 
     def _choose_export_scope(self, parent, scope):
         previous_grab = self.grab_current()
-        dialog = BodyExportScopeDialog(parent, colors=self.colors, scope=scope)
+        dialog = BodyExportScopeDialog(parent, colors=self.colors, scope=scope, section_label=f"현재 {self._scope_noun} 전체")
         try:
             self.wait_window(dialog)
             return dialog.selected_scope
@@ -1647,7 +1754,7 @@ class BookmarkSectionEditor(tk.Toplevel):
             path = filedialog.asksaveasfilename(
                 parent=parent, title="수정이 반영된 본문을 TXT로 내보내기", defaultextension=".txt",
                 filetypes=[("텍스트 파일", "*.txt")], initialdir=str(target.parent),
-                initialfile=target.stem + ("_전체본문.txt" if scope == "document" else "_구획본문.txt"))
+                initialfile=target.stem + ("_전체본문.txt" if scope == "document" else f"_{self._scope_noun}본문.txt"))
             if not path:
                 return False
         temporary = None
@@ -1678,7 +1785,7 @@ class BookmarkSectionEditor(tk.Toplevel):
                     temporary.unlink(missing_ok=True)
                 except OSError:
                     pass
-        label = "교정본 문서 전체" if scope == "document" else "현재 구획 전체"
+        label = "교정본 문서 전체" if scope == "document" else f"현재 {self._scope_noun} 전체"
         self.v_status.set(f"{label} 본문 내보냄 · {path.name} · 교정본은 저장하지 않았습니다.")
         return True
 
@@ -1748,8 +1855,9 @@ class BookmarkSectionEditor(tk.Toplevel):
         if self._find_dialog is not None and self._find_dialog.winfo_exists():
             self._find_dialog._invalidate()
             self._find_dialog.undo_button.configure(state="disabled")
-        for editor in self._editors.values():
+        for index, editor in self._editors.items():
             editor.edit_modified(False)
+            self._highlight(index)
         self._update_status()
         notice = f"저장됨 · 문단 {result.saved_count}개"
         if getattr(result, "learning_warning", ""):
@@ -1782,19 +1890,26 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.destroy()
         return True
 
-    def reload(self) -> bool:
+    def reload(self, *, generated_page=None) -> bool:
         if self.busy or self._closed:
             return False
+        if self._generated and not self.can_write():
+            messagebox.showinfo("OCR 작업 중", "OCR 작업이 끝난 뒤 편집 범위를 다시 불러오십시오.", parent=self)
+            return False
         if self.dirty:
-            choice = messagebox.askyesnocancel("교정본 다시 불러오기",
+            choice = messagebox.askyesnocancel("편집 범위 이동" if generated_page is not None else "교정본 다시 불러오기",
                 "저장하지 않은 수정이 있습니다.\n\n예: 변경 확인·저장 후 불러오기\n"
                 "아니요: 이번 수정을 버리고 불러오기\n취소: 계속 편집", parent=self)
             if choice is None or (choice and not self.save()):
                 return False
         from .section_edit import SectionEditSession
         try:
-            session = SectionEditSession.open(self.pdf_path, self.hwpx_path, self.section_name,
-                                              self.section_start, self.section_end, **self._scope_options)
+            if self._generated:
+                page = self.session.page if generated_page is None else generated_page
+                session = SectionEditSession.open_generated(self.pdf_path, self.hwpx_path, page, work_dir=self._work_dir)
+            else:
+                session = SectionEditSession.open(self.pdf_path, self.hwpx_path, self.section_name,
+                                                  self.section_start, self.section_end, **self._scope_options)
         except (OSError, ValueError) as exc:
             messagebox.showerror("교정본을 다시 불러오지 못했습니다", f"{exc}\n\n현재 화면과 입력한 수정은 그대로 남아 있습니다.", parent=self)
             return False
@@ -1805,8 +1920,21 @@ class BookmarkSectionEditor(tk.Toplevel):
         for card in self._cards.values():
             card.destroy()
         self.session = session
+        self.file_label.configure(text=Path(session.corrected_path).name)
+        if self._generated:
+            self.section_name, self.section_start, self.section_end = session.section_name, session.start, session.end
+            self.pdf_pages = session.pdf_pages
+            self._pdf_page = session.page
+            self._image_size = self._displayed_page = None
+            self.pdf_canvas.delete("all")
+            self.page_choice.configure(values=[str(n) for n in range(self.pdf_pages[0], self.pdf_pages[1] + 1)])
+            self._sync_page_buttons()
+            self._sync_generated_controls()
+            self.title(f"대조 편집 — {self.section_name}")
+            self.section_title.configure(text=self.section_name)
         self._snapshot_generation += 1
         self._paragraphs = {p.index: p for p in session.paragraphs}
+        self.scope_label.configure(text=self._scope_caption())
         self._baseline = {p.index: p.corrected_text for p in session.paragraphs}
         self._external_changes.clear()
         self._replacement_plan = None
@@ -1849,7 +1977,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         # Explicitly release Tcl-owned objects on the UI thread, even if a
         # background allocation later collects a closed window's Python cycle.
         self._editor_font = None
-        for name in ("v_status", "v_compare", "v_page", "v_zoom", "v_follow_cursor", "v_match_pdf_font"):
+        self._editor_bold_font = None
+        for name in ("v_status", "v_compare", "v_page", "v_zoom", "v_follow_cursor", "v_match_pdf_font", "v_generated_page"):
             setattr(self, name, None)
 
     def _destroyed(self, event):

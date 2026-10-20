@@ -1,8 +1,8 @@
 """Read-only, conservative links from an editing caret to PDF text geometry.
 
-PDF text is only a navigation aid, never correction evidence. Coordinates are
-normalized in the displayed (including /Rotate) page coordinate system. An
-unresolved duplicate or missing text layer produces no link, not a guess.
+PDF text and source-verified stored OCR are navigation aids, never correction
+evidence. Coordinates follow the displayed (including /Rotate) page. Stored OCR
+can identify a region only; unresolved duplicates or absent geometry do not link.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
 import math
+import json
 from statistics import median
 from types import SimpleNamespace
 from typing import Iterable
@@ -44,6 +45,7 @@ class _Glyph:
     page: int
     box: Box
     line_box: Box
+    geometry: str = "glyph"
 
 
 @dataclass(frozen=True)
@@ -128,7 +130,7 @@ def _box(raw, width: float, height: float) -> Box | None:
 
 
 class SectionCursorMap:
-    """Immutable PDF index; locating a caret never reads or writes a file."""
+    """Immutable source index; locating a caret never reads or writes a file."""
 
     def __init__(self, references: dict[int, tuple[_Reference, ...]], glyphs: tuple[_Glyph, ...],
                  page_font_heights=(), page_font_widths=()):
@@ -199,30 +201,81 @@ class SectionCursorMap:
                    for c in candidates):
                 return None
         glyph = self._glyphs[best.glyph]
+        if glyph.geometry == "region":
+            # Stored OCR has a region rectangle, not individual glyph boxes.
+            # Matching its text does not make that rectangle a precise caret.
+            return CursorLocation(glyph.page, (glyph.line_box,), None, False,
+                                  f"저장된 OCR 영역 · 원본 {glyph.page}쪽 (글자 단위 위치 없음)")
         message = (f"커서 위치 · PDF {glyph.page}쪽" if best.precise else
                    f"주변 문맥 · PDF {glyph.page}쪽 (수정한 글자 또는 글자층 차이)")
         return CursorLocation(glyph.page, (glyph.line_box,), glyph.box if best.precise else None,
                               best.precise, message)
 
 
-def read_cursor_pages(pdf_path, pdf_pages: tuple[int, int]) -> CursorPagesSnapshot:
+def _cached_regions(work, document, page_number):
+    """Read completed, source-verified OCR geometry without repairing records.
+
+    The persisted Column schema has text/order only. Never invent equally sized
+    columns or character boxes from that order. Missing/invalid region boxes,
+    uncertain duplicate region IDs and incomplete records have no coordinates.
+    """
+    from ..pdfio import page_frame
+    from ..schema import PageReading, TEXT_KINDS, TITLE_KINDS, duplicate_region_ids, paragraph_text
+
+    try:
+        record = json.loads(work.record_path(page_number).read_text(encoding="utf-8-sig"))
+        merged = record.get("merged")
+        if (type(record.get("pdf_page")) is not int or record["pdf_page"] != page_number
+                or not isinstance(merged, dict) or type(merged.get("pdf_page")) is not int
+                or merged["pdf_page"] != page_number):
+            return ()
+        reading = PageReading.model_validate(merged)
+        raw_regions = merged.get("regions", [])
+        duplicate = duplicate_region_ids(reading)
+        page = document[page_number - 1]
+        fx, fy, fw, fh = page_frame(document, page_number)
+        regions = []
+        for raw, region in zip(raw_regions, reading.regions):
+            if region.id in duplicate or region.kind not in TEXT_KINDS | TITLE_KINDS:
+                continue
+            bounds = raw.get("bbox")
+            if (not isinstance(bounds, list) or len(bounds) != 4
+                    or any(type(v) is not int or not 0 <= v <= 1000 for v in bounds)):
+                continue  # Do not use the schema's default whole-page bbox.
+            y0, x0, y1, x1 = region.bbox
+            box = _box((fx + fw * x0 / 1000, fy + fh * y0 / 1000,
+                        fx + fw * x1 / 1000, fy + fh * y1 / 1000), page.rect.width, page.rect.height)
+            text = region.title_text + "".join(paragraph_text(p) for p in region.paragraphs)
+            key, _ = _normalized(text)
+            if box is not None and key:
+                regions.append((key, box))
+        return tuple(regions)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return ()
+
+
+def read_cursor_pages(pdf_path, pdf_pages: tuple[int, int], *, work_dir=None) -> CursorPagesSnapshot:
     """Extract in the same serial worker used for all other PyMuPDF work.
 
     The returned snapshot can be handed to a separate CPU alignment worker.
     Coordinates and glyph dimensions follow the page as it is displayed.
+    Stored OCR is an optional, read-only region fallback when a page has no text
+    layer. It never invents glyph dimensions or starts a new OCR request.
     """
     import pymupdf
-    from ..pdfio import layer_chars
+    from ..pdfio import layer_chars, open_pdf
 
     first, last = pdf_pages
     if type(first) is not int or type(last) is not int or first < 1 or last < first:
         raise ValueError("커서 연결에 사용할 구획 범위가 올바르지 않습니다.")
     glyphs, pdf_chars = [], []
     heights, widths = [], []
-    with pymupdf.open(pdf_path) as document:
+    cached_work, cache_checked = None, False
+    with open_pdf(str(pdf_path)) as document:
         if last > len(document):
             raise ValueError("커서 연결 범위가 PDF 쪽 수를 벗어났습니다.")
         for page_number in range(first, last + 1):
+            page_start = len(glyphs)
             page = document[page_number - 1]
             dimensions, cjk_dimensions = [], []
             if page.rotation:
@@ -260,6 +313,20 @@ def read_cursor_pages(pdf_path, pdf_pages: tuple[int, int]) -> CursorPagesSnapsh
             if body:
                 widths.append((page_number, median(size[0] for size in body)))
                 heights.append((page_number, median(size[1] for size in body)))
+            if len(glyphs) == page_start and work_dir is not None:
+                if not cache_checked:
+                    from ..state import Work
+                    cache_checked = True
+                    candidate = Work(str(pdf_path), str(work_dir), initialize=False)
+                    try:
+                        if candidate.source_matches():
+                            cached_work = candidate
+                    except (OSError, ValueError, TypeError):
+                        pass
+                if cached_work is not None:
+                    for key, box in _cached_regions(cached_work, document, page_number):
+                        pdf_chars.extend(key)
+                        glyphs.extend(_Glyph(page_number, box, box, "region") for _ in key)
     return CursorPagesSnapshot("".join(pdf_chars), tuple(glyphs), tuple(heights), tuple(widths))
 
 
@@ -286,6 +353,6 @@ def align_cursor_map(snapshot: CursorPagesSnapshot, paragraphs: Iterable) -> Sec
                             snapshot.page_font_heights, snapshot.page_font_widths)
 
 
-def build_cursor_map(pdf_path, pdf_pages: tuple[int, int], paragraphs: Iterable) -> SectionCursorMap:
+def build_cursor_map(pdf_path, pdf_pages: tuple[int, int], paragraphs: Iterable, *, work_dir=None) -> SectionCursorMap:
     """Compatibility wrapper for callers already running in one PDF worker."""
-    return align_cursor_map(read_cursor_pages(pdf_path, pdf_pages), paragraphs)
+    return align_cursor_map(read_cursor_pages(pdf_path, pdf_pages, work_dir=work_dir), paragraphs)

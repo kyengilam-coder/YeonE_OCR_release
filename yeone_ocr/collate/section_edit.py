@@ -48,12 +48,39 @@ class ManualProtectionError(SectionEditError):
 
 
 @dataclass(frozen=True)
+class TextStyleSpan:
+    """Saved HWPX display style on a half-open range of paragraph text.
+
+    Empty colors mean automatic/transparent. ``kind`` identifies only an owned
+    OCR overlay; author colors are displayed without classifying them as OCR.
+    """
+    start: int
+    end: int
+    foreground: str = ""
+    background: str = ""
+    bold: bool = False
+    underline: bool = False
+    kind: str = ""
+
+
+@dataclass(frozen=True)
 class ParagraphEdit:
     index: int
     original_text: str
     corrected_text: str
     editable: bool
     readonly_reason: str = ""
+    corrected_styles: tuple[TextStyleSpan, ...] = ()
+
+
+@dataclass(frozen=True)
+class GeneratedPageScope:
+    """A source page and the complete editable paragraphs containing it."""
+    page: int
+    start: int
+    end: int
+    pdf_pages: tuple[int, int]
+    label: str
 
 
 @dataclass(frozen=True)
@@ -132,6 +159,15 @@ def _sha(data: bytes) -> str:
 
 def _fingerprint(path: Path) -> str | None:
     try:
+        if path.is_dir():
+            from ..pdfio import image_sources
+            digest = hashlib.sha256()
+            for source in image_sources(path):
+                value = _fingerprint(source)
+                if value is None:
+                    return None
+                digest.update(source.name.encode("utf-8") + b"\0" + bytes.fromhex(value))
+            return digest.hexdigest()
         with path.open("rb") as stream:
             digest = hashlib.sha256()
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -252,7 +288,7 @@ class _Archive:
                 raise SectionEditError("저장할 문서의 ZIP 검증에 실패했습니다.")
 
 
-def _readonly_reason(paragraph, heading: bool) -> str:
+def _readonly_reason(paragraph, heading: bool, *, allow_page_furniture: bool = False) -> str:
     if heading:
         return "구획 위치를 유지하기 위해 제목·책갈피 문단은 읽기 전용입니다."
     if not _slots(paragraph):
@@ -275,10 +311,88 @@ def _readonly_reason(paragraph, heading: bool) -> str:
                         continue
                     if ck == "bookmark":
                         continue
+                    if allow_page_furniture and ck in ("colPr", "pageNum", "header", "footer"):
+                        continue
                     return "필드·각주·그림·표가 있는 문단은 구조 보존을 위해 읽기 전용입니다."
+            elif allow_page_furniture and kind == "secPr":
+                continue
             elif kind not in ("bookmark",):
                 return "필드·각주·그림·표가 있는 문단은 구조 보존을 위해 읽기 전용입니다."
     return ""
+
+
+def _display_color(value: str | None) -> str:
+    """Return a safe literal HWPX RGB color, retaining explicit black/white."""
+    value = (value or "").strip()
+    return value.upper() if re.fullmatch(r"#[0-9a-fA-F]{6}", value) else ""
+
+
+def _display_char_styles(target: _Archive) -> dict[str, TextStyleSpan]:
+    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    header = etree.fromstring(target.entries["Contents/header.xml"], parser)
+    grades = {"#0B7A3B": "green", "#1F4FBF": "blue", "#C00000": "red"}
+    styles = {}
+    for style in header.iter(HH + "charPr"):
+        foreground = _display_color(style.get("textColor"))
+        underline = style.find(HH + "underline")
+        kind = grades.get(foreground, "") if _tag_of(style) == foreground else ""
+        styles[style.get("id", "")] = TextStyleSpan(
+            0, 0, foreground, _display_color(style.get("shadeColor")),
+            style.find(HH + "bold") is not None,
+            underline is not None and underline.get("type", "NONE").upper() != "NONE", kind)
+    return styles
+
+
+def _paragraph_display_styles(paragraph, styles: dict[str, TextStyleSpan]) -> tuple[TextStyleSpan, ...]:
+    """Use exactly paragraph_text's direct body offsets, never nested memos.
+
+    Inline markpen colors override run shading until their matching end marker,
+    including text tails and ranges crossing run boundaries. No XML is changed.
+    """
+    result = []
+    offset = 0
+    markpens = []
+    default = TextStyleSpan(0, 0)
+
+    def markpen(node):
+        if _local(node.tag) == "markpenBegin":
+            markpens.append(_display_color(node.get("color")))
+        elif _local(node.tag) == "markpenEnd" and markpens:
+            markpens.pop()
+
+    def emit(text, base):
+        nonlocal offset
+        if not text:
+            return
+        background = markpens[-1] if markpens and markpens[-1] else base.background
+        values = (base.foreground, background, base.bold, base.underline, base.kind)
+        if result and (result[-1].foreground, result[-1].background, result[-1].bold,
+                       result[-1].underline, result[-1].kind) == values:
+            result[-1] = TextStyleSpan(result[-1].start, offset + len(text), *values)
+        else:
+            result.append(TextStyleSpan(offset, offset + len(text), *values))
+        offset += len(text)
+
+    for run in paragraph:
+        if _local(run.tag) != "run":
+            continue
+        base = styles.get(run.get("charPrIDRef", ""), default)
+        for child in run:
+            name = _local(child.tag)
+            if name == "t":
+                emit(child.text or "", base)
+                for sub in child:
+                    kind = _local(sub.tag)
+                    markpen(sub)
+                    emit(INLINE_ATOMS.get(kind, "" if kind in (
+                        "markpenBegin", "markpenEnd", "insertBegin", "insertEnd",
+                        "deleteBegin", "deleteEnd") else "".join(sub.itertext())), base)
+                    emit(sub.tail or "", base)
+            elif name == "tab" or name == "ctrl" and (child.get("id") or "").lower() == "tab":
+                emit("\t", base)
+            else:
+                markpen(child)
+    return tuple(result)
 
 
 def _export_body_paragraph(paragraph) -> str:
@@ -420,9 +534,162 @@ def _align_style_choices(before: str, after: str, choices: list[frozenset[str]],
     return result
 
 
+_FLOW_PAGE = re.compile(r"^(?:전체 PDF [1-9][0-9]*쪽 · )?PDF ([1-9][0-9]*)쪽(?: · 인쇄 .+쪽)?(?: \([0-9]+\))?$")
+_CONTINUED_PAGE = re.compile(r"〔→PDF ([1-9][0-9]*)쪽(?:/인쇄 [^〕]*)?〕")
+
+
+def _generated_meta_page(text: str) -> int | None:
+    match = re.fullmatch(r"\[.+ / (?:전체 PDF [1-9][0-9]*쪽 / )?PDF ([1-9][0-9]*)쪽 / 인쇄 [^\]]+\](?:\s*〔고지: [\s\S]*〕)*", text)
+    return int(match[1]) if match else None
+
+
+def _generated_bookmarks(paragraph) -> list[tuple[int, int, str]]:
+    """Read only direct body page bookmarks; memo paragraphs never contribute."""
+    result, offset = [], 0
+    for run in paragraph.findall(HP + "run"):
+        for child in run:
+            candidates = [child] if child.tag == HP + "bookmark" else list(child) if child.tag == HP + "ctrl" else []
+            for bookmark in candidates:
+                if bookmark.tag != HP + "bookmark":
+                    continue
+                label = bookmark.get("name", "")
+                match = _FLOW_PAGE.fullmatch(label)
+                if match:
+                    result.append((offset, int(match[1]), label))
+            if child.tag == HP + "t":
+                holder = etree.Element(HP + "p")
+                holder_run = etree.SubElement(holder, HP + "run")
+                holder_run.append(deepcopy(child))
+                offset += len(paragraph_text(holder))
+            elif _local(child.tag) == "tab" or child.tag == HP + "ctrl" and child.get("id", "").lower() == "tab":
+                offset += 1
+    return result
+
+
+def _generated_scopes(source: _Archive, page_count: int) -> tuple[tuple[GeneratedPageScope, ...], set[int]]:
+    memberships: list[set[int]] = []
+    labels, heads = {}, set()
+    current = None
+    for index, paragraph in enumerate(source.paragraphs):
+        text = paragraph_text(paragraph)
+        meta = _generated_meta_page(text)
+        bookmarks = _generated_bookmarks(paragraph)
+        if meta is not None:
+            current = meta
+            heads.add(index)
+            labels.setdefault(meta, f"원본 {meta}쪽")
+        pages = {current} if current is not None else set()
+        if bookmarks:
+            if bookmarks[0][0] == 0:
+                pages.clear()
+            for _, number, label in bookmarks:
+                pages.add(number)
+                labels.setdefault(number, label)
+                current = number
+        # In page layout, continuation text is placed before the later page's
+        # metadata paragraph. Include that shared paragraph in both scopes.
+        for match in _CONTINUED_PAGE.finditer(text):
+            number = int(match[1])
+            pages.add(number)
+            labels.setdefault(number, f"원본 {number}쪽")
+        memberships.append(pages)
+    pages = sorted(set().union(*memberships)) if memberships else []
+    if not pages:
+        if page_count != 1:
+            raise SectionEditError("OCR 결과에서 원본 쪽 표시를 찾을 수 없습니다. 쪽 정보가 있는 결과를 선택하십시오.")
+        pages = [1]
+        memberships = [{1} for _ in source.paragraphs]
+    if any(number > page_count for number in pages):
+        raise SectionEditError("OCR 결과의 원본 쪽 표시가 선택한 원본 범위를 벗어납니다.")
+    scopes = []
+    for number in pages:
+        indices = [index for index, values in enumerate(memberships) if number in values]
+        start, end = min(indices), max(indices) + 1
+        represented = set().union(*memberships[start:end])
+        scopes.append(GeneratedPageScope(number, start, end, (min(represented), max(represented)),
+                                          labels.get(number, f"원본 {number}쪽")))
+    return tuple(scopes), heads
+
+
+def _generated_grade_kind(style, base=None) -> str:
+    """Recognize the writer's full overlay, never a color alone."""
+    color = (style.get("textColor") or "").upper()
+    shade = (style.get("shadeColor") or "none").upper()
+    underline = style.find(HH + "underline")
+    shape = (underline.get("shape", "") if underline is not None and underline.get("type", "NONE") != "NONE" else "")
+    if base is None:
+        strikeout = style.find(HH + "strikeout")
+        if (strikeout is not None and strikeout.get("shape", "NONE") != "NONE"
+                or shape and (underline.get("color", "").upper() != color
+                              or underline.get("type") != "BOTTOM")):
+            return ""
+    base_shade = (base.get("shadeColor") or "none").upper() if base is not None else "NONE"
+    base_underline = base.find(HH + "underline") if base is not None else None
+    base_shape = (base_underline.get("shape", "") if base_underline is not None
+                  and base_underline.get("type", "NONE") != "NONE" else "")
+    if color == "#0B7A3B" and shade in {"NONE", "#FFFFFF", base_shade} and shape == "DOT":
+        return "green"
+    if color == "#1F4FBF" and shade == "#E1EBFF" and shape == "DASH":
+        return "blue"
+    if color == "#C00000" and shade == "#FFFF00" and style.find(HH + "bold") is not None and shape in {"", "SOLID", base_shape}:
+        return "red"
+    return ""
+
+
+def _generated_grade_bases(source: _Archive, *, legacy_trusted: bool) -> dict[str, str]:
+    """Restore only declared writer overlays or unambiguous trusted legacy ones."""
+    header = etree.fromstring(source.entries["Contents/header.xml"], etree.XMLParser(resolve_entities=False, no_network=True))
+    styles = {style.get("id"): style for style in header.iter(HH + "charPr")}
+    raw = source.entries.get("META-INF/yeone-ocr-edit.json")
+    if raw is not None:
+        try:
+            manifest = json.loads(raw)
+            declared = manifest["grade_styles"]
+            if (manifest.get("schema_version") != 1 or manifest.get("producer") != "YeonE_OCR"
+                    or not isinstance(declared, dict)):
+                raise ValueError
+            result = {}
+            for current, base in declared.items():
+                if (not isinstance(current, str) or not isinstance(base, str)
+                        or current not in styles or base not in styles or current == base
+                        or not _generated_grade_kind(styles[current], styles[base])
+                        or _without_grade(styles[current]) != _without_grade(styles[base])):
+                    raise ValueError
+                result[current] = base
+            return result
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SectionEditError("OCR 결과의 교정 표시 서식 기록을 확인할 수 없습니다.") from exc
+    if not legacy_trusted:
+        return {}
+    used = {slot.run.get("charPrIDRef", "0") for paragraph in source.paragraphs for slot in _slots(paragraph)}
+    # A named paragraph/character style is an author's reusable formatting,
+    # even if it happens to look exactly like one of our old grade overlays.
+    author_styles = {style.get("charPrIDRef") for style in header.iter(HH + "style")}
+    result = {}
+    for current in used:
+        style = styles.get(current)
+        if current in author_styles or style is None or not _generated_grade_kind(style):
+            continue
+        candidates = {}
+        for pid in styles:
+            base = styles.get(pid)
+            if (base is None or _generated_grade_kind(base)
+                    or (base.get("textColor") or "#000000").upper() != "#000000"
+                    or (base.get("shadeColor") or "none").upper() != "NONE"
+                    or _without_grade(base) != _without_grade(style)):
+                continue
+            underline = base.find(HH + "underline")
+            if underline is not None and underline.get("type", "NONE") != "NONE":
+                continue
+            candidates[_style_key(base)] = pid
+        if len(candidates) == 1:
+            result[current] = next(iter(candidates.values()))
+    return result
+
+
 class _ManualGradeStyles:
     """Remove only owned OCR overlays, retaining typography and author marks."""
-    def __init__(self, source: _Archive, target: _Archive):
+    def __init__(self, source: _Archive, target: _Archive, generated_bases: dict[str, str] | None = None):
         parser = etree.XMLParser(resolve_entities=False, no_network=True)
         try:
             self.source = etree.fromstring(source.entries["Contents/header.xml"], parser)
@@ -432,6 +699,7 @@ class _ManualGradeStyles:
         self.source_styles = {s.get("id"): s for s in self.source.iter(HH + "charPr")}
         self.styles = {s.get("id"): s for s in self.header.iter(HH + "charPr")}
         self.target = target
+        self.generated_bases = generated_bases or {}
         self.cache = {}
 
     def clean_style(self, current_id: str, choices: frozenset[str]) -> str:
@@ -439,10 +707,14 @@ class _ManualGradeStyles:
         if key in self.cache:
             return self.cache[key]
         current = self.styles.get(current_id)
-        if (current is None or _tag_of(current) not in {"#0B7A3B", "#1F4FBF", "#C00000"}
-                or _tag_of(current) != (current.get("textColor") or "").upper()):
+        generated = (current_id in self.generated_bases and current is not None
+                     and _style_key(current) == _style_key(self.source_styles[current_id]))
+        owned = (current is not None and _tag_of(current) in {"#0B7A3B", "#1F4FBF", "#C00000"}
+                 and _tag_of(current) == (current.get("textColor") or "").upper())
+        if not generated and not owned:
             return current_id  # Author colors and untagged legacy styles are not ours.
-        candidates = [self.source_styles[pid] for pid in sorted(choices) if pid in self.source_styles]
+        candidates = [self.source_styles[self.generated_bases.get(pid, pid)]
+                      for pid in sorted(choices) if pid in self.source_styles]
         if len(candidates) > 1:
             matches = [s for s in candidates if _without_grade(s) == _without_grade(current)]
             if matches:
@@ -545,6 +817,75 @@ def _stage_bytes(destination: Path, data: bytes) -> Path:
 class SectionEditSession:
     """A document snapshot. No HWPX handles remain open while the UI is shown."""
     @classmethod
+    def open_generated(cls, input_path, output_hwpx, page: int | None = None, *, work_dir=None):
+        """Open an existing OCR result without recognizing or rewriting it.
+
+        Source page markers bound the widgets, including shared flow paragraphs.
+        A matching read-only Work manifest enables conservative legacy overlay
+        recognition; newer writer documents declare the exact base styles.
+        """
+        from ..pdfio import open_pdf
+        from ..state import Work
+        from .run import corrected_path
+        self = cls()
+        self.generated = True
+        self.pdf_path, self.source_path = Path(input_path).resolve(), Path(output_hwpx).resolve()
+        if self.source_path.stem.endswith("_교정"):
+            raise SectionEditError("처음 생성한 OCR 결과 HWPX를 선택하십시오. 기존 교정본은 자동으로 이어서 엽니다.")
+        self.corrected_path = Path(corrected_path(str(self.source_path))).resolve()
+        if (_path(self.source_path) == _path(self.corrected_path)
+                or self.corrected_path.exists() and os.path.samefile(self.source_path, self.corrected_path)):
+            raise SectionEditError("교정본과 OCR 결과가 같은 파일입니다.")
+        self._source_bytes = self.source_path.read_bytes()
+        self._target_bytes = self.corrected_path.read_bytes() if self.corrected_path.exists() else None
+        history_path = manual_history_path(self.corrected_path)
+        self._history_bytes = history_path.read_bytes() if history_path.exists() else None
+        self._pdf_hash = _fingerprint(self.pdf_path)
+        if self._pdf_hash is None:
+            raise SectionEditError("원본 PDF·이미지를 찾을 수 없습니다.")
+        legacy_trusted = False
+        self.work_dir = Path(work_dir).resolve() if work_dir is not None else None
+        if self.work_dir is not None:
+            work = Work(str(self.pdf_path), str(self.work_dir), initialize=False)
+            if not work.source_matches():
+                raise SectionEditError("작업 기록의 원본과 선택한 PDF·이미지가 다릅니다. 같은 원본의 OCR 결과를 선택하십시오.")
+            legacy_trusted = self.source_path.is_relative_to(work.out_dir.resolve())
+        with open_pdf(str(self.pdf_path)) as document:
+            page_count = len(document)
+        source = _Archive(self._source_bytes)
+        target = _Archive(self._target_bytes or self._source_bytes)
+        self.page_scopes, self._heads = _generated_scopes(source, page_count)
+        self.generated_pages = tuple(scope.page for scope in self.page_scopes)
+        self.page = self.generated_pages[0] if page is None else page
+        if type(self.page) is not int or self.page not in self.generated_pages:
+            raise SectionEditError("선택한 쪽은 현재 OCR 결과에 없습니다.")
+        selected = next(scope for scope in self.page_scopes if scope.page == self.page)
+        self.start, self.end, self.pdf_pages = selected.start, selected.end, selected.pdf_pages
+        self.section_name = selected.label
+        if len(source.paragraphs) != len(target.paragraphs):
+            raise SectionEditError("OCR 결과와 교정본의 문단 수가 달라 위치를 대응할 수 없습니다.")
+        for index, ((src_part, src), (dst_part, dst)) in enumerate(zip(source.locations, target.locations)):
+            source_marks = [(number, label) for _, number, label in _generated_bookmarks(src)]
+            target_marks = [(number, label) for _, number, label in _generated_bookmarks(dst)]
+            if (src_part != dst_part or _signature(src) != _signature(dst) or source_marks != target_marks
+                    or index in self._heads and paragraph_text(src) != paragraph_text(dst)
+                    or _CONTINUED_PAGE.findall(paragraph_text(src)) != _CONTINUED_PAGE.findall(paragraph_text(dst))):
+                raise SectionEditError("OCR 결과와 교정본의 원본 쪽 표시·문단 구조가 달라 편집할 수 없습니다.")
+        self._source = source
+        self._history = _load_history(self.corrected_path, self._history_bytes)
+        self._protected = manual_protected_paragraphs(self.corrected_path, target.paragraphs) if self._history_bytes else set()
+        for index in range(self.start, self.end):
+            reason = self._alignment_reason(index, paragraph_text(target.paragraphs[index]))
+            if reason:
+                raise SectionEditError(f"{index + 1}번 문단: {reason}")
+        self._generated_bases = _generated_grade_bases(source, legacy_trusted=legacy_trusted)
+        self._generation = 0
+        self._replace_plans = weakref.WeakValueDictionary()
+        self._refresh_paragraphs(target)
+        self._assert_unchanged()
+        return self
+
+    @classmethod
     def open(cls, pdf, original_hwpx, section_name: str, start: int, end: int, *,
              heading_styles=None, anchor_source: str = "auto"):
         from .run import corrected_path
@@ -607,10 +948,26 @@ class SectionEditSession:
 
     def _refresh_paragraphs(self, target: _Archive) -> None:
         self.paragraphs = []
+        styles = _display_char_styles(target)
+        generated_bases = getattr(self, "_generated_bases", {})
+        if generated_bases:
+            parser = etree.XMLParser(resolve_entities=False, no_network=True)
+            source_header = etree.fromstring(self._source.entries["Contents/header.xml"], parser)
+            target_header = etree.fromstring(target.entries["Contents/header.xml"], parser)
+            source_keys = {s.get("id"): _style_key(s) for s in source_header.iter(HH + "charPr")}
+            target_keys = {s.get("id"): _style_key(s) for s in target_header.iter(HH + "charPr")}
+        for pid in generated_bases:
+            if pid in styles and source_keys.get(pid) == target_keys.get(pid):
+                style = styles[pid]
+                kind = {"#0B7A3B": "green", "#1F4FBF": "blue", "#C00000": "red"}.get(style.foreground, "")
+                styles[pid] = TextStyleSpan(style.start, style.end, style.foreground, style.background,
+                                            style.bold, style.underline, kind)
         for i in range(self.start, self.end):
-            reason = _readonly_reason(target.paragraphs[i], i in self._heads)
+            reason = _readonly_reason(target.paragraphs[i], i in self._heads,
+                                      allow_page_furniture=getattr(self, "generated", False))
             self.paragraphs.append(ParagraphEdit(i, paragraph_text(self._source.paragraphs[i]),
-                                                paragraph_text(target.paragraphs[i]), not reason, reason))
+                                                paragraph_text(target.paragraphs[i]), not reason, reason,
+                                                _paragraph_display_styles(target.paragraphs[i], styles)))
 
     def export_text(self, changes: dict[int, str], *, scope: str = "section") -> str:
         """Return current body text, including unsaved edits, without saving.
@@ -682,6 +1039,14 @@ class SectionEditSession:
                 return "원문과 교정본 내용이 크게 달라 위치 대응을 확인할 수 없습니다."
         return ""
 
+    def _page_marker_reason(self, index: int, text: str) -> str:
+        if getattr(self, "generated", False):
+            before = paragraph_text(self._source.paragraphs[index])
+            if ([m.group() for m in _CONTINUED_PAGE.finditer(before)]
+                    != [m.group() for m in _CONTINUED_PAGE.finditer(text)]):
+                return "원본 쪽 연결 표시는 그대로 두고 본문만 수정하십시오."
+        return ""
+
     def preview_replace(self, find: str, replacement: str, *, scope: str = "section",
                         paragraph_index: int | None = None, changes: dict[int, str] | None = None,
                         previous_plan: ReplacePlan | None = None,
@@ -715,7 +1080,7 @@ class SectionEditSession:
                 raise SectionEditError("선택한 찾기 위치가 범위와 다릅니다. 다시 찾으십시오.")
             indices = [match[0]]
         entries, skipped = [], []
-        grade_styles = _ManualGradeStyles(self._source, target)
+        grade_styles = _ManualGradeStyles(self._source, target, getattr(self, "_generated_bases", None))
         for index in indices:
             paragraph = target.paragraphs[index]
             saved = paragraph_text(paragraph)
@@ -731,8 +1096,9 @@ class SectionEditSession:
                 after = before.replace(find, replacement) if count else before
             if not count:
                 continue
-            reason = (_readonly_reason(paragraph, index in self._heads)
-                      or self._alignment_reason(index, saved))
+            reason = (_readonly_reason(paragraph, index in self._heads,
+                                       allow_page_furniture=getattr(self, "generated", False))
+                      or self._alignment_reason(index, saved) or self._page_marker_reason(index, after))
             if not reason:
                 try:
                     trial = deepcopy(paragraph)
@@ -768,12 +1134,15 @@ class SectionEditSession:
                        section=history_section, updated=time.strftime("%Y-%m-%d %H:%M:%S"))
         changed_parts = set()
         correction_edits = []
-        grade_styles = _ManualGradeStyles(self._source, target)
+        grade_styles = _ManualGradeStyles(self._source, target, getattr(self, "_generated_bases", None))
         for index, text in edits.items():
             paragraph = target.paragraphs[index]
             before = paragraph_text(paragraph)
             old_hash = _text_hash(before)
             try:
+                marker_reason = self._page_marker_reason(index, text)
+                if marker_reason:
+                    raise SectionEditError(marker_reason)
                 _replace_text(paragraph, text)
                 grade_styles.clear_changed(self._source.paragraphs[index], paragraph, before)
             except SectionEditError as exc:

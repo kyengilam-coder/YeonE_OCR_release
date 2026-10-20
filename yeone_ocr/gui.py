@@ -85,6 +85,8 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     [▶ 한 번에 인식 (문자 PDF 만들기)]는 새 원본의 판독부터 검색·복사 가능한 PDF 생성까지 이어서 합니다.
     문자 PDF는 원본 모양과 글자 위치를 유지하며 HWPX용 자동 교정을 적용하지 않습니다. HWPX 양식도 필요 없습니다.
  5. 끝나면 실행 카드의 [HWPX 열기]·[문자 PDF 열기]·[검수 화면]으로 결과를 엽니다(실행 중에는 지난 결과의 읽기용 사본을 엽니다).
+    일반·이미지 OCR의 [나란히 대조 편집]에서는 원본과 인식 결과를 함께 보며 고칩니다. [편집 범위]로 원본 쪽을 선택합니다.
+    [변경 확인·저장]은 같은 <이름>_교정.hwpx에 수정을 누적하며 인식 결과 원본은 보존합니다. [본문 내보내기]로 미저장 수정도 TXT에 보관할 수 있습니다.
     책 카드의 [결과 저장]에 실제 저장 폴더가 표시되며 [저장 폴더]로 탐색기에서 확인합니다. 장부에는 마지막 비용 어림과 이번 실행의 호출 수가 남습니다.
     검수 화면에서 원본과 대조합니다. 〔 〕로 남은 자리만 사람이 보면 됩니다.
  6. 책갈피 OCR 탭: 이미 입력된 HWPX 가 있으면 [PDF 고르기…] → [HWPX 고르기…] → [▶ HWPX 전체 교정]. 구획을 차례로 전부 대조해
@@ -93,7 +95,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
     [PDF 글자층 넣기]는 판독한 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)를 만듭니다.
     문서 옵션의 "검색 가능한 PDF 도 만들기"를 켜면 [▶ 한 번에 인식] 끝에 저절로 만듭니다. 원본 PDF 는 고치지 않습니다.
     인쇄 쪽수 보정은 [설정] 탭 '이 책' 섹션의 [고급 ▸]에 있습니다. 파일 쪽수와 책에 적힌 쪽수를 맞춰 검수할 때 쓰며, 비우면 자동 판정합니다.
-    글자를 손으로 고치려면 결과 폴더의 readings/pNNN.json 을 고친 뒤 [④ 문서 만들기] 를 다시 누릅니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…] 으로 남깁니다.
+    글자를 직접 고칠 때는 [나란히 대조 편집]을 사용합니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…]으로 남깁니다.
  8. 시작할 때 새 버전을 확인하며, 위의 [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
     실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 [설정] 탭 바닥의 '시작할 때 업데이트 확인'으로 끌 수 있습니다.
 
@@ -3292,6 +3294,9 @@ class App(tk.Tk):
         for k, btn in enumerate((self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work)):
             btn.configure(padding=(P(6), P(4)))
             btn.grid(row=k // 2, column=k % 2, sticky="ew", padx=(0, P(3)) if k % 2 == 0 else (P(3), 0), pady=(P(6), 0) if k >= 2 else 0)
+        self.b_open_result_editor = self._btn(opens, "나란히 대조 편집", self.open_result_editor, lock=False,
+            tip="현재 원본과 완성된 HWPX를 한 쪽씩 나란히 보고 직접 수정합니다. 원본 HWPX는 보존하고 교정본에 저장합니다.")
+        self.b_open_result_editor.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(P(6), 0))
         self.l_copy_note = L(b, COPY_NOTE, "CAP", "MUTED", wrap=True)      # 실행 중에만
         # ---- 장부 ----
         led = self._led_card = ttk.Frame(self._work, style="Card.TFrame", padding=(P(18), P(16)))    # _place_cards 가 오른쪽 단(한 단이면 진행 아래)에
@@ -3339,7 +3344,7 @@ class App(tk.Tk):
         self.l_led_total = L(tr, "—", "BODY_B"); self.l_led_total.pack(side="right")
         # 원본이 있어야 눌리는 단추: 실행 둘·[비용 미리 보기](실행 중에도 잠김), 열기 넷(열기만 함 — 실행 중에도 눌림)
         self._src_locked = [self.b_run, self.b_run_pdf, self.b_estimate]
-        self._src_open = [self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work]
+        self._src_open = [self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work, self.b_open_result_editor]
         return run
 
     def _sync_run_card(self) -> None:
@@ -5847,6 +5852,8 @@ class App(tk.Tk):
     def start(self, argv: list[str], label: str, open_after: Path | None = None):
         if self.running:
             return
+        if len(argv) > 1 and argv[0] in ("run", "build") and not App._result_editors_ready(self, argv[1]):
+            return
         self.open_after = open_after
         cmd = argv[0] if argv else ""
         if cmd == "run" and "--pdf-only" in argv:
@@ -6580,7 +6587,8 @@ class App(tk.Tk):
             self._with_plan("read", go)
 
     def do_build(self):
-        if not self._need_pdf() or not App._corrections_ok(self):
+        if (not self._need_pdf() or not App._result_editors_ready(self, self.pdf())
+                or not App._corrections_ok(self)):
             return
         self._env_need_key = App._context_model_enabled(self)
         if self._prepare_env() and template_ok(self) and preset_ok(self):
@@ -6614,7 +6622,8 @@ class App(tk.Tk):
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
     def do_run(self):
-        if self._need_pdf() and App._corrections_ok(self) and self._prepare_env() and template_ok(self) and preset_ok(self):
+        if (self._need_pdf() and App._result_editors_ready(self, self.pdf()) and App._corrections_ok(self)
+                and self._prepare_env() and template_ok(self) and preset_ok(self)):
             def go(extra):                                                 # extra: [아니요 · 모델 단계 없이] 면 --no-adjudicate(문맥 교정 모델이 켜져 있으면 + --no-context-model)
                 self.nb.select(0)
                 self._save_book(create=True)                               # 실행 직전(비용 확인을 받은 뒤): 이 책의 설정을 결과 폴더에
@@ -6718,6 +6727,52 @@ class App(tk.Tk):
             App._open_result(self, path)
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"HWPX를 열지 못했습니다. [저장 폴더]에서 파일을 확인하거나 HWPX를 지원하는 프로그램의 파일 연결을 확인하십시오.\n{exc}")
+
+    def _result_editors_ready(self, source):
+        source = os.path.normcase(str(Path(source).resolve()))
+        for window in list(vars(self).get("_collate_edit_windows", ())):
+            key = getattr(window, "_generated_key", ())
+            if window.winfo_exists() and key and key[0] == source and (window.dirty or window.busy):
+                window.deiconify(); window.lift()
+                messagebox.showinfo(APP_NAME, "대조 편집 창에 저장하지 않은 수정이 있거나 저장 중입니다.\n"
+                                    "저장하거나 수정을 취소한 뒤 같은 원본의 OCR 문서를 다시 만드십시오.", parent=self)
+                return False
+        return True
+
+    def open_result_editor(self):
+        """Keep the active source, completed output and work folder together."""
+        if vars(self).get("running") or vars(self).get("_closing"):
+            messagebox.showinfo(APP_NAME, "OCR 작업이 끝난 뒤 나란히 대조 편집을 여십시오.", parent=self)
+            return
+        if not self._need_pdf():
+            return
+        source, work = str(Path(self.pdf()).resolve()), self.work().resolve()
+        try:
+            result = latest_result_hwpx(source, work)
+            if result is None:
+                messagebox.showinfo(APP_NAME, "이 원본의 완성된 HWPX가 아직 없습니다.\n"
+                                    "[한 번에 인식 (HWPX 만들기)]으로 문서를 만든 뒤 누르십시오.\n\n"
+                                    f"저장 위치: {work / 'out'}", parent=self)
+                return
+            result = result.resolve()
+            key = tuple(os.path.normcase(str(path)) for path in (source, result, work))
+            windows = vars(self).setdefault("_collate_edit_windows", [])
+            windows[:] = [window for window in windows if window.winfo_exists()]
+            for window in windows:
+                if getattr(window, "_generated_key", None) == key:
+                    if not window.dirty and not window.busy:
+                        window.reload()
+                    window.deiconify(); window.lift(); window.focus_set()
+                    return
+            from .collate.section_editor import BookmarkSectionEditor
+            window = BookmarkSectionEditor(self, pdf_path=source, hwpx_path=result, generated=True, work_dir=work,
+                input_label="이미지 OCR" if vars(self).get("_active_input") == 2 else None,
+                can_write=lambda: not vars(self).get("running") and not vars(self).get("_closing"),
+                on_saved=lambda path: self.v_status.set(f"대조 편집 저장 · {Path(path).name}"))
+            window._generated_key = key
+            windows.append(window)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(APP_NAME, f"나란히 대조 편집을 열지 못했습니다.\n{exc}", parent=self)
 
     def open_textlayer(self):
         if not self._need_pdf(): return

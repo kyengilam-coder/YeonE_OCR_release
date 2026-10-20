@@ -16,7 +16,7 @@ from lxml import etree
 from yeone_ocr.collate.hwpx_edit import HP, HH, Editor, _slots, _tag_of, paragraph_text
 from yeone_ocr.collate.section_edit import (
     ConflictError, ManualProtectionError, SectionEditError, SectionEditSession,
-    _Archive, _style_key, manual_history_path, manual_protected_paragraphs,
+    TextStyleSpan, _Archive, _style_key, manual_history_path, manual_protected_paragraphs,
 )
 from yeone_ocr.collate.sections import HwpxBook
 
@@ -114,6 +114,101 @@ class ManualSectionEditing(unittest.TestCase):
         saved = _Archive(self.corrected.read_bytes())
         self.assertEqual([s.text for s in _slots(saved.paragraphs[3])], ["WX", "YZ"])
         self.assertEqual([s.run.get("charPrIDRef") for s in _slots(saved.paragraphs[3])], styles)
+
+    def test_display_spans_include_actual_ocr_colors_even_when_text_is_unchanged(self):
+        expected = {
+            "green": ("#0B7A3B", "", False, True, "green"),
+            "blue": ("#1F4FBF", "#E1EBFF", False, True, "blue"),
+            "red": ("#C00000", "#FFFF00", True, False, "red"),
+            "red_ctx": ("#C00000", "#FFFF00", True, True, "red"),
+        }
+        source = self.source.read_bytes()
+        for grade, style in expected.items():
+            with self.subTest(grade=grade):
+                self.mark_copy(grade=grade)
+                corrected = self.corrected.read_bytes()
+                row = next(p for p in self.open().paragraphs if p.index == 2)
+                self.assertEqual(row.corrected_text, row.original_text)
+                self.assertEqual(row.corrected_styles, (TextStyleSpan(0, len(row.corrected_text), *style),))
+                self.assertEqual(self.corrected.read_bytes(), corrected)
+                self.assertEqual(self.source.read_bytes(), source)
+                self.assertFalse(manual_history_path(self.corrected).exists())
+
+    def test_display_spans_refresh_after_manual_color_cleanup_and_reopen(self):
+        self.mark_copy(grade="blue")
+        session = self.open()
+        session.save({2: "Alpha zeta gamma."})
+        row = next(p for p in session.paragraphs if p.index == 2)
+        self.assertNotEqual(row.original_text, row.corrected_text)
+        blue = ("#1F4FBF", "#E1EBFF", False, True, "blue")
+        self.assertEqual(row.corrected_styles, (
+            TextStyleSpan(0, 6, *blue), TextStyleSpan(6, 7, "#000000"),
+            TextStyleSpan(7, len(row.corrected_text), *blue),
+        ))
+        self.assertEqual(next(p for p in self.open().paragraphs if p.index == 2).corrected_styles,
+                         row.corrected_styles)
+
+    def test_display_spans_keep_author_red_white_background_and_bold_underline(self):
+        source = _Archive(self.source.read_bytes())
+        header = etree.fromstring(source.entries["Contents/header.xml"])
+        pid = _slots(source.paragraphs[2])[0].run.get("charPrIDRef")
+        style = next(s for s in header.iter(HH + "charPr") if s.get("id") == pid)
+        style.set("textColor", "#c00000")
+        style.set("shadeColor", "#ffffff")
+        style.find(HH + "strikeout").set("color", "#000000")
+        style.find(HH + "underline").set("type", "BOTTOM")
+        etree.SubElement(style, HH + "bold")
+        source.entries["Contents/header.xml"] = etree.tostring(header, encoding="utf-8", xml_declaration=True)
+        source.write(self.source, set())
+        before = self.source.read_bytes()
+        row = next(p for p in self.open().paragraphs if p.index == 2)
+        self.assertEqual(row.corrected_styles,
+                         (TextStyleSpan(0, len(row.corrected_text), "#C00000", "#FFFFFF", True, True),))
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertFalse(self.corrected.exists())
+
+    def test_display_offsets_include_atoms_tails_and_cross_run_markpen_but_not_memos(self):
+        source = _Archive(self.source.read_bytes())
+        paragraph = source.paragraphs[4]
+        run = paragraph.find(HP + "run")
+        text = run.find(HP + "t")
+        text.text = "甲😀"
+        etree.SubElement(text, HP + "markpenBegin", color="#aabbcc").tail = "乙"
+        etree.SubElement(text, HP + "tab").tail = "丙"
+        etree.SubElement(text, HP + "lineBreak").tail = "丁"
+        etree.SubElement(run, HP + "tab")
+        etree.SubElement(run, HP + "ctrl", id="tab")
+        bold_id = _slots(source.paragraphs[3])[-1].run.get("charPrIDRef")
+        other_run = etree.SubElement(paragraph, HP + "run", charPrIDRef=bold_id)
+        other_text = etree.SubElement(other_run, HP + "t")
+        other_text.text = "己"
+        etree.SubElement(other_text, HP + "markpenEnd").tail = "庚"
+        source.write(self.source, {"Contents/section0.xml"})
+        before = self.source.read_bytes()
+        row = next(p for p in self.open().paragraphs if p.index == 4)
+        self.assertFalse(row.editable)
+        self.assertEqual(row.corrected_text, "甲😀乙\t丙\n丁\t\t己庚")
+        self.assertEqual(row.corrected_styles, (
+            TextStyleSpan(0, 2, "#000000"), TextStyleSpan(2, 9, "#000000", "#AABBCC"),
+            TextStyleSpan(9, 10, "#000000", "#AABBCC", True),
+            TextStyleSpan(10, 11, "#000000", "", True),
+        ))
+        self.assertEqual(self.source.read_bytes(), before)
+
+    def test_display_automatic_colors_and_empty_paragraph_have_no_invented_mark(self):
+        source = _Archive(self.source.read_bytes())
+        header = etree.fromstring(source.entries["Contents/header.xml"])
+        pid = _slots(source.paragraphs[2])[0].run.get("charPrIDRef")
+        style = next(s for s in header.iter(HH + "charPr") if s.get("id") == pid)
+        style.set("textColor", "auto")
+        style.set("shadeColor", "none")
+        source.entries["Contents/header.xml"] = etree.tostring(header, encoding="utf-8", xml_declaration=True)
+        source.write(self.source, set())
+        session = self.open()
+        row = next(p for p in session.paragraphs if p.index == 2)
+        self.assertEqual(row.corrected_styles, (TextStyleSpan(0, len(row.corrected_text)),))
+        session.save({2: ""})
+        self.assertEqual(next(p for p in session.paragraphs if p.index == 2).corrected_styles, ())
 
     def test_each_grade_is_removed_only_from_replaced_characters(self):
         baseline = self.styles_at(self.source)

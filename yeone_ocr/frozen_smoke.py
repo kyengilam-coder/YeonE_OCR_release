@@ -667,6 +667,7 @@ def bookmark_replace_probe(folder: Path) -> dict:
         section = book.section(book.anchors(), 0)
         local = book.texts().index("單純皰疹。皰液。")
         outside = book.texts().index("他段皰疹。")
+        retained = book.texts().index("保留原文。")
         editor = Editor(book, memo="none")
         baseline = _canon(editor._char_pr(normal))
         marks = [
@@ -675,6 +676,11 @@ def bookmark_replace_probe(folder: Path) -> dict:
             for offset, char in enumerate(book.texts()[index]) if char == "皰"
         ]
         assert all(item.ok for item in editor.apply(marks))
+        # Stored marks can exist without a text difference, especially review
+        # requests. Exercise all three persisted grades through the shipped UI.
+        for offset, grade in enumerate(("green", "blue", "red")):
+            editor._recolor_range(book.paragraphs[retained].element, offset, offset + 1,
+                                  editor._style_for(normal, grade), None)
         editor.save_copy(str(target))
     finally:
         book.doc.close()
@@ -690,6 +696,20 @@ def bookmark_replace_probe(folder: Path) -> dict:
             section_start=section.start, section_end=section.end, pdf_pages=(1, 1))
         window.withdraw()
         field = window._editors[local]
+        def paint_at(widget, offset):
+            colors = {name: str(widget.cget(name)).upper() for name in ("foreground", "background")}
+            for tag in widget.tag_names(f"1.0+{offset}c"):
+                for name in colors:
+                    value = widget.tag_cget(tag, name)
+                    if value:
+                        colors[name] = str(value).upper()
+            return colors
+        retained_field = window._editors[retained]
+        assert paint_at(field, 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+        assert paint_at(retained_field, 0)["foreground"] == "#0B7A3B"
+        assert paint_at(retained_field, 1) == {"foreground": "#1F4FBF", "background": "#E1EBFF"}
+        assert paint_at(retained_field, 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+        assert not window.dirty and target.read_bytes() == before
         field.delete("1.0", "end")
         field.insert("1.0", "單純皰疹。皰液。\r\n確認\t句。")
         prompt = section_editor.messagebox.askyesno
@@ -714,6 +734,8 @@ def bookmark_replace_probe(folder: Path) -> dict:
         assert dialog.replace_all()
         assert target.read_bytes() == before
         assert field.get("1.0", "end-1c") == expected_draft.replace("皰", "疱")
+        assert paint_at(field, 2)["foreground"] not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+        assert paint_at(field, 2)["background"] not in {"#FFFF00", "#E1EBFF"}
         # Exercise the actual editor selection and bindings. Redirect only Tcl's
         # clipboard command so an image or other user clipboard format survives.
         window.deiconify()
@@ -770,6 +792,12 @@ def bookmark_replace_probe(folder: Path) -> dict:
         window.withdraw()
         window._confirm_changes = lambda changes: changes == plan.changes
         assert window.save() and not window.dirty
+        assert paint_at(field, 2)["foreground"] not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+        assert paint_at(field, 2)["background"] not in {"#FFFF00", "#E1EBFF"}
+        assert paint_at(retained_field, 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+        assert window.reload() and not window.dirty
+        assert paint_at(window._editors[local], 2)["foreground"] not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+        assert paint_at(window._editors[retained], 2) == {"foreground": "#C00000", "background": "#FFFF00"}
     finally:
         if dialog is not None:
             dialog.destroy()
@@ -803,6 +831,8 @@ def bookmark_replace_probe(folder: Path) -> dict:
     assert next(p.corrected_text for p in reopened.paragraphs if p.index == local) == "單純疱疹。疱液。 確認 句。"
     assert all(path.read_bytes() == data for path, data in originals.items())
     return {"editable_occurrences": 3, "readonly_skipped": 2,
+            "stored_hwpx_grade_colors_displayed": True, "unchanged_review_marks_displayed": True,
+            "manual_colors_cleared_after_save_and_reload": True,
             "input_line_join_preserved_text": True, "section_and_document_scopes": True,
             "pending_edits_preserved": True, "edited_marks_cleared": True,
             "edited_text_copy_shortcuts": True, "copy_context_menu": True,
@@ -810,6 +840,113 @@ def bookmark_replace_probe(folder: Path) -> dict:
             "whole_section_copy_includes_unsaved_edits": True, "unsaved_changes_exported_to_text": True,
             "source_and_other_content_preserved": True, "existing_copy_and_backup_preserved": True,
             "manual_history_and_protection_retained": True, "saved_file_reopened": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
+def generated_editor_probe(folder: Path) -> dict:
+    """Open real generated PDF/image results, edit, save and reopen offline."""
+    import tkinter as tk
+    import pymupdf
+    from PIL import Image
+    from .blocks import Block, meta_line
+    from .collate.section_editor import BookmarkSectionEditor
+    from .collate.cursor_map import read_cursor_pages, align_cursor_map
+    from .collate.section_edit import manual_history_path
+    from .hwpx_builder import build_hwpx
+    from .state import Work
+
+    pdf = folder / "generated-source.pdf"
+    with pymupdf.open() as document:
+        for number in range(1, 7):
+            document.new_page().insert_text((40, 60), f"天地皰黃宇宙洪荒 第{number}頁",
+                                           fontname="china-t", fontsize=18)
+        document.save(pdf)
+    screenshot = folder / "generated-screenshot.png"
+    images = folder / "generated-images"
+    images.mkdir()
+    for path in (screenshot, images / "page2.png", images / "page10.png"):
+        with Image.new("RGB", (400, 600), "white") as picture:
+            picture.save(path)
+    root = tk.Tk()
+    root.withdraw()
+    checked = []
+    try:
+        for source, pages in ((pdf, (2, 5)), (screenshot, (1,)), (images, (1, 2))):
+            work = Work(str(source), str(folder / (source.name + "-work")))
+            blocks = []
+            for number in pages:
+                body = f"天地皰黃宇宙洪荒 第{number}頁"
+                record = {"file": source.name, "pdf_page": number, "merged": {
+                    "pdf_page": number, "print_page": "", "regions": [{
+                        "id": "body", "kind": "본문", "bbox": [100, 100, 300, 900],
+                        "paragraphs": [{"columns": [{"col_from_right": 1, "text": body}]}],
+                    }],
+                }}
+                work.save_record(number, record)
+                blocks.extend([Block(type="meta", text=meta_line(record, None), page=number),
+                               Block(type="para", text=body, page=number,
+                                     spans=[(0, 1, "green"), (1, 2, "blue"), (2, 3, "red")])])
+            output = work.out_dir / (source.stem + ".hwpx")
+            assert build_hwpx(blocks, str(output))["validate_issues"] == 0
+            originals = {path: path.read_bytes() for path in
+                         ((list(source.iterdir()) if source.is_dir() else [source]) + [output])}
+            window = None
+            try:
+                window = BookmarkSectionEditor(root, pdf_path=source, hwpx_path=output,
+                    generated=True, generated_page=pages[0], work_dir=work.dir)
+                window.withdraw()
+                assert tuple(window.session.generated_pages) == pages
+                assert window.pdf_pages == (pages[0], pages[0])
+                rows = [row for row in window.session.paragraphs if "天地皰黃" in row.corrected_text]
+                assert len(rows) == 1 and rows[0].editable
+                row = rows[0]
+                assert {style.kind for style in row.corrected_styles} >= {"green", "blue", "red"}
+                # The raster fallback must identify an existing OCR region,
+                # never a fabricated character caret or a font-size estimate.
+                snapshot = window._executor.submit(read_cursor_pages, str(source), window.pdf_pages,
+                                                    work_dir=str(work.dir)).result(timeout=8)
+                mapping = align_cursor_map(snapshot, window.session.paragraphs)
+                if source != pdf:
+                    location = mapping.locate(row.index, row.corrected_text, 2)
+                    assert location is not None and not location.precise and location.caret_box is None
+                    assert "OCR 영역" in location.message and not snapshot.page_font_heights
+                field = window._editors[row.index]
+                field.delete("1.2", "1.3")
+                field.insert("1.2", "疱")
+                expected = row.corrected_text.replace("皰", "疱")
+                window._highlight(row.index)
+                with _isolated_tk_clipboard(root) as copied:
+                    assert window.copy_section_text()
+                    assert expected in copied["text"] and "天地皰黃" not in copied["text"]
+                window._confirm_changes = lambda changes: bool(changes)
+                assert window.save() and not window.dirty
+                target = window.session.corrected_path
+                assert target.is_file() and manual_history_path(target).is_file()
+                assert window.reload()
+                saved = next(p for p in window.session.paragraphs if p.index == row.index)
+                assert saved.corrected_text == expected
+                assert not any(style.start <= 2 < style.end and style.kind for style in saved.corrected_styles)
+                assert {style.kind for style in saved.corrected_styles} >= {"green", "blue"}
+                if len(pages) > 1:
+                    assert window.switch_generated_page(pages[1])
+                    assert window.pdf_pages == (pages[1], pages[1])
+                    assert window.session.corrected_path == target
+                    assert window.switch_generated_page(pages[0])
+                    assert next(p for p in window.session.paragraphs if p.index == row.index).corrected_text == expected
+                assert all(path.read_bytes() == data for path, data in originals.items())
+                checked.append("PDF" if source == pdf else "image" if source == screenshot else "image-folder")
+            finally:
+                if window is not None:
+                    window.destroy()
+                    window._executor.submit(time.time).result(timeout=8)
+                    window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+    finally:
+        root.destroy()
+    return {"sources": checked, "partial_output_page_mapping": True,
+            "generated_grade_colors_and_manual_cleanup": True, "copy_current_body": True,
+            "cumulative_save_reload_and_page_navigation": True,
+            "cached_image_region_without_fake_caret": True,
+            "source_and_ocr_output_preserved": True, "manual_history_saved": True,
             "ocr_calls": 0, "network_calls": 0}
 
 
@@ -1282,6 +1419,7 @@ def run(report_path: Path) -> int:
         check("bookmark-color-only-and-memo-cleanup", lambda: color_only_collation_probe(folder))
         check("manual-edit-style-cleanup", lambda: manual_style_cleanup_probe(folder))
         check("bookmark-find-replace-and-paragraph-input", lambda: bookmark_replace_probe(folder))
+        check("general-and-image-side-by-side-edit", lambda: generated_editor_probe(folder))
         check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
         check("bookmark-layout-after-delayed-show-and-reload", lambda: bookmark_layout_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)

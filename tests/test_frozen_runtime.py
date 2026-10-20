@@ -308,11 +308,27 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["editable_occurrences"], 3)
         self.assertEqual(result["readonly_skipped"], 2)
         for field in ("input_line_join_preserved_text", "section_and_document_scopes",
+                      "stored_hwpx_grade_colors_displayed", "unchanged_review_marks_displayed",
+                      "manual_colors_cleared_after_save_and_reload",
                       "pending_edits_preserved", "edited_marks_cleared",
                       "edited_text_copy_shortcuts", "copy_context_menu",
                       "unicode_copy_and_drafts_preserved", "user_clipboard_untouched",
                       "source_and_other_content_preserved", "existing_copy_and_backup_preserved",
                       "manual_history_and_protection_retained", "saved_file_reopened"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_edits_generated_pdf_image_and_image_folder_results(self):
+        from yeone_ocr.frozen_smoke import generated_editor_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = generated_editor_probe(self.root)
+        self.assertEqual(result["sources"], ["PDF", "image", "image-folder"])
+        for field in ("partial_output_page_mapping", "generated_grade_colors_and_manual_cleanup",
+                      "copy_current_body", "cumulative_save_reload_and_page_navigation",
+                      "cached_image_region_without_fake_caret", "source_and_ocr_output_preserved",
+                      "manual_history_saved"):
             self.assertTrue(result[field], field)
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
