@@ -4,6 +4,7 @@ import contextlib
 from pathlib import Path
 import sys
 import tempfile
+from tkinter import ttk
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -644,12 +645,63 @@ class BookmarkCursorTk(unittest.TestCase):
         self.ready()
         self.editor.deiconify()
         self.root.update()
+        if self.editor._initial_job is not None:
+            self.editor.after_cancel(self.editor._initial_job)
+        self.editor._initial_split()
+        self.root.update_idletasks()
         left = self.editor.pdf_panel.winfo_width()
         right = self.editor.doc_panel.winfo_width()
         self.assertLessEqual(abs(left - right), 4)
         self.mapping.page_font_width.return_value = .08
         self.editor._display_pdf(Image.new("RGB", (600, 1200), "white"))
         self.finish_layout_and_position()
+        self.assertEqual(self.editor.pdf_panel.winfo_width(), left)
+        self.assertEqual(self.editor.doc_panel.winfo_width(), right)
+
+    def test_initial_split_balances_actual_panes_across_theme_separator_widths(self):
+        style = ttk.Style(self.root)
+        previous = style.theme_use()
+        self.addCleanup(lambda: style.theme_use(previous))
+        self.editor.deiconify()
+        self.editor.geometry("1200x900")
+        self.root.update()
+        if self.editor._initial_job is not None:
+            self.editor.after_cancel(self.editor._initial_job)
+        for theme in style.theme_names():
+            for width in (1200, 1201):
+                with self.subTest(theme=theme, width=width):
+                    style.theme_use(theme)
+                    self.editor.geometry(f"{width}x900")
+                    self.root.update_idletasks()
+                    # Start off-center so the test requires the initial callback
+                    # to run; it cannot pass on ttk's automatic weight allocation.
+                    self.editor.panes.sashpos(0, self.editor.panes.winfo_width() // 3)
+                    self.root.update_idletasks()
+                    self.assertGreater(self.editor.doc_panel.winfo_width() - self.editor.pdf_panel.winfo_width(), 100)
+                    self.editor._initial_split()
+                    self.root.update_idletasks()
+                    left = self.editor.pdf_panel.winfo_width()
+                    right = self.editor.doc_panel.winfo_width()
+                    self.assertLessEqual(abs(left - right), 1)
+                    self.assertIsNone(self.editor._initial_job)
+
+    def test_font_reflow_preserves_user_split_after_initial_callback(self):
+        self.ready()
+        self.editor.deiconify()
+        self.root.update()
+        if self.editor._initial_job is not None:
+            self.editor.after_cancel(self.editor._initial_job)
+        self.editor._initial_split()
+        self.root.update_idletasks()
+        self.editor.panes.sashpos(0, self.editor.panes.winfo_width() // 3)
+        self.root.update_idletasks()
+        left = self.editor.pdf_panel.winfo_width()
+        right = self.editor.doc_panel.winfo_width()
+        self.assertGreater(right - left, 100)
+        self.mapping.page_font_width.return_value = .08
+        self.editor._display_pdf(Image.new("RGB", (600, 1200), "white"))
+        self.finish_layout_and_position()
+        self.assertIsNone(self.editor._initial_job)
         self.assertEqual(self.editor.pdf_panel.winfo_width(), left)
         self.assertEqual(self.editor.doc_panel.winfo_width(), right)
 

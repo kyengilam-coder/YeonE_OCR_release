@@ -457,7 +457,10 @@ class BookmarkSectionEditor(tk.Toplevel):
     def _initial_split(self):
         self._initial_job = None
         if not self._closed:
-            self.panes.sashpos(0, self.panes.winfo_width() // 2)
+            # Pane widths exclude the theme's separator (5–12 px on Windows).
+            # Balance their usable space, once, rather than centering its edge.
+            difference = self.doc_panel.winfo_width() - self.pdf_panel.winfo_width()
+            self.panes.sashpos(0, self.panes.sashpos(0) + difference // 2)
             self._request_render()
 
     def _document_resized(self, event):

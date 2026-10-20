@@ -1,3 +1,3 @@
 Version: 0.12.4
-Git commit: 8576845d1645a29655e247a317504a8a884ea137
+Git commit: 7ed972831bde1147c44d3b3ac9bd548aab466f81
 Source: committed Git tree only.
