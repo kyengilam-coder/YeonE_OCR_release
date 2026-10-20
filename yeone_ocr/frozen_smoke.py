@@ -413,6 +413,83 @@ def correction_memory_probe(folder: Path) -> dict:
             "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
 
 
+def color_only_collation_probe(folder: Path) -> dict:
+    """Exercise color-only output and safe memo cleanup in the packaged app."""
+    from hwpx.document import HwpxDocument
+    from .collate.collate import Item
+    from .collate.hwpx_edit import Editor, HP, _slots
+    from .collate.sections import HwpxBook
+    from .collate.memo_cleanup import clean_corrected_memos
+    from .hwpx_memo import count_memos, MemoWriter
+
+    source = folder / "color-only.hwpx"
+    target = folder / "color-only_교정.hwpx"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        style = document.styles.ensure_run(size=11)
+        document.add_paragraph("甲乙丙丁", style_id_ref=0, char_pr_id_ref=style, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    source_bytes = source.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        index = book.texts().index("甲乙丙丁")
+        editor = Editor(book, memo="none")
+        applied = editor.apply([
+            Item("A", "replace", index, 1, 2, "乙", "己", "己", auto=True),
+            Item("B1", "mark", index, 2, 3, "丙", "丁", "", note="확인"),
+        ])
+        assert all(entry.ok and not entry.memo for entry in applied)
+        assert book.texts()[index] == "甲己丙丁"
+        assert count_memos(p.element for p in book.paragraphs) == 0
+        assert not editor.add_legend_memo()
+        color_path = editor.save_copy(str(folder / "color-output.hwpx"))
+    finally:
+        book.doc.close()
+    output = HwpxBook(color_path)
+    try:
+        assert output.texts()[index] == "甲己丙丁"
+        assert count_memos(p.element for p in output.paragraphs) == 0
+        inspector = Editor(output, memo="none")
+        colors = {char: inspector._char_pr(slot.run.get("charPrIDRef")).get("textColor")
+                  for slot in _slots(output.paragraphs[index].element) for char in slot.text}
+        assert colors["己"] == "#1F4FBF" and colors["丙"] == "#C00000"
+    finally:
+        output.doc.close()
+    book = HwpxBook(str(source))
+    try:
+        editor = Editor(book, memo="all")
+        editor.apply([Item("B1", "mark", index, 1, 2, "乙", "己", "", note="확인")])
+        assert editor.add_legend_memo()
+        run = book.paragraphs[index].element.find(HP + "run")
+        assert MemoWriter(book.doc, author="교정자", start=10).wrap_run(run, "[확인] 사람이 남긴 의견")
+        editor.save_copy(str(target))
+        before_text = book.texts()
+        assert count_memos(p.element for p in book.paragraphs) == 3
+    finally:
+        book.doc.close()
+    before = target.read_bytes()
+    result = clean_corrected_memos(source)
+    assert result.removed == 2 and result.skipped == 0
+    assert result.backup_path.read_bytes() == before
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts() == before_text
+        assert count_memos(p.element for p in book.paragraphs) == 1
+        assert "사람이 남긴 의견" in "".join(book.paragraphs[index].element.itertext())
+    finally:
+        book.doc.close()
+    after = target.read_bytes()
+    assert clean_corrected_memos(source).removed == 0
+    assert target.read_bytes() == after and source.read_bytes() == source_bytes
+    return {"color_only_no_memos_or_inline_text": True, "owned_memos_removed": 2,
+            "human_memo_preserved": True, "text_and_original_preserved": True,
+            "backup_matches_previous": True, "repeated_cleanup_no_write": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
 def bookmark_cursor_probe(folder: Path) -> dict:
     """Exercise real cursor mapping, PDF overlays and matching text size."""
     import os
@@ -721,6 +798,7 @@ def run(report_path: Path) -> int:
         check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
         check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
         check("human-correction-memory", lambda: correction_memory_probe(folder))
+        check("bookmark-color-only-and-memo-cleanup", lambda: color_only_collation_probe(folder))
         check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))

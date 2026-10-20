@@ -153,6 +153,39 @@ class BookmarkGui(unittest.TestCase):
             gui.App.open_collate_editor(self.app)
         constructor.assert_not_called()
 
+    def test_memo_cleanup_blocks_active_work_and_unsaved_editor(self):
+        window = SimpleNamespace(
+            winfo_exists=lambda: True, dirty=True, busy=False, deiconify=Mock(), lift=Mock(), reload=Mock(),
+            _collate_key=("", os.path.normcase(str(self.hwpx.resolve())), 5271, 5323))
+        self.app._collate_edit_windows = [window]
+        with patch("yeone_ocr.collate.memo_cleanup.clean_corrected_memos") as cleanup:
+            self.app.running = True
+            gui.App.clean_collate_memos(self.app)
+            self.app.running = False
+            gui.App.clean_collate_memos(self.app)
+        cleanup.assert_not_called()
+        window.lift.assert_called_once()
+        window.reload.assert_not_called()
+        self.assertIn("저장하지 않은 수정", self.info.call_args.args[1])
+
+    def test_memo_cleanup_uses_existing_corrected_file_and_reloads_clean_editor(self):
+        window = SimpleNamespace(
+            winfo_exists=lambda: True, dirty=False, busy=False, reload=Mock(return_value=True),
+            _collate_key=("", os.path.normcase(str(self.hwpx.resolve())), 5271, 5323))
+        self.app._collate_edit_windows = [window]
+        self.app._append = Mock()
+        result = SimpleNamespace(removed=4, skipped=1, corrected_path=self.root / "book_교정.hwpx",
+                                 backup_path=self.root / "book_교정.메모정리.bak.hwpx")
+        with patch("yeone_ocr.collate.memo_cleanup.clean_corrected_memos", return_value=result) as cleanup, \
+             patch.object(gui.App, "do_collate", side_effect=AssertionError("cleanup must not run OCR")):
+            gui.App.clean_collate_memos(self.app)
+        cleanup.assert_called_once_with(str(self.hwpx))
+        window.reload.assert_called_once()
+        self.assertIn("4개 정리", self.app.v_cstat.get())
+        self.assertIn("1개는 남겼습니다", self.info.call_args.args[1])
+        self.assertIn(str(result.backup_path), self.info.call_args.args[1])
+        self.assertEqual(self.app.collate_rows, [self.row])  # Body and source index do not change.
+
     def test_editor_without_confirmed_pdf_range_is_not_opened(self):
         with patch.object(gui.App, "_collate_editor_pages", return_value=None), \
              patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:

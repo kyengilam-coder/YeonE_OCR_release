@@ -262,6 +262,17 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_color_only_and_owned_memo_cleanup(self):
+        from yeone_ocr.frozen_smoke import color_only_collation_probe
+        result = color_only_collation_probe(self.root)
+        self.assertEqual(result["owned_memos_removed"], 2)
+        for field in ("color_only_no_memos_or_inline_text", "human_memo_preserved",
+                      "text_and_original_preserved", "backup_matches_previous",
+                      "repeated_cleanup_no_write"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
     def test_release_smoke_remembers_human_correction_without_cross_document_or_undo_reuse(self):
         from yeone_ocr.frozen_smoke import correction_memory_probe
         with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \

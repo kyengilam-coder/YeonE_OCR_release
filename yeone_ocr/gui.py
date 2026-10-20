@@ -26,7 +26,7 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "preset": DEFAULT_PRESET, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
+            "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "none", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": ""}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
@@ -34,7 +34,7 @@ LAYOUT_LABELS = {"page": "원본 쪽대로(검수용)", "flow": "내용별(제�
 PRESET_PICK = "파일에서 고르기…"                                   # 짜임 규칙 칸의 끝 항목 — 규칙 JSON 파일을 고른다(--preset 파일 경로)
 PRESET_EXPORT = "本草 조문 규칙을 파일로 저장…"                     # 그 뒤 — 내장 kaibao 파일을 복사해 새 책의 규칙을 만드는 바탕으로(설치판·실행 파일 하나 판은 data 폴더를 찾기 어렵다)
 LEGACY_PRESET = {"auto": "kaibao", "bencao": "bencao", "none": "regions"}   # 0.7.x 설정의 짜임 규칙(structure) → 짜임 규칙(preset). bencao 는 그대로(약재명 늘 떼기)
-from .collate.labels import MEMO_MODES as MEMO_LABELS          # 한컴 메모를 어디에 달지(패키지 없이도 창이 뜨게 가벼운 모듈에서)
+from .collate.labels import MEMO_MODES as MEMO_LABELS, GENERAL_MEMO_MODES as GENERAL_MEMO_LABELS
 MODE_LABELS = {"auto": "자동 판정", "vertical": "세로쓰기 한자·한글", "horizontal_zh": "가로쓰기 한문(간체)"}
 MRES_LABELS = {"default": "기본", "high": "높음(high)", "ultra_high": "최고(ultra_high · Gemini 3)"}   # 2차 조각 이미지 토큰 예산
 PAGE_THINK_LABELS = {"auto": "자동(모델 기본)", "low": "낮음(low)", "medium": "중간(medium)", "high": "높음(high)"}         # 1차(쪽 전체) 생각 수준 --page-thinking
@@ -149,9 +149,15 @@ def upgrade_config(cfg: dict, raw: dict | None = None) -> dict:
     if "media_high" in cfg:                                   # 0.6.0~0.6.1 의 켬/끔 → 3단 선택 (load_config 가 DEFAULTS 를 먼저 섞으므로 setdefault 가 아니라 대입)
         cfg["media_res"] = "high" if cfg.pop("media_high") else "default"
     cfg.setdefault("media_res", DEFAULTS["media_res"])
-    cm = cfg.get("collate_memo", "notice")                       # 0.6.3 까지의 켬/끔 → 고지 사항만 / 글 속
-    cfg["collate_memo"] = ("notice" if cm else "inline") if isinstance(cm, bool) else (cm if cm in MEMO_LABELS else "notice")
-    if cfg.get("memo_mode") not in MEMO_LABELS:
+    cm = cfg.get("collate_memo", "none")
+    cm = ("notice" if cm else "inline") if isinstance(cm, bool) else (cm if isinstance(cm, str) and cm in MEMO_LABELS else "none")
+    display_version = raw.get("collate_display_version", 0)
+    display_current = isinstance(display_version, int) and display_version >= 1
+    if not display_current and cm in ("notice", "inline"):    # 이전 기본·메모 끔은 색상만으로 한번 옮김. 이후 다시 고른 메모 옵션과 명시적 all은 보존.
+        cm = "none"
+    cfg["collate_memo"] = cm
+    cfg["collate_display_version"] = display_version if display_current else 1
+    if cfg.get("memo_mode") not in GENERAL_MEMO_LABELS:
         cfg["memo_mode"] = "notice"
     if cfg.get("media_res") not in MRES_LABELS:
         cfg["media_res"] = DEFAULTS["media_res"]
@@ -2022,7 +2028,7 @@ class App(tk.Tk):
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
-        self.v_memo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), MEMO_LABELS["notice"]))
+        self.v_memo = tk.StringVar(value=GENERAL_MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), GENERAL_MEMO_LABELS["notice"]))
         self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "none"), CHECK_LIST_LABELS["none"]))
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 8))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
@@ -2313,7 +2319,7 @@ class App(tk.Tk):
         wide = chars(240)
 
         def memo(parent):
-            mc = ttk.Combobox(parent, textvariable=self.v_memo, values=list(MEMO_LABELS.values()), state="readonly", width=wide)
+            mc = ttk.Combobox(parent, textvariable=self.v_memo, values=list(GENERAL_MEMO_LABELS.values()), state="readonly", width=wide)
             Tip(mc, "고지 사항만(기본): 색으로 전할 수 없는 것 — 본문에 표시되지 않은 확인 항목, 구조 검사 오류, 3차와 다른 대목의 어긋남 — 과 첫머리의 표시 범례에만 "
                     "한컴 메모를 답니다. 모든 표시에 메모: 초록·파랑·문맥 밑줄 자리마다 근거 메모. 메모 없이: 고지를 회색 〔고지: …〕 로 글 속에.", self)
             return mc
@@ -4329,7 +4335,7 @@ class App(tk.Tk):
         from .gui_progress import pill_view
         from .progress import UNITS
         self.l_crun_summary.configure(text=f"{self.v_provider.get()} · {self.v_model.get().strip() or '(모델 없음)'}")
-        self.l_crun_opts.configure(text=f"읽기 방향 {self._mode_vars[0].get()} · 교정 정책 {self.v_policy.get()} · 메모 {self.v_cmemo.get()}")
+        self.l_crun_opts.configure(text=f"읽기 방향 {self._mode_vars[0].get()} · 교정 정책 {self.v_policy.get()} · 표시 {self.v_cmemo.get()}")
         mine = cmd == "collate"
         ph = phase if mine and phase in ("running", "done") else "ready"
         tr = self.tracker
@@ -4713,7 +4719,7 @@ class App(tk.Tk):
         C, P, L = self.colors, self.px, self._lab
         self.v_hwpx = tk.StringVar(value=self.cfg.get("hwpx", "")); self.v_pdf2 = tk.StringVar(value=self.cfg.get("collate_pdf", "")); self.v_find = tk.StringVar()
         self.v_policy = tk.StringVar(value=POLICIES.get(self.cfg.get("collate_policy", "sure"), POLICIES["sure"]))
-        self.v_cmemo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("collate_memo", "notice"), MEMO_LABELS["notice"]))
+        self.v_cmemo = tk.StringVar(value=MEMO_LABELS.get(self.cfg.get("collate_memo", "none"), MEMO_LABELS["none"]))
         self.v_hstyles = tk.StringVar(value=self.cfg.get("heading_styles", ""))
         self.v_asrc = tk.StringVar(value=ANCHOR_SOURCES.get(self.cfg.get("anchor_source", "auto"), ANCHOR_SOURCES["auto"]))
         self.v_cforce = tk.BooleanVar(value=False)
@@ -4784,8 +4790,8 @@ class App(tk.Tk):
         self.ctable.bind("<<TreeviewSelect>>", lambda _e: App._sync_collate_pick(self), add="+")
         App._sync_collate_pick(self)
         L(gb, "기록이 없는 쪽은 모델로 읽고, 入/人 같은 자형 편향 자리는 글자 조각을 모델에 다시 물어 가립니다. "
-              "자동 교정은 초록(3차 자형 판별 근거)·파랑(판독 일치·사전·반복·글자층 근거, 확인 권장), 확인 요청은 빨강으로 칠합니다. "
-              "메모는 지운 자리·넣지 않은 자리·구조 차이·반영하지 않은 제안에만 답니다(원래 글자와 근거 전체는 보고 화면). 이전처럼 모든 교정에 메모를 원하면 '모든 표시에 메모'.",
+              "초록은 자형 판별로 확정, 파랑은 자동 교정(확인 권장), 빨강은 확인 필요입니다. "
+              "기본은 색상만 표시하며 메모나 글 속 설명을 넣지 않습니다. 원래 글자·누락 및 삽입 제안·상세 근거는 [이 구획 결과 보기]에서 확인합니다.",
           "CAP", "MUTED", wrap=True).pack(fill="x", pady=(P(10), 0))
         cl["run"] = ttk.Frame(tab)                                          # '교정 실행' 카드 자리(select_tab 이 act_cards[1] 을 넣고 뺀다)
         cl["prog"] = self._build_collate_progress(tab)
@@ -4805,7 +4811,7 @@ class App(tk.Tk):
         head = tk.Frame(b, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
         L(head, "교정 실행", "SECTION").pack(side="left")
         self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton",
-                  tip="판독기·모델·속도·읽기 방향과 교정 정책·메모는 설정 탭에서 고릅니다.").pack(side="right")
+                  tip="판독기·모델·속도·읽기 방향과 교정 정책·표시 방식은 설정 탭에서 고릅니다.").pack(side="right")
         self.l_crun_summary = L(b, "", "BODY_B", wrap=True); self.l_crun_summary.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
         self.l_crun_opts = L(b, "", "CAP", "MUTED", wrap=True); self.l_crun_opts.grid(row=2, column=0, sticky="ew", pady=(P(2), 0))
         self._btn(b, "▶  HWPX 전체 교정", self.do_collate_all, style="Seal.TButton",
@@ -4830,8 +4836,11 @@ class App(tk.Tk):
         b_section.grid(row=8, column=0, sticky="ew", pady=(P(6), 0))
         self._cview_btns.append(b_section)
         App._sync_collate_pick(self)
+        self._btn(b, "기존 앱 메모 정리", self.clean_collate_memos,
+                  tip="교정본 전체에서 연어OCR이 만든 책갈피 교정 메모만 정리합니다. 백업을 남기고 본문·색상·직접 단 메모를 보존합니다. OCR을 다시 실행하지 않습니다.").grid(
+                      row=9, column=0, sticky="ew", pady=(P(6), 0))
         L(b, "직접 수정은 [나란히 대조·편집]에서 기존 교정본에 저장합니다. 한글 구획 보기는 별도 사본입니다.",
-          "CAP", "MUTED", wrap=True).grid(row=9, column=0, sticky="ew", pady=(P(4), 0))
+          "CAP", "MUTED", wrap=True).grid(row=10, column=0, sticky="ew", pady=(P(4), 0))
         return card
 
     def _build_collate_progress(self, parent) -> ttk.Frame:
@@ -4860,19 +4869,20 @@ class App(tk.Tk):
         self.v_collate_set = tk.BooleanVar(value=False)
         self.b_collate_set = ttk.Button(head, text="책갈피 OCR 교정 ▸", style="SecToggle.TButton", cursor="hand2", command=self.toggle_collate_settings)
         self.b_collate_set.pack(side="left")
-        self._lab(head, "교정 정책 · 메모 · 책갈피 OCR: 기록 있는 쪽도 다시 판독", "CAP", "MUTED", wrap=True).pack(side="left", fill="x", expand=True, padx=(P(8), 0))
+        self._lab(head, "교정 정책 · 표시 방식 · 책갈피 OCR: 기록 있는 쪽도 다시 판독", "CAP", "MUTED", wrap=True).pack(side="left", fill="x", expand=True, padx=(P(8), 0))
         body = tk.Frame(card, bg=C["PANEL"])
         self._set_sections["collate"] = {"card": card, "head": head, "body": body}
         R, row = self._set_rows, self._setting_row
-        R["policy"] = row(body, "교정 정책", "HWPX 글자를 얼마나 고칠지 — 메모만 · 확실한 것만(A) · 전부(A·B2)",
+        R["policy"] = row(body, "교정 정책", "HWPX 글자를 얼마나 고칠지 — 표시만 · 확실한 것만(A) · 전부(A·B2)",
                           lambda p: ttk.Combobox(p, textvariable=self.v_policy, values=list(POLICIES.values()), state="readonly", width=self._cw(POLICIES.values())))
 
         def memo(p):
             cm = ttk.Combobox(p, textvariable=self.v_cmemo, values=list(MEMO_LABELS.values()), state="readonly", width=self._cw(MEMO_LABELS.values()))
-            Tip(cm, "고지 사항만(기본): 지운 글자·폭 없는 표시·구조 차이·반영하지 않은 제안에만 메모를 답니다. 자동 교정은 초록·파랑, 확인 요청은 빨강으로 칠하고, "
-                    "원래 글자와 근거 전체는 보고(collate 폴더의 html)에 남습니다. 모든 항목에 메모를 원하면 '모든 표시에 메모'.", self)
+            Tip(cm, "색상만 표시(기본): 초록은 자형 판별로 확정, 파랑은 자동 교정(확인 권장), 빨강은 확인 필요입니다. "
+                    "메모·글 속 설명을 넣지 않고 원래 글자·누락 및 삽입 제안·근거 전체는 보고서에 남깁니다. "
+                    "기존 교정본의 앱 메모는 책갈피 OCR의 [기존 앱 메모 정리]로 정리할 수 있습니다. 메모가 필요하면 '고지 사항만 메모' 또는 '모든 표시에 메모'를 고르십시오.", self)
             return cm
-        R["cmemo"] = row(body, "메모", "원래 글자와 근거 전체는 보고(collate 폴더의 html)에", memo)
+        R["cmemo"] = row(body, "표시 방식", "기본은 색상만 — 상세 근거는 [이 구획 결과 보기]", memo)
         R["cforce"] = row(body, "책갈피 OCR: 기록 있는 쪽도 다시 판독", "켜면 판독 기록이 있는 쪽도 다시 삼", lambda p: ttk.Checkbutton(p, variable=self.v_cforce, style="Bare.TCheckbutton"),
                           receipt=True)
 
@@ -5376,6 +5386,49 @@ class App(tk.Tk):
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"교정본을 열지 못했습니다.\n{out}\n{exc}")
 
+    def clean_collate_memos(self):
+        """Remove only app-owned correction memos from the existing corrected file, without OCR."""
+        if vars(self).get("running") or vars(self).get("_closing"):
+            return
+        source = self.v_hwpx.get().strip()
+        if not source:
+            messagebox.showinfo(APP_NAME, "책갈피 OCR에서 원본 HWPX를 먼저 고르십시오.", parent=self)
+            return
+        source_key = os.path.normcase(str(Path(source).resolve()))
+        windows = []
+        for window in list(vars(self).get("_collate_edit_windows", ())):
+            key = getattr(window, "_collate_key", ())
+            if not window.winfo_exists() or len(key) < 2 or key[1] != source_key:
+                continue
+            if window.dirty or window.busy:
+                window.deiconify(); window.lift()
+                messagebox.showinfo(APP_NAME, "대조 편집 창에 저장하지 않은 수정이 있거나 저장 중입니다.\n"
+                                    "편집 창에서 저장을 마치거나 수정을 취소한 뒤 [기존 앱 메모 정리]를 누르십시오.", parent=self)
+                return
+            windows.append(window)
+        from .collate.memo_cleanup import clean_corrected_memos, MemoCleanupError
+        try:
+            result = clean_corrected_memos(source)
+        except (OSError, MemoCleanupError) as exc:
+            messagebox.showerror(APP_NAME, f"교정본의 앱 메모를 정리하지 못했습니다.\n{exc}", parent=self)
+            return
+        notice = (f"기존 앱 메모 {result.removed}개 정리 · {result.corrected_path.name}"
+                  if result.removed else "정리할 앱 메모가 없습니다.")
+        detail = "\n본문·색상·직접 단 메모는 보존했습니다. OCR을 다시 실행하지 않았습니다."
+        if result.skipped:
+            detail += f"\n안전하게 구분할 수 없는 메모 {result.skipped}개는 남겼습니다."
+        if result.backup_path is not None:
+            detail += f"\n정리 전 백업: {result.backup_path}"
+        if result.removed:
+            for window in windows:
+                if not window.reload():
+                    detail += "\n대조 편집 창에서 [다시 불러오기]를 눌러 정리한 교정본을 확인하십시오."
+                    break
+        if vars(self).get("v_cstat") is not None:
+            self.v_cstat.set(notice)
+        self._append(notice + detail + "\n")
+        messagebox.showinfo(APP_NAME, notice + detail, parent=self)
+
     def _btn(self, parent, text, cmd, tip: str | None = None, lock: bool = True, **kw) -> ttk.Button:
         """작업 중에는 잠기는 단추(lock=False 면 잠그지 않음 — 원본 보기·결과 열기처럼 열기만 하는 단추). 너비는 글자에 맞춘다(고정 너비로 글자가 잘리던 문제).
         tip 은 마우스를 올리면 보이는 설명."""
@@ -5536,7 +5589,7 @@ class App(tk.Tk):
         return o
 
     def memo_mode(self) -> str:
-        return next((k for k, v in MEMO_LABELS.items() if v == self.v_memo.get()), "notice")
+        return next((k for k, v in GENERAL_MEMO_LABELS.items() if v == self.v_memo.get()), "notice")
 
     def layout_key(self) -> str:
         return next((k for k, v in LAYOUT_LABELS.items() if v == self.v_layout.get()), "page")
@@ -5619,7 +5672,7 @@ class App(tk.Tk):
             self._append("주의: " + msg + " [설정] → 이 책 → 짜임 규칙에서 바꿀 수 있습니다.\n")
 
     def collate_memo_mode(self) -> str:
-        return next((k for k, v in MEMO_LABELS.items() if v == self.v_cmemo.get()), "notice")
+        return next((k for k, v in MEMO_LABELS.items() if v == self.v_cmemo.get()), "none")
 
     def check_list_mode(self) -> str:
         return next((k for k, v in CHECK_LIST_LABELS.items() if v == self.v_chk.get()), "none")

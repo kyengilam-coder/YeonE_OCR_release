@@ -464,9 +464,11 @@ class Cli(unittest.TestCase):
         self.assertEqual(ap.parse_args(["run", "x.pdf"]).memo, "notice")
         from yeone_ocr.collate.run import memo_mode
         self.assertEqual(memo_mode(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx", "--no-memo"])), "inline")
-        self.assertEqual(memo_mode(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx"])), "notice")
+        self.assertEqual(memo_mode(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx"])), "none")
+        for mode in ("none", "notice", "all", "inline"):
+            self.assertEqual(memo_mode(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx", "--memo", mode])), mode)
         from yeone_ocr.collate.labels import MEMO_MODES
-        self.assertEqual(set(MEMO_MODES), {"notice", "all", "inline"})
+        self.assertEqual(set(MEMO_MODES), {"none", "notice", "all", "inline"})
 
     def test_run_writes_context_json_not_records(self):
         from yeone_ocr import cli

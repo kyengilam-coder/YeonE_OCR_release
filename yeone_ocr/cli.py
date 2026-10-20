@@ -2766,11 +2766,11 @@ def build_parser():
     p.add_argument("--anchor-source", choices=["auto", "hwpx", "pdf"], default="auto",
                    help="구획 기준: auto(기본)=HWPX 책갈피·제목 스타일, 없으면 PDF 책갈피 이름으로 본문 검색 / hwpx / pdf")
     p.add_argument("--pdf-pages", help="PDF 책갈피 짝이 없을 때 쪽 범위를 직접(예 120-123)")
-    p.add_argument("--policy", choices=["all", "sure", "memo"], default="sure", help="all=A·B2 자동, C 는 표시만 / sure=A 만(기본) / memo=메모만")
+    p.add_argument("--policy", choices=["all", "sure", "memo"], default="sure", help="all=A·B2 자동, C 는 표시만 / sure=A 만(기본) / memo=표시만(글자 안 바꿈)")
     p.add_argument("--apply", action="store_true", help="대조 결과를 HWPX 에 반영해 사본(<이름>_교정.hwpx)으로 저장. 없으면 보고만")
     p.add_argument("--out", help="저장할 HWPX 경로(기본 <이름>_교정.hwpx)")
-    p.add_argument("--memo", choices=["notice", "all", "inline"], default=None,
-                   help="한컴 메모: notice=고지 사항만(지운 글자·구조 차이·반영하지 않은 제안 등, 기본) / all=모든 항목에 근거(0.6.3 방식) / inline=메모 없이 고지만 글 뒤 〔…〕")
+    p.add_argument("--memo", choices=["none", "notice", "all", "inline"], default=None,
+                   help="교정 표시: none=색상만(기본, 메모·글 속 고지 없음; 상세 근거는 보고서) / notice=고지 사항만 메모 / all=모든 항목에 메모 / inline=글 뒤 〔…〕(이전 방식)")
     p.add_argument("--no-memo", action="store_true", help="(예전 이름) --memo inline 과 같음")
     p.add_argument("--all", action="store_true", help="구획 전체를 차례로 대조(--apply 면 교정본 하나에 쌓음). PDF 쪽을 못 찾는 구획은 건너뛰고 요약에 적음")
     p.add_argument("--no-glyph-check", action="store_true", help="대조 뒤 자형 편향·혼동 자리(入/人 등)를 글자 조각으로 모델에 묻는 3차 판별을 하지 않음")

@@ -611,11 +611,15 @@ class MemoAndMarks(unittest.TestCase):
         items = [Item("A", "replace", 1, 0, 1, "有", "无", "無", auto=True), Item("B1", "mark", 1, 3, 3, "", "胎", "")]
         with tempfile.TemporaryDirectory() as td:
             got = {}
-            for mode in ("notice", "all", "inline"):
+            for mode in ("none", "notice", "all", "inline"):
                 p = Path(td, f"{mode}.html"); report_html(sec, None, (7, 7), [], [], items, "all", None, p, mode=mode); got[mode] = p.read_text(encoding="utf-8")
             self.assertEqual(got["notice"].count("· 고지 메모</small>"), 1)                          # 폭 없는 표시만
             self.assertEqual(got["all"].count("· 메모</small>"), 2)                                   # 모든 항목
             self.assertEqual(got["inline"].count("· 글 속 〔〕 표기</small>"), 1); self.assertNotIn("고지 메모", got["inline"])
+            self.assertNotIn("· 메모</small>", got["none"])
+            self.assertNotIn("고지 메모", got["none"])
+            self.assertIn("원래 글자·제안·근거 전체는 이 보고에 보관", got["none"])
+            self.assertIn("有", got["none"]); self.assertIn("無", got["none"]); self.assertIn("胎", got["none"])
 
     def test_recolor_over_red_drops_yellow_and_bold(self):
         from yeone_ocr.collate.hwpx_edit import _slots
@@ -833,6 +837,35 @@ class NotesAndLegacy(unittest.TestCase):
         finally:
             R.log, R.ensure_pages_read, cli.resolve_mode, R.collate = old
         return logs, out
+
+    def test_color_only_run_preserves_body_and_reports_without_memos(self):
+        from yeone_ocr.collate.collate import Item
+        from yeone_ocr.hwpx_memo import count_memos
+        with tempfile.TemporaryDirectory() as td:
+            book = HwpxBook(make_book(os.path.join(td, "color.hwpx")))
+            try:
+                before = book.texts()
+                anchors = book.anchors()
+                pi = anchors[1].para + 1
+                text = before[pi]
+                items = [Item("B1", "mark", pi, 0, 1, text[0], "疑", "", note="原本 확인"),
+                         Item("C", "mark", pi, len(text), len(text), "", "漏落", "", note="삽입 제안")]
+                logs, output = self._run_section(td, book, anchors, 1, items, mode="none")
+            finally:
+                book.doc.close()
+            saved = HwpxBook(output)
+            try:
+                self.assertEqual(saved.texts(), before)
+                self.assertEqual(count_memos(p.element for p in saved.paragraphs), 0)
+            finally:
+                saved.doc.close()
+            self.assertTrue(any("메모 0건(색상만)" in line for line in logs), logs)
+            report = next(Path(td, "collate").glob("*.json"))
+            import json
+            data = json.loads(report.read_text("utf-8"))
+            self.assertEqual(data["memo_mode"], "none")
+            self.assertTrue(all(not item["memo"] for item in data["items"]))
+            self.assertIn("漏落", report.with_suffix(".html").read_text("utf-8"))
 
     def test_inline_keeps_pdf_title_anchors(self):
         """제목 스타일·책갈피가 없어 PDF 책갈피 제목으로 찾은 구획 기준 문단(--anchor-source pdf·자동 대체)에도 글 속 표기를 넣지 않는다."""

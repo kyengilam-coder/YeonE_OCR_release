@@ -146,8 +146,8 @@ def trim_to_section(paras: list[tuple], title: str, next_title: str | None) -> t
 
 # ---------- 보고 ----------
 def memo_mode(args) -> str:
-    """책갈피 교정의 메모 방식: --memo 가 있으면 그것, --no-memo 면 inline, 아니면 notice(고지 사항만)."""
-    return getattr(args, "memo", None) or ("inline" if getattr(args, "no_memo", False) else "notice")
+    """책갈피 기본은 색상만. 명시적 --memo와 예전 --no-memo(inline)는 유지한다."""
+    return getattr(args, "memo", None) or ("inline" if getattr(args, "no_memo", False) else "none")
 
 
 def _item_json(it: Item, mode: str) -> dict:
@@ -157,11 +157,12 @@ def _item_json(it: Item, mode: str) -> dict:
 
 
 def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int, int], hw_paras: list[str], oc_paras: list[tuple],
-                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "", mode: str = "notice") -> str:
+                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "", mode: str = "none") -> str:
     """mode: 실제 메모 방식(memo_mode) — 항목마다 '메모를 다는지' 를 그 방식으로 보인다(json 의 memo 와 같게)."""
     sm = summary(items)
     def esc(s): return html.escape(s or "")
-    from ..grades import collate_grade, needs_memo
+    from ..grades import collate_grade, needs_memo, COLLATE_COLOR_LEGEND
+    legend = COLLATE_COLOR_LEGEND if mode == "none" else COLLATE_LEGEND
     gname = {"green": "<span style='color:#0B7A3B;text-decoration:underline dotted'>초록</span>", "blue": "<span style='color:#1F4FBF;background:#E1EBFF;text-decoration:underline dashed'>파랑</span>",
              "red": "<span style='color:#C00000;background:#FFFF00'><b>빨강</b></span>"}
     mlabel = {"notice": "고지 메모", "all": "메모", "inline": "글 속 〔〕 표기"}.get(mode, "메모")
@@ -188,7 +189,7 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>교정 · {esc(section.anchor.name)}</title><style>{css}</style></head><body>"
            f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start + 1}~{section.end} · PDF {pages[0]}~{pages[1]}쪽"
            + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}"
-           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + f"<br>{esc(COLLATE_LEGEND)}</small></header><main>"
+           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + f"<br>{esc(legend)}</small></header><main>"
            f"<p class=sum><span>자동 교정 {sm['auto']}</span><span>표시만 {sm['mark']}</span><span>A {sm['A']}</span><span>B1 {sm['B1']}</span><span>B2 {sm['B2']}</span><span>C {sm['C']}</span></p>"
            + (f"<p><b>참고:</b> {esc(note)}</p>" if note else "") + appl +
            f"<table><tr><th>갈래</th><th>처리</th><th>문단</th><th>HWPX (「」 안이 해당 자리)</th><th>판독(간체)</th><th>반영</th><th>다른 후보</th><th>PDF 쪽</th><th>설명</th></tr>{''.join(rows) or '<tr><td colspan=9>차이 없음</td></tr>'}</table>"
@@ -539,7 +540,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             mode = memo_mode(args)
             ed = Editor(book, memo=mode, heads={x.para for x in anchors})   # 이번 실행의 구획 기준(구획 시작 포함, PDF 책갈피 제목·고른 스타일)
             applied = ed.apply(applicable)
-            if mode != "inline":
+            if mode not in ("inline", "none"):
                 ed.add_legend_memo()                                   # 범례 메모 하나(이미 있으면 그대로)
             out = str(target)
             try:
@@ -555,11 +556,14 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                 if g: gc[g] += 1
             n_memo = sum(1 for x in applied if x.ok and x.memo)   # 실제로 단 메모·글 속 표기만('이미 표시된 자리'·제목 문단·표기 자리 없음은 세지 않음)
             log(f"반영 {ok}건" + (f", 실패 {len(bad)}건" if bad else "") + f" → 저장: {saved}")
-            log(f"표시: 초록 {gc['green']} · 파랑 {gc['blue']} · 빨강 {gc['red']} · 메모 {n_memo}건({ {'notice': '고지 사항', 'all': '모든 표시', 'inline': '글 속 〔〕'}[mode] })"
+            log(f"표시: 초록 {gc['green']} · 파랑 {gc['blue']} · 빨강 {gc['red']} · 메모 {n_memo}건({ {'none': '색상만', 'notice': '고지 사항', 'all': '모든 표시', 'inline': '글 속 〔〕'}[mode] })"
                 + (" — 원래 글자·근거는 보고 화면(html·json)에" if mode != "all" else ""))
             n_hidden = sum(1 for x in applied if x.ok and x.hidden)
             if n_hidden:
-                log(f"제목 문단의 표시 {n_hidden}건(지운 글자·폭 없는 표시)은 문서에 보이지 않고 보고(html)에만 있습니다 — 구획 이름이 바뀌지 않게 글 속 표기를 넣지 않음")
+                if mode == "none":
+                    log(f"색을 표시할 글자가 없는 항목 {n_hidden}건은 보고(html)에만 있습니다.")
+                else:
+                    log(f"제목 문단의 표시 {n_hidden}건(지운 글자·폭 없는 표시)은 문서에 보이지 않고 보고(html)에만 있습니다 — 구획 이름이 바뀌지 않게 글 속 표기를 넣지 않음")
             for x in bad[:5]:
                 log(f"  실패: {x.item.kind} 문단 {x.item.para + 1} [{x.item.start}:{x.item.end}] — {x.note}")
     if saved and normalized_path(saved) == binding["source_hwpx"]["path"]:
@@ -570,7 +574,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path), mode=memo_mode(args))
     (out_dir / f"{stem}.json").write_text(json.dumps({**binding, "section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
                                                       "hwpx_file": str(book.path), "hwpx_paragraphs": len(book.paragraphs), "witness_stats": wst, "glyph_stats": gst,
-                                                      "summary": sm, "manual_protected_paragraphs": sorted(protected),
+                                                      "summary": sm, "memo_mode": memo_mode(args), "manual_protected_paragraphs": sorted(protected),
                                                       "manual_held_items": len(held),
                                                       "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
