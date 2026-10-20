@@ -232,6 +232,16 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["automatic_insertions"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_edits_existing_bookmark_copy_with_backup(self):
+        from yeone_ocr.frozen_smoke import bookmark_edit_probe
+        result = bookmark_edit_probe(self.root)
+        self.assertTrue(result["saved_into_existing_copy"])
+        self.assertTrue(result["backup_matches_previous"])
+        self.assertTrue(result["source_and_other_section_preserved"])
+        self.assertTrue(result["manual_protection"])
+        self.assertTrue(result["ui_save_and_reopen"])
+        self.assertEqual(result["network_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

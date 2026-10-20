@@ -273,6 +273,74 @@ def bookmark_section_probe(folder: Path) -> dict:
             "earlier_mention_rejected": True, "input_unchanged": True, "network_calls": 0}
 
 
+def bookmark_edit_probe(folder: Path) -> dict:
+    """Save a manual edit through the shipped UI, preserving source and other text."""
+    import tkinter as tk
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import SectionEditSession, manual_protected_paragraphs
+    from .collate.section_editor import BookmarkSectionEditor
+
+    source = folder / "bookmark-edit.hwpx"
+    pdf_path = folder / "bookmark-edit.pdf"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph("本方正文。", style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=18)
+        pdf.save(pdf_path)
+    original = source.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        anchors = book.anchors()
+        section = book.section(anchors, 0)
+    finally:
+        book.doc.close()
+    session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    editable = next(p.index for p in session.paragraphs if p.editable)
+    first = session.save({editable: "本方正文甲。"})
+    previous = first.path.read_bytes()
+    root = tk.Tk()
+    root.withdraw()
+    window = None
+    try:
+        window = BookmarkSectionEditor(root, pdf_path=pdf_path, hwpx_path=source,
+            section_name="瀉白散", section_start=section.start, section_end=section.end,
+            pdf_pages=(1, 1))
+        window.withdraw()
+        field = window._editors[editable]
+        field.delete("1.0", "end")
+        field.insert("1.0", "本方正文乙。")
+        window._confirm_changes = lambda changes: changes == {editable: "本方正文乙。"}
+        assert window.dirty
+        assert window.save()
+        assert not window.dirty
+        assert first.path.with_suffix(".bak.hwpx").read_bytes() == previous
+        assert manual_protected_paragraphs(first.path) == {editable}
+        reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        assert next(p.corrected_text for p in reopened.paragraphs if p.index == editable) == "本方正文乙。"
+        check = HwpxBook(str(first.path))
+        try:
+            assert "下一方正文。" in check.texts()
+        finally:
+            check.doc.close()
+        assert source.read_bytes() == original
+    finally:
+        if window is not None:
+            window.destroy()
+        root.destroy()
+    return {"saved_into_existing_copy": True, "backup_matches_previous": True,
+            "source_and_other_section_preserved": True, "manual_protection": True,
+            "ui_save_and_reopen": True, "network_calls": 0}
+
+
 def run(report_path: Path) -> int:
     from . import __version__
     report_path = Path(report_path).resolve()
@@ -463,6 +531,7 @@ def run(report_path: Path) -> int:
         check("offline-ocr-pipeline", pipeline_probe)
         check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
         check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
+        check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))
 

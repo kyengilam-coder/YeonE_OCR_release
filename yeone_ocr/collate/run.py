@@ -4,7 +4,7 @@
          yeone-ocr collate <pdf> --hwpx <hwpx> --section "大薊" [--apply] [--policy all|sure|memo] [--out 파일]
 """
 from __future__ import annotations
-import html, json, os, re, time, unicodedata
+import hashlib, html, json, os, re, time, unicodedata
 from argparse import Namespace
 from contextlib import ExitStack
 from dataclasses import asdict
@@ -405,8 +405,29 @@ def note_remerged(work, pages: list[int], backups: list | None = None) -> None:
         pass
 
 
+def _document_digest(path) -> str | None:
+    try:
+        with Path(path).open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def _manual_protection(target, book) -> set[int]:
+    from .section_edit import manual_protected_paragraphs
+    try:
+        return manual_protected_paragraphs(target, book.paragraphs)
+    except (OSError, ValueError) as exc:
+        raise SaveFailed(f"사람이 수정한 문단의 보존 기록을 확인하지 못했습니다. 교정본을 덮어쓰지 않습니다 — {exc}") from exc
+
+
 def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matches, idx: int, flat: bool = False) -> dict:
     from ..cli import resolve_mode
+    target = Path(getattr(args, "out", None) or corrected_path(book.path))
+    protected = _manual_protection(target, book)
+    target_digest, source_digest = _document_digest(target), _document_digest(book.path)
+    original = getattr(args, "hwpx", None) or book.path
+    original_digest = _document_digest(original)
     resolve_mode(args, pdf_doc, work)
     a = anchors[idx]; m = matches[idx]
     sec = book.section(anchors, idx, flat=flat)
@@ -462,6 +483,15 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     policy = getattr(args, "policy", "all") or "all"
     log(f"기준 HWPX: {Path(book.path).name} (문단 {len(book.paragraphs):,}개)")
     items = collate(hwpx_cells(hw_paras, sec.start), ocr_cells(oc_paras), policy=policy, titles=book_titles(book.texts()))
+    held = [item for item in items if item.para in protected]
+    items = [item for item in items if item.para not in protected]
+    for item in held:
+        item.auto = False
+        item.note = "사람이 수정한 문단 — 자동 반영·표시 보류, 보고에만 제안" + (f" · {item.note}" if item.note else "")
+    if held:
+        notice = f"사람이 수정한 문단 {len({item.para for item in held})}개의 차이 {len(held)}건은 보고에만 남기고 문서에 반영하지 않습니다."
+        log(notice)
+        note = f"{note} · {notice}" if note else notice
     # 3차 판별(글자 조각)을 글자층 대조보다 먼저 — 글자층은 같은 화소를 본 다른 OCR 이라 자형 혼동을 가리지 못하고, 먼저 올려 버리면(B1→A·B2) 3차가 묻지 않게 된다
     gst = {}; reader = glyph_reader(args) if any(glyph_candidate(it) for it in items) else None
     if reader is not None:
@@ -484,6 +514,8 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             + (f" · 자형 편향 쌍이라 증인으로 안 씀 {wst['weak']}건" if wst.get("weak") else "")
             + (f" · 3차 판별이 가린 자리라 건너뜀 {wst['glyph']}건" if wst.get("glyph") else "")
             + (" · 글자층만으로는 교정 후보로 올리지 않음(3차 판별이 가림)" if reader is not None else ""))
+    items.extend(held)
+    items.sort(key=lambda item: (item.para, item.start, item.end))
     sm = summary(items)
     log(f"대조: 자동 교정 {sm['auto']}건 · 표시만 {sm['mark']}건 (A {sm['A']} · B1 {sm['B1']} · B2 {sm['B2']} · C {sm['C']})" + (f" · {note}" if note else ""))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
@@ -492,18 +524,27 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                              getattr(args, "hwpx", None) or book.path, a.name, sec.start, sec.end)
     applied = None; saved = None
     if getattr(args, "apply", False):
-        if not items:
+        def check_current():
+            if (_document_digest(original) != original_digest
+                    or _document_digest(book.path) != source_digest
+                    or _document_digest(target) != target_digest):
+                raise SaveFailed("대조하는 동안 HWPX 파일이 다른 곳에서 변경되었습니다. 현재 교정본을 덮어쓰지 않습니다. 다시 열어 확인하십시오.")
+        # Check before editing and again inside save_copy after serialization.
+        check_current()
+        protected = _manual_protection(target, book)
+        applicable = [item for item in items if item.para not in protected]
+        if not applicable:
             log("차이가 없어 고칠 것이 없습니다.")
         else:
             mode = memo_mode(args)
             ed = Editor(book, memo=mode, heads={x.para for x in anchors})   # 이번 실행의 구획 기준(구획 시작 포함, PDF 책갈피 제목·고른 스타일)
-            applied = ed.apply(items)
+            applied = ed.apply(applicable)
             if mode != "inline":
                 ed.add_legend_memo()                                   # 범례 메모 하나(이미 있으면 그대로)
-            out = getattr(args, "out", None) or corrected_path(book.path)
+            out = str(target)
             try:
                 Path(out).parent.mkdir(parents=True, exist_ok=True)
-                saved = ed.save_copy(out)
+                saved = ed.save_copy(out, check_current=check_current)
             except OSError as e:                                       # 한컴에 열린 교정본 등 — 고친 것이 저장되지 않았다
                 raise SaveFailed(f"교정본 {Path(out).name} 을(를) 저장하지 못했습니다({str(e)[:80]}) — 한컴 등에서 그 파일을 열어 두었으면 닫고 다시 누르십시오") from e
             ok = sum(1 for x in applied if x.ok); bad = [x for x in applied if not x.ok]
@@ -529,7 +570,9 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path), mode=memo_mode(args))
     (out_dir / f"{stem}.json").write_text(json.dumps({**binding, "section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
                                                       "hwpx_file": str(book.path), "hwpx_paragraphs": len(book.paragraphs), "witness_stats": wst, "glyph_stats": gst,
-                                                      "summary": sm, "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                                      "summary": sm, "manual_protected_paragraphs": sorted(protected),
+                                                      "manual_held_items": len(held),
+                                                      "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"보고: {rep}")
     return {"section": a.name, "pages": pages, "summary": sm, "report": rep, "saved": saved, "items": items, "read_partial": bool(read_partial), "remerged": remerged,
@@ -671,6 +714,10 @@ def _cmd_collate(args, resources):
                 book, anchors, matches = book2, a2, m2
                 log(f"기존 교정본에 이어서 작업합니다(앞서 고친 구획 유지): {target.name}")
             elif getattr(args, "apply", False) and not preview:
+                from .section_edit import manual_history_path
+                if manual_history_path(target).exists():
+                    log("오류: 사람이 수정한 교정본의 구획 목록이 원본과 다릅니다. 교정본을 옮기거나 원본부터 다시 덮어쓰지 않습니다. 대조 편집에서 문서를 확인하십시오.")
+                    return 1
                 # 저장하면 덮어써질 교정본 — 앞서 고친 것이 사라지지 않게 옆으로 옮겨 두고 원본에서 다시 시작한다
                 book2.doc.close()                           # Windows 에서 읽던 ZIP 핸들을 닫아야 파일을 옮길 수 있다
                 moved = set_aside(target)

@@ -1,3 +1,3 @@
-Version: 0.12.1
-Git commit: 514a82b11edf7f9b59d16c11db3903a043909797
+Version: 0.12.2
+Git commit: 4610bfb5f491af4688639cc7ef7979b6a1292a7b
 Source: committed Git tree only.

@@ -1,6 +1,7 @@
 """Bookmark results stay attached to their selected source and section; no OCR."""
 import contextlib
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -115,13 +116,48 @@ class BookmarkGui(unittest.TestCase):
         self.assertIn("기존 기록: 瀉白散", self.app.v_cstat.get())
         self.assertIn("2026-10-20", self.app.v_cstat.get())
 
-    def test_double_click_without_result_previews_without_executing(self):
-        with patch("yeone_ocr.collate.results.locate_section_report", return_value=None), \
-             patch.object(gui.App, "preview_collate_section") as preview, \
+    def test_double_click_opens_editor_without_executing(self):
+        with patch.object(gui.App, "open_collate_editor") as editor, \
              patch.object(gui.App, "do_collate", side_effect=AssertionError("view must not execute OCR")):
             gui.App.open_collate_section(self.app)
-        preview.assert_called_once_with(self.app)
+        editor.assert_called_once_with(self.app)
         self.opened.assert_not_called()
+
+    def test_editor_receives_selected_scope_and_save_gate(self):
+        with patch.object(gui.App, "_collate_editor_pages", return_value=(623, 627)), \
+             patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:
+            gui.App.open_collate_editor(self.app)
+        arguments = constructor.call_args.kwargs
+        self.assertEqual(arguments["section_name"], "瀉白散")
+        self.assertEqual((arguments["section_start"], arguments["section_end"]), (5271, 5323))
+        self.assertEqual(arguments["pdf_pages"], (623, 627))
+        self.assertEqual(arguments["heading_styles"], ["제목"])
+        self.assertTrue(arguments["can_write"]())
+        self.app.running = True
+        self.assertFalse(arguments["can_write"]())
+        self.assertEqual(len(self.app._collate_edit_windows), 1)
+
+    def test_dirty_editor_blocks_ocr_for_its_document(self):
+        window = SimpleNamespace(
+            winfo_exists=lambda: True, dirty=True, busy=False, deiconify=Mock(), lift=Mock(),
+            _collate_key=("", os.path.normcase(str(self.hwpx.resolve())), 5271, 5323))
+        self.app._collate_edit_windows = [window]
+        self.assertFalse(gui.App._collate_editors_ready(self.app))
+        window.lift.assert_called_once()
+        window.dirty = False
+        self.assertTrue(gui.App._collate_editors_ready(self.app))
+
+    def test_editing_cannot_open_during_ocr(self):
+        self.app.running = True
+        with patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:
+            gui.App.open_collate_editor(self.app)
+        constructor.assert_not_called()
+
+    def test_editor_without_confirmed_pdf_range_is_not_opened(self):
+        with patch.object(gui.App, "_collate_editor_pages", return_value=None), \
+             patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:
+            gui.App.open_collate_editor(self.app)
+        constructor.assert_not_called()
 
     def test_missing_result_does_not_open_an_unrelated_report(self):
         with patch("yeone_ocr.collate.results.locate_section_report", return_value=None):
@@ -181,12 +217,14 @@ class BookmarkGui(unittest.TestCase):
     def test_view_buttons_stay_available_during_run_but_need_selection(self):
         self.app._csec_btns = [Mock(), Mock()]
         self.app._cview_btns = [Mock(), Mock()]
+        self.app._cedit_btns = [Mock()]
         self.app.running = True
         gui.App._sync_collate_pick(self.app)
         for button in self.app._csec_btns:
             button.configure.assert_called_with(state="disabled")
         for button in self.app._cview_btns:
             button.configure.assert_called_with(state="normal")
+        self.app._cedit_btns[0].configure.assert_called_with(state="disabled")
         self.selected[:] = []
         gui.App._sync_collate_pick(self.app)
         for button in self.app._cview_btns:

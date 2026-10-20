@@ -4764,7 +4764,7 @@ class App(tk.Tk):
         self.ctable.configure(xscrollcommand=xsb.set); xsb.pack(side="bottom", fill="x")
         sb.pack(side="right", fill="y"); self.ctable.pack(side="left", fill="both", expand=True)
         self.ctable.bind("<Double-1>", lambda _e: self.open_collate_section())
-        self._ctable_empty = tk.Label(self.ctable, text="구획 색인 전 — 색인하면 구획마다 한 줄씩 나옵니다(두 번 누르면 결과·미리 보기)",
+        self._ctable_empty = tk.Label(self.ctable, text="구획 색인 전 — 색인하면 구획마다 한 줄씩 나옵니다(두 번 누르면 대조 편집)",
                                       font=self.fonts["CAP"], fg=C["MUTED"], bg=C["FIELD"], bd=0)
         self._ctable_empty.place(relx=0.5, rely=0.55, anchor="center")
         self.v_cselection = tk.StringVar(value="구획을 선택하면 PDF 범위와 HWPX 시작·끝을 확인할 수 있습니다.")
@@ -4775,10 +4775,11 @@ class App(tk.Tk):
         b_fix = self._btn(r4, "선택 구획 교정 실행", lambda: self.do_collate(apply=True), tip="선택한 구획을 대조해 교정본에 저장합니다. 완료 후 다시 누르면 재실행합니다."); b_fix.pack(side="right")
         b_chk = self._btn(r4, "대조만 실행", lambda: self.do_collate(apply=False), tip="선택 구획을 대조해 보고를 만듭니다. 기록이 없는 쪽의 판독·자형 판별에는 모델 호출이 들 수 있습니다.")
         b_chk.pack(side="right", padx=(0, P(6)))
-        b_preview = self._btn(r4, "구획 미리 보기", self.preview_collate_section, lock=False,
-                              tip="선택 구획의 PDF와 HWPX 시작·끝을 확인합니다. OCR을 실행하지 않습니다.")
-        b_preview.pack(side="left")
-        self._cview_btns = [b_preview]
+        b_edit = self._btn(r4, "나란히 대조·편집", self.open_collate_editor, lock=False,
+                          tip="왼쪽 원본 PDF를 보며 오른쪽 교정문을 수정합니다. 저장 전 변경 내용을 확인하고 기존 교정본에 반영합니다.")
+        b_edit.pack(side="left")
+        self._cedit_btns = [b_edit]
+        self._cview_btns = []
         self._csec_btns = (b_chk, b_fix)                                    # 표에서 구획을 고른 때만 켠다(명세 §6.4 · F_collate)
         self.ctable.bind("<<TreeviewSelect>>", lambda _e: App._sync_collate_pick(self), add="+")
         App._sync_collate_pick(self)
@@ -4829,7 +4830,7 @@ class App(tk.Tk):
         b_section.grid(row=8, column=0, sticky="ew", pady=(P(6), 0))
         self._cview_btns.append(b_section)
         App._sync_collate_pick(self)
-        L(b, "구획 보기는 별도 사본입니다. 직접 고칠 때는 전체 교정본을 여십시오.",
+        L(b, "직접 수정은 [나란히 대조·편집]에서 기존 교정본에 저장합니다. 한글 구획 보기는 별도 사본입니다.",
           "CAP", "MUTED", wrap=True).grid(row=9, column=0, sticky="ew", pady=(P(4), 0))
         return card
 
@@ -5075,7 +5076,7 @@ class App(tk.Tk):
                 empty.place_forget()
             else:
                 empty.configure(text="찾는 구획이 없습니다 — 찾기 칸을 비우면 모두 나옵니다" if self.collate_rows else
-                                "구획 색인 전 — 색인하면 구획마다 한 줄씩 나옵니다(두 번 누르면 결과·미리 보기)")
+                                "구획 색인 전 — 색인하면 구획마다 한 줄씩 나옵니다(두 번 누르면 대조 편집)")
                 empty.place(relx=0.5, rely=0.55, anchor="center")
 
     def _sync_collate_pick(self) -> None:
@@ -5091,6 +5092,8 @@ class App(tk.Tk):
         for b in btns:
             b.configure(state="normal" if on else "disabled")
         row = App._collate_selected_row(self, notify=False)
+        for button in vars(self).get("_cedit_btns", ()):
+            button.configure(state="normal" if row is not None and not vars(self).get("running") else "disabled")
         for button in vars(self).get("_cview_btns", ()):
             button.configure(state="normal" if row is not None else "disabled")
         if vars(self).get("v_cselection") is not None:
@@ -5118,6 +5121,8 @@ class App(tk.Tk):
         return int(sel[0])
 
     def do_collate(self, apply: bool):
+        if not App._collate_editors_ready(self):
+            return
         if not App._collate_index_current(self):
             return
         if not self._need_hwpx() or not self._prepare_env():
@@ -5162,6 +5167,8 @@ class App(tk.Tk):
 
     def do_collate_all(self):
         """구획 전체를 차례로 대조·교정한다. 색인이 아직 없으면 먼저 색인한 뒤 다시 누르게 한다."""
+        if not App._collate_editors_ready(self):
+            return
         if not self._need_hwpx() or not self._prepare_env():
             return
         if not App._collate_index_current(self):
@@ -5214,25 +5221,91 @@ class App(tk.Tk):
                 App._open_collate_report_file(self, report, row)
             else:
                 messagebox.showinfo(APP_NAME, f"「{row['name']}」의 현재 문서와 일치하는 결과가 없습니다.\n"
-                                    "[구획 미리 보기]로 범위를 확인한 뒤 [선택 구획 교정 실행]을 누르십시오.")
+                                    "[나란히 대조·편집]에서 현재 교정본을 확인할 수 있습니다.")
         except (OSError, ValueError) as exc:
             messagebox.showerror(APP_NAME, f"구획 결과를 열지 못했습니다.\n{exc}")
 
     def open_collate_section(self):
-        """Double-click is read-only: show this result or its source preview."""
+        """Double-click opens the editor; OCR and document saves remain explicit."""
+        App.open_collate_editor(self)
+
+    def _collate_editors_ready(self):
+        """Keep unsaved manual edits out of a concurrently running OCR operation."""
+        source = os.path.normcase(str(Path(self.v_hwpx.get().strip()).resolve()))
+        for window in list(vars(self).get("_collate_edit_windows", ())):
+            if not window.winfo_exists():
+                continue
+            key = getattr(window, "_collate_key", ())
+            if len(key) > 1 and key[1] == source and (window.dirty or window.busy):
+                window.deiconify(); window.lift()
+                messagebox.showinfo(APP_NAME, "대조 편집 창에 저장하지 않은 수정이 있거나 저장 중입니다.\n"
+                                    "편집 창에서 저장을 마치거나 수정을 취소한 뒤 OCR을 실행하십시오.", parent=self)
+                return False
+        return True
+
+    def _collate_editor_pages(self, row):
+        """Use verified bounds, or have the user explicitly choose PDF bounds."""
+        from .pdfio import open_pdf
+        from .collate.pdf_outline import find_title_pages
+        pages = row.get("pages") if row.get("range_verified") is not False else None
+        with open_pdf(self.pdf2()) as document:
+            count = len(document)
+            if pages and 1 <= pages[0] <= pages[1] <= count:
+                return tuple(pages)
+            nxt = next((r.get("content_name", r["name"]) for r in self.collate_rows
+                        if r["no"] > row["no"] and r["lv"] <= row["lv"]), None)
+            bounds = row.get("search_bounds") or (1, count)
+            guess = find_title_pages(document, row.get("content_name", row["name"]), nxt,
+                                     start_page=bounds[0], end_page=bounds[1])
+        value = simpledialog.askstring(APP_NAME,
+            f"「{row['name']}」와 대조할 PDF 쪽 범위를 확인하십시오.\nPDF 쪽 번호로 입력합니다(예: 623-627).",
+            parent=self, initialvalue=f"{guess[0]}-{guess[1]}" if guess else "")
+        if not value:
+            return None
+        match = re.fullmatch(r"\s*(\d+)\s*(?:[-–~]\s*(\d+))?\s*", value)
+        if match:
+            start, end = int(match[1]), int(match[2] or match[1])
+            if 1 <= start <= end <= count:
+                return start, end
+        messagebox.showinfo(APP_NAME, f"PDF 범위는 1–{count}쪽 안에서 입력하십시오.", parent=self)
+        return None
+
+    def _collate_editor_saved(self, path, row):
+        self.v_cstat.set(f"직접 수정 저장: {row['name']} · {Path(path).name} · OCR 보고는 작성 당시의 기록입니다.")
+        self._append(f"대조 편집 저장 — {row['name']}: {path}\n")
+
+    def open_collate_editor(self):
+        if vars(self).get("running") or vars(self).get("_closing"):
+            return
         if not App._collate_index_current(self):
             return
         row = App._collate_selected_row(self)
         if row is None:
             return
         try:
-            report = App._collate_report_path(self, row)
-            if report:
-                App._open_collate_report_file(self, report, row)
-            else:
-                App.preview_collate_section(self)
+            windows = vars(self).setdefault("_collate_edit_windows", [])
+            windows[:] = [window for window in windows if window.winfo_exists()]
+            key = (os.path.normcase(str(Path(self.pdf2()).resolve())),
+                   os.path.normcase(str(Path(self.v_hwpx.get().strip()).resolve())),
+                   row["para"], row["end"])
+            for window in windows:
+                if getattr(window, "_collate_key", None) == key:
+                    window.deiconify(); window.lift(); window.focus_set()
+                    return
+            pages = App._collate_editor_pages(self, row)
+            if pages is None:
+                return
+            from .collate.section_editor import BookmarkSectionEditor
+            window = BookmarkSectionEditor(
+                self, pdf_path=self.pdf2(), hwpx_path=self.v_hwpx.get().strip(),
+                section_name=row["name"], section_start=row["para"], section_end=row["end"],
+                heading_styles=self.heading_styles_list(), anchor_source=self.anchor_source(),
+                pdf_pages=pages, can_write=lambda: not vars(self).get("running") and not vars(self).get("_closing"),
+                on_saved=lambda path, selected=dict(row): App._collate_editor_saved(self, path, selected))
+            window._collate_key = key
+            windows.append(window)
         except (OSError, ValueError) as exc:
-            messagebox.showerror(APP_NAME, f"구획을 열지 못했습니다.\n{exc}")
+            messagebox.showerror(APP_NAME, f"대조 편집을 열지 못했습니다.\n{exc}", parent=self)
 
     def preview_collate_section(self):
         if not App._collate_index_current(self):
@@ -6867,6 +6940,11 @@ class App(tk.Tk):
                     self.table.see(iid); self.table.selection_set(iid); break
 
     def on_close(self):
+        for window in list(vars(self).get("_collate_edit_windows", ())):
+            if window.winfo_exists() and not window.close():
+                window.lift()
+                self.v_status.set("대조 편집 창의 저장 상태를 확인하십시오.")
+                return
         pending = False
         for window in list(vars(self).get("_comparison_windows", ())):
             if window.winfo_exists() and not window.request_close():
