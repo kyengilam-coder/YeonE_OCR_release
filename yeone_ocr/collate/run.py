@@ -735,7 +735,15 @@ def _cmd_collate(args, resources):
     # '모든 쪽의 기록이 있음' 경로도 바뀐 PDF·DPI의 옛 판독을 재사용하지 않는다.
     work = Work(args.pdf, args.work)
     work.ensure_source(getattr(args, "dpi", 300))
-    from ..cli import progress
+    from ..cli import progress, _load_manual_corrections
+    # A single immutable snapshot for this command, even when --all reads many
+    # sections. Keep it off the caller's Namespace so another book cannot reuse it.
+    args = Namespace(**vars(args))
+    try:
+        args._correction_memory = _load_manual_corrections(args)
+    except (OSError, ValueError) as exc:
+        log(f"오류: 사람 수정 기록을 확인하지 못했습니다. 기록과 교정본을 확인한 뒤 다시 실행하십시오 — {exc}")
+        return 1
     if getattr(args, "all", False):
         r = run_all(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches) or {}
         # 중지·판독 오류로 멈추면 '완료'로 보이지 않게. 판독 일부 실패·손 고침 다시 계산·교정본 옮김은 끝났어도 3(창이 '주의:' 를 알림창에)

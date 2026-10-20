@@ -262,6 +262,20 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_remembers_human_correction_without_cross_document_or_undo_reuse(self):
+        from yeone_ocr.frozen_smoke import correction_memory_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = correction_memory_probe(self.root)
+        self.assertEqual(result["same_pdf_hint_count"], 1)
+        for field in ("before_after_journal_saved", "hangul_to_hanja_hint", "other_pdf_excluded",
+                      "read_only_hint_loading", "undo_excluded_history_retained",
+                      "existing_copy_and_backup_preserved", "manual_protection_retained",
+                      "source_pdf_and_hwpx_unchanged"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -982,11 +982,40 @@ def partial_path(work: Work, n: int) -> Path:
 PASS1_CFG0 = ["auto", "auto", None]   # 1차 설정을 적지 않은 기록·부분 기록(0.6.8 시험판)은 기본 설정으로 읽은 것으로 본다
 
 
+def _load_manual_corrections(args):
+    """명령 시작 때 책별 사례를 한 번 읽는다. 판독기·공통 지침에는 상태를 넣지 않는다."""
+    target = getattr(args, "manual_corrections", None)
+    if not target and getattr(args, "hwpx", None):
+        from .collate.run import corrected_path
+        target = getattr(args, "out", None) or corrected_path(args.hwpx)
+    if not target:
+        return None
+    from .correction_memory import load_correction_memory
+    memory = load_correction_memory(Path(target), Path(args.pdf))
+    if memory.warning:
+        log(f"주의: 사람 수정 사례 — {memory.warning}")
+    if memory.count and memory.prompt:
+        log(f"사람 수정 사례 {memory.count}개를 새 1차 판독에 참고합니다. 원본 이미지가 우선이며 2·3차는 독립 판독합니다.")
+        log("  기존 판독 기록은 바꾸지 않습니다. 완료 쪽에 새 사례를 쓰려면 '기록 있는 쪽도 다시 판독' 또는 --force를 선택하십시오.")
+    return memory
+
+
+def _manual_correction_provenance(args) -> dict:
+    memory = getattr(args, "_correction_memory", None)
+    if not memory or not memory.count or not memory.prompt:
+        return {}
+    return {"digest": memory.digest, "count": memory.count, "path": str(memory.path)}
+
+
 def _pass1_cfg(args) -> list:
     """1차(쪽 전체) 판독 설정 [생각 수준, 쪽 해상도, 생각 예산(auto 일 때)] — 요청한 값(모델이 거부해 판독기가 실행 중에 끈 것과 상관없이).
     다시 쓸 1차가 지금 설정으로 읽은 것인지 가르고, 기록·부분 기록에 남겨 측정(eval)이 설정이 다른 판독을 섞지 않게 한다."""
     think = getattr(args, "page_thinking", "auto") or "auto"
-    return [think, getattr(args, "page_media_resolution", "auto") or "auto", getattr(args, "thinking_budget", None) if think == "auto" else None]
+    cfg = [think, getattr(args, "page_media_resolution", "auto") or "auto", getattr(args, "thinking_budget", None) if think == "auto" else None]
+    memory = _manual_correction_provenance(args)
+    if memory:
+        cfg.append({"manual_corrections": memory["digest"]})
+    return cfg
 
 
 def _same_pass1(d: dict, reader, args) -> bool:
@@ -1003,9 +1032,19 @@ def _record_provider(d: dict) -> str:
     return "gemini" if model.startswith("gemini") else ("anthropic" if model.startswith("claude") else ("openai" if model.startswith(("gpt", "o1", "o3", "o4")) else ""))
 
 
+def _pass1_without_memory(cfg: list) -> list:
+    """Ignore only the known memory extension; unknown future settings still differ."""
+    if (len(cfg) > 3 and isinstance(cfg[3], dict) and set(cfg[3]) == {"manual_corrections"}
+            and isinstance(cfg[3]["manual_corrections"], str) and cfg[3]["manual_corrections"]):
+        return cfg[:3] + cfg[4:]
+    return cfg
+
+
 def _can_resume_pass1(d: dict, reader, args) -> bool:
-    """제공사를 바꿔도 읽기 방향이 같은 유효 1차 결과를 이어 쓴다. 강제 판독은 별도로 처리한다."""
-    if _same_pass1(d, reader, args):
+    """사례가 바뀌어도 이미 산 1차는 원래 출처로 이어 쓴다. --force는 정확한 설정으로 구분한다."""
+    if ((d.get("model"), d.get("mode")) == (getattr(reader, "model", ""), getattr(args, "mode", ""))
+            and _pass1_without_memory(list(d.get("pass1_cfg") or PASS1_CFG0)) ==
+            _pass1_without_memory(_pass1_cfg(args))):
         return True
     previous = _record_provider(d)
     return (previous in PROVIDERS and previous != getattr(reader, "name", "") and previous != "mock"
@@ -1120,15 +1159,27 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     from .text_policy import SOURCE_TEXT_POLICY, record_text_policy
     text_policy = record_text_policy(partial) if partial else SOURCE_TEXT_POLICY
     origin = _pass1_origin(partial) if partial else {"provider": reader.name, "model": getattr(reader, "model", ""), "config": _pass1_cfg(args)}
+    if not partial:
+        memory_used = _manual_correction_provenance(args)
+        if memory_used:
+            origin["manual_corrections"] = memory_used
     keep = None if args.no_second_pass else (partial or {}).get("record")      # ② 그 기록의 1차: 2차가 된 영역은 그 기록의 2차·글을 그대로, 덜 된 영역만 다시 묻는다
     redo = set(_p2_failed_ids(keep)) if keep else set()
     if partial:
         p1 = PageReading.model_validate(partial["pass1"]); src = partial.get("image_source") or src; up = partial.get("upscale") or up
         log(f"  {n}쪽: 이전 실행의 1차 판독을 재사용(2차만 다시)")
+        if ((origin.get("manual_corrections") or {}).get("digest", "") !=
+                _manual_correction_provenance(args).get("digest", "")):
+            log(f"  {n}쪽: 사람 수정 사례가 달라졌지만 이미 읽은 1차는 보존합니다. 새 사례는 이 쪽의 기존 1차에 적용하지 않았습니다.")
     else:
         stage_start = time.perf_counter()
         model_img = upscale(img, up) if up != 1 else img
-        p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total), text_policy=text_policy)
+        memory = getattr(args, "_correction_memory", None)
+        extra = memory.prompt if memory and memory.count and memory.prompt else ""
+        # The hint is request-local: shared reader/system caches and independent
+        # second/third passes never receive corrected text.
+        p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total, extra=extra)
+                         if extra else reader.read_page(model_img, Path(args.pdf).name, n, total), text_policy=text_policy)
         timings["pass1"] = time.perf_counter() - stage_start
     stage_start = time.perf_counter()
     p1_raw = p1.model_dump()                                  # 좌표 보정·덮개 검사 전의 모델 답 — 부분 기록은 이것을 남긴다(재사용 때 보정을 다시 하므로 중복되지 않게)
@@ -1257,6 +1308,13 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     work.ensure_source(getattr(args, "dpi", 300))
+    args = argparse.Namespace(**vars(args))
+    if not hasattr(args, "_correction_memory"):
+        try:
+            args._correction_memory = _load_manual_corrections(args)
+        except (OSError, ValueError) as exc:
+            log(f"오류: 사람 수정 기록을 확인하지 못했습니다. 기록과 교정본을 확인한 뒤 다시 실행하십시오 — {exc}")
+            return 1
     pages = parse_pages(args.pages, len(doc))
     existing = {n: work.load_record(n) for n in pages}
     if not args.force and all(existing[n] is not None and
@@ -2562,6 +2620,7 @@ def build_parser():
         p.add_argument("--second-model", default="auto", help="같은 제공사의 2차 모델. auto=Gemini 는 flash 자동 선택, OpenAI·Anthropic 은 1차와 같은 모델")
         p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
+        p.add_argument("--manual-corrections", help="사람 수정 사례를 참고할 교정 HWPX(같은 PDF만). 책갈피 OCR은 기존 교정본을 자동 사용하며, 새 1차 판독에만 참고")
         p.add_argument("--chunk-lines", type=int, default=8, help="2차 조각 한 장에 넣을 글줄(세로쓰기는 열) 수. 넘으면 나눠 보낸다(0=안 나눔). 글자당 픽셀을 늘려 획 하나 차이를 가린다")
         p.add_argument("--media-resolution", choices=["auto", "default", "low", "medium", "high", "ultra_high"], default="auto",
                        help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. ultra_high 는 Gemini 3 에서 조각마다 2,240 토큰(두 배). 모델이 거부하면 자동으로 한 단계 아래로")

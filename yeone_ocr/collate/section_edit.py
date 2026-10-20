@@ -53,6 +53,9 @@ class SaveResult:
     saved_count: int
     backup_path: Path | None
     reports_stale: bool
+    learning_count: int = 0
+    learning_path: Path | None = None
+    learning_warning: str = ""
 
     @property
     def corrected_path(self) -> Path:
@@ -389,14 +392,24 @@ class SectionEditSession:
         history.update(paragraph_count=len(target.paragraphs), source=_path(self.source_path),
                        section=self.section_name, updated=time.strftime("%Y-%m-%d %H:%M:%S"))
         changed_parts = set()
+        correction_edits = []
         for index, text in edits.items():
             paragraph = target.paragraphs[index]
-            old_hash = _text_hash(paragraph_text(paragraph))
+            before = paragraph_text(paragraph)
+            old_hash = _text_hash(before)
             _replace_text(paragraph, text)
             _clear_known_grades(self._source.paragraphs[index], paragraph, self._source, target)
             record = history["paragraphs"].setdefault(str(index), {"signature": _signature(paragraph), "text_hashes": []})
             record["text_hashes"] = sorted(set(record["text_hashes"]) | {old_hash, _text_hash(text)})
+            correction_edits.append({"paragraph": index, "signature": _signature(paragraph),
+                                     "before": before, "after": text})
             changed_parts.add(target.locations[index][0])
+        from ..correction_memory import append_corrections, memory_from_snapshot
+        learning_warning = append_corrections(
+            history, correction_edits, pdf_path=_path(self.pdf_path), pdf_sha256=self._pdf_hash,
+            source_path=_path(self.source_path), source_sha256=_sha(self._source_bytes),
+            section=self.section_name, start=self.start, end=self.end,
+        )
         self.corrected_path.parent.mkdir(parents=True, exist_ok=True)
         history_path = manual_history_path(self.corrected_path)
         history_bytes = json.dumps(history, ensure_ascii=False, indent=1).encode("utf-8")
@@ -450,7 +463,19 @@ class SectionEditSession:
                 path.unlink(missing_ok=True)
         self._target_bytes, self._history_bytes, self._history = new_bytes, history_bytes, history
         self._refresh_paragraphs(verified)
-        return SaveResult(self.corrected_path, len(edits), backup, True)
+        memory = memory_from_snapshot(history, verified.paragraphs, self._pdf_hash, history_path)
+        return SaveResult(self.corrected_path, len(edits), backup, True,
+                          memory.count, history_path, learning_warning or memory.warning)
+
+    def correction_records(self) -> list[dict]:
+        """Committed human edits in this section, using this session snapshot."""
+        from ..correction_memory import correction_records
+        target = _Archive(self._target_bytes or self._source_bytes)
+        try:
+            return correction_records(self._history, target.paragraphs, self._pdf_hash,
+                                      start=self.start, end=self.end)
+        except ValueError as exc:
+            raise SectionEditError("수동 수정 기록의 내용을 확인할 수 없습니다. 교정본과 자동 덮어쓰기 보호는 유지됩니다.") from exc
 
     def close(self) -> None:
         """Compatibility with GUI cleanup; snapshots hold no file handles."""

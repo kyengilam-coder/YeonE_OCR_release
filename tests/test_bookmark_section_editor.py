@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import pymupdf
 from PIL import Image
 
-from yeone_ocr.collate.section_editor import BookmarkSectionEditor, ChangeReviewDialog, render_pdf_page
+from yeone_ocr.collate.section_editor import BookmarkSectionEditor, ChangeReviewDialog, CorrectionHistoryDialog, render_pdf_page
 from test_ops import _real_tk
 
 
@@ -134,6 +134,56 @@ class SectionEditorTk(unittest.TestCase):
         self.assertIn("수정 전 사본", self.editor.v_status.get())
         self.saved.assert_called_once_with(self.session.corrected_path)
         self.assertEqual(self.hwpx.read_bytes(), b"original fixture; GUI must never overwrite")
+
+    def test_correction_history_shows_saved_records_without_saving_current_draft(self):
+        records = [{"time": "2026-10-20 12:00:00", "section": "瀉白散", "paragraph": 11,
+                    "before": "사火之劑", "after": "瀉火之劑"}]
+        self.session.correction_records = Mock(return_value=records)
+        self.edit(11, "아직 저장하지 않은 수정")
+        with patch("yeone_ocr.collate.section_editor.CorrectionHistoryDialog") as dialog:
+            self.editor.history_button.invoke()
+        dialog.assert_called_once_with(self.editor, records)
+        self.assertEqual(self.session.calls, [])
+        self.assertTrue(self.editor.dirty)
+        display = CorrectionHistoryDialog(self.editor, records)
+        self.addCleanup(display.destroy)
+        text = display.text.get("1.0", "end-1c")
+        self.assertIn("문단 12", text)
+        self.assertIn("사火之劑", text)
+        self.assertIn("瀉火之劑", text)
+        self.assertNotIn("아직 저장하지 않은 수정", text)
+        self.assertEqual(str(display.text.cget("state")), "disabled")
+        selected = display.text.tag_ranges("changed")
+        self.assertEqual(display.text.get(selected[0], selected[1]), "瀉")
+
+    def test_legacy_history_explains_that_only_new_saves_record_before_and_after(self):
+        display = CorrectionHistoryDialog(self.editor, [])
+        self.addCleanup(display.destroy)
+        self.assertIn("이 버전부터", display.text.get("1.0", "end-1c"))
+        self.assertIn("기존 판독 기록은 유지", display.note.cget("text"))
+        self.assertEqual(self.session.calls, [])
+
+    def test_save_status_reports_correction_memory_or_its_warning(self):
+        original_save = self.session.save
+        def save(changes):
+            result = original_save(changes)
+            result.learning_path = self.session.corrected_path.with_suffix(".manual.json")
+            result.learning_count = 1
+            result.learning_warning = ""
+            return result
+        self.session.save = save
+        self.edit(11, "瀉火之劑")
+        self.assertTrue(self.editor.save())
+        self.assertIn("다음 새 판독 참고 1건", self.editor.v_status.get())
+        def warning_save(changes):
+            result = save(changes)
+            result.learning_warning = "수정 기록 확인 필요"
+            return result
+        self.session.save = warning_save
+        self.edit(11, "瀉火之劑。")
+        self.assertTrue(self.editor.save())
+        self.assertIn("수정 사례 참고 보류", self.editor.v_status.get())
+        self.assertNotIn("다음 새 판독 참고", self.editor.v_status.get())
 
     def test_cancel_review_never_saves_or_discards_drafts(self):
         self.edit(12, "氣喘咳嗽。")

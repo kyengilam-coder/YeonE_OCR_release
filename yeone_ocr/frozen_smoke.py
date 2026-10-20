@@ -344,6 +344,75 @@ def bookmark_edit_probe(folder: Path) -> dict:
             "ui_save_and_reopen": True, "network_calls": 0}
 
 
+def correction_memory_probe(folder: Path) -> dict:
+    """Keep a human correction separately and reuse only active same-PDF hints."""
+    import hashlib
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import SectionEditSession, manual_history_path, manual_protected_paragraphs
+    from .correction_memory import load_correction_memory
+
+    source = folder / "human-correction.hwpx"
+    pdf_path = folder / "human-correction.pdf"
+    other_pdf = folder / "human-correction-other.pdf"
+    before, after = "方解：사火之劑。", "方解：瀉火之劑。"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph(before, style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    for path, text in ((pdf_path, after), (other_pdf, "別本正文。")):
+        with pymupdf.open() as pdf:
+            pdf.new_page().insert_text((40, 60), text, fontname="china-t", fontsize=18)
+            pdf.save(path)
+    originals = {path: path.read_bytes() for path in (source, pdf_path, other_pdf)}
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+    finally:
+        book.doc.close()
+    session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    editable = next(row.index for row in session.paragraphs if row.editable)
+    saved = session.save({editable: after})
+    history_path = manual_history_path(saved.path)
+    history = json.loads(history_path.read_text("utf-8"))
+    event = history["correction_events"][-1]
+    assert event["before"] == before and event["after"] == after
+    assert event["paragraph"] == editable and event["section"]["name"] == "瀉白散"
+    assert event["time"] and event["pdf"]["sha256"] == hashlib.sha256(originals[pdf_path]).hexdigest()
+    assert saved.learning_count == 1 and saved.learning_path == history_path and not saved.learning_warning
+    memory = load_correction_memory(saved.path, pdf_path)
+    assert memory.count == 1 and memory.digest and not memory.warning and memory.path == history_path
+    assert '"수정 전":"사"' in memory.prompt and '"사람이 저장한 글자":"瀉"' in memory.prompt
+    assert load_correction_memory(saved.path, other_pdf).count == 0
+    saved_bytes, history_bytes = saved.path.read_bytes(), history_path.read_bytes()
+    assert load_correction_memory(saved.path, pdf_path) == memory
+    assert saved.path.read_bytes() == saved_bytes and history_path.read_bytes() == history_bytes
+    assert manual_protected_paragraphs(saved.path) == {editable}
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(row.corrected_text for row in reopened.paragraphs if row.index == editable) == after
+    undone = reopened.save({editable: before})
+    assert undone.path == saved.path and undone.learning_count == 0
+    assert undone.backup_path.read_bytes() == saved_bytes
+    inactive = load_correction_memory(saved.path, pdf_path)
+    assert inactive.count == 0 and not inactive.prompt and not inactive.digest
+    journal = json.loads(history_path.read_text("utf-8"))["correction_events"]
+    assert len(journal) == 2 and journal[0] == event
+    assert journal[1]["before"] == after and journal[1]["after"] == before
+    assert manual_protected_paragraphs(saved.path) == {editable}
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    return {"before_after_journal_saved": True, "same_pdf_hint_count": memory.count,
+            "hangul_to_hanja_hint": True, "other_pdf_excluded": True,
+            "read_only_hint_loading": True, "undo_excluded_history_retained": True,
+            "existing_copy_and_backup_preserved": True, "manual_protection_retained": True,
+            "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
+
+
 def bookmark_cursor_probe(folder: Path) -> dict:
     """Exercise real cursor mapping, PDF overlays and matching text size."""
     import os
@@ -651,6 +720,7 @@ def run(report_path: Path) -> int:
         check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
         check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
         check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
+        check("human-correction-memory", lambda: correction_memory_probe(folder))
         check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))

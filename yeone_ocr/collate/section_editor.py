@@ -60,7 +60,8 @@ class ChangeReviewDialog(tk.Toplevel):
         tk.Label(self, text="수정한 내용을 확인하세요", anchor="w", bg=parent.colors["BG"],
                  fg=parent.colors["INK"], font=("Malgun Gothic", 16, "bold")).grid(
                      row=0, column=0, sticky="ew", padx=22, pady=(20, 8))
-        tk.Label(self, text=f"문단 {len(changes)}개 · {target.name}\n기존 교정본이 있으면 저장 전 사본을 보관합니다.",
+        tk.Label(self, text=f"문단 {len(changes)}개 · {target.name}\n"
+                 "수정 전후를 별도 기록하고, 같은 책의 다음 새 판독에 참고합니다. 저장 전 사본도 보관합니다.",
                  anchor="w", justify="left", bg=parent.colors["BG"], fg=parent.colors["MUTED"]).grid(
                      row=1, column=0, sticky="ew", padx=22, pady=(0, 14))
         body = tk.Frame(self, bg=parent.colors["PANEL"])
@@ -90,6 +91,56 @@ class ChangeReviewDialog(tk.Toplevel):
     def _accept(self):
         self.accepted = True
         self.destroy()
+
+
+class CorrectionHistoryDialog(tk.Toplevel):
+    """Show committed human edits without mixing in the current editor draft."""
+    def __init__(self, parent, records):
+        super().__init__(parent)
+        self.title("사람 수정 기록")
+        self.transient(parent)
+        self.geometry("800x650")
+        self.minsize(560, 420)
+        colors = parent.colors
+        self.configure(bg=colors["BG"])
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1)
+        tk.Label(self, text="사람 수정 기록", anchor="w", bg=colors["BG"], fg=colors["INK"],
+                 font=("Malgun Gothic", 16, "bold")).grid(
+                     row=0, column=0, sticky="ew", padx=22, pady=(20, 8))
+        self.note = tk.Label(
+            self, text="이 구획에서 저장한 수정 전후입니다. 되돌린 이력도 확인할 수 있습니다.\n"
+            "같은 책을 새로 판독할 때 최근의 유효한 짧은 수정 사례를 최대 24개 1차 판독기에 전달합니다.\n"
+            "원본 이미지를 확인하는 2차 판독은 독립적으로 진행합니다. 기존 판독 기록은 유지됩니다.",
+            anchor="w", justify="left", bg=colors["BG"], fg=colors["MUTED"])
+        self.note.grid(row=1, column=0, sticky="ew", padx=22, pady=(0, 14))
+        self.note.bind("<Configure>", lambda e: self.note.configure(wraplength=max(200, e.width)))
+        body = tk.Frame(self, bg=colors["PANEL"])
+        body.grid(row=2, column=0, sticky="nsew", padx=22)
+        self.text = tk.Text(body, wrap="word", relief="flat", bg=colors["PANEL"], fg=colors["INK"],
+                            font=("Malgun Gothic", 12), padx=14, pady=12, spacing3=8)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
+        self.text.tag_configure("heading", font=("Malgun Gothic", 10, "bold"), foreground=colors["ACCENT"])
+        self.text.tag_configure("before", foreground=colors["MUTED"])
+        self.text.tag_configure("changed", background="#e2edf3", foreground=colors["BLUE"])
+        if not records:
+            self.text.insert("end", "이 구획에 저장된 수정 전후 기록이 없습니다.\n\n"
+                             "이 버전부터 대조 편집에서 수정하고 저장하면 기록이 쌓입니다. "
+                             "이전 버전의 문단 보호 기록은 그대로 유지됩니다.")
+        for record in reversed(records):
+            self.text.insert("end", f"{record['time']}  ·  {record['section']}  ·  문단 {record['paragraph'] + 1}\n", "heading")
+            self.text.insert("end", f"수정 전\n{record['before']}\n\n", "before")
+            self.text.insert("end", "수정 후\n")
+            before, after = record["before"], record["after"]
+            for op, _, _, start, end in difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes():
+                self.text.insert("end", after[start:end], "changed" if op in ("replace", "insert") else ())
+            self.text.insert("end", "\n\n")
+        self.text.configure(state="disabled")
+        ttk.Button(self, text="닫기", command=self.destroy).grid(row=3, column=0, sticky="e", padx=22, pady=18)
+        self.bind("<Escape>", lambda _event: self.destroy())
 
 
 class BookmarkSectionEditor(tk.Toplevel):
@@ -233,6 +284,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.target_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         actions = tk.Frame(footer, bg=C["BG"])
         actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
+        self.history_button = ttk.Button(actions, text="수정 기록 보기", command=self.show_correction_history)
+        self.history_button.pack(side="left", padx=(0, 7))
         self.revert_button = ttk.Button(actions, text="이번 수정 취소", command=self.revert_changes, state="disabled")
         self.revert_button.pack(side="left", padx=(0, 7))
         self.save_button = ttk.Button(actions, text="변경 확인·저장  Ctrl S", command=self.save, style="Ink.TButton", state="disabled")
@@ -860,6 +913,16 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.wait_window(dialog)
         return dialog.accepted
 
+    def show_correction_history(self):
+        if self.busy or self._closed:
+            return
+        try:
+            records = self.session.correction_records()
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("수정 기록을 열지 못했습니다", str(exc), parent=self)
+            return
+        CorrectionHistoryDialog(self, records)
+
     def save(self) -> bool:
         if self.busy or self._closed:
             return False
@@ -901,6 +964,10 @@ class BookmarkSectionEditor(tk.Toplevel):
             editor.edit_modified(False)
         self._update_status()
         notice = f"저장됨 · 문단 {result.saved_count}개"
+        if getattr(result, "learning_warning", ""):
+            notice += f" · 수정 사례 참고 보류: {result.learning_warning}"
+        elif getattr(result, "learning_path", None):
+            notice += f" · 수정 기록 보관 · 다음 새 판독 참고 {result.learning_count}건"
         if result.backup_path:
             notice += " · 수정 전 사본 보관"
         if result.reports_stale:
