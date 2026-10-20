@@ -129,7 +129,7 @@ class Outline(unittest.TestCase):
     def test_find_title_in_text_layer(self):
         import pymupdf
         doc = pymupdf.open()
-        for text in ["目录 大蓟 12 小蓟 13", "大蓟 本草经疏 大蓟根 陶云有毒", "续 大蓟 本草新编", "小蓟 性凉 治吐血", "人参 大补元气"]:
+        for text in ["目录 大蓟 12 小蓟 13", "大蓟\n本草经疏 大蓟根 陶云有毒", "续 大蓟 本草新编", "小蓟\n性凉 治吐血", "人参\n大补元气"]:
             pg = doc.new_page(); pg.insert_text((72, 100), text, fontname="china-s", fontsize=14)
         from yeone_ocr.collate.pdf_outline import find_title_pages
         self.assertEqual(find_title_pages(doc, "大薊", "小薊", start_page=2), (2, 4))     # 목차 쪽을 건너뛰고 본문에서, 다음 제목 쪽까지
@@ -595,12 +595,12 @@ class MemoAndMarks(unittest.TestCase):
                 R.log = logs.append; R.ensure_pages_read = lambda *a, **k: None; cli.resolve_mode = lambda *a, **k: None
                 for _ in range(2):                                     # 두 번째는 같은 교정본에 다시 — 모두 '이미 표시된 자리'
                     bk = HwpxBook(out if os.path.exists(out) else src); an = bk.anchors()
-                    R.run_section(args, pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+                    result = R.run_section(args, pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
             finally:
                 R.log, R.ensure_pages_read, cli.resolve_mode = old
             counts = [l for l in logs if l.startswith("표시:")]
             self.assertIn("메모 4건(글 속 〔〕)", counts[0]); self.assertIn("메모 0건(글 속 〔〕)", counts[1])
-            rep = Path(td, "collate", "大薊.html").read_text(encoding="utf-8")
+            rep = Path(result["report"]).read_text(encoding="utf-8")
             self.assertIn("글 속 〔〕 표기", rep); self.assertNotIn("고지 메모", rep)            # inline 에는 메모가 없다
 
     def test_report_marks_memo_by_real_mode(self):

@@ -213,6 +213,15 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["mock_answers"], 1)
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_uses_unique_sections_and_rejects_earlier_mentions(self):
+        from yeone_ocr.frozen_smoke import bookmark_section_probe
+        result = bookmark_section_probe(self.root)
+        self.assertEqual(result["canonical_sections"], 2)
+        self.assertEqual(result["body_heading_pages"], [2, 3])
+        self.assertTrue(result["earlier_mention_rejected"])
+        self.assertTrue(result["input_unchanged"])
+        self.assertEqual(result["network_calls"], 0)
+
     def test_release_smoke_scans_both_annotation_layouts_without_editing_records(self):
         from yeone_ocr.frozen_smoke import small_annotations_probe
         result = small_annotations_probe(self.root)

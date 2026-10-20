@@ -2701,6 +2701,8 @@ def build_parser():
     p.add_argument("--section", help="교정할 책갈피·제목 이름(정확히, 또는 일부)")
     p.add_argument("--nth", type=int, help="같은 이름이 여럿일 때 몇 번째인지(1부터)")
     p.add_argument("--anchor-index", type=int, help="--list 번호로 구획을 바로 지정(1부터). 화면에서 쓴다")
+    p.add_argument("--anchor-para", type=int, help="화면에서 선택한 구획의 시작 문단(0부터). 실행 전 위치를 확인한다")
+    p.add_argument("--anchor-name", help="화면에서 선택한 구획 이름. 문단 위치와 함께 선택을 확인한다")
     p.add_argument("--heading-styles", help="책갈피처럼 쓸 HWPX 스타일 이름(쉼표로 여러 개, 앞이 큰 단위). 예 \"제목-본초명,제목-본초명(소)\". 비우면 이름에 '제목'이 든 스타일 전부")
     p.add_argument("--anchor-source", choices=["auto", "hwpx", "pdf"], default="auto",
                    help="구획 기준: auto(기본)=HWPX 책갈피·제목 스타일, 없으면 PDF 책갈피 이름으로 본문 검색 / hwpx / pdf")

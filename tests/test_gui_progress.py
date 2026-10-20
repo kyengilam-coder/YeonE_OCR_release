@@ -373,7 +373,7 @@ class ProgressCardRealTk(unittest.TestCase):
                     texts[str(c.cget("text")).strip()] = c
                 walk(c)
         walk(app.act_cards[1])
-        self.assertNotIn(texts["보고 열기"], app.buttons); self.assertNotIn(texts["교정본 열기"], app.buttons)
+        self.assertNotIn(texts["이 구획 결과 보기"], app.buttons); self.assertNotIn(texts["전체 교정본 열기"], app.buttons)
         self.assertIn(texts["▶  HWPX 전체 교정"], app.buttons)
 
     def test_9_legend_fail_glyph_uses_the_cell_font(self):

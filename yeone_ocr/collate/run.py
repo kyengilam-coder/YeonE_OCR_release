@@ -10,8 +10,8 @@ from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from . import zh
-from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name
-from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages
+from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name, resolve_anchor_index
+from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages, fallback_page_bounds, section_page_range
 from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter, book_titles, promote_repeated, REPEAT_MIN
 from .hwpx_edit import Editor
 from .labels import POLICIES, ANCHOR_SOURCES
@@ -53,7 +53,7 @@ def list_text(anchors, pdf_anchors, matches, limit: int = 0) -> str:
         a = m.anchor
         pdf = f"PDF 「{m.pdf.title}」 {m.pdf.page}쪽" if m.pdf else "PDF 짝 없음"
         from . import reading
-        lines.append(f"{i + 1:4d}. {'  ' * (a.level - 1)}{a.name[:30]:<32} [{reading.reading(a.name)[:16]}] 문단 {a.para:>5}  {pdf}  ({m.how}{'' if m.how != 'fuzzy' else f' {m.score:.2f}'})")
+        lines.append(f"{i + 1:4d}. {'  ' * (a.level - 1)}{a.name[:30]:<32} [{reading.reading(a.name)[:16]}] 문단 {a.para + 1:>5}  {pdf}  ({m.how}{'' if m.how != 'fuzzy' else f' {m.score:.2f}'})")
     return "\n".join(lines)
 
 
@@ -170,7 +170,7 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
         cls = {"A": "a", "B1": "b1", "B2": "b2", "C": "c"}.get(it.kind, "")
         g = collate_grade(it)
         grade = "—" if g is None else gname[g] + (f" · {mlabel}" if needs_memo(it, mode) else "")
-        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}<br><small>{grade}</small></td><td>{it.para}</td>"
+        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}<br><small>{grade}</small></td><td>{it.para + 1}</td>"
                     f"<td class=ctx>{esc(it.hw_ctx) or esc(it.hwpx) or '—'}</td><td class=ctx>{esc(it.oc_ctx) or esc(it.ocr) or '—'}</td>"
                     f"<td><b>{esc(it.new) or '—'}</b></td><td>{esc('/'.join(it.candidates))}</td><td>{it.pdf_page}</td><td>{esc(it.note)}</td></tr>")
     appl = ""
@@ -186,7 +186,7 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     .sum span{display:inline-block;margin-right:12px;padding:2px 8px;border-radius:10px;background:#e4d7b4}
     td.ctx{font-size:15px;letter-spacing:.02em}td.ctx b{color:#b3261e}"""
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>교정 · {esc(section.anchor.name)}</title><style>{css}</style></head><body>"
-           f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start}~{section.end - 1} · PDF {pages[0]}~{pages[1]}쪽"
+           f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start + 1}~{section.end} · PDF {pages[0]}~{pages[1]}쪽"
            + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}"
            + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + f"<br>{esc(COLLATE_LEGEND)}</small></header><main>"
            f"<p class=sum><span>자동 교정 {sm['auto']}</span><span>표시만 {sm['mark']}</span><span>A {sm['A']}</span><span>B1 {sm['B1']}</span><span>B2 {sm['B2']}</span><span>C {sm['C']}</span></p>"
@@ -415,15 +415,17 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     if getattr(args, "pdf_pages", None):
         from ..pdfio import parse_pages
         ps = parse_pages(args.pdf_pages, len(pdf_doc)); pages = (min(ps), max(ps))
-    elif m.pdf:
-        j = pdf_anchors.index(m.pdf); pages = page_range(pdf_anchors, j, len(pdf_doc))
+    elif (matched_pages := section_page_range(sec, matches, len(pdf_doc))) is not None:
+        pages = matched_pages
     else:
-        guess = find_title_pages(pdf_doc, a.name, sec.next_anchor.name if sec.next_anchor else None)
+        lo, hi = fallback_page_bounds(matches, idx, len(pdf_doc))
+        guess = find_title_pages(pdf_doc, a.content_name, sec.next_anchor.content_name if sec.next_anchor else None,
+                                 start_page=lo, end_page=hi)
         if not guess:
-            raise RuntimeError(f"「{a.name}」 에 맞는 PDF 책갈피가 없고 PDF 글자층에서도 제목을 찾지 못했습니다. --pdf-pages 로 쪽 범위를 주십시오.")
+            raise RuntimeError(f"「{a.name}」 의 PDF 제목·범위를 확실히 확인하지 못했습니다. 원본을 확인하고 --pdf-pages 로 쪽 범위를 주십시오.")
         pages = guess
         log(f"PDF 책갈피에 짝이 없어 PDF 글자층에서 「{a.name}」 을 찾음 → {pages[0]}~{pages[1]}쪽")
-    log(f"구획 「{a.name}」: HWPX 문단 {sec.start}~{sec.end - 1}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
+    log(f"구획 「{a.name}」: HWPX 문단 {sec.start + 1}~{sec.end}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
     read_partial = ensure_pages_read(args, work, pdf_doc, pages)          # 범위 쪽 기록이 빠졌으면 PartialRead — 이 구획은 대조하지 않는다
     oc_all = []; layers: dict[int, str] = {}; remerged: list[int] = []; backups: list[Path] = []
     from .. import __version__, prompts
@@ -452,7 +454,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             oc_all.extend(reading_paras(rec))
     if remerged:
         note_remerged(work, remerged, backups)
-    oc_paras, note = trim_to_section(oc_all, a.name, sec.next_anchor.name if sec.next_anchor else (m.pdf and None))
+    oc_paras, note = trim_to_section(oc_all, a.content_name, sec.next_anchor.content_name if sec.next_anchor else None)
     once = sorted({pg for pg, _, o in oc_paras if o})
     if once:
         log(f"주의: 쪽 {', '.join(map(str, once[:10]))}{' …' if len(once) > 10 else ''} 의 일부 영역은 2차 판독이 빠져 1차만으로 읽은 글이라 그 자리의 차이는 고치지 않고 표시만 합니다(B1)"
@@ -485,7 +487,9 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     sm = summary(items)
     log(f"대조: 자동 교정 {sm['auto']}건 · 표시만 {sm['mark']}건 (A {sm['A']} · B1 {sm['B1']} · B2 {sm['B2']} · C {sm['C']})" + (f" · {note}" if note else ""))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
-    stem = re.sub(r"[\\/:*?\"<>|\s]+", "_", a.name)[:40] or f"sec{idx}"
+    from .results import result_binding, report_stem, normalized_path
+    binding = result_binding(getattr(args, "pdf", None) or getattr(work, "pdf_path", ""),
+                             getattr(args, "hwpx", None) or book.path, a.name, sec.start, sec.end)
     applied = None; saved = None
     if getattr(args, "apply", False):
         if not items:
@@ -516,9 +520,14 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             if n_hidden:
                 log(f"제목 문단의 표시 {n_hidden}건(지운 글자·폭 없는 표시)은 문서에 보이지 않고 보고(html)에만 있습니다 — 구획 이름이 바뀌지 않게 글 속 표기를 넣지 않음")
             for x in bad[:5]:
-                log(f"  실패: {x.item.kind} 문단 {x.item.para} [{x.item.start}:{x.item.end}] — {x.note}")
+                log(f"  실패: {x.item.kind} 문단 {x.item.para + 1} [{x.item.start}:{x.item.end}] — {x.note}")
+    if saved and normalized_path(saved) == binding["source_hwpx"]["path"]:
+        # 교정본 자체를 입력으로 골랐다면 저장한 현재 파일에 결과를 연결한다.
+        binding = result_binding(getattr(args, "pdf", None) or getattr(work, "pdf_path", ""),
+                                 getattr(args, "hwpx", None) or book.path, a.name, sec.start, sec.end)
+    stem = report_stem(binding, a.name, sec.start)
     rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path), mode=memo_mode(args))
-    (out_dir / f"{stem}.json").write_text(json.dumps({"section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
+    (out_dir / f"{stem}.json").write_text(json.dumps({**binding, "section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
                                                       "hwpx_file": str(book.path), "hwpx_paragraphs": len(book.paragraphs), "witness_stats": wst, "glyph_stats": gst,
                                                       "summary": sm, "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
@@ -547,8 +556,11 @@ def run_all(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matche
         if sec.n_paras <= 0 or not any(t.strip() for t in book.section_texts(sec)[1:]):
             continue                                            # 제목뿐인 구획(장 제목 등)
         m = matches[i]
-        if not m.pdf and not find_title_pages(pdf_doc, a.name, sec.next_anchor.name if sec.next_anchor else None):
-            skipped.append(a.name); continue
+        if section_page_range(sec, matches, len(pdf_doc)) is None:
+            lo, hi = fallback_page_bounds(matches, i, len(pdf_doc))
+            if not find_title_pages(pdf_doc, a.content_name, sec.next_anchor.content_name if sec.next_anchor else None,
+                                    start_page=lo, end_page=hi):
+                skipped.append(a.name); continue
         try:
             r = run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=i, flat=True)
             results.append(r); partial = partial or to_check(r)
@@ -635,6 +647,13 @@ def _cmd_collate(args, resources):
     book = HwpxBook(args.hwpx)
     resources.callback(book.doc.close)
     anchors, pdf_anchors, matches = index_both(pdf_doc, book, src, styles)
+    selected_idx = None
+    if getattr(args, "anchor_index", None) or getattr(args, "anchor_para", None) is not None:
+        try:
+            selected_idx = resolve_anchor_index(anchors, getattr(args, "anchor_index", None),
+                                                para=getattr(args, "anchor_para", None), name=getattr(args, "anchor_name", None))
+        except ValueError as exc:
+            log(str(exc)); return 2
     moved = None                                                 # 교정본을 _이전_n 으로 옮겼으면 그 경로 — 끝나도 3(확인할 것 있음)으로 알린다
     # 교정본(<이름>_교정.hwpx)이 이미 있으면 거기에 이어서 고친다 — 앞서 고친 구획이 지워지지 않게.
     # 구획 번호가 원본 기준으로 매겨지므로, 교정본의 기준 목록이 원본과 같을 때만 바꿔 탄다.
@@ -644,7 +663,10 @@ def _cmd_collate(args, resources):
             book2 = HwpxBook(str(target))
             resources.callback(book2.doc.close)
             a2, _, m2 = index_both(pdf_doc, book2, src, styles)
-            if len(a2) == len(anchors) and all(x.para == y.para for x, y in zip(a2, anchors)):
+            if len(a2) == len(anchors) and all(
+                    (x.para, x.level, x.kind) == (y.para, y.level, y.kind)
+                    and bool({_key(n) for n in x.names} & {_key(n) for n in y.names})
+                    for x, y in zip(a2, anchors)):
                 book.doc.close()
                 book, anchors, matches = book2, a2, m2
                 log(f"기존 교정본에 이어서 작업합니다(앞서 고친 구획 유지): {target.name}")
@@ -671,13 +693,10 @@ def _cmd_collate(args, resources):
         r = run_all(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches) or {}
         # 중지·판독 오류로 멈추면 '완료'로 보이지 않게. 판독 일부 실패·손 고침 다시 계산·교정본 옮김은 끝났어도 3(창이 '주의:' 를 알림창에)
         return 130 if r.get("stopped") else (1 if r.get("failed") else (3 if r.get("partial") or moved else 0))
-    ai = getattr(args, "anchor_index", None)
-    if ai:
-        if not 1 <= ai <= len(anchors):
-            log(f"구획 번호 {ai} 가 범위(1~{len(anchors)}) 밖입니다."); return 2
+    if selected_idx is not None:
         progress("collate", 0, 1)
         try:
-            r = run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=ai - 1)
+            r = run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=selected_idx)
         except Cancelled:
             log("중지 요청으로 멈춤 — 쪽 판독 도중이라 이 구획은 대조하지 않았습니다(끝난 쪽 판독은 남음)."); return 130
         except PartialRead as e:
@@ -696,7 +715,7 @@ def _cmd_collate(args, resources):
     if len(hits) > 1 and not getattr(args, "nth", None):
         log(f"「{args.section}」 에 맞는 기준이 {len(hits)}개입니다. --nth 로 고르십시오:")
         for i, h in enumerate(hits, 1):
-            log(f"  {i}. {h.name} (문단 {h.para}, 급 {h.level})")
+            log(f"  {i}. {h.name} (문단 {h.para + 1}, 급 {h.level})")
         return 2
     a = hits[(getattr(args, "nth", 1) or 1) - 1]
     try:

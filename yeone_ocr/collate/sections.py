@@ -19,10 +19,54 @@ class Anchor:
     para: int            # 문단 번호(0부터, 본문 섹션 전체 기준)
     level: int = 1       # 1이 가장 큰 단위
     style: str = ""      # 제목 스타일 이름
+    aliases: tuple[str, ...] = ()   # 같은 문단의 다른 책갈피·제목 이름
+    heading_title: str = ""        # 본문을 자를 때 쓸 실제 제목(책갈피 별칭과 구별)
 
     @property
     def key(self) -> str:
         return normalize_name(self.name)
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return (self.name, *self.aliases)
+
+    @property
+    def content_name(self) -> str:
+        return self.heading_title or self.name
+
+
+def canonical_anchors(anchors: list[Anchor]) -> list[Anchor]:
+    """문단 하나는 구획 하나. 책갈피 이름을 유지하고 제목 스타일의 계층을 쓴다."""
+    groups: dict[int, list[Anchor]] = {}
+    for anchor in sorted(anchors, key=lambda a: a.para):
+        groups.setdefault(anchor.para, []).append(anchor)
+    out = []
+    for para, group in groups.items():
+        primary = next((a for a in group if a.kind == "bookmark"), group[0])
+        heading = next((a for a in group if a.kind == "heading"), primary)
+        names = tuple(dict.fromkeys(n for a in group for n in a.names if n))
+        out.append(Anchor(primary.kind, primary.name, para, heading.level, heading.style,
+                          tuple(n for n in names if n != primary.name),
+                          heading.content_name if heading.kind == "heading" else primary.heading_title))
+    return out
+
+
+def resolve_anchor_index(anchors: list[Anchor], index: int | None, *, para: int | None = None,
+                         name: str | None = None) -> int:
+    """창이 보낸 문단·이름을 검증한다. 번호가 바뀌었어도 같은 구획만 실행한다."""
+    if para is not None or name is not None:
+        if para is None or not name:
+            raise ValueError("구획 위치와 이름을 함께 지정해야 합니다. 구획 목록을 새로 불러오십시오.")
+        from . import zh
+        key = zh.compare_key(normalize_name(name))
+        hits = [i for i, a in enumerate(anchors) if a.para == para and
+                any(zh.compare_key(normalize_name(n)) == key for n in a.names)]
+        if len(hits) != 1:
+            raise ValueError("선택한 구획의 위치·이름이 현재 문서와 다릅니다. 구획 목록을 새로 불러오십시오.")
+        return hits[0]
+    if not index or not 1 <= index <= len(anchors):
+        raise ValueError(f"구획 번호 {index} 가 범위(1~{len(anchors)}) 밖입니다.")
+    return index - 1
 
 
 @dataclass
@@ -137,7 +181,7 @@ class HwpxBook:
             if sid in hs and texts[i].strip():
                 out.append(Anchor("heading", texts[i].strip(), i, hs[sid], dict(self.style_names).get(sid, sid)))
         out.sort(key=lambda a: (a.para, 0 if a.kind == "bookmark" else 1))
-        return out
+        return canonical_anchors(out)
 
     def anchors_from_titles(self, titles: list[tuple[str, int]], slack: int = 6) -> list[tuple[int, Anchor | None]]:
         """PDF 책갈피 (제목, 급) 목록을 HWPX 본문에서 찾아 기준으로 삼는다(책갈피도 제목 스타일도 없는 HWPX 용).
@@ -186,15 +230,15 @@ def find_anchor(anchors: list[Anchor], query: str) -> list[Anchor]:
     if not q:
         return []
     from . import zh, reading
-    exact = [a for a in anchors if a.name.strip() == q]
+    exact = [a for a in anchors if any(n.strip() == q for n in a.names)]
     if exact:
         return exact
     nq = zh.compare_key(normalize_name(q))          # 간체·번체·이체자 차이를 접고 비교
-    same = [a for a in anchors if zh.compare_key(a.key) == nq]
+    same = [a for a in anchors if any(zh.compare_key(normalize_name(n)) == nq for n in a.names)]
     if same:
         return same
-    part = [a for a in anchors if nq and nq in zh.compare_key(a.key)]
+    part = [a for a in anchors if nq and any(nq in zh.compare_key(normalize_name(n)) for n in a.names)]
     if part:
         return part
     # 한글 독음으로(대계 → 大薊, 인삼 → 人參·人蔘)
-    return [a for a in anchors if reading.matches(a.name, q)]
+    return [a for a in anchors if any(reading.matches(n, q) for n in a.names)]

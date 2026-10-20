@@ -227,6 +227,52 @@ def small_annotations_probe(folder: Path) -> dict:
             "automatic_insertions": 0, "network_calls": 0}
 
 
+def bookmark_section_probe(folder: Path) -> dict:
+    """Exercise the shipped bookmark matcher with an earlier narrative mention."""
+    from hwpx.document import HwpxDocument
+    from lxml import etree
+    import pymupdf
+    from .collate.sections import HwpxBook
+    from .collate.pdf_outline import find_title_pages
+    from .collate.run import index_both
+
+    path = folder / "bookmark-navigation.hwpx"
+    hp = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        heading = document.paragraphs[-1].element
+        run = etree.SubElement(heading, hp + "run", charPrIDRef="0")
+        ctrl = etree.SubElement(run, hp + "ctrl")
+        etree.SubElement(ctrl, hp + "bookmark", name="    瀉白散")
+        document.add_paragraph("本方正文。", style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(path))
+    finally:
+        document.close()
+    before = path.read_bytes()
+    with pymupdf.open() as pdf:
+        for lines in (["方書載有瀉白散等多種方劑。"],
+                      ["瀉白散", "本方正文。"], ["葦莖湯", "下一方正文。"]):
+            page = pdf.new_page()
+            for row, text in enumerate(lines):
+                page.insert_text((40, 70 + row * 40), text, fontname="china-t", fontsize=18)
+        assert find_title_pages(pdf, "瀉白散", "葦莖湯") == (2, 3)
+        pdf.set_toc([[1, "사백산", 2], [1, "위경탕", 3]])
+        book = HwpxBook(str(path))
+        try:
+            anchors, _, matches = index_both(pdf, book)
+            assert [a.name.strip() for a in anchors] == ["瀉白散", "葦莖湯"]
+            assert [m.pdf.page if m.pdf else None for m in matches] == [2, 3]
+            assert len({a.para for a in anchors}) == len(anchors)
+        finally:
+            book.doc.close()
+    assert path.read_bytes() == before
+    return {"canonical_sections": 2, "body_heading_pages": [2, 3],
+            "earlier_mention_rejected": True, "input_unchanged": True, "network_calls": 0}
+
+
 def run(report_path: Path) -> int:
     from . import __version__
     report_path = Path(report_path).resolve()
@@ -416,6 +462,7 @@ def run(report_path: Path) -> int:
             return {"pipeline": "mock PDF → OCR records → HWPX/DOCX → normalization/review", "network_calls": 0}
         check("offline-ocr-pipeline", pipeline_probe)
         check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
+        check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))
 
