@@ -102,6 +102,7 @@ class GuiResources(unittest.TestCase):
 
     def test_missing_bookmark_title_search_closes_before_user_prompt(self):
         app = SimpleNamespace(_need_hwpx=lambda: True, _prepare_env=lambda: True, _selected_anchor=lambda: 1, pdf2=lambda: str(self.pdf),
+                              v_hwpx=var(str(self.root / "book.hwpx")),
                               collate_rows=[{"no": 1, "lv": 1, "name": "天地", "pdf": ""}])
         for fail in (False, True):
             with self.subTest(fail=fail):
