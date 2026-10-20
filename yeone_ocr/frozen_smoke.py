@@ -580,6 +580,31 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
             "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
 
 
+@contextlib.contextmanager
+def _isolated_tk_clipboard(root):
+    """Observe real Tk copy commands without changing the user's OS clipboard."""
+    original = f"__yeone_smoke_clipboard_{id(root)}"
+    captured = {"text": "", "writes": 0}
+
+    def clipboard(operation, *arguments):
+        if operation == "clear":
+            captured["text"] = ""
+        elif operation == "append" and arguments:
+            captured["text"] += str(arguments[-1])
+            captured["writes"] += 1
+        else:
+            raise ValueError(f"Unexpected clipboard operation in copy probe: {operation}")
+        return ""
+
+    root.tk.call("rename", "clipboard", original)
+    try:
+        root.tk.createcommand("clipboard", clipboard)
+        yield captured
+    finally:
+        root.tk.deletecommand("clipboard")
+        root.tk.call("rename", original, "clipboard")
+
+
 def bookmark_replace_probe(folder: Path) -> dict:
     """Recover paragraph input and replace through the shipped comparison UI."""
     import tkinter as tk
@@ -666,6 +691,39 @@ def bookmark_replace_probe(folder: Path) -> dict:
         assert dialog.replace_all()
         assert target.read_bytes() == before
         assert field.get("1.0", "end-1c") == expected_draft.replace("皰", "疱")
+        # Exercise the actual editor selection and bindings. Redirect only Tcl's
+        # clipboard command so an image or other user clipboard format survives.
+        window.deiconify()
+        root.update()
+        field.focus_force()
+        field.tag_add("sel", "1.2", "1.3")
+        root.update()
+        before_copy = window._changes()
+        with _isolated_tk_clipboard(root) as copied:
+            for shortcut in ("<Control-c>", "<Control-C>", "<Control-Insert>", "<<Copy>>"):
+                writes = copied["writes"]
+                field.event_generate(shortcut)
+                root.update()
+                assert copied["writes"] == writes + 1 and copied["text"] == "疱", shortcut
+            if sys.platform == "win32":
+                from types import SimpleNamespace
+                key = SimpleNamespace(state=0x0004, keycode=67, keysym="??")
+                writes = copied["writes"]
+                assert section_editor._copy_control_key(field, key) == "break"
+                assert copied["writes"] == writes + 1 and copied["text"] == "疱"
+            # Invoking the menu's copy action uses the selected Text directly,
+            # including after focus moves to another field.
+            dialog.deiconify()
+            dialog.find_entry.focus_force()
+            dialog.find_entry.selection_range(0, "end")
+            root.update()
+            writes = copied["writes"]
+            field._copy_menu.invoke(0)
+            assert copied["writes"] == writes + 1 and copied["text"] == "疱"
+            assert field.get("sel.first", "sel.last") == "疱"
+        assert root.tk.call("info", "commands", "clipboard") == ("clipboard",)
+        assert window._changes() == before_copy and target.read_bytes() == before
+        window.withdraw()
         window._confirm_changes = lambda changes: changes == plan.changes
         assert window.save() and not window.dirty
     finally:
@@ -703,6 +761,8 @@ def bookmark_replace_probe(folder: Path) -> dict:
     return {"editable_occurrences": 3, "readonly_skipped": 2,
             "input_line_join_preserved_text": True, "section_and_document_scopes": True,
             "pending_edits_preserved": True, "edited_marks_cleared": True,
+            "edited_text_copy_shortcuts": True, "copy_context_menu": True,
+            "unicode_copy_and_drafts_preserved": True, "user_clipboard_untouched": True,
             "source_and_other_content_preserved": True, "existing_copy_and_backup_preserved": True,
             "manual_history_and_protection_retained": True, "saved_file_reopened": True,
             "ocr_calls": 0, "network_calls": 0}

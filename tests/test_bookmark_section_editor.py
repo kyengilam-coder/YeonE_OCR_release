@@ -12,7 +12,7 @@ import pymupdf
 from PIL import Image
 
 from yeone_ocr.collate.section_editor import (BookmarkSectionEditor, ChangeReviewDialog,
-    CorrectionHistoryDialog, FindReplaceDialog, join_paragraph_lines, render_pdf_page)
+    CorrectionHistoryDialog, FindReplaceDialog, _copy_control_key, join_paragraph_lines, render_pdf_page)
 from test_ops import _real_tk
 
 
@@ -109,6 +109,24 @@ class SectionEditorTk(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
+        # Exercise real Tk clipboard bindings without reading or overwriting the
+        # user's system clipboard. Native Text class handlers use this command too.
+        self.clipboard = {"text": "", "clears": 0}
+        self.root.tk.call("rename", "clipboard", "__section_editor_native_clipboard")
+        def clipboard_command(operation, *args):
+            if operation == "clear":
+                self.clipboard["text"] = ""
+                self.clipboard["clears"] += 1
+            elif operation == "append":
+                self.clipboard["text"] += args[-1]
+            elif operation == "get":
+                return self.clipboard["text"]
+            return ""
+        self.root.tk.createcommand("clipboard", clipboard_command)
+        def restore_clipboard():
+            self.root.tk.deletecommand("clipboard")
+            self.root.tk.call("rename", "__section_editor_native_clipboard", "clipboard")
+        self.addCleanup(restore_clipboard)
         self.folder = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.pdf = self.folder / "book.pdf"
         with pymupdf.open() as document:
@@ -491,6 +509,80 @@ class SectionEditorTk(unittest.TestCase):
         self.assertTrue(self.editor.reload())
         self.assertFalse(dialog.replace_all())
         self.assertFalse(self.editor.dirty)
+
+    def test_copy_shortcuts_copy_unsaved_unicode_selection_without_changing_draft(self):
+        self.editor.deiconify()
+        self.edit(11, "單純疱疹𠀀")
+        widget = self.editor._editors[11]
+        widget.focus_force()
+        self.root.update()
+        widget.tag_add("sel", "1.2", "end-1c")
+        expected = widget.get("sel.first", "sel.last")
+        drafts = self.editor._changes()
+        for sequence in ("<Control-c>", "<Control-C>", "<Control-Insert>", "<<Copy>>"):
+            with self.subTest(sequence=sequence):
+                self.clipboard["text"] = "unchanged sentinel"
+                widget.event_generate(sequence)
+                self.root.update()
+                self.assertEqual(self.clipboard["text"], expected)
+                self.assertEqual(widget.get("sel.first", "sel.last"), expected)
+                self.assertEqual(self.editor._changes(), drafts)
+        self.assertEqual(expected, "疱疹𠀀")
+        self.assertEqual(self.session.calls, [])
+
+    def test_ime_copy_uses_physical_c_key_and_does_not_intercept_alt_shortcuts(self):
+        self.edit(11, "單純疱疹")
+        widget = self.editor._editors[11]
+        widget.tag_add("sel", "1.2", "1.3")
+        with patch("yeone_ocr.collate.section_editor.sys.platform", "win32"):
+            self.assertEqual(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4, keysym="ㅊ")), "break")
+            self.assertEqual(self.clipboard["text"], "疱")
+            self.clipboard["text"] = "sentinel"
+            self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4 | 0x20000, keysym="ㅊ")))
+            self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=88, state=4, keysym="ㅌ")))
+            self.assertEqual(self.clipboard["text"], "sentinel")
+
+    def test_context_copy_preserves_selection_after_focus_moves_and_has_clear_empty_state(self):
+        self.edit(11, "單純疱疹𠀀")
+        widget = self.editor._editors[11]
+        widget.tag_add("sel", "1.2", "1.3")
+        # Selecting in another widget must not remove the correction selection.
+        other = self.editor._editors[12]
+        other.tag_add("sel", "1.0", "1.1")
+        self.editor._highlight(11)
+        self.assertEqual(widget.get("sel.first", "sel.last"), "疱")
+        self.assertGreater(widget.tag_names().index("sel"), widget.tag_names().index("changed"))
+        menu = widget._copy_menu
+        with patch.object(menu, "tk_popup") as popup:
+            widget._copy_popup(SimpleNamespace(x_root=10, y_root=20))
+        popup.assert_called_once_with(10, 20)
+        self.assertEqual(str(menu.entrycget(0, "state")), "normal")
+        menu.invoke(0)
+        self.assertEqual(self.clipboard["text"], "疱")
+        widget.tag_remove("sel", "1.0", "end")
+        self.clipboard["text"] = "keep clipboard"
+        with patch.object(menu, "tk_popup"):
+            widget._copy_popup(SimpleNamespace(x_root=10, y_root=20))
+        self.assertEqual(str(menu.entrycget(0, "state")), "disabled")
+        widget.event_generate("<<Copy>>")
+        self.assertEqual(self.clipboard["text"], "keep clipboard")
+        self.assertIn("드래그", self.editor.v_status.get())
+
+    def test_readonly_original_and_replacement_preview_can_be_copied(self):
+        self.editor.select_paragraph(11)
+        original = self.editor.original_text
+        original.tag_add("sel", "1.0", "end-1c")
+        original.event_generate("<<Copy>>")
+        self.assertEqual(self.clipboard["text"], "上藥人梗米")
+        self.assertEqual(str(original.cget("state")), "disabled")
+        dialog = self.replacement_dialog()
+        dialog.preview()
+        preview = dialog.preview_text
+        preview._copy_menu.invoke(1)
+        preview._copy_menu.invoke(0)
+        self.assertIn("疱疹", self.clipboard["text"])
+        self.assertEqual(str(preview.cget("state")), "disabled")
+        self.assertEqual(self.session.calls, [])
 
 
 if __name__ == "__main__":

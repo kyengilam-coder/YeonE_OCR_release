@@ -309,6 +309,8 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["readonly_skipped"], 2)
         for field in ("input_line_join_preserved_text", "section_and_document_scopes",
                       "pending_edits_preserved", "edited_marks_cleared",
+                      "edited_text_copy_shortcuts", "copy_context_menu",
+                      "unicode_copy_and_drafts_preserved", "user_clipboard_untouched",
                       "source_and_other_content_preserved", "existing_copy_and_backup_preserved",
                       "manual_history_and_protection_retained", "saved_file_reopened"):
             self.assertTrue(result[field], field)
