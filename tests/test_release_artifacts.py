@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import struct
+import subprocess
 import zipfile
 
 import pytest
@@ -120,6 +121,36 @@ def test_source_allowlist_preserves_all_current_local_engine_resources():
     # Presets must stay synchronized with the real built-in registry/data files.
     from yeone_ocr.presets import BUILTIN
     assert {f"yeone_ocr/data/preset_{key}.json" for key in BUILTIN} <= release.SOURCE_DATA
+
+
+def test_windows_checkout_preserves_pinned_dictionary_bytes(tmp_path):
+    """A Windows Git checkout must not invalidate the dictionary's byte hash."""
+    from yeone_ocr import comparison_unihan as unihan
+
+    root = Path(__file__).resolve().parents[1]
+    name = unihan.DATA.relative_to(root).as_posix()
+    expected = unihan.DATA.read_bytes()
+    assert hashlib.sha256(expected).hexdigest() == unihan.DATA_SHA256
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".gitattributes").write_bytes((root / ".gitattributes").read_bytes())
+    data = checkout / name
+    data.parent.mkdir(parents=True)
+    data.write_bytes(expected)
+    # No commit, network access or changes to the real repository are required.
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "core.autocrlf=true", "-c", "core.safecrlf=false",
+             "-C", str(checkout), *args],
+            check=True, capture_output=True, timeout=30,
+        )
+
+    git("init", "--quiet")
+    git("add", "--", ".gitattributes", name)
+    exported = tmp_path / "exported"
+    exported.mkdir()
+    git("checkout-index", "--all", "--prefix=" + exported.as_posix() + "/")
+    assert (exported / name).read_bytes() == expected
 
 
 def test_source_allowlist_rejects_private_inputs_models_and_runtime_homes():

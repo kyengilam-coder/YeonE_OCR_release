@@ -1,2 +1,5 @@
 # The historical reference manifest records the original bytes, including CRLF.
 /references/AB_OCR_0.3.0/** -text whitespace=cr-at-eol
+
+# The runtime verifies this official dictionary against a pinned byte hash.
+/yeone_ocr/data/unihan_source_protection_17_0_0.json -text
