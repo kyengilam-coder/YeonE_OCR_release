@@ -325,7 +325,7 @@ class FrozenRuntime(unittest.TestCase):
         for field in ("delayed_first_show_balanced", "collapsed_pane_restored",
                       "reload_preserves_comparison", "pdf_and_font_follow_available_width",
                       "manual_resize_preserved", "source_pdf_and_hwpx_unchanged",
-                      "corrected_file_not_created"):
+                      "corrected_file_not_created", "hidden_render_replayed"):
             self.assertTrue(result[field], field)
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)

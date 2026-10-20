@@ -562,7 +562,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.configure(bg=self.colors["BG"])
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Destroy>", self._destroyed, add="+")
-        self.bind("<Map>", lambda event: self._schedule_split() if event.widget is self else None, add="+")
+        self.bind("<Map>", self._mapped, add="+")
         self.bind("<Control-s>", self._save_shortcut)
         self.bind("<Control-S>", self._save_shortcut)
         for shortcut in ("<Control-h>", "<Control-H>", "<Control-f>", "<Control-F>"):
@@ -821,6 +821,14 @@ class BookmarkSectionEditor(tk.Toplevel):
     def _initial_split(self):
         self._initial_job = None
         self._restore_split()
+
+    def _mapped(self, event):
+        if event.widget is self and not self._closed:
+            self._schedule_split()
+            # A render requested while hidden may have been deliberately skipped.
+            # Mapping does not necessarily resize the canvas, so explicitly resume
+            # rendering even when its remembered pane geometry is already valid.
+            self._request_render()
 
     def _schedule_split(self):
         if not self._closed and self._split_job is None:

@@ -908,6 +908,9 @@ def bookmark_layout_probe(folder: Path) -> dict:
         page = pdf.new_page(width=760, height=500)
         page.insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=22)
         page.insert_text((40, 130), body, fontname="china-t", fontsize=22)
+        page = pdf.new_page(width=620, height=840)
+        page.insert_text((40, 60), "下一頁", fontname="china-t", fontsize=26)
+        page.insert_text((40, 130), "春夏秋冬東西南北。", fontname="china-t", fontsize=26)
         pdf.save(pdf_path)
     original, original_pdf = source.read_bytes(), pdf_path.read_bytes()
     book = HwpxBook(str(source))
@@ -922,7 +925,7 @@ def bookmark_layout_probe(folder: Path) -> dict:
     try:
         window = BookmarkSectionEditor(
             root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
-            section_start=section.start, section_end=section.end, pdf_pages=(1, 1))
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 2))
         window.attributes("-alpha", 0.0)
         window.withdraw()
 
@@ -956,6 +959,14 @@ def bookmark_layout_probe(folder: Path) -> dict:
             # This fixture uses fit-to-width, with a 32-pixel image margin.
             return abs(window._image_size[0] - (window.pdf_canvas.winfo_width() - 32)) <= 2
 
+        # A legitimate first layout may finish just before the window is hidden,
+        # leaving the 100 ms render timer to run with no mapped canvas.
+        pump_until(balanced, "First mapped layout did not balance the comparison")
+        assert window._image_size is None
+        window.withdraw()
+        pump_until(lambda: window._render_job is None, "Hidden initial render timer did not run")
+        assert window._image_size is None
+        window.deiconify()
         pump_until(lambda: balanced() and display_matches_width(),
                    "Delayed first show did not restore both panes and render the PDF")
         window.select_paragraph(body_index)
@@ -993,6 +1004,28 @@ def bookmark_layout_probe(folder: Path) -> dict:
                    "Hidden reload and redisplay did not preserve the comparison")
         glyph_width = window._cursor_map.page_font_width(1) * window._image_size[0]
         assert glyph_width >= 12 and abs(window._editor_font.measure("漢") - glyph_width) <= 2
+
+        # Reopening at the same width must replay a page/zoom request skipped
+        # while hidden. Different page dimensions prove the actual PDF changed.
+        window.v_follow_cursor.set(False)
+        window._toggle_cursor_follow()
+        pump_until(lambda: window._render_job is None and window._render_future is None,
+                   "Previous visible render did not finish")
+        window.withdraw()
+        window.set_page(2)
+        window.set_zoom(1.25)
+        pump_until(lambda: window._render_job is None, "Hidden page/zoom timer did not run")
+        assert window._displayed_page == 1
+        window.deiconify()
+        pump_until(lambda: window._displayed_page == 2 and window._image_size == (775, 1050)
+                   and abs(window._rendered_scale - 1.25) < .001,
+                   "Redisplay lost the hidden page/zoom request")
+        glyph_width = window._cursor_map.page_font_width(2) * window._image_size[0]
+        assert abs(window._editor_font.measure("漢") - glyph_width) <= 2
+        window.set_zoom(None)
+        pump_until(lambda: window._image_size is not None and
+                   abs(window._image_size[0] - (window.pdf_canvas.winfo_width() - 32)) <= 2,
+                   "Fit-to-width did not recover after replaying a hidden request")
         assert not window.dirty and not window.session.corrected_path.exists()
         assert source.read_bytes() == original and pdf_path.read_bytes() == original_pdf
     finally:
@@ -1004,7 +1037,8 @@ def bookmark_layout_probe(folder: Path) -> dict:
     return {"delayed_first_show_balanced": True, "collapsed_pane_restored": True,
             "reload_preserves_comparison": True, "pdf_and_font_follow_available_width": True,
             "manual_resize_preserved": True, "source_pdf_and_hwpx_unchanged": True,
-            "corrected_file_not_created": True, "ocr_calls": 0, "network_calls": 0}
+            "corrected_file_not_created": True, "hidden_render_replayed": True,
+            "ocr_calls": 0, "network_calls": 0}
 
 
 def run(report_path: Path) -> int:
