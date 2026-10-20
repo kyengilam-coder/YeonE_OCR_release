@@ -1,6 +1,7 @@
 """Direct bookmark editing: drafts, review, conflicts, closing and PDF scope."""
 from concurrent.futures import Future
 import contextlib
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -541,6 +542,122 @@ class SectionEditorTk(unittest.TestCase):
             self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4 | 0x20000, keysym="ㅊ")))
             self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=88, state=4, keysym="ㅌ")))
             self.assertEqual(self.clipboard["text"], "sentinel")
+
+    def test_ime_select_all_then_copy_keeps_unsaved_unicode_and_alt_shortcuts(self):
+        self.edit(11, "수정 疱𠀀漢\ufe00")
+        widget = self.editor._editors[11]
+        drafts = self.editor._changes()
+        with patch("yeone_ocr.collate.section_editor.sys.platform", "win32"):
+            self.assertEqual(_copy_control_key(widget, SimpleNamespace(keycode=65, state=4, keysym="ㅁ")), "break")
+            self.assertEqual(widget.get("sel.first", "sel.last"), drafts[11])
+            self.assertEqual(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4, keysym="ㅊ")), "break")
+            self.assertEqual(self.clipboard["text"], drafts[11])
+            widget.tag_remove("sel", "1.0", "end")
+            self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=65, state=4 | 0x20000)))
+            self.assertFalse(widget.tag_ranges("sel"))
+        widget.event_generate("<<SelectAll>>")
+        self.assertEqual(widget.get("sel.first", "sel.last"), drafts[11])
+        self.assertEqual(self.editor._changes(), drafts)
+
+    def test_whole_section_copy_includes_all_paragraphs_after_save_error(self):
+        self.edit(11, "수정한 疱𠀀")
+        self.edit(12, "다른 문단의 수정")
+        self.session.failure = ValueError("synthetic save error")
+        self.assertFalse(self.editor.save())
+        widget = self.editor._editors[11]
+        widget.tag_add("sel", "1.0", "1.2")
+        selection = tuple(widget.tag_ranges("sel"))
+        caret = widget.index("insert")
+        drafts = self.editor._changes()
+        self.assertTrue(self.editor.copy_section_text())
+        self.assertEqual(self.clipboard["text"], "瀉白散\n\n수정한 疱𠀀\n\n다른 문단의 수정")
+        self.assertEqual(tuple(widget.tag_ranges("sel")), selection)
+        self.assertEqual(widget.index("insert"), caret)
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_export_changes_keeps_exact_unicode_and_external_drafts_without_saving(self):
+        self.edit(11, "수정 疱𠀀漢\ufe00\r\n보관\t내용")
+        self.editor._external_changes[99] = "구획 밖 수정𠀀"
+        self.editor._baseline[99] = "구획 밖 수정 전"
+        drafts = self.editor._changes()
+        corrected = self.session.corrected_path
+        corrected.write_bytes(b"existing corrected snapshot")
+        history = corrected.with_suffix(".manual.json")
+        history.write_bytes(b"existing history")
+        path = self.folder / "draft.txt"
+        self.assertTrue(self.editor.export_changes(path))
+        self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
+        exported = path.read_bytes().decode("utf-8-sig")
+        self.assertIn("문단 12\n수정 전\n上藥入粳米\n\n수정 후\n" + drafts[11], exported)
+        self.assertIn("문단 100\n수정 전\n구획 밖 수정 전\n\n수정 후\n" + drafts[99], exported)
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(corrected.read_bytes(), b"existing corrected snapshot")
+        self.assertEqual(history.read_bytes(), b"existing history")
+        self.assertEqual(self.hwpx.read_bytes(), b"original fixture; GUI must never overwrite")
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(list(self.folder.glob(".*.tmp")), [])
+
+    def test_export_cancel_and_write_failure_leave_drafts_and_previous_text_untouched(self):
+        self.edit(11, "보관할 수정")
+        drafts = self.editor._changes()
+        with patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=""):
+            self.assertFalse(self.editor.export_changes())
+        path = self.folder / "draft.txt"
+        path.write_bytes(b"previous export")
+        with patch("yeone_ocr.collate.section_editor.os.replace", side_effect=PermissionError("synthetic locked file")):
+            self.assertFalse(self.editor.export_changes(path))
+        self.assertEqual(path.read_bytes(), b"previous export")
+        self.assertEqual(list(self.folder.glob(".*.tmp")), [])
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_export_rejects_document_paths_and_txt_hardlink_to_original(self):
+        self.edit(11, "보관할 수정")
+        original = self.hwpx.read_bytes()
+        linked = self.folder / "original-alias.txt"
+        os.link(self.hwpx, linked)
+        for path in (self.hwpx, self.pdf, self.session.corrected_path,
+                     self.session.corrected_path.with_suffix(".manual.json"), linked):
+            with self.subTest(path=path.name):
+                self.assertFalse(self.editor.export_changes(path))
+        self.assertEqual(self.hwpx.read_bytes(), original)
+        self.assertEqual(linked.read_bytes(), original)
+        self.assertEqual(self.editor._changes(), {11: "보관할 수정"})
+        self.assertEqual(self.session.calls, [])
+
+    def test_change_review_can_export_without_accepting_or_closing(self):
+        self.edit(11, "수정 후 疱")
+        dialog = ChangeReviewDialog(self.editor, self.editor._changes(), self.editor._baseline,
+                                    self.session.corrected_path)
+        self.addCleanup(lambda: dialog.destroy() if dialog.winfo_exists() else None)
+        path = self.folder / "review.txt"
+        with patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=str(path)):
+            dialog.export_button.invoke()
+        self.assertTrue(dialog.winfo_exists())
+        self.assertFalse(dialog.accepted)
+        self.assertIn("수정 후 疱", path.read_text(encoding="utf-8-sig"))
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_copy_and_export_controls_fit_minimum_window_width(self):
+        self.editor.geometry("900x640")
+        self.editor.deiconify()
+        self.root.update()
+        buttons = (self.editor.copy_section_button, self.editor.find_button, self.editor.export_button,
+                   self.editor.save_button, self.editor.history_button, self.editor.revert_button)
+        for button in buttons:
+            with self.subTest(button=button.cget("text")):
+                self.assertTrue(button.winfo_ismapped())
+                self.assertGreater(button.winfo_width(), 20)
+                self.assertGreaterEqual(button.winfo_rootx(), self.editor.winfo_rootx())
+                self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                     self.editor.winfo_rootx() + self.editor.winfo_width())
+        self.assertLessEqual(self.editor.find_button.winfo_rootx() + self.editor.find_button.winfo_width(),
+                             self.editor.copy_section_button.winfo_rootx())
 
     def test_context_copy_preserves_selection_after_focus_moves_and_has_clear_empty_state(self):
         self.edit(11, "單純疱疹𠀀")

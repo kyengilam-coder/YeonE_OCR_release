@@ -744,8 +744,25 @@ def bookmark_replace_probe(folder: Path) -> dict:
             field._copy_menu.invoke(0)
             assert copied["writes"] == writes + 1 and copied["text"] == "疱"
             assert field.get("sel.first", "sel.last") == "疱"
+            # One action crosses paragraph boxes without selecting each field.
+            assert window.copy_section_text()
+            assert copied["text"] == ("瀉白散\n\n" + expected_draft.replace("皰", "疱")
+                                      + "\n\n保留原文。")
+            assert "他段疱疹" not in copied["text"]
+            if sys.platform == "win32":
+                key = SimpleNamespace(state=0x0004, keycode=65, keysym="Hangul")
+                assert section_editor._copy_control_key(field, key) == "break"
+                assert field.get("sel.first", "sel.last") == expected_draft.replace("皰", "疱")
         assert root.tk.call("info", "commands", "clipboard") == ("clipboard",)
         assert window._changes() == before_copy and target.read_bytes() == before
+        draft_path = folder / "bookmark-unsaved-draft.txt"
+        assert window.export_changes(draft_path)
+        backup_text = draft_path.read_text(encoding="utf-8-sig")
+        assert f"문단 {local + 1}" in backup_text and f"문단 {outside + 1}" in backup_text
+        assert expected_draft.replace("皰", "疱") in backup_text and "他段疱疹。" in backup_text
+        assert "수정 전" in backup_text and "수정 후" in backup_text
+        assert window._changes() == before_copy and window.dirty and target.read_bytes() == before
+        assert not manual_history_path(target).exists()
         window.withdraw()
         window._confirm_changes = lambda changes: changes == plan.changes
         assert window.save() and not window.dirty
@@ -786,6 +803,7 @@ def bookmark_replace_probe(folder: Path) -> dict:
             "pending_edits_preserved": True, "edited_marks_cleared": True,
             "edited_text_copy_shortcuts": True, "copy_context_menu": True,
             "unicode_copy_and_drafts_preserved": True, "user_clipboard_untouched": True,
+            "whole_section_copy_includes_unsaved_edits": True, "unsaved_changes_exported_to_text": True,
             "source_and_other_content_preserved": True, "existing_copy_and_backup_preserved": True,
             "manual_history_and_protection_retained": True, "saved_file_reopened": True,
             "ocr_calls": 0, "network_calls": 0}

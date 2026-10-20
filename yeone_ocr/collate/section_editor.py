@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import difflib
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 
 _PDF_EXECUTOR = None
@@ -45,6 +47,20 @@ def join_paragraph_lines(text, baseline=""):
     return "".join(result)
 
 
+def copy_text_value(widget, value):
+    """Copy Unicode text without modifying an editor or its selection."""
+    if not value:
+        return False
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(value)
+    except tk.TclError:
+        messagebox.showerror("복사하지 못했습니다", "클립보드를 사용할 수 없습니다. 잠시 뒤 다시 복사해 주세요.",
+                             parent=widget.winfo_toplevel())
+        return False
+    return True
+
+
 def copy_selected_text(widget, *, on_status=None):
     """Copy exactly the selection, including unsaved Unicode edits."""
     try:
@@ -53,26 +69,26 @@ def copy_selected_text(widget, *, on_status=None):
         if on_status:
             on_status("복사할 글자를 먼저 드래그해 선택하세요. 파란 교정 표시는 글자 선택과 다릅니다.")
         return "break"
-    if not value:
-        return "break"
-    try:
-        widget.clipboard_clear()
-        widget.clipboard_append(value)
-    except tk.TclError:
-        messagebox.showerror("복사하지 못했습니다", "클립보드를 사용할 수 없습니다. 잠시 뒤 다시 복사해 주세요.",
-                             parent=widget.winfo_toplevel())
-        return "break"
-    if on_status:
+    if copy_text_value(widget, value) and on_status:
         on_status(f"선택한 글자 {len(value)}개를 복사했습니다. 입력한 수정은 그대로 남아 있습니다.")
     return "break"
 
 
+def select_all_text(widget):
+    widget.focus_set()
+    widget.tag_add("sel", "1.0", "end-1c")
+    widget.tag_raise("sel")
+    return "break"
+
+
 def _copy_control_key(widget, event, *, on_status=None):
-    """Windows IMEs can change keysyms; the physical C key still means copy."""
+    """Preserve select-all and copy when a Windows IME changes keysyms."""
     state = int(getattr(event, "state", 0))
-    if (sys.platform == "win32" and getattr(event, "keycode", None) == 67
-            and state & 4 and not state & (8 | 0x20000)):
-        return copy_selected_text(widget, on_status=on_status)
+    if sys.platform == "win32" and state & 4 and not state & (8 | 0x20000):
+        if getattr(event, "keycode", None) == 65:
+            return select_all_text(widget)
+        if getattr(event, "keycode", None) == 67:
+            return copy_selected_text(widget, on_status=on_status)
     return None
 
 
@@ -85,10 +101,7 @@ def bind_text_copy(widget, *, on_status=None):
         return copy_selected_text(widget, on_status=on_status)
 
     def select_all(_event=None):
-        widget.focus_set()
-        widget.tag_add("sel", "1.0", "end-1c")
-        widget.tag_raise("sel")
-        return "break"
+        return select_all_text(widget)
 
     menu = tk.Menu(widget, tearoff=False)
     menu.add_command(label="복사", accelerator="Ctrl+C", command=copy)
@@ -107,7 +120,7 @@ def bind_text_copy(widget, *, on_status=None):
     widget._copy_popup = popup
     for sequence in ("<<Copy>>", "<Control-c>", "<Control-C>", "<Control-Insert>"):
         widget.bind(sequence, copy)
-    for sequence in ("<Control-a>", "<Control-A>"):
+    for sequence in ("<<SelectAll>>", "<Control-a>", "<Control-A>"):
         widget.bind(sequence, select_all)
     widget.bind("<Control-KeyPress>", lambda event: _copy_control_key(widget, event, on_status=on_status))
     widget.bind("<Button-3>", popup)
@@ -184,6 +197,11 @@ class ChangeReviewDialog(tk.Toplevel):
         bind_text_copy(text)
         buttons = tk.Frame(self, bg=parent.colors["BG"])
         buttons.grid(row=3, column=0, sticky="ew", padx=22, pady=18)
+        self.export_button = ttk.Button(
+            buttons, text="텍스트로 보관",
+            command=lambda: parent.export_changes(changes=dict(changes), baseline=dict(baseline),
+                                                  dialog_parent=self))
+        self.export_button.pack(side="left")
         ttk.Button(buttons, text="확인 · 교정본에 저장", command=self._accept,
                    style="Ink.TButton").pack(side="right")
         ttk.Button(buttons, text="계속 편집", command=self.destroy).pack(side="right", padx=(0, 8))
@@ -639,6 +657,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
         self.history_button = ttk.Button(actions, text="수정 기록 보기", command=self.show_correction_history)
         self.history_button.pack(side="left", padx=(0, 7))
+        self.export_button = ttk.Button(actions, text="수정 내용 보관", command=self.export_changes, state="disabled")
+        self.export_button.pack(side="left", padx=(0, 7))
         self.revert_button = ttk.Button(actions, text="이번 수정 취소", command=self.revert_changes, state="disabled")
         self.revert_button.pack(side="left", padx=(0, 7))
         self.save_button = ttk.Button(actions, text="변경 확인·저장  Ctrl S", command=self.save, style="Ink.TButton", state="disabled")
@@ -709,7 +729,9 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.reload_button = self._tool_button(heading, "다시 불러오기", self.reload)
         self.reload_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
         self.find_button = self._tool_button(heading, "찾기·바꾸기  Ctrl H", self.open_find_replace)
-        self.find_button.grid(row=2, column=0, columnspan=2, sticky="w", pady=(7, 0))
+        self.find_button.grid(row=2, column=0, sticky="w", pady=(7, 0))
+        self.copy_section_button = self._tool_button(heading, "구획 전체 복사", self.copy_section_text)
+        self.copy_section_button.grid(row=2, column=1, sticky="e", padx=(8, 0), pady=(7, 0))
         tools = tk.Frame(panel, bg="#fcfaf5")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
         self.v_match_pdf_font = tk.BooleanVar(value=True)
@@ -1200,6 +1222,7 @@ class BookmarkSectionEditor(tk.Toplevel):
                              fg=self.colors["ACCENT"] if index in changes else self.colors["MUTED"])
         state = "normal" if changes and not self.busy else "disabled"
         self.save_button.configure(state=state); self.revert_button.configure(state=state)
+        self.export_button.configure(state="normal" if changes else "disabled")
         self.reload_button.configure(state="disabled" if self.busy else "normal")
         self.find_button.configure(state="disabled" if self.busy else "normal")
 
@@ -1556,6 +1579,70 @@ class BookmarkSectionEditor(tk.Toplevel):
     def _save_shortcut(self, _event=None):
         self.save()
         return "break"
+
+    def copy_section_text(self):
+        """Copy all currently displayed paragraphs, without changing drafts."""
+        if self._closed:
+            return False
+        value = "\n\n".join(self._editors[index].get("1.0", "end-1c") for index in sorted(self._editors))
+        if not copy_text_value(self, value):
+            return False
+        self.v_status.set(f"구획 전체 {len(self._editors)}문단을 복사했습니다. 미저장 수정도 포함합니다.")
+        return True
+
+    def export_changes(self, path=None, *, changes=None, baseline=None, dialog_parent=None):
+        """Keep an exact before/after TXT copy; this never saves the HWPX."""
+        if self._closed:
+            return False
+        parent = dialog_parent or self
+        changes = self._changes() if changes is None else dict(changes)
+        baseline = self._baseline if baseline is None else baseline
+        if not changes:
+            messagebox.showinfo("수정 내용 보관", "보관할 미저장 수정이 없습니다.", parent=parent)
+            return False
+        if path is None:
+            target = Path(self.session.corrected_path)
+            path = filedialog.asksaveasfilename(
+                parent=parent, title="미저장 수정 내용을 텍스트로 보관", defaultextension=".txt",
+                filetypes=[("텍스트 파일", "*.txt")], initialdir=str(target.parent),
+                initialfile=target.stem + "_수정내용.txt")
+            if not path:
+                return False
+        temporary = None
+        try:
+            path = Path(path).expanduser()
+            protected = [Path(self.pdf_path), Path(self.hwpx_path), Path(self.session.corrected_path)]
+            corrected = Path(self.session.corrected_path)
+            protected += [corrected.with_suffix(".bak.hwpx"), corrected.with_suffix(".manual.json"),
+                          corrected.with_suffix(".manual.bak.json")]
+            if path.suffix.lower() != ".txt" or path.is_symlink():
+                raise ValueError("별도의 .txt 파일을 선택해 주세요.")
+            if any(path.resolve() == item.resolve() or
+                   (path.exists() and item.exists() and path.samefile(item)) for item in protected):
+                raise ValueError("원본·교정본·수정 기록을 보관 파일로 덮어쓸 수 없습니다.")
+            parts = ["연어OCR · 미저장 수정 내용", f"교정 대상: {corrected.name}",
+                     "이 파일은 보관용 텍스트이며 교정본 HWPX에 저장된 결과가 아닙니다.", ""]
+            for index in sorted(changes):
+                if index not in baseline:
+                    raise ValueError("수정 전 문단을 확인하지 못했습니다. 입력한 내용은 그대로 남아 있습니다.")
+                parts.extend([f"문단 {index + 1}", "수정 전", baseline[index], "", "수정 후", changes[index], "", ""])
+            descriptor, filename = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            temporary = Path(filename)
+            with os.fdopen(descriptor, "w", encoding="utf-8-sig", newline="") as stream:
+                stream.write("\n".join(parts))
+            os.replace(temporary, path)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("수정 내용을 보관하지 못했습니다",
+                                 f"{exc}\n\n입력한 수정은 이 창에 남아 있습니다.", parent=parent)
+            return False
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self.v_status.set(f"수정 내용 보관됨 · {path.name} · 교정본은 아직 저장하지 않았습니다.")
+        return True
 
     def _confirm_changes(self, changes):
         dialog = ChangeReviewDialog(self, changes, self._baseline, Path(self.session.corrected_path))
