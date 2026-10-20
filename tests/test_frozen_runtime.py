@@ -151,6 +151,56 @@ class FrozenRuntime(unittest.TestCase):
         self.assertTrue(all(key not in text for key in keys))
         self.assertEqual(text.count("[REDACTED]"), 3)
 
+    def test_all_six_engine_worker_and_installer_resources_are_self_contained(self):
+        from yeone_ocr.frozen_smoke import comparison_resources_probe
+        from ab_ocr import runtime as engine_runtime
+        result = comparison_resources_probe()
+        self.assertEqual(set(result["workers"]), {"rapidocr", "easyocr", "paddle_server", "glmocr", "surya"})
+        self.assertEqual(len(set(result["workers"].values())), 4)
+        self.assertEqual(result["workers"]["paddle_server"], "rapidocr_worker.py")
+        self.assertFalse(result["external_models_loaded"])
+        self.assertEqual(result["network_calls"], 0)
+        resources = set(result["application_resources"])
+        self.assertIn("worker_sessions.py", resources)
+        self.assertEqual(result["gpu_queue_database"], "sqlite3 available")
+        for name in ("install_paddle_server.py", "paddle-server-lock.json", "install_glmocr.py",
+                     "glmocr-models.lock.json", "install_surya.py", "surya-lock.json", "surya-requirements.txt"):
+            self.assertIn(name, resources)
+        self.assertTrue({"GLM_OCR.md", "PADDLE_SERVER.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md"}
+                        <= set(result["documentation"]))
+        # A frozen installation must resolve its own workers, never the source
+        # checkout or another project's runtime if one bundled file is missing.
+        with self.frozen():
+            self.assertTrue(engine_runtime.worker_path("glmocr").is_relative_to(self.install))
+            with self.assertRaisesRegex(AssertionError, "Missing application-owned worker"):
+                comparison_resources_probe()
+
+    def test_release_smoke_preserves_source_codes_and_measures_literal_errors(self):
+        from yeone_ocr.frozen_smoke import source_preservation_probe
+        result = source_preservation_probe(self.root)
+        self.assertEqual(result["source_exact_edits"], 2)
+        self.assertTrue(result["evaluation_record_unchanged"])
+        self.assertTrue(result["compatibility_and_selectors_preserved"])
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_holds_new_unlocated_answers_and_replays_legacy(self):
+        from yeone_ocr.frozen_smoke import glyph_location_hold_probe
+        result = glyph_location_hold_probe()
+        self.assertEqual(result["new_unmeasured_choice"], "held")
+        self.assertEqual(result["legacy_decision_replay"], "preserved")
+        self.assertEqual(result["mock_answers"], 1)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_scans_both_annotation_layouts_without_editing_records(self):
+        from yeone_ocr.frozen_smoke import small_annotations_probe
+        result = small_annotations_probe(self.root)
+        self.assertEqual(result["layouts"], {"vertical": {"candidates": 1, "lines": 2},
+                                            "horizontal": {"candidates": 2, "lines": 7}})
+        self.assertTrue(result["ui_imported"])
+        self.assertTrue(result["original_and_records_unchanged"])
+        self.assertEqual(result["automatic_insertions"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

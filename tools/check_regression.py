@@ -40,7 +40,16 @@ def _fingerprint(module):
 def _write_json(path, payload):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    # Windows scanners can briefly open the previous receipt without share-delete.
+    # Keep the complete pending file and retry only that transient sharing failure.
+    for attempt in range(20):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 19:
+                raise
+            time.sleep(min(0.01 * 2 ** attempt, 0.1))
 
 
 def _offline():

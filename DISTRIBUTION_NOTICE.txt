@@ -13,3 +13,14 @@ preserved. No new AGPL license is applied to YeonE_OCR application source here.
 No personal API key, access token, user settings, source document or OCR work
 directory is included. Each user supplies their own Gemini API key. API use is
 separate from distribution of this executable.
+
+Unicode Unihan 17.0.0 source-preservation data is bundled in
+yeone_ocr/data/unihan_source_protection_17_0_0.json. It includes all relationships
+from the selected compatibility, semantic, specialized semantic, simplified,
+traditional and Z-variant properties, plus official Mandarin readings. The data
+is used to hold risky new OCR proposals, never to normalize or convert a text.
+The original Unicode License v3 text is embedded in the JSON license_text field.
+Source: https://www.unicode.org/Public/17.0.0/ucd/Unihan.zip
+Archive SHA-256: f7a48b2b545acfaa77b2d607ae28747404ce02baefee16396c5d2d7a8ef34b5e
+Documentation: https://www.unicode.org/reports/tr38/tr38-39.html
+License: https://www.unicode.org/license.txt

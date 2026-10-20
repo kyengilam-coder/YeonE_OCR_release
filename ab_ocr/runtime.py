@@ -7,10 +7,10 @@ reusing a development installation does not import another project's Python.
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
-from pathlib import Path
 import sys
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 
 _SPAWN_LOCK = threading.RLock()
 
@@ -34,8 +34,9 @@ def user_engine_root() -> Path:
 
 
 def _has_engine_home(root: Path) -> bool:
+    from .engine_registry import ENGINES
     return any((root / "tools" / engine / "installation.json").is_file()
-               for engine in ("tesseract", "rapidocr", "easyocr"))
+               for engine in ENGINES)
 
 
 def default_engine_root(selected_root: str | Path | None = None) -> Path:
@@ -65,9 +66,11 @@ def default_engine_root(selected_root: str | Path | None = None) -> Path:
 
 
 def worker_path(engine: str) -> Path:
-    if engine not in ("rapidocr", "easyocr"):
+    names = {"rapidocr": "rapidocr", "easyocr": "easyocr", "paddle_server": "rapidocr",
+             "glmocr": "glmocr", "surya": "surya"}
+    if engine not in names:
         raise ValueError("지원하지 않는 로컬 OCR 작업자입니다.")
-    return resource_root() / "ab_ocr" / f"{engine}_worker.py"
+    return resource_root() / "ab_ocr" / f"{names[engine]}_worker.py"
 
 
 def subprocess_environment() -> dict[str, str]:
@@ -76,6 +79,7 @@ def subprocess_environment() -> dict[str, str]:
     for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
         environment.pop(name, None)
     environment.update(PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+                       PYTHONDONTWRITEBYTECODE="1",
                        HF_HUB_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1",
                        DO_NOT_TRACK="1", ANONYMIZED_TELEMETRY="False")
     thread_limit = min(8, os.cpu_count() or 1)
@@ -120,3 +124,123 @@ def external_process_search():
         finally:
             if kernel is not None:
                 kernel.SetDllDirectoryW(previous or None)
+
+
+def _resume_suspended_process(process):
+    """Resume only the sole initial thread of our suspended worker process.
+
+    CPython closes CreateProcess's primary-thread handle before Popen returns.
+    The documented Toolhelp/OpenThread APIs recover that handle without resuming
+    any unrelated process or relying on the undocumented NtResumeProcess call.
+    """
+    import ctypes
+    from ctypes import wintypes as wt
+
+    from .ocr import OCRError
+
+    class ThreadEntry(ctypes.Structure):
+        _fields_ = [("dwSize", wt.DWORD), ("cntUsage", wt.DWORD),
+                    ("th32ThreadID", wt.DWORD), ("th32OwnerProcessID", wt.DWORD),
+                    ("tpBasePri", wt.LONG), ("tpDeltaPri", wt.LONG), ("dwFlags", wt.DWORD)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetProcessId.argtypes = [wt.HANDLE]
+    kernel.GetProcessId.restype = wt.DWORD
+    kernel.CreateToolhelp32Snapshot.argtypes = [wt.DWORD, wt.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    for name in ("Thread32First", "Thread32Next"):
+        function = getattr(kernel, name)
+        function.argtypes = [wt.HANDLE, ctypes.POINTER(ThreadEntry)]
+        function.restype = wt.BOOL
+    kernel.OpenThread.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    kernel.OpenThread.restype = wt.HANDLE
+    kernel.ResumeThread.argtypes = [wt.HANDLE]
+    kernel.ResumeThread.restype = wt.DWORD
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    kernel.CloseHandle.restype = wt.BOOL
+    if (type(getattr(process, "pid", None)) is not int
+            or kernel.GetProcessId(wt.HANDLE(int(process._handle))) != process.pid):
+        raise OCRError("로컬 OCR 작업의 소유 프로세스를 확인하지 못했습니다.")
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000004, 0)  # TH32CS_SNAPTHREAD
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise OCRError("로컬 OCR의 대기 스레드를 확인하지 못했습니다.")
+    try:
+        entry = ThreadEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        found = []
+        available = kernel.Thread32First(snapshot, ctypes.byref(entry))
+        while available:
+            if entry.th32OwnerProcessID == process.pid:
+                found.append(entry.th32ThreadID)
+            entry.dwSize = ctypes.sizeof(entry)
+            available = kernel.Thread32Next(snapshot, ctypes.byref(entry))
+        if len(found) != 1:
+            raise OCRError("로컬 OCR의 유일한 시작 스레드를 확인하지 못했습니다.")
+        thread = kernel.OpenThread(0x0002, False, found[0])  # THREAD_SUSPEND_RESUME
+        if not thread:
+            raise OCRError("로컬 OCR 시작 스레드를 열지 못했습니다.")
+        try:
+            if kernel.ResumeThread(thread) != 1:
+                raise OCRError("로컬 OCR 작업을 안전하게 시작하지 못했습니다.")
+        finally:
+            kernel.CloseHandle(thread)
+    finally:
+        kernel.CloseHandle(snapshot)
+
+
+@contextmanager
+def process_tree(process, *, suspended=False):
+    """Own this Windows worker's descendants, including private model servers.
+
+    A suspended worker is attached before its initial thread is resumed, so even
+    a server spawned immediately at startup belongs to this job. Closing the job
+    on success, cancel, timeout or termination releases only this process tree.
+    """
+    if sys.platform != "win32" or not isinstance(getattr(process, "_handle", None), int):
+        yield
+        return
+    import ctypes
+    from ctypes import wintypes as wt
+
+    from .ocr import OCRError
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong), ("LimitFlags", wt.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wt.DWORD), ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wt.DWORD), ("SchedulingClass", wt.DWORD)]
+
+    class IOCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", IOCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wt.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
+    kernel.SetInformationJobObject.restype = wt.BOOL
+    kernel.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+    kernel.AssignProcessToJobObject.restype = wt.BOOL
+    kernel.CloseHandle.argtypes = [wt.HANDLE]
+    kernel.CloseHandle.restype = wt.BOOL
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        raise OCRError("로컬 OCR 하위 작업의 정리 장치를 만들지 못했습니다.")
+    try:
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if (not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits))
+                or not kernel.AssignProcessToJobObject(job, wt.HANDLE(int(process._handle)))):
+            raise OCRError("로컬 OCR 하위 작업을 안전하게 관리할 수 없어 실행을 중단했습니다.")
+        if suspended:
+            _resume_suspended_process(process)
+        yield
+    finally:
+        kernel.CloseHandle(job)

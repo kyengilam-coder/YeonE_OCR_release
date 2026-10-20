@@ -1150,8 +1150,8 @@ class Safety068(unittest.TestCase):
             work.save_record(7, rec)
             bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
             calls = []
-            def fake_remerge(r, layer, layer_d=None):
-                calls.append(r["pdf_page"]); r = dict(r); r["version"] = __version__; r["remerged"] = True; return r
+            def fake_remerge(r, layer, layer_d=None, *, mode=None):
+                calls.append(r["pdf_page"]); r = dict(r); r["version"] = __version__; r["mode"] = mode; r["remerged"] = True; return r
             logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record
             try:
                 R.log = logs.append; R.ensure_pages_read = lambda *a, **k: None; cli.resolve_mode = lambda *a, **k: None; cli.remerge_record = fake_remerge
@@ -1362,8 +1362,8 @@ class Review068(unittest.TestCase):
             merged = PageReading.model_validate({"pdf_page": 7, "regions": [{"id": "r1", "kind": "본문", "bbox": [0, 0, 1000, 1000],
                                                                              "paras": [{"cols": [{"n": 1, "t": "大蓟根陶云有毒"}]}]}]}).model_dump()
             bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
-            def fake_remerge(r, layer, layer_d=None):
-                r = dict(r); r["version"] = __version__; return r
+            def fake_remerge(r, layer, layer_d=None, *, mode=None):
+                r = dict(r); r["version"] = __version__; r["mode"] = mode; return r
             logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record
             try:
                 R.log = logs.append; R.ensure_pages_read = lambda *a, **k: False; cli.resolve_mode = lambda *a, **k: None; cli.remerge_record = fake_remerge

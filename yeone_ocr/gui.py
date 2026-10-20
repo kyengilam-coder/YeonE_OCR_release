@@ -1941,8 +1941,8 @@ class App(tk.Tk):
         tabs.pack(side="left", fill="y"); self._tab_buttons = list(tabs.winfo_children())
         local_tools = tk.Frame(self, bg=C["PANEL"])
         local_tools.pack(fill="x")
-        self.b_comparison = self._btn(local_tools, "3엔진 비교·교정", self.open_local_comparison,
-            style="Link.TButton", tip="선택한 원본을 Tesseract·RapidOCR·EasyOCR로 비교하고 원본 옆에서 교정합니다. 로컬 처리이며 API를 호출하지 않습니다.")
+        self.b_comparison = self._btn(local_tools, "OCR 모델 비교·교정", self.open_local_comparison,
+            style="Link.TButton", tip="선택한 로컬 OCR 모델의 결과를 비교하고 원본 옆에서 교정합니다. AI 재검증은 전송 범위를 확인한 뒤 따로 실행합니다.")
         self.b_comparison.pack(side="left", padx=(P(24), P(12)), pady=(0, P(3)))
         tk.Label(local_tools, text="원본 대조 편집 · 로컬 처리", font=self.fonts["CAP"],
                  bg=C["PANEL"], fg=C["MUTED"]).pack(side="left")
@@ -4387,6 +4387,7 @@ class App(tk.Tk):
                  ("⑤ 검수 화면", self.do_review, "원본 위에 영역 상자를 그린 검수 화면(review.html)을 만들어 엽니다"),
                  ("⑥ 보고", self.do_report, "쪽별 상태와 다발 오인식 장부(report.md)를 진행 기록에 보여 줍니다")]
         tools = [("3차 글자 판별", self.do_adjudicate, "1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 자형만으로 묻습니다(앞뒤 글자는 글로 주지 않고 후보 차례는 섞음 · 8자리씩 묶어 한 호출, 쪽은 동시에)"),
+                 ("소주 검수", self.do_small_annotations, "세로 쌍행·가로 다중행 소주를 찾아 원본과 대조합니다. 선택한 후보만 재판독하고 직접 지정한 본문 위치에 삽입할 수 있습니다"),
                  ("혼동 장부", self.do_ledger, "어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모읍니다(모델 호출 없음)"),
                  ("비교 다시 계산", self.do_remerge, "저장된 1차·2차 판독으로 확인 표시만 다시 계산합니다(모델 호출 없음). 프로그램을 새 판으로 바꾼 뒤에"),
                  ("PDF 글자층 넣기", self.do_textlayer, "판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)를 만들고 엽니다"
@@ -5123,11 +5124,14 @@ class App(tk.Tk):
     def _comparison_ai_settings(self):
         """Snapshot only the currently selected provider on the owning UI thread."""
         from .providers import PROVIDERS
+        from .readers import split_keys
         reader = self.v_reader.get().strip()
         model = self.v_model.get().strip()
         if reader not in PROVIDERS or not model:
             raise ValueError("[설정]에서 AI 판독기와 이미지 입력을 지원하는 모델을 선택하십시오.")
-        return {"provider": reader, "model": model, "api_key": self.v_key.get().strip()}
+        keys = split_keys(reader, self.v_key.get())
+        return {"provider": reader, "model": model, "api_key": keys[0] if keys else "",
+                "key_count": len(keys)}
 
     def _remember_local_engine_root(self, path):
         self.cfg["local_engine_root"] = str(Path(path).expanduser().resolve())
@@ -6245,6 +6249,18 @@ class App(tk.Tk):
         rv = self.work() / "review.html"
         self.start(["review", self.pdf(), "--work", str(self.work())] + self._pages(), "⑤ 검수 화면", open_after=rv)
 
+    def do_small_annotations(self):
+        if self.running or not self._need_pdf():
+            return
+        from .small_annotation_ui import SmallAnnotationDialog
+        window = vars(self).get("_small_annotation_window")
+        if window is not None and window.winfo_exists():
+            window.deiconify(); window.lift(); window.focus_set()
+            return
+        self._small_annotation_window = SmallAnnotationDialog(
+            self, pdf=self.pdf(), work_dir=self.work(), pages=self.v_pages.get().strip(),
+            settings=lambda: App._comparison_ai_settings(self))
+
     def do_report(self):
         if self._need_records("보고"):
             self.nb.select(0)
@@ -6294,7 +6310,7 @@ class App(tk.Tk):
         """저장된 1차·2차 판독으로 비교·표시만 다시 계산한다(모델 호출 없음). 프로그램을 고친 뒤 기존 기록에 적용할 때 쓴다."""
         if not self._need_records("비교 다시 계산"): return
         if not messagebox.askyesno(APP_NAME, "저장된 1차·2차 판독으로 비교와 확인 표시를 다시 계산합니다(모델 호출 없음).\n"
-                                             "readings/pNNN.json 의 merged 를 손으로 고친 내용은 사라집니다. 계속할까요?"):
+                                             "기존 교정문을 보존하고 새 확인 항목을 함께 남깁니다. 계산 전 기록도 readings/prev/에 보관합니다. 계속할까요?"):
             return
         self.nb.select(0)
         self.start(["remerge", self.pdf(), "--work", str(self.work())] + self._pages(), "비교 다시 계산")

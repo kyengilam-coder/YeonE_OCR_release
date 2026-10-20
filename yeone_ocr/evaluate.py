@@ -29,6 +29,23 @@ _COVER = chr(0xFFFFD)  # 2차 조각이 읽은 문단의 머리 표지
 TOKEN_RE = re.compile(r"([\U000F0000-\U000FFFFD])|(〔[^〔〕]*〕)|(\S)")
 SENT_RE = re.compile(r"[\U000F0000-\U000FFFFD]")
 WS_RE = re.compile(r"\s+")
+SOURCE_EXACT_VERSION = "source-codepoint-evaluation-v1"
+SOURCE_EXACT_POLICY = {
+    "version": SOURCE_EXACT_VERSION, "unit": "unicode_code_point",
+    "unicode_normalization": "none", "variant_folding": False,
+    "compatibility_ideographs": "preserve", "variation_selectors": "preserve",
+    "invisible_characters": "preserve", "private_use_characters": "preserve",
+    "whitespace": "remove-Python-str.isspace",
+    "app_markup": "first-candidate; unknown-and-work-notes-empty; reference-not-expanded",
+    "positions": "projected-codepoints; not-original-PDF-or-HWPX-offsets",
+    "alignment": "exact-Levenshtein-or-unavailable; no-approximate-score",
+    "scope": "stored-readings-and-same-reference-sections; not-image-ground-truth",
+    "legacy_labels": "not-applied",
+}
+SOURCE_EXACT_METHOD = ("원문 코드 CER: 저장된 원문에서 공백과 앱 판독 표시만 처리하고 Unicode 정규화·자형 접기를 하지 않습니다. "
+                       "호환 한자·이체자 선택자·옛한글·폭 없는 문자·사용자 영역 문자를 보존합니다. "
+                       "위치는 평가용 문자열의 코드포인트 기준이며 원본 PDF/HWPX 위치가 아닙니다. "
+                       "정확 정렬 한도를 넘으면 수치를 내지 않습니다. 기존 표본 판정은 이 수치에 적용하지 않습니다.")
 METHOD = ("정규화: 이체자 호환 한자를 보존하는 NFC → 폭 없는 글자 제거 → 공백 제거 → 접기(전각 부호 → 반각; horizontal_zh 모드는 compare_key 로 간체·이체자 대표 글자). 원글 CER 은 이체자 호환 한자를 구분하며 접기는 글자 수를 보존한다.\n"
           f"정렬: 정확한 편집 거리(Levenshtein) — difflib 의 {ANCHOR}자 이상 일치 구간을 닻으로 한 정렬로 상한 U 를 얻고, 대각선마다 가장 멀리 닿는 방법(Ukkonen, 보통 O(n+D²))"
           f" 또는 너비 ~U 의 띠 DP 로 전체를 다시 맞춘다. 둘 다 {CELLS:,}칸을 넘으면 닻 정렬(상한, 닻 사이도 그 칸 수를 넘으면 difflib 로 어림)을 쓰고 summary 의 align 에 센다."
@@ -76,6 +93,38 @@ def flatten(paras: list[tuple[int, str]], expand: bool = True) -> Flat:
                 cands = [mark_reading(inner, work_notes=True), ""] if mark_kind(inner, work_notes=True) == "doubt" else ([c.strip() for c in inner.split("/")] if seg else [""])
                 f.marks.append({"start": n, "end": n + len(seg), "mark": m.group(2), "cands": [WS_RE.sub("", c) for c in cands], "entry": entry, "page": pg}); entry = None
             out.append(seg); f.page += [pg] * len(seg); f.cov += [covered] * len(seg); n += len(seg)
+    f.text = "".join(out)
+    return f
+
+
+def flatten_source_exact(paras: list[tuple[int, str]], expand: bool = True) -> Flat:
+    """Separate source projection: no NFC, invisible removal or private-use sentinels.
+
+    Call only with paragraph streams collected without injected evaluation
+    sentinels. Mark offsets address this projection, never the legacy Flat.
+    """
+    f = Flat(); out = []; n = 0
+    for pg, text in paras:
+        segments = []; begin = 0
+        if expand:
+            for match in MARK_RE.finditer(text):
+                segments.append((text[begin:match.start()], None))
+                segments.append((match.group(), match.group()))
+                begin = match.end()
+        segments.append((text[begin:], None))
+        for segment, mark in segments:
+            if mark is not None:
+                inner = mark[1:-1]
+                segment = mark_reading(inner, work_notes=True)
+                kind = mark_kind(inner, work_notes=True)
+                candidates = ([segment, ""] if kind == "doubt" else
+                              inner.split("/") if kind == "ab" else [""])
+                candidates = ["".join(c for c in value if not c.isspace()) for value in candidates]
+            segment = "".join(c for c in segment if not c.isspace())
+            if mark is not None:
+                f.marks.append({"start": n, "end": n + len(segment), "mark": mark,
+                                "cands": candidates, "entry": None, "page": pg})
+            out.append(segment); f.page += [pg] * len(segment); n += len(segment)
     f.text = "".join(out)
     return f
 
@@ -250,7 +299,7 @@ def _pass2_partial(rr: dict | None) -> bool:
     return bool(rr) and bool(rr.get("pass2_failed") or int(rr.get("chunks_read", rr.get("chunks", 1)) or 0) < int(rr.get("chunks", 1) or 1))
 
 
-def _pass2_reading(rec: dict) -> PageReading:
+def _pass2_reading(rec: dict, *, annotate_coverage: bool = True) -> PageReading:
     """1차 쪽 판독의 문자 영역을 2차 조각 판독(열 글)으로 바꾼 쪽 판독. 2차가 없거나 일부 조각만 읽힌 영역(제목·2차 실패·_pass2_partial)은
     1차 글 그대로 두고 머리 표지로 가른다."""
     pr = PageReading.model_validate(rec["pass1"])
@@ -258,11 +307,11 @@ def _pass2_reading(rec: dict) -> PageReading:
         rr = (rec.get("pass2") or {}).get(reg.id)
         if reg.kind in TEXT_KINDS and rr and rr.get("columns") and not _pass2_partial(rr):
             cols = sorted(RegionReread.model_validate(rr).columns, key=lambda c: c.col_from_right)
-            reg.paragraphs = [Paragraph(columns=[Column(col_from_right=k + 1, text=(_COVER if k == 0 else "") + c.text) for k, c in enumerate(cols)])]
+            reg.paragraphs = [Paragraph(columns=[Column(col_from_right=k + 1, text=(_COVER if annotate_coverage and k == 0 else "") + c.text) for k, c in enumerate(cols)])]
     return pr
 
 
-def _revert_adjudications(pr: PageReading, adj: list[dict], base: int) -> tuple[PageReading, int]:
+def _revert_adjudications(pr: PageReading, adj: list[dict], base: int, *, annotate_entries: bool = True) -> tuple[PageReading, int]:
     """3차 뒤 병합문에서 확정 글자를 표시 〔a/b〕로 되돌려 3차 전 병합문을 만든다. 되돌린 표시와 미정 표시 앞에 기록 번호 표지를 둔다.
     미정 자리는 apply_choice 처럼 (영역, 열, 표시 글)이 같고 글자 번호가 가장 가까운 표시로 잡는다.
     두 확정 기록이 겹치는 자리로 찾아지면(이웃 표시가 같은 후보로 달리 정해짐) 앞 기록만 되돌린다 — 한 자리에 두 번 되돌리면 표시가 덧난다.
@@ -275,7 +324,8 @@ def _revert_adjudications(pr: PageReading, adj: list[dict], base: int) -> tuple[
         taken = edits.setdefault((L.region_id, L.para_index), [])
         if any(L.start < e and s < L.end for s, e, _ in taken):
             lost += 1; continue
-        taken.append((L.start, L.end, chr(_SENT0 + base + ids[id(L.entry)]) + L.entry["mark"]))
+        sentinel = chr(_SENT0 + base + ids[id(L.entry)]) if annotate_entries else ""
+        taken.append((L.start, L.end, sentinel + L.entry["mark"]))
     for reg in pr.regions:
         for pi, p in enumerate(reg.paragraphs):
             off = 0
@@ -284,6 +334,8 @@ def _revert_adjudications(pr: PageReading, adj: list[dict], base: int) -> tuple[
                 for s, e, t in sorted((s - off, e - off, t) for s, e, t in edits.get((reg.id, pi), []) if off <= s < off + n)[::-1]:
                     c.text = c.text[:s] + t + c.text[e:]
                 off += n
+    if not annotate_entries:
+        return pr, lost
     for k, a in enumerate(adj):
         if a.get("choice"):
             continue
@@ -299,14 +351,15 @@ def _revert_adjudications(pr: PageReading, adj: list[dict], base: int) -> tuple[
     return pr, lost
 
 
-def _stage_paras(work, doc, n: int, rec: dict, adj_base: int) -> tuple[dict[str, list], list[dict], int]:
+def _stage_paras(work, doc, n: int, rec: dict, adj_base: int, *, source_exact: bool = False) -> tuple[dict[str, list], list[dict], int]:
     """한 쪽의 단계별 [(쪽, 문단 글)]. 3차 기록은 adj_base 부터 번호를 매긴 표지로 병합(3차 전) 글의 표시에 잇는다(잇지 못한 기록 수도 돌려준다)."""
     adj = list(rec.get("adjudications") or []); final = reading_text(rec); lost = 0
     st = {"final": final, "pass1": final, "pass2": final, "merged_default": final}
     if rec.get("pass1"):
-        st["pass1"] = reading_text({"merged": rec["pass1"]}); st["pass2"] = reading_text({"merged": _pass2_reading(rec).model_dump()})
+        st["pass1"] = reading_text({"merged": rec["pass1"]}); st["pass2"] = reading_text({"merged": _pass2_reading(rec, annotate_coverage=not source_exact).model_dump()})
     if adj:
-        pr, lost = _revert_adjudications(PageReading.model_validate(rec["merged"]), adj, adj_base); st["merged_default"] = reading_text({"merged": pr.model_dump()})
+        pr, lost = _revert_adjudications(PageReading.model_validate(rec["merged"]), adj, adj_base, annotate_entries=not source_exact)
+        st["merged_default"] = reading_text({"merged": pr.model_dump()})
     try:
         tlp = work.textlayer_path(n)
         if tlp.exists():
@@ -356,14 +409,19 @@ def build_unit(work, doc, name: str, pages: list[int], hw_paras: list[str], hw_f
     """평가 단위 하나: 쪽 기록들의 단계별 글(title 이 있으면 trim_to_section 으로 구획만)과 기준 HWPX 문단(연어OCR 작업 표시 note_spans 제거).
     work 는 load_record(n)·textlayer_path(n) 이 있는 것(명령줄은 읽기 전용 Records). 못 읽는 쪽 기록은 건너뛴다."""
     stages: dict[str, list] = {s: [] for s in ("layer", "pass1", "pass2", "merged_default", "final")}; adj: list[dict] = []; dpi: dict[int, object] = {}
+    exact_stages: dict[str, list] = {s: [] for s in stages}
+    exact_lost = 0
     longs = partial = lost = 0
     for n in pages:
         rec = work.load_record(n)
         if rec is None:
             continue
         st, a, k = _stage_paras(work, doc, n, rec, len(adj)); adj += a; lost += k
+        exact_st, _, exact_missing = _stage_paras(work, doc, n, rec, 0, source_exact=True)
+        exact_lost += exact_missing
         for s in stages:
             stages[s] += st[s]
+            exact_stages[s] += exact_st[s]
         longs += int((rec.get("merge_stats") or {}).get("long_segments", 0) or 0)
         partial += sum(1 for rr in (rec.get("pass2") or {}).values() if isinstance(rr, dict) and rr.get("columns") and _pass2_partial(rr)) if rec.get("pass1") else 0
         if rec.get("src_dpi") or rec.get("dpi"):
@@ -383,10 +441,93 @@ def build_unit(work, doc, name: str, pages: list[int], hw_paras: list[str], hw_f
             t = t[:a] + t[b:]
         hw.append((hw_first + k, t))
     unit["ref"] = flatten(hw, expand=False)
+    exact = {"ref": flatten_source_exact(hw, expand=False), "adj_unlinked": exact_lost, "trim_notes": {}}
+    for s, paras in exact_stages.items():
+        if title:
+            paras, note = trim_to_section(paras, title, next_title)
+            if note:
+                exact["trim_notes"][s] = note
+        exact[s] = flatten_source_exact(paras)
+    unit["source_exact"] = exact
     return unit
 
 
 # ---------- 지표 ----------
+class SourceExactUnavailable(ValueError):
+    """No exact metric is emitted when the alignment needs an approximation."""
+
+
+def _source_exact_align(reference: str, hypothesis: str):
+    stats = {}
+    ops = align(reference, hypothesis, stats)
+    if stats.get("inexact"):
+        raise SourceExactUnavailable("exact_alignment_budget_exceeded")
+    return ops
+
+
+def _source_exact_oracle(reference: str, flat: Flat, ops) -> tuple[str, int]:
+    """The existing greedy local oracle, with exact literal candidate costs."""
+    edits = []
+    for mark in flat.marks:
+        start, end = mark["start"], mark["end"]
+        lo, hi = _ref_span(ops, max(0, start - 1), min(len(flat.text), end + 1), len(reference))
+        def cost(candidate):
+            text = flat.text[max(0, start - 1):start] + candidate + flat.text[end:end + 1]
+            return _dist(_source_exact_align(reference[lo:hi], text))
+        best = min(mark["cands"], key=cost)
+        if cost(best) < cost(mark["cands"][0]):
+            edits.append((start, end, best))
+    result = flat.text
+    for start, end, candidate in reversed(edits):
+        result = result[:start] + candidate + result[end:]
+    return result, len(edits)
+
+
+def source_exact_metrics(unit: dict) -> dict:
+    """Additive metrics; legacy normalized strings and labels are never reused."""
+    source = unit.get("source_exact")
+    if source is None:
+        return {"version": SOURCE_EXACT_VERSION, "available": False, "reason": "raw_projection_unavailable"}
+    reference = source["ref"].text; count = len(reference)
+    result = {"version": SOURCE_EXACT_VERSION, "available": True, "ref_chars": count,
+              "stages": {}, "adj_unlinked": source["adj_unlinked"], "trim_notes": source["trim_notes"],
+              "outside_errors": None, "outside_rate": None,
+              "reference_position_regressions": None, "reference_position_repairs": None,
+              "regression_policy": "merged-first-candidate-to-final; substitutions/deletions at reference positions; insertions excluded; not causal attribution"}
+    alignments = {}
+    for stage in STAGES:
+        try:
+            if stage in ("merged_default", "merged_oracle") and source["adj_unlinked"]:
+                raise SourceExactUnavailable("pre_adjudication_reconstruction_incomplete")
+            if stage == "merged_oracle":
+                if "merged_default" not in alignments:
+                    raise SourceExactUnavailable("merged_default_alignment_unavailable")
+                text, replaced = _source_exact_oracle(reference, source["merged_default"], alignments["merged_default"])
+            else:
+                text = source[stage].text
+            ops = _source_exact_align(reference, text); edits = _dist(ops)
+            row = {"available": True, "hyp_chars": len(text), "edits": edits,
+                   "cer": edits / count if count else None}
+            if stage == "merged_oracle":
+                row["replaced"] = replaced
+                row["oracle_policy"] = "greedy-local-first-candidate-alignment; not-global-optimum"
+            result["stages"][stage] = row; alignments[stage] = ops
+        except SourceExactUnavailable as exc:
+            result["stages"][stage] = {"available": False, "edits": None, "cer": None, "reason": str(exc)}
+    if "merged_default" in alignments:
+        flat = source["merged_default"]
+        near = {i for mark in flat.marks for i in range(mark["start"] - 1, mark["end"] + 1)}
+        outside = sum(op != "=" and j not in near for op, _, j in alignments["merged_default"])
+        result.update(outside_errors=outside, outside_rate=outside / count if count else None)
+        if "final" in alignments:
+            def wrong(stage):
+                return {i for op, i, _ in alignments[stage] if op in ("R", "D")}
+            before, after = wrong("merged_default"), wrong("final")
+            result.update(reference_position_regressions=len(after - before),
+                          reference_position_repairs=len(before - after))
+    return result
+
+
 def oracle_text(ref_f: str, fl: Flat, hyp_f: str, ops, zh_fold: bool) -> tuple[str, int]:
     """표시마다 후보 가운데 맞선 기준 구간(앞뒤 1자 포함)과의 편집 거리가 가장 작은 것을 고른다 — 첫 후보 정렬 기준의 탐욕법.
     첫 후보보다 나을 때만 바꾸므로 표시 하나하나는 좋아지지만 전체 거리가 꼭 단조롭지는 않다. 바꾼 글과 바꾼 수를 돌려준다."""
@@ -479,6 +620,7 @@ def eval_unit(unit: dict, zh_fold: bool, seen: dict | None = None) -> dict:
     if unit["dpi"]:
         res["dpi"] = {str(n): str(v) for n, v in unit["dpi"].items()}
     res["diffs"] = _diffs(ref_raw, fl, ops, near, {s: _wrong_ref(al[s][2]) for s in ("layer", "pass1", "pass2")}, {} if seen is None else seen)
+    res["source_exact"] = source_exact_metrics(unit)
     return res
 
 
@@ -513,6 +655,33 @@ def apply_labels(diffs: list[dict], labels: dict[str, str], N: int) -> dict:
 
 
 # ---------- 모으기·쓰기 ----------
+def _overall_source_exact(units: list[dict]) -> dict:
+    values = [unit.get("source_exact", {}) for unit in units]
+    if not all(value.get("available") for value in values):
+        return {"version": SOURCE_EXACT_VERSION, "available": False, "reason": "raw_projection_unavailable"}
+    count = sum(value["ref_chars"] for value in values)
+    result = {"version": SOURCE_EXACT_VERSION, "available": True, "ref_chars": count, "stages": {},
+              "adj_unlinked": sum(value["adj_unlinked"] for value in values)}
+    for stage in STAGES:
+        missing = [unit["name"] for unit, value in zip(units, values) if not value["stages"][stage]["available"]]
+        edits = None if missing else sum(value["stages"][stage]["edits"] for value in values)
+        result["stages"][stage] = {"available": not missing, "edits": edits,
+                                    "cer": edits / count if edits is not None and count else None,
+                                    "unavailable_units": missing}
+    for key in ("outside_errors", "reference_position_regressions", "reference_position_repairs"):
+        counts = [value[key] for value in values]
+        result[key] = None if None in counts else sum(counts)
+    result["outside_rate"] = result["outside_errors"] / count if result["outside_errors"] is not None and count else None
+    result["regression_policy"] = values[0]["regression_policy"] if values else ""
+    return result
+
+
+def _source_cer(result: dict, stage: str) -> str:
+    exact = result.get("source_exact", {})
+    row = exact.get("stages", {}).get(stage, {})
+    return _pct(row.get("cer")) if row.get("available") else "미산출"
+
+
 def _overall(units: list[dict]) -> dict:
     N = sum(u["ref_chars"] for u in units); o: dict = {"ref_chars": N, "stages": {}}
     for s in STAGES:
@@ -534,6 +703,7 @@ def _overall(units: list[dict]) -> dict:
                 g["ref_chars"] += d["ref_chars"]; g["edits"] += d["edits"]
     if dpi:
         o["by_dpi"] = dpi
+    o["source_exact"] = _overall_source_exact(units)
     return o
 
 
@@ -541,8 +711,14 @@ def write_md(path: Path, S: dict) -> None:
     o = S["overall"]; A = o["adjudication"]; ratio = "—" if o["error_corr_ratio"] is None else f"{o['error_corr_ratio']:.2f}"
     L = [f"# 평가 요약 — {S['hwpx']} ↔ {S['pdf']}", "",
          f"{S['at']} · 읽기 모드 {S['mode']} · 접기: {'부호 + 간체·이체자(compare_key)' if S['zh_fold'] else '부호만'} · 단위 {len(S['units'])}개 · 기준 {o['ref_chars']:,}자 · 쪽 {S['pages'][0]}~{S['pages'][-1]}",
-         "", "## 단계별 CER(전체, 기준 글자 수 가중)", "", "| 단계 | 편집 수 | CER(접음) | CER(원글) |", "|---|---|---|---|"]
-    L += [f"| {STAGE_KO[s]} | {o['stages'][s]['edits']} | {_pct(o['stages'][s]['cer'])} | {_pct(o['stages'][s]['cer_raw'])} |" for s in STAGES]
+         "", "## 단계별 CER(전체, 기준 글자 수 가중)", "", "| 단계 | 편집 수(기존) | CER(접음) | CER(기존 원글) | CER(원문 코드) |", "|---|---|---|---|---|"]
+    L += [f"| {STAGE_KO[s]} | {o['stages'][s]['edits']} | {_pct(o['stages'][s]['cer'])} | {_pct(o['stages'][s]['cer_raw'])} | {_source_cer(o, s)} |" for s in STAGES]
+    exact = o.get("source_exact", {})
+    L += ["", SOURCE_EXACT_METHOD, "기존 원글 CER도 NFC·폭 없는 문자 제거 뒤의 수치이며 원문 코드 CER과 다릅니다."]
+    if exact.get("available"):
+        L += [f"원문 코드 기준 {exact['ref_chars']:,}자 · 표시 밖 오류 {exact['outside_errors'] if exact['outside_errors'] is not None else '미산출'}자"
+              f"({_pct(exact['outside_rate'])}) · 병합 첫 후보→3차 뒤 기준 위치 악화 {exact['reference_position_regressions'] if exact['reference_position_regressions'] is not None else '미산출'}곳. "
+              "악화는 기준 위치의 치환·누락을 비교한 수치이며 삽입과 인과적 오교정 판정은 포함하지 않습니다."]
     L += ["", "## 표시·3차·상관", "", f"- 표시 {o['marks']}곳 · 표시 정밀도 {_pct(o['mark_precision'], 1)}(기준이 첫 후보와 다른 표시) · 표시 밖 오류율 {_pct(o['outside_rate'])}",
           f"- 3차: 물음 {A['asked']} · 확정 {A['decided']}(결정률 {_pct(A['decision_rate'], 1)}) · 확정 정밀도 {_pct(A['precision'], 1)}"
           + (f" · 표시에 잇지 못한 기록 {o['adj_unlinked']}건(그만큼 병합(첫 후보) 글·물음 수가 어림)" if o["adj_unlinked"] else ""),
@@ -555,8 +731,8 @@ def write_md(path: Path, S: dict) -> None:
         la = S["labels_applied"]; L += [f"- 사람 판정 {la['labelled']}건(OCR 오류 아님 {la['non_ocr_labelled']}건) 반영 → 병합(첫 후보) CER {_pct(la['cer_default_corrected'])} · 표시 밖 오류율 {_pct(la['outside_rate_corrected'])}"
                                          + (f" · 이번 차이와 맞지 않는 판정 {la['unmatched']}건은 적용 안 함" if la.get("unmatched") else "")]
     for s in STAGES:
-        L += ["", f"## {STAGE_KO[s]} — 단위별", "", "| 단위 | 쪽 | 기준 글자 | 편집 수 | CER(접음) | CER(원글) |", "|---|---|---|---|---|---|"]
-        L += [f"| {u['name']} | {u['pages'][0]}~{u['pages'][-1]} | {u['ref_chars']} | {u['stages'][s]['edits']} | {_pct(u['stages'][s]['cer'])} | {_pct(u['stages'][s]['cer_raw'])} |" for u in S["units"]]
+        L += ["", f"## {STAGE_KO[s]} — 단위별", "", "| 단위 | 쪽 | 기준 글자(기존) | 편집 수(기존) | CER(접음) | CER(기존 원글) | CER(원문 코드) |", "|---|---|---|---|---|---|---|"]
+        L += [f"| {u['name']} | {u['pages'][0]}~{u['pages'][-1]} | {u['ref_chars']} | {u['stages'][s]['edits']} | {_pct(u['stages'][s]['cer'])} | {_pct(u['stages'][s]['cer_raw'])} | {_source_cer(u, s)} |" for u in S["units"]]
     untrimmed = ", ".join(f"{u['name']}/{s}" for u in S["units"] for s in u["trim_notes"])
     L += ["", "## 표본·판정", "", f"차이 전체 {S['diff_total']}건 가운데 {S['sample']['n']}건을 diffs.html 에 띄웠다({S['sample']['rule']}). "
           "판정은 labels.json({\"<id>\": \"판독 틀림|HWPX 틀림|인쇄 오자|이체자\"})에 적고 다시 돌리면 머리 숫자가 보정된다. id 는 차이의 내용(쪽·기준·가설·앞뒤 기준 글)에서 만들므로 다시 읽어 달라진 차이에는 붙지 않는다.",
@@ -583,10 +759,17 @@ def write_html(path: Path, S: dict, sample: list[dict], labels: dict[str, str], 
           "function dl(){const o=Object.assign({},K);document.querySelectorAll('select[data-id]').forEach(s=>{if(s.value)o[s.dataset.id]=s.value});"
           "const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(o,null,1)],{type:'application/json'}));a.download='labels.json';a.click()}")
     o = S["overall"]
+    exact_table = ""
+    if o.get("source_exact"):
+        exact_rows = "".join(f"<tr><td>{STAGE_KO[stage]}</td><td>{_pct(o['stages'][stage]['cer'])}</td>"
+                             f"<td>{_source_cer(o, stage)}</td></tr>" for stage in STAGES)
+        exact_table = (f"<p>{esc(SOURCE_EXACT_METHOD)}  아래 차이 표본과 labels.json은 기존 접은 지표의 표본입니다.</p>"
+                       "<table><tr><th>단계</th><th>CER(접음)</th><th>CER(원문 코드)</th></tr>"
+                       + exact_rows + "</table>")
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>평가 차이 표본</title><style>{css}</style></head><body><header><h1>평가 — 차이 표본(사람 판정용)</h1>"
            f"<small>{esc(S['hwpx'])} ↔ {esc(S['pdf'])} · {S['at']} · 기준 {o['ref_chars']:,}자 · 병합(첫 후보) CER {_pct(o['stages']['merged_default']['cer'])}<br>"
            f"<b>표본이지 전체가 아님</b>: 차이 전체 {S['diff_total']}건(틀린 글자 {o['stages']['merged_default']['edits']}자) 가운데 {len(sample)}건 — {esc(S['sample']['rule'])}</small></header><main>"
-           "<p>기준은 HWPX(굵은 글자가 차이 자리, ∅ 는 없음), 가설은 병합 판독(첫 후보). 단계 표지 ○ = 그 단계도 같은 자리에서 틀림. 판정을 고른 뒤 단추로 labels.json 을 받아 "
+           + exact_table + "<p>기준은 HWPX(굵은 글자가 차이 자리, ∅ 는 없음), 가설은 병합 판독(첫 후보). 단계 표지 ○ = 그 단계도 같은 자리에서 틀림. 판정을 고른 뒤 단추로 labels.json 을 받아 "
            "eval/ 에 두고 <code>eval --labels</code> 로 다시 돌리면 머리 숫자가 보정된다. id 는 차이 내용에서 만들어 판독이 바뀐 차이에는 붙지 않는다"
            + (f"(이번에 맞지 않은 판정 {S['labels_applied']['unmatched']}건은 적용하지 않았고 내려받기에서 빠진다)" if (S.get("labels_applied") or {}).get("unmatched") else "")
            + (f". 표본 밖 차이의 판정 {len(keep)}건은 내려받기에 그대로 담긴다" if keep else "") + ".</p><button onclick='dl()'>labels.json 내려받기</button>"
@@ -720,7 +903,8 @@ def _cmd_eval(args, resources) -> int:
             labels = {str(k): str(v) for k, v in json.loads(lab_path.read_text(encoding="utf-8")).items()}
         except Exception as e:
             log(f"주의: 판정 파일을 읽지 못해 적용하지 않습니다({str(e)[:60]}): {lab_path}")
-    S = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "pdf": Path(args.pdf).name, "hwpx": Path(hw).name, "work": str(work.dir), "mode": mode, "zh_fold": zh_fold,
+    S = {"schema_version": 2, "source_exact_policy": SOURCE_EXACT_POLICY,
+         "at": time.strftime("%Y-%m-%d %H:%M:%S"), "pdf": Path(args.pdf).name, "hwpx": Path(hw).name, "work": str(work.dir), "mode": mode, "zh_fold": zh_fold,
          "pages": sorted(have), "skipped": skipped, "method": METHOD, "overall": _overall(results), "units": [{k: v for k, v in u.items() if k != "diffs"} for u in results],
          "diff_total": len(diffs), "sample": {"rule": rule, "n": len(sample), "ids": [d["id"] for d in sample]}}
     if labels:

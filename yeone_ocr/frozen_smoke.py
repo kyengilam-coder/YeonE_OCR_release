@@ -19,6 +19,214 @@ import time
 import traceback
 
 
+COMPARISON_WORKER_ENGINES = ("rapidocr", "easyocr", "paddle_server", "glmocr", "surya")
+COMPARISON_INSTALLER_RESOURCES = (
+    "install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py", "rapidocr-lock.json",
+    "install_easyocr.py", "easyocr-lock.json", "install_paddle_server.py", "paddle-server-lock.json",
+    "install_paddle_server_gpu.py", "paddle-server-gpu-lock.json", "install_glmocr.py", "glmocr-models.lock.json",
+    "install_surya.py", "install_surya_cuda.py", "surya-lock.json", "surya-requirements.txt",
+)
+COMPARISON_DOCUMENTS = ("LOCAL_OCR.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "PADDLE_SERVER.md",
+                        "GLM_OCR.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md", "release-notes.md", "AB_OCR_PROVENANCE.json")
+
+
+def comparison_resources_probe() -> dict:
+    from ab_ocr.runtime import resource_root, worker_path
+    checked = []
+    workers = {}
+    for engine in COMPARISON_WORKER_ENGINES:
+        worker = worker_path(engine)
+        assert worker.is_file(), f"Missing application-owned worker: {worker.name}"
+        compile(worker.read_text(encoding="utf-8"), worker.name, "exec")
+        workers[engine] = worker.name
+        if worker.name not in checked:
+            checked.append(worker.name)
+    helper = resource_root() / "ab_ocr" / "worker_sessions.py"
+    assert helper.is_file(), "Missing persistent-worker protocol helper"
+    compile(helper.read_text(encoding="utf-8"), helper.name, "exec")
+    checked.append(helper.name)
+    import sqlite3
+    with contextlib.closing(sqlite3.connect(":memory:")) as database:
+        assert database.execute("SELECT 1").fetchone() == (1,)
+    for name in COMPARISON_INSTALLER_RESOURCES:
+        resource = resource_root() / "scripts" / name
+        assert resource.is_file(), f"Missing installer resource: {name}"
+        if name.endswith(".json"):
+            assert isinstance(json.loads(resource.read_text(encoding="utf-8")), dict)
+        elif name.endswith(".txt"):
+            requirements = [line.strip() for line in resource.read_text(encoding="utf-8").splitlines()
+                            if line.strip() and not line.lstrip().startswith("#")]
+            assert requirements and all("==" in requirement for requirement in requirements)
+        else:
+            compile(resource.read_text(encoding="utf-8"), name, "exec")
+        checked.append(name)
+    for name in COMPARISON_DOCUMENTS:
+        resource = resource_root() / "docs" / name
+        assert resource.is_file(), f"Missing comparison documentation: {name}"
+        assert resource.read_text(encoding="utf-8").strip(), f"Empty comparison documentation: {name}"
+    return {"application_resources": checked, "workers": workers,
+            "persistent_worker_helper": helper.name, "gpu_queue_database": "sqlite3 available",
+            "documentation": list(COMPARISON_DOCUMENTS),
+            "external_models_loaded": False, "network_calls": 0}
+
+
+def source_preservation_probe(folder: Path) -> dict:
+    """Exercise the new record policy and exact evaluation without model calls."""
+    from PIL import Image
+    from .cli import nfc_reading
+    from .evaluate import build_unit, flatten_source_exact, source_exact_metrics
+    from .merge import merge_passes
+    from .schema import Column, PageReading, Paragraph, Region, RegionReread
+    from .state import Work
+    from .text_policy import LEGACY_TEXT_POLICY, SOURCE_TEXT_POLICY, record_text_policy
+
+    literal = "靑硏敎眞樂神\U0002f800漢\ufe00字\U000e0100한\u200b"
+    first = PageReading(pdf_page=1, regions=[Region(id="body", kind="본문",
+        paragraphs=[Paragraph(columns=[Column(n=1, t=literal)])])])
+    second = RegionReread(columns=[Column(n=1, t=literal)])
+    before = first.model_dump(), second.model_dump()
+    assert nfc_reading(first, text_policy=SOURCE_TEXT_POLICY).model_dump() == before[0]
+    merged, stats = merge_passes(first, {"body": second}, text_policy=SOURCE_TEXT_POLICY)
+    assert merged.regions[0].paragraphs[0].columns[0].text == literal and stats["marks"] == 0
+    assert (first.model_dump(), second.model_dump()) == before
+    historical = nfc_reading(first.model_copy(deep=True))
+    assert "樂" not in historical.regions[0].paragraphs[0].columns[0].text
+    assert record_text_policy({}) == LEGACY_TEXT_POLICY
+    projected = flatten_source_exact([(1, " " + literal + "\n")], expand=False)
+    assert projected.text == literal
+
+    source = folder / "source-policy.png"
+    with Image.new("RGB", (64, 48), "white") as image:
+        image.save(source)
+    work = Work(str(source), str(folder / "source-policy-work"))
+    raw = first.model_dump()
+    raw["regions"][0]["paragraphs"][0]["columns"][0]["text"] = "樂一"
+    record = {"pdf_page": 1, "text_policy": SOURCE_TEXT_POLICY, "pass1": raw,
+              "merged": raw, "pass2": {}, "human_edits": [{"text": "kept"}]}
+    work.save_record(1, record)
+    original = work.record_path(1).read_bytes()
+    exact = source_exact_metrics(build_unit(work, None, "synthetic", [1], ["樂一\ufe00"]))
+    assert exact["available"] and exact["stages"]["final"]["edits"] == 2
+    assert work.record_path(1).read_bytes() == original and work.load_record(1) == record
+    return {"text_policy": SOURCE_TEXT_POLICY, "compatibility_and_selectors_preserved": True,
+            "legacy_policy_unchanged": True, "source_exact_edits": 2,
+            "evaluation_record_unchanged": True, "network_calls": 0}
+
+
+def glyph_location_hold_probe() -> dict:
+    """A synthetic answer cannot confirm a position on a blank source image."""
+    from dataclasses import asdict
+    from PIL import Image
+    from . import adjudicate
+    from .schema import Column, GlyphChoice, PageReading, Paragraph, Region
+
+    reading = PageReading(pdf_page=1, regions=[Region(id="body", kind="본문",
+        bbox=[100, 100, 900, 900],
+        paragraphs=[Paragraph(columns=[Column(n=1, t="甲〔入/人〕乙")])])])
+    record = {"pdf_page": 1, "pass1": reading.model_dump(), "merged": reading.model_dump(),
+              "human_edits": [{"text": "historical correction remains"}]}
+
+    class FixtureReader:
+        model = "offline-location-fixture"
+        calls = 0
+
+        def adjudicate(self, *_args):
+            self.calls += 1
+            return GlyphChoice(choice="人", window="甲人乙", evidence="synthetic fixture")
+
+    reader = FixtureReader()
+    with Image.new("L", (120, 120), 255) as image:
+        adjudicate.adjudicate_page(record, image, reader, True, batch=1)
+    entry = record["adjudications"][0]
+    assert reader.calls == 1 and entry["choice"] == "" and entry["unconfirmed_choice"] == "人"
+    assert entry["location_check"]["reason"] == "unmeasured-location"
+    assert not entry["location_check"]["verified"] and record["merged"] == reading.model_dump()
+    assert record["human_edits"] == [{"text": "historical correction remains"}]
+    legacy = reading.model_copy(deep=True)
+    old = {**asdict(adjudicate.find_sites(legacy)[0]), "choice": "人",
+           "loc": "uniform", "window": "", "evidence": "legacy"}
+    assert adjudicate.apply_adjudications(legacy, [old]) == 1
+    assert legacy.regions[0].paragraphs[0].columns[0].text == "甲人乙"
+    return {"new_unmeasured_choice": "held", "legacy_decision_replay": "preserved",
+            "mock_answers": reader.calls, "network_calls": 0}
+
+
+def small_annotations_probe(folder: Path) -> dict:
+    """Detect both layouts and persist proposals without changing old records."""
+    import tkinter as tk
+    from PIL import Image, ImageDraw
+    from .cli import build_parser
+    from .schema import Column, PageReading, Paragraph, Region
+    from .small_annotation_detection import detect_small_annotations
+    from .small_annotation_ui import SmallAnnotationDialog
+    from .small_annotations import load_bundle, scan_work
+    from .state import Work
+
+    assert issubclass(SmallAnnotationDialog, tk.Toplevel)
+
+    def glyph(draw, x, y, width, height):
+        draw.rectangle((x, y, x + width - 1, y + height - 1), outline=0, width=2)
+        draw.line((x, y + height // 2, x + width - 1, y + height // 2), fill=0, width=2)
+
+    counts = {}
+    for horizontal in (False, True):
+        label = "horizontal" if horizontal else "vertical"
+        source = folder / f"small-{label}.png"
+        with Image.new("L", (900, 650) if horizontal else (420, 400), 255) as image:
+            draw = ImageDraw.Draw(image)
+            if horizontal:
+                for y in (30, 80, 130):
+                    for x in range(25, 810, 34):
+                        glyph(draw, x, y, 26, 30)
+                for y in (240, 390, 440, 490):
+                    for x in range(25, 230, 34):
+                        glyph(draw, x, y, 26, 30)
+                for row in range(2):
+                    for x in range(280, 800 if row == 0 else 390, 18):
+                        glyph(draw, x, 235 + row * 24, 12, 14)
+                for row in range(5):
+                    for x in range(280, 800 if row < 4 else 600, 26):
+                        glyph(draw, x, 380 + row * 32, 18, 20)
+            else:
+                for x in (255, 320):
+                    for y in range(25, 365, 34):
+                        glyph(draw, x, y, 24, 26)
+                for y in (25, 59, 263, 297, 331):
+                    glyph(draw, 160, y, 24, 26)
+                for x in (160, 176):
+                    for y in range(110, 207, 16):
+                        glyph(draw, x, y, 10, 12)
+            reading = PageReading(pdf_page=1, regions=[Region(id="body", kind="본문",
+                bbox=[0, 0, 1000, 1000], reading_direction="가로" if horizontal else "세로",
+                paragraphs=[Paragraph(columns=[Column(n=1, t="人手樂\ufe00校正")])])])
+            detected = detect_small_annotations(image, reading, horizontal=horizontal)
+            expected = [2, 5] if horizontal else [2]
+            assert [len(c["subcolumns"]) for c in detected["candidates"]] == expected
+            image.save(source)
+        work = Work(str(source), str(folder / f"small-{label}-work"))
+        record = {"pdf_page": 1, "pass1": reading.model_dump(), "pass2": {},
+                  "merged": reading.model_dump(), "adjudications": [{"choice": "曰"}],
+                  "mode": "horizontal_zh" if horizontal else "vertical",
+                  "unknown_old_metadata": {"keep": "unchanged"}}
+        work.save_record(1, record)
+        originals = {path: path.read_bytes() for path in (source, work.record_path(1))}
+        bundle = scan_work(source, work.dir, pages=[1], horizontal=horizontal)
+        candidates = bundle["pages"][0]["candidates"]
+        assert [len(c["subcolumns"]) for c in candidates] == expected
+        for candidate in candidates:
+            sides = [side["side"] for side in candidate["subcolumns"]]
+            assert sides == ([f"line-{n}" for n in range(1, len(sides) + 1)]
+                             if horizontal else ["right", "left"])
+            assert candidate["status"] == "detected" and Path(candidate["crop_path"]).is_file()
+        assert load_bundle(work.dir)["pages"][0]["stale"] is False
+        assert all(path.read_bytes() == content for path, content in originals.items())
+        counts[label] = {"candidates": len(candidates), "lines": sum(expected)}
+    args = build_parser().parse_args(["annotations", str(source), "--direction", "horizontal"])
+    assert callable(args.fn) and args.direction == "horizontal"
+    return {"layouts": counts, "ui_imported": True, "original_and_records_unchanged": True,
+            "automatic_insertions": 0, "network_calls": 0}
+
+
 def run(report_path: Path) -> int:
     from . import __version__
     report_path = Path(report_path).resolve()
@@ -207,6 +415,9 @@ def run(report_path: Path) -> int:
             assert (work / "out" / "fixture_normalization.html").is_file()
             return {"pipeline": "mock PDF → OCR records → HWPX/DOCX → normalization/review", "network_calls": 0}
         check("offline-ocr-pipeline", pipeline_probe)
+        check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
+        check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
+        check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))
 
         def comparison_project_probe():
             from .comparison import ComparisonProject
@@ -214,7 +425,8 @@ def run(report_path: Path) -> int:
             source = folder / "image.png"
             project = ComparisonProject.open(source)
             source_hash = file_sha256(source)
-            texts = {"tesseract": "漢樂一\ufe00，", "rapidocr": "漢樂一\ufe00，", "easyocr": "漢樂一\ufe00。"}
+            texts = {"tesseract": "漢樂一\ufe00，", "rapidocr": "漢樂一\ufe00，", "easyocr": "漢樂一\ufe00。",
+                     "paddle_server": "漢樂一\ufe00，", "glmocr": "漢樂一\ufe00，", "surya": "漢樂一\ufe00。"}
             for engine, text in texts.items():
                 raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
                        "coordinate_system": "rendered-image pixels, xyxy",
@@ -246,9 +458,51 @@ def run(report_path: Path) -> int:
             reopened.save_recovery(recovery)
             assert ComparisonProject.load(recovery).text(1) == corrected
             assert file_sha256(source) == source_hash
-            return {"raw_runs": 3, "unicode": "compatibility ideograph and variation selector preserved",
+            return {"raw_runs": 6, "engines": list(texts), "unicode": "compatibility ideograph and variation selector preserved",
                     "audit": "candidate → undo → manual", "storage": "project and recovery reopen", "network_calls": 0}
         check("local-comparison-project", comparison_project_probe)
+
+        def refinement_probe():
+            from .comparison import ComparisonProject
+            from .comparison_refinement import (build_candidates, evaluate_proposals,
+                                                 accept_proposal, reject_proposal, proposals)
+            from .comparison_ai import AISettings, ReviewPolicy, prepare_plan, _prompt
+            from ab_ocr.ocr import RecognitionResult
+            source = folder / "image.png"
+            project = ComparisonProject.open(source)
+            original = "甲乙丙丁,戊己庚辛"
+            expected = original.replace(",", "，")
+            for engine, value in (("glmocr", original), ("easyocr", expected), ("surya", original)):
+                raw = RecognitionResult(text=value, words=[] if engine == "glmocr" else [
+                    {"text": value, "bbox": [1, 1, 63, 47], "confidence": None}],
+                    source_path=str(source), source_sha256=project.source_sha256, page_number=1,
+                    image_width=64, image_height=48, engine_version="offline-refinement",
+                    languages="chi_tra", psm=None, duration_seconds=0, engine=engine,
+                    engine_metadata={"generation_complete": True})
+                project.add_result(raw, request={"profile": "traditional", "direction": "horizontal",
+                                                 "dpi": 300, "engine_root": None, "policy": "local-three-engine-v1"})
+            project.choose_baseline(1, "glmocr")
+            raw_runs = project.page(1)["runs"]
+            items = build_candidates(project, 1)
+            assert len(items) == 1 and evaluate_proposals(project, 1)["text"] == expected
+            assert project.text(1) == original and not project.page(1)["edits"]
+            plan = prepare_plan(project, [1], ReviewPolicy(punctuation=True, visual_scope="page"),
+                                settings=AISettings("openai", "offline-refinement-fixture"))
+            assert plan.summary["refinement_proposals"] == 1
+            assert "local_refinement_unconfirmed" in _prompt(plan.batches[0], plan.policy, [])
+            item = proposals(project, 1)[0]
+            accept_proposal(project, 1, item["review_id"], item["id"])
+            assert project.text(1) == expected
+            assert project.undo_edit(1) and project.text(1) == original
+            reject_proposal(project, 1, item["review_id"], item["id"])
+            destination = folder / "local-refinement.json"
+            project.save(destination)
+            page = ComparisonProject.load(destination).page(1)
+            assert page["runs"] == raw_runs and not page["ai_reviews"] and not page["ai_decisions"]
+            assert [entry["decision"] for entry in page["refinement_decisions"]] == ["accepted", "undone", "rejected"]
+            return {"unconfirmed_candidates": 1, "AI_context": "frozen pending evidence",
+                    "raw_unchanged": True, "human_decisions": "accept/undo/reject/reopen", "network_calls": 0}
+        check("local-refinement-history-and-ai-context", refinement_probe)
 
         def comparison_ai_probe():
             from types import SimpleNamespace
@@ -257,12 +511,14 @@ def run(report_path: Path) -> int:
             from ab_ocr.ocr import file_sha256
             source = folder / "image.png"
             project = ComparisonProject.open(source)
-            original = "误汉,樂一\ufe00한글"
-            for engine, text in (("tesseract", original), ("rapidocr", "论汉,樂一\ufe00한글"),
-                                 ("easyocr", "论汉,樂一\ufe00한글")):
+            # Exact positional context and two eligible mixed-script witnesses
+            # exercise the same source-fidelity gate used by the editor.
+            original = "ABCD误汉天地玄黃,樂一\ufe00한글"
+            for engine, text in (("tesseract", original), ("glmocr", "ABCD论汉天地玄黃，樂一\ufe00한글"),
+                                 ("surya", "ABCD论汉天地玄黃，樂一\ufe00한글")):
                 raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
                        "coordinate_system": "rendered-image pixels, xyxy", "text": text,
-                       "words": [{"text": text, "bbox": [1, 1, 63, 47], "confidence": None,
+                       "words": [] if engine == "glmocr" else [{"text": text, "bbox": [1, 1, 63, 47], "confidence": None,
                                   "block": 1, "paragraph": 1, "line": 1}],
                        "source_path": str(source), "source_sha256": file_sha256(source), "page_number": 1,
                        "image_width": 64, "image_height": 48, "engine_version": "offline-ai-fixture",
@@ -273,7 +529,7 @@ def run(report_path: Path) -> int:
             project.compare_page(1, baseline="tesseract")
             raw_runs = project.page(1)["runs"]
             settings = AISettings(provider="openai", model="offline-vision-fixture", max_calls=2)
-            policy = ReviewPolicy(traditional=True, punctuation=True)
+            policy = ReviewPolicy(traditional=True, punctuation=True, visual_scope="page")
             plan = prepare_plan(project, [1], policy, settings=settings)
             assert plan.summary["calls"] == 2
             requests = []
@@ -286,9 +542,9 @@ def run(report_path: Path) -> int:
                 data = json.loads(prompt.split("Source DATA (JSON):\n", 1)[1].rsplit("\nReturn JSON", 1)[0])
                 items = []
                 for target in data["targets"]:
-                    patches = [(0, 1, "误", "论", "recognition")] if data["phase"] == "visual" else [
-                        (0, 1, "误", "論", "traditional"), (1, 2, "汉", "漢", "traditional"),
-                        (2, 3, ",", "，", "punctuation")]
+                    patches = [(4, 5, "误", "论", "recognition")] if data["phase"] == "visual" else [
+                        (4, 5, "误", "論", "traditional"), (5, 6, "汉", "漢", "traditional"),
+                        (10, 11, ",", "，", "punctuation")]
                     proposals = [{"start": start, "end": end, "before": before, "after": after,
                                   "kind": kind, "reason": "offline synthetic protocol fixture", "uncertain": False}
                                  for start, end, before, after, kind in patches
@@ -305,10 +561,13 @@ def run(report_path: Path) -> int:
             assert len(checkpoints) == 2 and project.text(1) == original
             reviews = project.page(1)["ai_reviews"]
             assert len(reviews) == 2 and project.page(1)["runs"] == raw_runs
+            from .comparison_fidelity import SOURCE_FIDELITY_CONTRACT
+            assert all(r["metadata"]["source_fidelity"]["contract"] == SOURCE_FIDELITY_CONTRACT for r in reviews)
+            assert reviews[0]["metadata"]["source_fidelity"]["proposals"][0]["supporting_families"] == ["glmocr", "surya"]
             for ending in ("論", "漢", "，"):
                 proposal = next(item for item in project.ai_proposals(1) if item["after"] == ending)
                 project.accept_ai_proposal(1, proposal["review_id"], proposal["id"])
-            assert project.text(1) == "論漢，樂一\ufe00한글"
+            assert project.text(1) == "ABCD論漢天地玄黃，樂一\ufe00한글"
             for _ in range(3):
                 assert project.undo_edit(1)
             assert project.text(1) == original and project.page(1)["ai_reviews"] == reviews
@@ -324,24 +583,6 @@ def run(report_path: Path) -> int:
                     "storage": "reopened; credential excluded; completed requests reused", "network_calls": 0}
         check("comparison-ai-proposals-offline", comparison_ai_probe)
 
-        def comparison_resources_probe():
-            from ab_ocr.runtime import resource_root, worker_path
-            checked = []
-            for engine in ("rapidocr", "easyocr"):
-                worker = worker_path(engine)
-                assert worker.is_file(), f"Missing application-owned worker: {worker.name}"
-                compile(worker.read_text(encoding="utf-8"), worker.name, "exec")
-                checked.append(worker.name)
-            for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py",
-                         "rapidocr-lock.json", "install_easyocr.py", "easyocr-lock.json"):
-                resource = resource_root() / "scripts" / name
-                assert resource.is_file(), f"Missing installer resource: {name}"
-                if name.endswith(".json"):
-                    assert isinstance(json.loads(resource.read_text(encoding="utf-8")), dict)
-                else:
-                    compile(resource.read_text(encoding="utf-8"), name, "exec")
-                checked.append(name)
-            return {"application_resources": checked, "external_models_loaded": False, "network_calls": 0}
         check("local-comparison-worker-resources", comparison_resources_probe)
 
         def comparison_cli_probe():

@@ -41,13 +41,22 @@ def block_network() -> None:
     socket.socket.sendto = denied
 
 
-def verify_models(model_dir: Path, languages: str, profile: str = "mobile") -> tuple[dict, list[dict]]:
-    route = language_route(languages)
-    manifest = json.loads((model_dir.parent / "installation.json").read_text(encoding="utf-8"))
-    if manifest.get("engine") != "rapidocr" or manifest.get("rapidocr_version") != "3.9.2":
-        raise ValueError("RapidOCR installation manifest is incompatible")
+def recognition_route(languages: str, profile: str) -> str:
     if profile not in ("server", "mobile"):
         raise ValueError("Unsupported recognition profile")
+    route = language_route(languages)
+    if profile == "server" and route == "korean":
+        raise ValueError("PP-OCRv5 server recognition does not support Korean; no mobile fallback is applied")
+    return route
+
+
+def verify_models(model_dir: Path, languages: str, profile: str = "mobile") -> tuple[dict, list[dict]]:
+    route = recognition_route(languages, profile)
+    manifest = json.loads((model_dir.parent / "installation.json").read_text(encoding="utf-8"))
+    if manifest.get("engine") not in ("rapidocr", "paddle_server") or manifest.get("rapidocr_version") != "3.9.2":
+        raise ValueError("RapidOCR installation manifest is incompatible")
+    if manifest.get("engine") == "paddle_server" and profile != "server":
+        raise ValueError("Paddle server installation requires the server profile")
     wanted = [DETECTOR, CLASSIFIER, KOREAN if route == "korean" else (CHINESE if profile == "server" else CHINESE_MOBILE)]
     records = []
     for name in wanted:
@@ -104,16 +113,49 @@ def atomic_output(path: Path, result: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def verify_providers(engine, provider: str) -> dict[str, list[str]]:
+    expected = "CUDAExecutionProvider" if provider == "cuda" else "CPUExecutionProvider"
+    sessions = {name: getattr(engine, name).session.session for name in ("text_det", "text_cls", "text_rec")}
+    actual = {name: session.get_providers() for name, session in sessions.items()}
+    if any(not providers or providers[0] != expected for providers in actual.values()):
+        raise ValueError("Requested inference provider is unavailable; no automatic backend fallback is applied")
+    return actual
+
+
+def preload_nvrtc(manifest: dict) -> tuple[list, list]:
+    """Load both pinned Windows NVRTC DLLs before constructing GPU sessions."""
+    import ctypes
+    nvrtc = importlib.metadata.distribution("nvidia-cuda-nvrtc-cu12")
+    expected = manifest.get("gpu_packages", {}).get("nvidia-cuda-nvrtc-cu12")
+    if not expected or nvrtc.version != expected:
+        raise ValueError("Pinned NVIDIA NVRTC runtime is not installed")
+    directory = Path(nvrtc.locate_file("nvidia/cuda_nvrtc/bin")).resolve()
+    search = os.add_dll_directory(str(directory))
+    try:
+        dlls = [ctypes.WinDLL(str(directory / name)) for name in ("nvrtc-builtins64_128.dll", "nvrtc64_120_0.dll")]
+        return dlls, [search]
+    except Exception:
+        search.close()
+        raise
+
+
 class Worker:
-    def __init__(self, model_dir: Path, profile: str = "mobile"):
+    def __init__(self, model_dir: Path, profile: str = "mobile", provider: str = "cpu"):
         self.model_dir = model_dir.resolve()
         if profile not in ("server", "mobile"):
             raise ValueError("Unsupported recognition profile")
         self.profile = profile
+        if provider not in ("cpu", "cuda"):
+            raise ValueError("Unsupported inference provider")
+        if provider == "cuda" and profile != "server":
+            raise ValueError("CUDA backend is enabled only for the explicit server profile")
+        self.provider = provider
+        self.cuda_dlls = []
+        self.cuda_dll_directories = []
         self.engines = {}
 
     def engine(self, languages: str):
-        route = language_route(languages)
+        route = recognition_route(languages, self.profile)
         if route in self.engines:
             return self.engines[route]
         manifest, models = verify_models(self.model_dir, languages, self.profile)
@@ -122,8 +164,20 @@ class Worker:
         from rapidocr import RapidOCR, ModelType, OCRVersion, EngineType
         if importlib.metadata.version("rapidocr") != manifest["rapidocr_version"]:
             raise ValueError("RapidOCR package version differs from installation manifest")
-        if importlib.metadata.version("onnxruntime") != manifest["onnxruntime_version"]:
+        ort_package = manifest.get("onnxruntime_package", "onnxruntime")
+        if ort_package not in ("onnxruntime", "onnxruntime-gpu"):
+            raise ValueError("Unsupported ONNX Runtime distribution")
+        if importlib.metadata.version(ort_package) != manifest["onnxruntime_version"]:
             raise ValueError("ONNX Runtime version differs from installation manifest")
+        if self.provider == "cuda":
+            if ort_package != "onnxruntime-gpu" or "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+                raise ValueError("CUDA Runtime is not installed; no automatic CPU fallback is applied")
+            onnxruntime.preload_dlls(directory="")
+            # Some cuDNN kernels load NVRTC lazily for particular line shapes.
+            # Resolve the pinned, installed NVIDIA wheel before any inference so
+            # a missing runtime cannot fail halfway through a document batch.
+            if os.name == "nt":
+                self.cuda_dlls, self.cuda_dll_directories = preload_nvrtc(manifest)
         params = {
             "Global.log_level": "critical", "Global.text_score": 0.0,
             "Global.max_side_len": 4096, "Global.use_cls": True,
@@ -144,10 +198,20 @@ class Worker:
             "EngineConfig.onnxruntime.intra_op_num_threads": min(8, os.cpu_count() or 1),
             "EngineConfig.onnxruntime.inter_op_num_threads": 1,
         }
+        if self.provider == "cuda":
+            params.update({"EngineConfig.onnxruntime.use_cuda": True,
+                           "EngineConfig.onnxruntime.cuda_ep_cfg.device_id": 0,
+                           "EngineConfig.onnxruntime.cuda_ep_cfg.use_tf32": 0,
+                           "EngineConfig.onnxruntime.cuda_ep_cfg.cudnn_conv_algo_search": "HEURISTIC",
+                           "EngineConfig.onnxruntime.cuda_ep_cfg.gpu_mem_limit": 3 * 1024 ** 3})
         engine = RapidOCR(params=params)
+        providers = verify_providers(engine, self.provider)
         metadata = {"model_family": "PP-OCRv5", "recognition_profile": self.profile, "language_route": route, "models": models,
-                    "onnxruntime_version": importlib.metadata.version("onnxruntime"),
-                    "provider": "CPUExecutionProvider", "network": "disabled", "telemetry": "disabled",
+                    "model_name": "PP-OCRv5_server_rec" if self.profile == "server" else ("korean_PP-OCRv5_mobile_rec" if route == "korean" else "PP-OCRv5_mobile_rec"),
+                    "runtime_adapter": "RapidOCR ONNX Runtime; PaddleOCR-derived official model conversion",
+                    "onnxruntime_version": importlib.metadata.version(ort_package), "onnxruntime_package": ort_package,
+                    "provider": "CUDAExecutionProvider" if self.provider == "cuda" else "CPUExecutionProvider",
+                    "verified_session_providers": providers, "network": "disabled", "telemetry": "disabled",
                     "text_policy": "unmodified engine lines joined with LF; no Unicode/script/space conversion",
                     "reading_order": "RapidOCR detected-line order; no document layout reconstruction",
                     "bbox_granularity": "line", "confidence_granularity": "line",
@@ -185,11 +249,21 @@ def main() -> int:
     parser.add_argument("--languages", default="chi_sim")
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--profile", choices=("server", "mobile"), default="mobile")
+    parser.add_argument("--provider", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--batch", type=Path)
+    parser.add_argument("--session-root", type=Path)
+    parser.add_argument("--max-requests", type=int, default=8)
     args = parser.parse_args()
     block_network()
     try:
-        worker = Worker(args.model_dir, args.profile)
+        worker = Worker(args.model_dir, args.profile, args.provider)
+        if args.session_root:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("yeone_worker_protocol", Path(__file__).with_name("worker_sessions.py"))
+            protocol = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(protocol)
+            return protocol.serve_requests(worker, args.session_root, args.languages, atomic_output,
+                                           max_requests=args.max_requests)
         if args.batch:
             items = json.loads(args.batch.read_text(encoding="utf-8"))["items"]
         elif args.input and args.output:

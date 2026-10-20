@@ -9,7 +9,7 @@ from unittest.mock import patch
 import httpx
 from PIL import Image
 
-from yeone_ocr.comparison_ai import AISettings, RESPONSE_SCHEMA, _request
+from yeone_ocr.comparison_ai import AISettings, RESPONSE_SCHEMA, _request, _wire_schema
 
 
 class SDKWireTests(unittest.TestCase):
@@ -22,10 +22,10 @@ class SDKWireTests(unittest.TestCase):
         self.guard.start()
         self.addCleanup(self.guard.stop)
 
-    def transport(self, response, wire=httpx):
+    def transport(self, response, wire=httpx, status=200):
         def handle(request):
             self.requests.append((request.url.path, json.loads(request.content)))
-            return wire.Response(200, json=response, headers={"request-id": "offline-sdk-fixture"})
+            return wire.Response(status, json=response, headers={"request-id": "offline-sdk-fixture"})
         return wire.MockTransport(handle)
 
     def test_openai_real_sdk_preserves_selected_model_images_schema_and_no_store(self):
@@ -111,6 +111,67 @@ class SDKWireTests(unittest.TestCase):
         parts = [part for content in body["contents"] for part in content["parts"]]
         self.assertEqual(base64.urlsafe_b64decode(next(p["inlineData"]["data"] for p in parts if "inlineData" in p)), self.png)
         self.assertNotIn("tools", body)
+        self.assertNotIn("thinkingConfig", body["generationConfig"])
+
+    def test_gemini3_real_sdk_serializes_low_thinking_cap_and_target_schema(self):
+        from google import genai
+        from google.genai import types
+        schema = {"type": "object", "properties": {"items": {"type": "array", "maxItems": 1,
+                  "items": {"type": "string", "enum": ["approved-target"]}}}, "required": ["items"]}
+        client = genai.Client(api_key="offline-fixture-key", http_options=types.HttpOptions(
+            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport({
+                "candidates": [{"finishReason": "MAX_TOKENS", "content": {"role": "model", "parts": [{"text": '{"items":[]}'}]}}],
+                "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 5, "thoughtsTokenCount": 8,
+                                  "totalTokenCount": 20}, "modelVersion": "gemini-3.1-pro-preview"})}))
+        self.addCleanup(client.close)
+        text, complete, metadata = _request(client, AISettings("gemini", "gemini-3.1-pro-preview"),
+                                           "fixture-data", [self.png], response_schema=schema)
+        self.assertEqual(text, '{"items":[]}')
+        self.assertFalse(complete)
+        self.assertFalse(metadata["response_complete"])
+        self.assertEqual(metadata["finish_reason"], "MAX_TOKENS")
+        self.assertEqual(metadata["usage"]["thoughts_token_count"], 8)
+        self.assertEqual(len(self.requests), 1)
+        config = self.requests[0][1]["generationConfig"]
+        self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "LOW"})
+        self.assertEqual(config["maxOutputTokens"], 8192)
+        self.assertEqual(config["responseJsonSchema"], _wire_schema(schema, "gemini"))
+        self.assertNotIn("maxItems", config["responseJsonSchema"]["properties"]["items"])
+        self.assertEqual(metadata["wire_schema_policy"], "gemini-basic-v1")
+
+    def test_gemini_wire_subset_keeps_ids_kinds_and_does_not_mutate_other_providers(self):
+        schema = {"type": "object", "additionalProperties": False, "required": ["items"], "properties": {
+            "items": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "object",
+                "additionalProperties": False, "required": ["target_id", "kind", "start", "reason"],
+                "properties": {"target_id": {"type": "string", "enum": ["approved-target"]},
+                    "kind": {"type": "string", "enum": ["recognition"]},
+                    "start": {"type": "integer", "minimum": 0},
+                    "reason": {"type": "string", "maxLength": 80}}}}}}
+        original = json.dumps(schema, sort_keys=True)
+        filtered = _wire_schema(schema, "gemini")
+        self.assertEqual(json.dumps(schema, sort_keys=True), original)
+        self.assertIs(_wire_schema(schema, "openai"), schema)
+        self.assertIs(_wire_schema(schema, "anthropic"), schema)
+        array = filtered["properties"]["items"]
+        self.assertNotIn("minItems", array)
+        self.assertNotIn("maxItems", array)
+        fields = array["items"]["properties"]
+        self.assertEqual(fields["target_id"]["enum"], ["approved-target"])
+        self.assertEqual(fields["kind"]["enum"], ["recognition"])
+        self.assertNotIn("minimum", fields["start"])
+        self.assertNotIn("maxLength", fields["reason"])
+        self.assertFalse(array["items"]["additionalProperties"])
+
+    def test_gemini_real_sdk_invalid_argument_makes_one_request_without_retry(self):
+        from google import genai
+        from google.genai import types, errors
+        client = genai.Client(api_key="offline-fixture-key", http_options=types.HttpOptions(
+            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport({
+                "error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Public synthetic rejection"}}, status=400)}))
+        self.addCleanup(client.close)
+        with self.assertRaises(errors.ClientError):
+            _request(client, AISettings("gemini", "gemini-3.1-pro-preview"), "fixture-data", [self.png])
+        self.assertEqual(len(self.requests), 1)
 
 
 if __name__ == "__main__":

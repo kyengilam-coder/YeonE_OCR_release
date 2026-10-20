@@ -1,3 +1,3 @@
-Version: 0.9.0
-Git commit: 140dc87320c5a83c6f61b219dc7ad3b81d5a5dfe
+Version: 0.12.0
+Git commit: 64f99f8d9d29ecf01802ad5fb553c4627dbc1ed8
 Source: committed Git tree only.

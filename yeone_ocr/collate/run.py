@@ -385,7 +385,7 @@ def backup_record(work, n: int) -> Path | None:
 
 
 def note_remerged(work, pages: list[int], backups: list | None = None) -> None:
-    """비교 표시를 다시 계산한 쪽을 알린다. 한 실행에 처음 한 번은 '주의:' 로(창의 알림창에 보이게) — merged 에 손으로 고친 글이 사라지므로.
+    """비교 표시를 다시 계산한 쪽을 알린다. 한 실행에 처음 한 번은 '주의:' 로(창의 알림창에 보이게).
     backups: 이번에 남긴 사본 경로(backup_record) — 어디서 되찾는지 그 경로를 적는다."""
     from .. import __version__, prompts
     ps = ", ".join(str(p) for p in pages[:8]) + (" …" if len(pages) > 8 else "")
@@ -398,7 +398,7 @@ def note_remerged(work, pages: list[int], backups: list | None = None) -> None:
             return b.as_posix()
     where = (", ".join(rel(b) for b in saved[:4]) + (f" 외 {len(saved) - 4}개" if len(saved) > 4 else "")) if saved else "readings/prev/"
     log(f"{head}쪽 {ps}({len(pages)}쪽)의 판독 기록이 다른 판·모드로 비교한 것이라 지금 규칙(판 {__version__}·{prompts.MODE})으로 비교 표시를 다시 계산했습니다 — "
-        f"판독 기록(merged)에 손으로 고친 글은 사라지고, 계산 전 기록은 {where} 에 남김" + ("" if len(saved) >= len(pages) else "(사본이 이미 있던 쪽은 그 사본)"))
+        f"판독 기록(merged)의 기존 교정은 보존하고, 계산 전 기록은 {where} 에 남김" + ("" if len(saved) >= len(pages) else "(사본이 이미 있던 쪽은 그 사본)"))
     try:
         work._remerge_noted = True
     except Exception:
@@ -445,7 +445,7 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                 # 같은 판·같은 모드면 결과가 같으니 건너뛴다 — merged 에 손으로 고친 글이 실행마다 지워지지 않게. 계산 전 기록은 readings/prev/ 에 남기고 그 경로를 알린다
                 try:
                     bk = backup_record(work, n)
-                    rec = remerge_record(rec, layer, layer_d); rec["mode"] = prompts.MODE; work.save_record(n, rec); remerged.append(n)
+                    rec = remerge_record(rec, layer, layer_d, mode=prompts.MODE); work.save_record(n, rec); remerged.append(n)
                     if bk: backups.append(bk)
                 except Exception as e:
                     log(f"  {n}쪽 비교 다시 계산 실패(기존 기록 사용): {e}")

@@ -11,4 +11,8 @@ dist/
 /tools/tesseract/
 /tools/rapidocr/
 /tools/easyocr/
+/tools/paddle_server/
+/tools/paddle_server_gpu/
+/tools/glmocr/
+/tools/surya/
 /downloads/

@@ -263,7 +263,8 @@ class ProviderResume(unittest.TestCase):
         rec["merged"]["regions"][0]["paragraphs"][0]["columns"][0]["text"] = "手校保存"
         self.work.save_record(1, rec)
         b = self.FakeReader("anthropic"); self.args.reader = "anthropic"
-        def remaining(reader, image, p1, n, args):
+        def remaining(reader, image, p1, n, args, *, text_policy):
+            self.assertEqual(text_policy, rec["text_policy"])
             self.assertEqual([r.id for r in p1.regions], ["b2"])
             return self.rereads("b2"), {}
         with mock.patch.object(cli, "_second_pass", side_effect=remaining):

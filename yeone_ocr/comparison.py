@@ -17,15 +17,16 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 import uuid
 
 from ab_ocr import ocr
+from ab_ocr.engine_registry import ENGINES, LEGACY_ENGINES, language_for
 
 FORMAT = "yeone-ocr-comparison"
 VERSION = 1
 MAX_BYTES = 256_000_000
 MAX_TEXT = 2_000_000
-ENGINES = ("tesseract", "rapidocr", "easyocr")
 PROFILES = ("traditional", "simplified", "mixed")
 _HEX = re.compile(r"[a-f0-9]{64}")
 _AI_SECRET_FIELDS = {"apikey", "authorization", "accesstoken", "refreshtoken", "clientsecret", "password",
@@ -83,12 +84,112 @@ def _ai_phase(review):
     return review["request"].get("phase", review.get("metadata", {}).get("phase"))
 
 
+def _validate_anchor_evidence(review, previous):
+    """Reproduce new response/proposal provenance; legacy reviews stay readable."""
+    metadata = review.get("metadata", {})
+    has_recovery = "anchor_recovery" in metadata
+    new_contract = (review["request"].get("response_contract") == "comparison-ai-anchored-v1"
+                    or metadata.get("prompt_version") in ("comparison-ai-v4", "comparison-ai-v5", "comparison-ai-v6", "comparison-ai-v7", "comparison-ai-v8", "comparison-ai-v9", "comparison-ai-v10", "comparison-ai-v11", "comparison-ai-v12"))
+    if not has_recovery and (not new_contract or review["status"] != "completed"):
+        return
+    from .comparison_ai import AIReviewError, ReviewPolicy, _recover_anchors, _validate_response
+    try:
+        if metadata.get("response_complete") is not True:
+            raise ComparisonError("미완결 AI 응답에서 위치를 복원할 수 없습니다.")
+        allowed_finish = {"gemini": "STOP", "openai": "completed", "anthropic": "end_turn"}
+        finish = metadata.get("finish_reason")
+        if finish is not None and allowed_finish.get(review["provider"]) != finish:
+            raise ComparisonError("AI 위치 복원의 완료 근거가 일치하지 않습니다.")
+        derived, expected = _recover_anchors(review["response_text"], review["request"])
+        if ((expected is None and has_recovery) or (expected is not None and not has_recovery)
+                or (expected is not None and _canonical(metadata["anchor_recovery"]) != _canonical(expected))):
+            raise ComparisonError("AI 위치 복원의 원시·파생 응답 또는 위치 계보가 일치하지 않습니다.")
+        if review["status"] == "completed":
+            captured = set(metadata.get("provisional_visual_proposal_ids", []))
+            visual = [p for old in previous for p in old["proposals"] if p["id"] in captured]
+            proposals = _validate_response(derived, review["request"], ReviewPolicy(**review["policy"]), visual)
+            bodies = lambda values: [{k: v for k, v in p.items() if k != "id"} for p in values]
+            if _canonical(bodies(proposals)) != _canonical(bodies(review["proposals"])):
+                raise ComparisonError("AI 교정 제안이 보존된 파생 응답과 일치하지 않습니다.")
+    except (AIReviewError, TypeError, KeyError, ValueError) as exc:
+        raise ComparisonError("AI 위치 복원 기록의 원문·유일성·검증 계보를 확인할 수 없습니다.") from exc
+
+
 def _ai_batch_key(review):
     request = review["request"]
     scope, batch = request.get("scope_fingerprint"), request.get("batch_id")
     if isinstance(scope, str) and scope and isinstance(batch, str) and batch:
         return scope, _ai_phase(review), batch
     return None
+
+
+def _source_fidelity_contract(review):
+    return ("source_fidelity_contract" in review.get("request", {})
+            or review.get("metadata", {}).get("prompt_version") in ("comparison-ai-v8", "comparison-ai-v9", "comparison-ai-v10", "comparison-ai-v11", "comparison-ai-v12"))
+
+
+def _source_fidelity_version(review):
+    return review.get("request", {}).get("source_fidelity_contract") or {
+        "comparison-ai-v8": "source-fidelity-v1", "comparison-ai-v9": "source-fidelity-v2",
+        "comparison-ai-v10": "source-fidelity-v3", "comparison-ai-v11": "source-fidelity-v4",
+        "comparison-ai-v12": "source-fidelity-v4"
+    }.get(review.get("metadata", {}).get("prompt_version"))
+
+
+def _source_fidelity_proof_allowed(review, contract):
+    # A new acceptance may use a newer guard, but never an older one than its
+    # review. Proofless legacy/v1 history is handled separately below.
+    ranks = {"source-fidelity-v2": 2, "source-fidelity-v3": 3, "source-fidelity-v4": 4}
+    minimum = {"source-fidelity-v3": 3, "source-fidelity-v4": 4}.get(_source_fidelity_version(review), 2)
+    return isinstance(contract, str) and contract in ranks and ranks[contract] >= minimum
+
+
+def _source_fidelity_view(page, review, *, contract=None):
+    """Derive current protection without rewriting a historical AI response."""
+    from .comparison_fidelity import FidelityError, SOURCE_FIDELITY_CONTRACT, assess_source_fidelity
+    runs = {run["id"]: run for run in page.get("runs", [])}
+    captured = set(review.get("metadata", {}).get("provisional_visual_proposal_ids", []))
+    visual = [proposal for old in page.get("ai_reviews", []) for proposal in old["proposals"]
+              if proposal["id"] in captured]
+    try:
+        batch = {**review["request"], "phase": _ai_phase(review)}
+        return assess_source_fidelity(batch, review["proposals"], visual, runs=runs,
+                                      policy=review["policy"], contract=contract)
+    except FidelityError:
+        # An unavailable witness never grants permission to change source text.
+        return {"contract": contract or SOURCE_FIDELITY_CONTRACT, "proposals": [
+            {"proposal_id": proposal["id"], "blocked": True,
+             "reason_codes": ["fidelity-evidence-unavailable"]}
+            for proposal in review["proposals"]]}
+
+
+def _source_fidelity_items(result):
+    return {item["proposal_id"]: item for item in result.get("proposals", [])}
+
+
+def _source_fidelity_reason(item):
+    if not item.get("blocked"):
+        return ""
+    reason = item.get("reason")
+    if not isinstance(reason, str) or not reason:
+        from .comparison_fidelity import source_fidelity_reason
+        reason = source_fidelity_reason(item.get("reason_codes", []))
+    return "원본보존 보류: " + reason
+
+
+def _source_fidelity_acceptance(page, review, proposal_id, source_sha256, before, start, end, *, contract=None):
+    """Bind a human acceptance to its own versioned, reproducible guard verdict."""
+    result = _source_fidelity_view(page, review, contract=contract)
+    verdict = _source_fidelity_items(result).get(proposal_id)
+    if verdict is None or verdict.get("blocked", True):
+        raise ComparisonError(_source_fidelity_reason(verdict or {"blocked": True}))
+    attestation = {key: copy.deepcopy(value) for key, value in result.items() if key != "proposals"}
+    attestation["proposals"] = [copy.deepcopy(verdict)]
+    return {"contract": "source-fidelity-acceptance-v1", "review_id": review["id"],
+            "proposal_id": proposal_id, "review_record_sha256": review["record_sha256"],
+            "source_sha256": source_sha256, "snapshot_sha256": review["request"]["snapshot_sha256"],
+            "baseline_run_id": review["request"]["baseline_run_id"], "before_text_sha256": _text_sha(before),
+            "applied_start": start, "applied_end": end, "attestation": attestation}
 
 
 def _text(value, *, nullable=False):
@@ -141,6 +242,7 @@ def _read(path):
 
 
 def _atomic_write(target, content, *, protected=(), before_replace=None):
+    protected = tuple(protected)
     for original in protected:
         if original is not None and _same_file(target, Path(original)):
             raise ComparisonError("원본이나 프로젝트 파일을 덮어쓸 수 없습니다.")
@@ -153,13 +255,30 @@ def _atomic_write(target, content, *, protected=(), before_replace=None):
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        if before_replace is not None:
-            before_replace()
-        # Recheck hard links and path aliases after writing the temporary file.
-        for original in protected:
-            if original is not None and _same_file(target, Path(original)):
-                raise ComparisonError("보호된 원본 경로에는 저장할 수 없습니다.")
-        os.replace(temporary, target)
+        deadline = time.monotonic() + 1.8
+        last_lock = None
+        for attempt in range(20):
+            if last_lock is not None and time.monotonic() >= deadline:
+                raise last_lock
+            if before_replace is not None:
+                before_replace()
+            # Recheck the source/current file and hard-link aliases on EVERY
+            # attempt. Waiting for a Windows scanner must never grant permission
+            # to replace another window's newer project or a changed original.
+            for original in protected:
+                if original is not None and _same_file(target, Path(original)):
+                    raise ComparisonError("보호된 원본 경로에는 저장할 수 없습니다.")
+            try:
+                os.replace(temporary, target)
+                break
+            except PermissionError as exc:
+                if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 19:
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                last_lock = exc
+                time.sleep(min(0.01 * 2 ** attempt, 0.1, remaining))
         temporary = None
         return target
     finally:
@@ -184,6 +303,30 @@ def _latest_runs(page):
 def latest_runs(page):
     """Snapshot latest active readings, falling back to imported history if needed."""
     return copy.deepcopy(_latest_runs(page))
+
+
+def _run_complete(run):
+    """Incomplete generative output is evidence, never an eligible reading."""
+    return not (run["engine"] in ("glmocr", "surya")
+                and run["raw"].get("engine_metadata", {}).get("generation_complete") is False)
+
+
+def usable_runs(page):
+    """Known, active, completed readings compatible with the stored baseline.
+
+    Both the editor's readiness indicator and AI planning use this same rule.
+    A snapshot is returned so callers cannot mutate the project's raw history.
+    """
+    baseline = next((run for run in page.get("runs", []) if run["id"] == page.get("baseline_run_id")), None)
+    if baseline is None or baseline["engine"] not in ENGINES or not _run_complete(baseline):
+        return {}
+    latest = _latest_runs(page)
+    result = {engine: latest[engine] for engine in ENGINES if engine in latest
+              and latest[engine].get("active", True) and _run_complete(latest[engine])
+              and _compatible(baseline, latest[engine])}
+    if baseline["engine"] not in result or result[baseline["engine"]]["id"] != baseline["id"]:
+        return {}
+    return copy.deepcopy(result)
 
 
 def _han(char):
@@ -253,12 +396,14 @@ def _bbox(raw, start, end):
 
 
 def _eligibility(run, span, baseline_span, explicitly_selected=False):
+    if not _run_complete(run):
+        return False, "완료되지 않은 생성 판독은 원시 증거로만 보존하며 교정 근거로 사용하지 않습니다."
     if run["engine"] not in ENGINES and not explicitly_selected:
         return False, "가져온 판독은 비교 근거로만 보관하며 자동 합의에 참여하지 않습니다."
     languages = run["raw"].get("languages", "")
     has_han = any(_han(c) for c in span + baseline_span)
     has_kor = any(_hangul(c) for c in span + baseline_span)
-    if run["engine"] in ("rapidocr", "easyocr"):
+    if run["engine"] in ("rapidocr", "easyocr", "paddle_server"):
         if has_han and languages == "kor":
             return False, "이 한국어 모델은 한자를 지원하지 않아 누락을 합의 근거로 세지 않습니다."
         if has_kor and languages in ("chi_sim", "chi_tra"):
@@ -298,6 +443,8 @@ def _validate_request(request):
     manifest = request.get("installation_sha256")
     if manifest is not None and (not isinstance(manifest, str) or not _HEX.fullmatch(manifest)):
         raise ComparisonError("판독 모델 설치 기록 해시가 올바르지 않습니다.")
+    if "device" in request and request["device"] not in ("cpu", "cuda"):
+        raise ComparisonError("명시한 판독 장치 기록이 올바르지 않습니다.")
 
 
 class ComparisonProject:
@@ -320,6 +467,9 @@ class ComparisonProject:
         self._lock = threading.RLock()
         self._revision = self._saved_revision = 0
         self._disk_sha256 = None
+        # Loading or explicitly choosing a baseline must not replace it merely
+        # because a new release recommends a different recognition model.
+        self._preserve_baselines = set()
 
     @classmethod
     def open(cls, source):
@@ -363,6 +513,8 @@ class ComparisonProject:
                 page.setdefault("ai_decisions", [])
             project._validate_page(page, number, run_ids)
             project._pages[number] = copy.deepcopy(page)
+            if page.get("baseline_run_id") is not None:
+                project._preserve_baselines.add(number)
         project._id = identifier
         project.project_path = path
         project._disk_sha256 = digest
@@ -444,7 +596,7 @@ class ComparisonProject:
         baseline = page.get("baseline_run_id")
         if baseline is not None and (baseline not in local_ids or page.get("baseline_engine") != local_ids[baseline]["engine"]):
             raise ComparisonError("기준 판독 연결이 올바르지 않습니다.")
-        if baseline is None and (runs or page.get("baseline_engine") is not None):
+        if baseline is None and (any(_run_complete(run) for run in runs) or page.get("baseline_engine") is not None):
             raise ComparisonError("기준 판독이 없습니다.")
         edits = page.get("edits")
         if not isinstance(edits, list):
@@ -453,7 +605,7 @@ class ComparisonProject:
         state, edit_ids, active = None, set(), []
         for edit in edits:
             if (not isinstance(edit, dict) or not isinstance(edit.get("id"), str) or edit["id"] in edit_ids
-                    or edit.get("kind") not in ("manual", "candidate", "ai_accept", "undo")
+                    or edit.get("kind") not in ("manual", "candidate", "ai_accept", "refinement_accept", "undo")
                     or not isinstance(edit.get("at"), str) or not isinstance(edit.get("reason"), str)
                     or edit.get("before") != state):
                 raise ComparisonError("교정 이력의 순서나 내용이 일치하지 않습니다.")
@@ -471,6 +623,10 @@ class ComparisonProject:
             state = edit["after"]
         if state != page.get("corrected_text"):
             raise ComparisonError("현재 교정문과 교정 이력이 일치하지 않습니다.")
+        if (any(key in page for key in ("region_readings", "refinement_reviews", "refinement_decisions", "refinement_source_checks", "image_only_checks"))
+                or any(edit.get("kind") == "refinement_accept" for edit in edits)):
+            from .comparison_refinement import validate_page
+            validate_page(self, page, local_ids)
         errors = page.get("last_errors")
         if not isinstance(errors, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in errors.items()):
             raise ComparisonError("실패 기록이 올바르지 않습니다.")
@@ -499,7 +655,7 @@ class ComparisonProject:
                 raise ComparisonError("사람의 검수 이력이 올바르지 않습니다.")
         _json_copy(page)
 
-    def _validate_ai_review(self, review, number, runs, previous):
+    def _validate_ai_review(self, review, number, runs, previous, *, page=None):
         if (not isinstance(review, dict) or not isinstance(review.get("id"), str)
                 or not re.fullmatch(r"[a-f0-9]{32}", review["id"])
                 or not _ai_label(review.get("created_at"))
@@ -525,6 +681,14 @@ class ComparisonProject:
         _text(snapshot)
         if request.get("snapshot_sha256") != _text_sha(snapshot):
             raise ComparisonError("AI 검증 대상 문장의 해시가 일치하지 않습니다.")
+        if "refinement_evidence" in request or "refinement_evidence_sha256" in request:
+            if page is None:
+                raise ComparisonError("AI 재검증의 로컬 근거를 확인할 쪽이 없습니다.")
+            from .comparison_refinement import validate_ai_refinement_context
+            try:
+                validate_ai_refinement_context(page, request)
+            except (TypeError, KeyError, AttributeError) as exc:
+                raise ComparisonError("AI 재검증의 로컬 근거 형식이 올바르지 않습니다.") from exc
         references = request.get("runs")
         if not isinstance(references, list) or len(references) > 100:
             raise ComparisonError("AI 검증의 원시 판독 근거가 올바르지 않습니다.")
@@ -641,6 +805,23 @@ class ComparisonProject:
                     or prior["baseline_run_id"] != baseline or prior["runs"] != references
                     or not any(t["start"] <= proposal["start"] <= proposal["end"] <= t["end"] for t in targets)):
                 raise ComparisonError("AI 후속 검토의 앞 단계 원문·범위·판독 근거가 일치하지 않습니다.")
+        _validate_anchor_evidence(review, previous)
+        if _source_fidelity_contract(review):
+            from .comparison_fidelity import FidelityError, validate_source_fidelity_evidence, verify_source_fidelity
+            captured = set(review.get("metadata", {}).get("provisional_visual_proposal_ids", []))
+            visual = [proposal for old in previous for proposal in old["proposals"] if proposal["id"] in captured]
+            try:
+                validate_source_fidelity_evidence(request, runs, policy=review["policy"])
+                verified = verify_source_fidelity(review, visual, runs=runs)
+                if verified is not None and superseded:
+                    protected = _source_fidelity_items(verified)
+                    eligible = [p for p in proposals if not protected[p["id"]]["blocked"]]
+                    for identifier in superseded:
+                        old = next(p for prior in previous for p in prior["proposals"] if p["id"] == identifier)
+                        if not any(p["start"] <= old["start"] <= old["end"] <= p["end"] for p in eligible):
+                            raise ComparisonError("원본보존 보류된 AI 후보가 이전 후보를 대체할 수 없습니다.")
+            except FidelityError as exc:
+                raise ComparisonError("AI 원본보존 검증의 원시 판독·파생 판정이 일치하지 않습니다.") from exc
 
     def _validate_ai_state(self, page, number, runs):
         reviews, decisions = page.get("ai_reviews", []), page.get("ai_decisions", [])
@@ -648,7 +829,7 @@ class ComparisonProject:
             raise ComparisonError("AI 검증·결정 이력 형식이 올바르지 않습니다.")
         review_map, previous = {}, []
         for review in reviews:
-            self._validate_ai_review(review, number, runs, previous)
+            self._validate_ai_review(review, number, runs, previous, page=page)
             if review["id"] in review_map:
                 raise ComparisonError("AI 검증 식별자가 중복되었습니다.")
             review_map[review["id"]] = review
@@ -693,6 +874,31 @@ class ComparisonProject:
                             or before_text[start:end] != proposal["before"]
                             or edit.get("after") != before_text[:start] + proposal["after"] + before_text[end:]):
                         raise ComparisonError("AI 후보 채택 범위와 실제 교정문이 일치하지 않습니다.")
+                    proof = decision.get("source_fidelity_acceptance")
+                    from .comparison_image_only import validate_acceptance
+                    validate_acceptance(page, "ai", review["id"], proposal["id"], decision, edit)
+                    if proof is not None:
+                        if (not isinstance(proof, dict) or proof.get("contract") != "source-fidelity-acceptance-v1"
+                                or not isinstance(proof.get("attestation"), dict)
+                                or not _source_fidelity_proof_allowed(review, proof["attestation"].get("contract"))
+                                or edit.get("source_fidelity_acceptance_sha256") != _digest(proof)):
+                            raise ComparisonError("AI 후보 채택의 원본보존 검증 근거가 올바르지 않습니다.")
+                        _reject_ai_secrets(proof)
+                        if self._mapped_span(review["request"]["snapshot_text"], before_text,
+                                             proposal["start"], proposal["end"]) != (start, end):
+                            raise ComparisonError("AI 후보 채택의 검증 위치가 실제 교정 위치와 다릅니다.")
+                        expected = _source_fidelity_acceptance(page, review, proposal["id"], self.source_sha256,
+                                                              before_text, start, end,
+                                                              contract=proof["attestation"]["contract"])
+                        if _canonical(proof) != _canonical(expected):
+                            raise ComparisonError("AI 후보 채택의 당시 원본보존 판정이 일치하지 않습니다.")
+                    elif (edit.get("source_fidelity_acceptance_sha256") is not None
+                          or _source_fidelity_version(review) in ("source-fidelity-v2", "source-fidelity-v3", "source-fidelity-v4")):
+                        raise ComparisonError("AI 후보 채택의 원본보존 검증 근거가 누락됐습니다.")
+                    elif _source_fidelity_contract(review):
+                        fidelity = _source_fidelity_items(review.get("metadata", {}).get("source_fidelity", {}))
+                        if fidelity.get(proposal["id"], {}).get("blocked", True):
+                            raise ComparisonError("원본보존 보류된 AI 후보를 채택한 이력은 유효하지 않습니다.")
                     accepted_edits.add(edit["id"])
                 states[key] = decision["decision"]
             decision_ids.add(decision["id"])
@@ -795,7 +1001,7 @@ class ComparisonProject:
             run = {"id": uuid.uuid4().hex, "engine": raw["engine"], "created_at": _now(),
                    "raw": raw, "raw_sha256": _digest(raw), "request": request, "active": activate}
             page["runs"].append(run)
-            if page["baseline_run_id"] is None or (activate and page["baseline_engine"] == raw["engine"]):
+            if _run_complete(run) and (page["baseline_run_id"] is None or (activate and page["baseline_engine"] == raw["engine"])):
                 page["baseline_engine"], page["baseline_run_id"] = raw["engine"], run["id"]
             if activate:
                 page["suggestions"] = []
@@ -810,6 +1016,9 @@ class ComparisonProject:
             run = _latest_runs(page).get(engine)
             if run is None:
                 raise ComparisonError("선택한 엔진의 판독 결과가 없습니다.")
+            if not _run_complete(run):
+                raise ComparisonError("완료되지 않은 원시 판독을 기준으로 선택할 수 없습니다.")
+            self._preserve_baselines.add(number)
             if page["baseline_run_id"] != run["id"]:
                 page["baseline_engine"], page["baseline_run_id"] = engine, run["id"]
                 page["suggestions"] = []
@@ -822,26 +1031,33 @@ class ComparisonProject:
             page = self._page(number)
             if not page["runs"]:
                 return []
-            if baseline is None:
+            if baseline is None and number not in self._preserve_baselines:
                 preferred = "tesseract" if page["profile"] == "mixed" else "easyocr"
-                matching = [r for r in _latest_runs(page).values() if _run_profile(r) == (page["profile"], page["direction"])]
+                matching = [r for r in _latest_runs(page).values() if _run_complete(r)
+                            and _run_profile(r) == (page["profile"], page["direction"])]
                 candidates = [r for r in matching if r["engine"] == preferred]
                 chosen = candidates[-1] if candidates else (matching[-1] if matching else self._baseline(page))
-                if page["baseline_run_id"] != chosen["id"]:
+                if chosen is not None and page["baseline_run_id"] != chosen["id"]:
                     self._invalidate_review(page, "baseline-changed")
-                page["baseline_engine"], page["baseline_run_id"] = chosen["engine"], chosen["id"]
-            else:
+                if chosen is not None:
+                    page["baseline_engine"], page["baseline_run_id"] = chosen["engine"], chosen["id"]
+            elif baseline is not None:
                 self.choose_baseline(number, baseline)
             selected = self._baseline(page)
+            if selected is None:
+                page["suggestions"] = []
+                return []
             latest, excluded = {}, []
             for run in _latest_runs(page).values():
                 if run["engine"] in ENGINES or run["id"] == selected["id"]:
                     latest[run["engine"]] = run
             for engine, run in list(latest.items()):
-                if not _compatible(selected, run):
+                if not _run_complete(run) or not _compatible(selected, run):
                     excluded.append({"engine": engine, "run_id": run["id"],
-                                     "reason": "원본 렌더링 크기·문서 종류·방향·DPI가 기준 판독과 다릅니다."})
+                                     "reason": ("완료되지 않은 생성 판독은 원시 증거로만 보관합니다." if not _run_complete(run)
+                                                else "원본 렌더링 크기·문서 종류·방향·DPI가 기준 판독과 다릅니다.")})
                     del latest[engine]
+            latest[selected["engine"]] = selected
             baseline_text = selected["raw"]["text"]
             alignments, intervals = {}, []
             for engine, run in latest.items():
@@ -942,6 +1158,9 @@ class ComparisonProject:
                 page.setdefault("ai_decisions", []).append({"id": uuid.uuid4().hex, "at": _now(),
                     "review_id": edit["ai_review_id"], "proposal_id": edit["ai_proposal_id"], "decision": "undone",
                     "edit_id": edit["id"], "undo_edit_id": page["edits"][-1]["id"]})
+            elif edit["kind"] == "refinement_accept":
+                from .comparison_refinement import record_undo
+                record_undo(page, edit, page["edits"][-1])
             self._invalidate_review(page, "edit-undone")
             self._revision += 1
             return True
@@ -1050,7 +1269,7 @@ class ComparisonProject:
             if any(old["id"] == review["id"] for old in reviews):
                 raise ComparisonError("AI 검증 식별자가 이미 있습니다.")
             runs = {run["id"]: run for run in page["runs"]}
-            self._validate_ai_review(review, number, runs, reviews)
+            self._validate_ai_review(review, number, runs, reviews, page=page)
             self._pages[number] = page
             page.setdefault("ai_reviews", reviews)
             page.setdefault("ai_decisions", [])
@@ -1068,7 +1287,7 @@ class ComparisonProject:
         # Cloud comparison uses the active local readings. Adding read-only
         # imported AI history must not invalidate those local image readings.
         if any(engine in ENGINES for engine in references):
-            expected_engines = {engine for engine, run in current.items() if engine in ENGINES and run.get("active", True)}
+            expected_engines = set(usable_runs(page))
             if expected_engines != (set(references) & set(ENGINES)):
                 return "AI 검증 뒤 참여한 로컬 판독 목록이 변경되었습니다. 다시 검증하세요."
         for engine, reference in references.items():
@@ -1104,9 +1323,14 @@ class ComparisonProject:
         return latest, visual
 
     @staticmethod
-    def _ai_lineage_stale(review, visual):
+    def _ai_lineage_stale(review, visual, guarded_visual=None):
         if _ai_phase(review) != "editorial":
             return ""
+        # Older responses captured their original provisional inputs. A newer
+        # protection policy must not rewrite that historical provenance.
+        if _source_fidelity_contract(review) and guarded_visual is not None:
+            visual = (guarded_visual.get(_source_fidelity_version(review), [])
+                      if isinstance(guarded_visual, dict) else guarded_visual)
         request, metadata = review["request"], review.get("metadata", {})
         captured = set(metadata.get("provisional_visual_proposal_ids", metadata.get("superseded_proposal_ids", [])))
         expected = {p["id"] for old, p in visual
@@ -1119,13 +1343,31 @@ class ComparisonProject:
         return ""
 
     def ai_proposals(self, number, include_decided=False):
+        from .comparison_image_only import evidence_for as image_evidence, hold_reason as image_hold
         with self._lock:
             page = self.page(number)
             reviews = page.get("ai_reviews", [])
             latest, visual = self._ai_generations(page)
+            current_fidelity = {review["id"]: _source_fidelity_view(page, review)
+                                for review in reviews if review["status"] == "completed"}
+            fidelity = {identifier: _source_fidelity_items(value) for identifier, value in current_fidelity.items()}
+            guarded_visual = {}
+            for version in {_source_fidelity_version(review) for review in reviews
+                            if review["status"] == "completed" and _ai_phase(review) == "editorial"
+                            and _source_fidelity_contract(review)}:
+                verdicts = {}
+                historical = []
+                for prior, proposal in visual:
+                    if prior["id"] not in verdicts:
+                        stored = prior.get("metadata", {}).get("source_fidelity", {})
+                        result = stored if stored.get("contract") == version else _source_fidelity_view(page, prior, contract=version)
+                        verdicts[prior["id"]] = _source_fidelity_items(result)
+                    if not verdicts[prior["id"]].get(proposal["id"], {}).get("blocked", True):
+                        historical.append((prior, proposal))
+                guarded_visual[version] = historical
             active = [r for r in reviews if r["status"] == "completed"
                       and (_ai_batch_key(r) is None or latest[_ai_batch_key(r)] == r["id"])
-                      and not self._ai_lineage_stale(r, visual)]
+                      and not self._ai_lineage_stale(r, visual, guarded_visual)]
             superseded = {identifier for review in active
                           for identifier in review.get("metadata", {}).get("superseded_proposal_ids", [])}
             source_reason = ""
@@ -1140,12 +1382,16 @@ class ComparisonProject:
                     continue
                 key = _ai_batch_key(review)
                 generation_stale = key is not None and latest[key] != review["id"]
-                lineage_reason = self._ai_lineage_stale(review, visual)
+                lineage_reason = self._ai_lineage_stale(review, visual, guarded_visual)
                 stale_reason = (source_reason or self._ai_evidence_stale(page, review)
                                 or ("같은 범위의 새 AI 검증 시도가 있습니다. 이전 후보는 이력으로 보존합니다." if generation_stale else "")
                                 or lineage_reason)
                 for proposal in review["proposals"]:
                     decision = self._ai_decision(page, review["id"], proposal["id"])
+                    protection = fidelity[review["id"]].get(proposal["id"], {
+                        "proposal_id": proposal["id"], "blocked": True,
+                        "reason_codes": ["fidelity-evidence-unavailable"]})
+                    fidelity_blocked = decision == "pending" and protection.get("blocked", True)
                     replaced = proposal["id"] in superseded or generation_stale
                     if not include_decided and (decision != "pending" or replaced):
                         continue
@@ -1156,20 +1402,35 @@ class ComparisonProject:
                         reason = "뒤 단계 AI 검토의 통합 후보가 이 후보를 대체했습니다."
                     elif proposal["uncertain"]:
                         reason = "AI가 판독을 확정하지 못했습니다. 원본과 직접 대조하여 교정하세요."
+                    elif not reason and fidelity_blocked:
+                        reason = _source_fidelity_reason(protection)
                     elif not reason and decision == "pending":
                         try:
                             self._mapped_span(review["request"]["snapshot_text"], self.text(number), proposal["start"], proposal["end"])
                         except ComparisonError as exc:
                             reason = str(exc)
                             manual_conflict = True
+                    image_proof = image_evidence(page, "ai", review["id"], proposal["id"])
+                    if not reason and decision == "pending":
+                        reason = image_hold(page, "ai", review["id"], proposal["id"])
                     target = next((t for t in review["request"]["targets"]
                                    if t["start"] <= proposal["start"] <= proposal["end"] <= t["end"]), None)
+                    current_protection = {key: copy.deepcopy(value)
+                                          for key, value in current_fidelity[review["id"]].items()
+                                          if key != "proposals"}
+                    current_protection["proposals"] = [copy.deepcopy(protection)]
                     result.append({**copy.deepcopy(proposal), "review_id": review["id"], "provider": review["provider"],
                                    "model": review["model"], "decision": decision, "superseded": replaced,
                                    "generation_stale": generation_stale, "lineage_stale": bool(lineage_reason),
+                                   "source_fidelity": copy.deepcopy(protection), "source_fidelity_blocked": fidelity_blocked,
+                                   "source_fidelity_current": current_protection,
+                                   "source_fidelity_contract": current_fidelity[review["id"]].get("contract"),
+                                   "source_fidelity_stored_contract": review.get("metadata", {}).get("source_fidelity", {}).get("contract"),
                                    "stale": bool(stale_reason) or manual_conflict, "applicable": decision == "pending" and not reason,
                                    "blocked_reason": reason, "bbox": copy.deepcopy(target.get("bbox")) if target else None,
                                    "image_id": target.get("image_id") if target else None})
+                    if image_proof is not None:
+                        result[-1]["image_only_check"] = image_proof
             return result
 
     def accept_ai_proposal(self, number, review_id, proposal_id):
@@ -1183,19 +1444,28 @@ class ComparisonProject:
                          if p["review_id"] == review_id and p["id"] == proposal_id), None)
             if view is None or not view["applicable"]:
                 raise ComparisonError(view["blocked_reason"] if view and view["blocked_reason"] else "처리할 수 있는 AI 교정 후보가 없습니다.")
+            from .comparison_image_only import record_checks, evidence_for as image_evidence
+            record_checks(self, number)
             review = next(r for r in page["ai_reviews"] if r["id"] == review_id)
             current = self.text(number)
             start, end = self._mapped_span(review["request"]["snapshot_text"], current, view["start"], view["end"])
             if current[start:end] != view["before"]:
                 raise ComparisonError("AI 후보의 변경 전 문장이 현재 교정문과 다릅니다.")
+            proof = _source_fidelity_acceptance(page, review, proposal_id, self.source_sha256, current, start, end)
             replacement = current[:start] + view["after"] + current[end:]
             changed = self._set_text(number, replacement, "ai:" + review_id + ":" + proposal_id, kind="ai_accept",
                                      extra={"ai_review_id": review_id, "ai_proposal_id": proposal_id,
-                                            "applied_start": start, "applied_end": end})
+                                            "applied_start": start, "applied_end": end,
+                                            "source_fidelity_acceptance_sha256": _digest(proof)})
             if not changed:
                 raise ComparisonError("현재 교정문에 적용할 변경이 없습니다.")
             page["ai_decisions"].append({"id": uuid.uuid4().hex, "at": _now(), "review_id": review_id,
-                                         "proposal_id": proposal_id, "decision": "accepted", "edit_id": page["edits"][-1]["id"]})
+                                         "proposal_id": proposal_id, "decision": "accepted", "edit_id": page["edits"][-1]["id"],
+                                         "source_fidelity_acceptance": proof})
+            image_proof = image_evidence(page, "ai", review_id, proposal_id)
+            if image_proof is not None:
+                page["ai_decisions"][-1]["image_only_check"] = copy.deepcopy(image_proof)
+                page["edits"][-1]["image_only_check_sha256"] = _digest(image_proof)
             self._revision += 1
             return replacement
 
@@ -1295,6 +1565,13 @@ def _models_unchanged(run, engine_root):
     """A resume checkpoint is valid only for the recorded installed model bytes."""
     engine = run["engine"]
     metadata = run["raw"].get("engine_metadata", {})
+    if any(key in metadata for key in ("installation_sha256", "worker_sha256", "runtime_files")):
+        from ab_ocr.local_engines import installed_run_unchanged
+        return installed_run_unchanged(engine, engine_root, metadata)
+    if engine not in LEGACY_ENGINES:
+        # New engines require their complete executable/model provenance before
+        # a saved result can be silently reused as a resume checkpoint.
+        return False
     models = metadata.get("model_files", {})
     if not isinstance(models, dict):
         return False
@@ -1321,9 +1598,28 @@ def _models_unchanged(run, engine_root):
     return True
 
 
+def _effective_device(run):
+    """Engine-specific execution evidence, not a requested-device label."""
+    engine, metadata = run["engine"], run["raw"].get("engine_metadata", {})
+    if engine in ("tesseract", "easyocr"):
+        return "cpu"  # These adapters expose CPU execution only.
+    if engine == "glmocr":
+        actual = metadata.get("actual_size_vram")
+        return ("cuda" if actual > 0 else "cpu") if type(actual) is int and actual >= 0 else None
+    if engine == "surya":
+        return {"CPU": "cpu", "CUDA": "cuda"}.get(metadata.get("provider"))
+    provider = metadata.get("provider")
+    sessions = metadata.get("verified_session_providers")
+    if (not isinstance(sessions, dict) or not sessions
+            or any(not isinstance(values, list) or not values or values[0] != provider for values in sessions.values())):
+        return None
+    return {"CPUExecutionProvider": "cpu", "CUDAExecutionProvider": "cuda"}.get(provider)
+
+
 def run_page(project, number, profile="traditional", direction="horizontal", dpi=300,
-             should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False):
-    """Run three local engines sequentially; checkpoint each completed reading.
+             should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
+              engines=None, primary_engine=None, recognizer=None, device=None):
+    """Run an explicit local engine set; legacy callers still run three engines.
 
     A failed engine never removes successful raw results or human edits.  Model
     confidence is not used as an accuracy score or as permission to auto-correct.
@@ -1336,17 +1632,49 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
         raise ComparisonError("렌더링 DPI는 72~600이어야 합니다.")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ComparisonError("엔진 제한 시간은 양수여야 합니다.")
+    if device not in (None, "cpu", "cuda"):
+        raise ComparisonError("판독 장치는 cpu 또는 cuda로 명시하세요.")
+    if engines is None:
+        selected_engines = LEGACY_ENGINES
+    elif isinstance(engines, (tuple, list)):
+        selected_engines = tuple(engines)
+    else:
+        raise ComparisonError("판독할 로컬 엔진 목록을 명시하세요.")
+    if (not selected_engines or any(engine not in ENGINES for engine in selected_engines)
+            or len(set(selected_engines)) != len(selected_engines)):
+        raise ComparisonError("지원하는 로컬 엔진을 중복 없이 선택하세요.")
+    if primary_engine is not None and primary_engine not in selected_engines:
+        raise ComparisonError("기준 엔진은 이번에 선택한 판독 모델에 포함되어야 합니다.")
+    if primary_engine is not None:
+        # The first durable checkpoint of a new job must already contain its
+        # selected primary. A cancellation before the last optional model must
+        # not turn a temporary legacy baseline into the resumed page's default.
+        selected_engines = (primary_engine,) + tuple(engine for engine in selected_engines if engine != primary_engine)
     project._check_page(number)
     project.validate_source()
     request = _request(profile, direction, dpi, engine_root)
+    if device is not None:
+        request["device"] = device
     outcome = {"completed": [], "errors": {}, "cancelled": False, "skipped": []}
     with project._lock:
         page = project._page(number)
+        same_profile = page["profile"] == profile and page["direction"] == direction
+        if page["runs"] and same_profile:
+            project._preserve_baselines.add(number)
         if page["profile"] != profile or page["direction"] != direction:
+            project._preserve_baselines.discard(number)
             page["profile"], page["direction"] = profile, direction
             page["suggestions"] = []
             project._revision += 1
-    for engine in ENGINES:
+    def compare():
+        if primary_engine is not None:
+            latest = _latest_runs(project.page(number)).get(primary_engine)
+            if (latest is not None and _run_complete(latest)
+                    and _run_profile(latest) == (profile, direction)):
+                return project.compare_page(number, baseline=primary_engine)
+        return project.compare_page(number)
+
+    for engine in selected_engines:
         if should_stop is not None and should_stop():
             outcome["cancelled"] = True
             break
@@ -1355,19 +1683,22 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
         engine_request["installation_sha256"] = ocr.file_sha256(manifest) if manifest.is_file() else None
         existing = _latest_runs(project.page(number)).get(engine)
         if (not force and existing and existing.get("request") == engine_request
+                and (device is None or _effective_device(existing) == device)
                 and _models_unchanged(existing, request["engine_root"])):
             outcome["skipped"].append(engine)
             continue
-        languages = ("kor+chi_tra" if engine == "tesseract" else "kor") if profile == "mixed" else (
-            "chi_sim" if profile == "simplified" else "chi_tra")
+        languages = language_for(engine, profile, direction)
         psm = 6 if engine == "tesseract" else None
         if direction == "vertical" and engine == "tesseract":
-            # Vertical Chinese models have a different traineddata identifier.
-            languages = languages.replace("chi_tra", "chi_tra_vert").replace("chi_sim", "chi_sim_vert")
-            languages = languages.replace("kor", "kor_vert")
             psm = 5
         try:
-            result = ocr.recognize_file(project.source_path, engine=engine, page_number=number,
+            if recognizer is None and device is not None:
+                from ab_ocr.local_engines import RecognitionSession
+                with RecognitionSession(engine, languages, engine_root=engine_root, device=device,
+                        timeout=timeout, should_stop=should_stop, psm=psm) as session:
+                    result = session.recognize_file(project.source_path, page_number=number, dpi=dpi, psm=psm)
+            else:
+                result = (recognizer or ocr.recognize_file)(project.source_path, engine=engine, page_number=number,
                                         languages=languages, psm=psm, dpi=dpi, timeout=timeout,
                                         should_stop=should_stop, engine_root=engine_root)
             project.add_result(result, request=engine_request)
@@ -1383,9 +1714,14 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
             project.record_error(number, engine, message)
             outcome["errors"][engine] = message
         else:
-            outcome["completed"].append(engine)
+            if _run_complete(project.page(number)["runs"][-1]):
+                outcome["completed"].append(engine)
+            else:
+                message = f"{engine} 생성이 완료되지 않아 원시 결과만 보존했습니다. 비교·AI 교정 근거에서는 제외합니다."
+                project.record_error(number, engine, message)
+                outcome["errors"][engine] = message
             try:
-                project.compare_page(number)
+                compare()
             finally:
                 if on_result is not None:
                     # Even a comparison failure checkpoints the completed raw OCR.
@@ -1393,5 +1729,77 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
                     # an engine failure, and leave in-memory raw/history intact.
                     on_result(result)
     if project.page(number)["runs"]:
-        project.compare_page(number)
+        compare()
     return outcome
+
+
+def run_pages(project, numbers, profile="traditional", direction="horizontal", dpi=300,
+              should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
+              engines=None, primary_engine=None, device=None, on_wait=None, on_page=None,
+              max_requests=8, session_factory=None):
+    """Engine-outer batch with bounded reusable sessions and per-result checkpoints.
+
+    New pages receive their primary first. Existing stored baselines and edits
+    remain unchanged. Sessions own FIFO GPU leases and close on every exit.
+    """
+    from ab_ocr.local_engines import RecognitionSession
+    pages = tuple(numbers)
+    if (not pages or any(type(n) is not int for n in pages) or len(pages) != len(set(pages))):
+        raise ComparisonError("판독할 쪽을 중복 없이 선택하세요.")
+    if profile not in PROFILES or direction not in ("horizontal", "vertical"):
+        raise ComparisonError("문서 종류 또는 읽기 방향을 확인하세요.")
+    if type(dpi) is not int or not 72 <= dpi <= 600:
+        raise ComparisonError("렌더링 DPI는 72~600이어야 합니다.")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ComparisonError("엔진 제한 시간은 양수여야 합니다.")
+    if engines is not None and not isinstance(engines, (tuple, list)):
+        raise ComparisonError("판독할 로컬 엔진 목록을 명시하세요.")
+    selected = tuple(LEGACY_ENGINES if engines is None else engines)
+    if (not selected or any(e not in ENGINES for e in selected) or len(selected) != len(set(selected))
+            or (primary_engine is not None and primary_engine not in selected)):
+        raise ComparisonError("지원하는 기준과 판독 엔진을 중복 없이 선택하세요.")
+    if device not in (None, "cpu", "cuda") or type(max_requests) is not int or not 1 <= max_requests <= 64:
+        raise ComparisonError("장치와 세션 요청 상한을 확인하세요.")
+    for number in pages:
+        project._check_page(number)
+    project.validate_source()
+    new_pages = {n for n in pages if not project.page(n)["runs"]}
+    if primary_engine is not None:
+        selected = (primary_engine,) + tuple(e for e in selected if e != primary_engine)
+    results = {n: {"completed": [], "errors": {}, "cancelled": False, "skipped": []} for n in pages}
+    cancelled = False
+    factory = session_factory or RecognitionSession
+    for engine in selected:
+        if should_stop is not None and should_stop():
+            cancelled = True
+            break
+        languages = language_for(engine, profile, direction)
+        psm = (5 if direction == "vertical" else 6) if engine == "tesseract" else None
+        # Enter is lazy: cached pages do not load a worker or reserve GPU VRAM.
+        with factory(engine, languages, engine_root=engine_root, device=device, timeout=timeout,
+                     should_stop=should_stop, on_wait=on_wait, max_requests=max_requests, psm=psm) as session:
+            def recognize(source, **kwargs):
+                return session.recognize_file(source, page_number=kwargs["page_number"],
+                                               dpi=kwargs["dpi"], psm=kwargs["psm"])
+            for number in pages:
+                if should_stop is not None and should_stop():
+                    cancelled = True
+                    break
+                outcome = run_page(project, number, profile, direction, dpi, should_stop, on_result,
+                    timeout, engine_root, force=force, engines=(engine,),
+                    primary_engine=primary_engine if engine == primary_engine and number in new_pages else None,
+                    recognizer=recognize, device=device)
+                combined = results[number]
+                combined["completed"].extend(outcome["completed"])
+                combined["skipped"].extend(outcome["skipped"])
+                combined["errors"].update(outcome["errors"])
+                combined["cancelled"] = combined["cancelled"] or outcome["cancelled"]
+                if on_page is not None:
+                    on_page(number, engine, copy.deepcopy(outcome))
+                if outcome["cancelled"]:
+                    cancelled = True
+                    break
+        if cancelled:
+            break
+    return {"pages": results, "cancelled": cancelled,
+            "errors": {n: r["errors"] for n, r in results.items() if r["errors"]}}

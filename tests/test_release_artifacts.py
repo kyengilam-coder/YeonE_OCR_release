@@ -108,9 +108,11 @@ def test_source_archive_refuses_version_mismatch(tmp_path, monkeypatch):
 
 def test_source_allowlist_preserves_all_current_local_engine_resources():
     root = Path(__file__).resolve().parents[1]
-    required = set(release.SOURCE_DATA | release.SOURCE_ENGINE_LOCKS | release.SOURCE_JSON_DOCS | release.SOURCE_PACKAGING)
+    required = set(release.SOURCE_DATA | release.SOURCE_ENGINE_LOCKS | release.SOURCE_ENGINE_REQUIREMENTS
+                   | release.SOURCE_JSON_DOCS | release.SOURCE_PACKAGING)
     required.update(path.relative_to(root).as_posix() for path in (root / "ab_ocr").glob("*.py"))
-    required.update(f"scripts/install_{engine}.py" for engine in ("tesseract", "rapidocr", "easyocr"))
+    from yeone_ocr.frozen_smoke import COMPARISON_INSTALLER_RESOURCES
+    required.update("scripts/" + name for name in COMPARISON_INSTALLER_RESOURCES)
     assert required
     for name in required:
         assert (root / name).is_file(), name
@@ -128,9 +130,13 @@ def test_source_allowlist_rejects_private_inputs_models_and_runtime_homes():
         "ab_ocr/model.onnx", "ab_ocr/model.pth", "ab_ocr/model.traineddata", "ab_ocr/model.safetensors",
         "resources/model.onnx", "resources/licenses/model.pth", "packaging/third_party_licenses/model.traineddata",
         "resources/source.png", "packaging/source.png", "packaging/private-record.json",
-        "scripts/private-settings.json", "scripts/unknown-lock.json", "docs/private-record.json",
+        "scripts/private-settings.json", "scripts/unknown-lock.json", "scripts/private-requirements.txt", "docs/private-record.json",
         "yeone_ocr/data/private-record.json", "yeone_ocr/data/preset_private.json",
         "tools/easyocr/credentials.py", "tools/rapidocr/cache.py", "tools/tesseract/installation.py",
+        "tools/paddle_server/credentials.py", "tools/paddle_server_gpu/cache.py",
+        "tools/glmocr/runtime/private.py", "tools/surya/python/site-packages/private.py",
+        "tools/PADDLE_SERVER/venv/Lib/site-packages/cached.py",
+        "resources/licenses/model.gguf", "packaging/third_party_licenses/model.ggml",
         "scripts/downloads/private.py", "tests/private.hwpx", "docs/private.pdf", "packaging/.env.production",
         "ab_ocr/../private.py", "/ab_ocr/ocr.py", "C:/Users/private/credentials.json",
     ]
@@ -144,12 +150,25 @@ def test_source_archive_keeps_integration_resources_as_committed_bytes(tmp_path,
         "ab_ocr/runtime.py": "# independent runtime resource selection\n",
         "ab_ocr/rapidocr_worker.py": "# isolated RapidOCR worker\n",
         "ab_ocr/easyocr_worker.py": "# isolated EasyOCR worker\n",
+        "ab_ocr/glmocr_worker.py": "# isolated GLM-OCR worker\n",
+        "ab_ocr/surya_worker.py": "# isolated Surya worker\n",
         "scripts/install_tesseract.py": "# pinned installer\n",
         "scripts/install_rapidocr.py": "# pinned installer\n",
         "scripts/install_easyocr.py": "# pinned installer\n",
+        "scripts/install_paddle_server.py": "# pinned installer\n",
+        "scripts/install_paddle_server_gpu.py": "# pinned optional GPU installer\n",
+        "scripts/install_glmocr.py": "# pinned installer\n",
+        "scripts/install_surya.py": "# pinned installer\n",
+        "scripts/install_surya_cuda.py": "# pinned optional GPU installer\n",
         "scripts/tesseract-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
         "scripts/rapidocr-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
         "scripts/easyocr-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/paddle-server-lock.json": '{"models":["pinned"]}\n',
+        "scripts/paddle-server-gpu-lock.json": '{"packages":{"onnxruntime-gpu":"pinned"}}\n',
+        "scripts/glmocr-models.lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/surya-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/surya-requirements.txt": "surya-ocr==0.22.1\npillow==10.4.0\n",
+        "docs/PADDLE_SERVER.md": "# Local server recognition\n",
         "docs/AB_OCR_PROVENANCE.json": '{"source_project":"AB_OCR"}\n',
         "yeone_ocr/data/preset_basic.json": '{"id":"basic"}\n',
         "yeone_ocr/data/preset_kaibao.json": '{"id":"kaibao"}\n',
@@ -157,7 +176,11 @@ def test_source_archive_keeps_integration_resources_as_committed_bytes(tmp_path,
     }
     private = {"ab_ocr/source.png": "private synthetic image", "ab_ocr/model.pth": "private synthetic weights",
                "scripts/private-settings.json": "private synthetic configuration",
-               "resources/licenses/model.onnx": "private synthetic weights"}
+               "resources/licenses/model.onnx": "private synthetic weights",
+               "tools/paddle_server/venv/site-packages/private.py": "private synthetic runtime payload",
+               "tools/paddle_server_gpu/venv/site-packages/private.py": "private synthetic runtime payload",
+               "tools/glmocr/runtime/model.gguf": "private synthetic weights",
+               "tools/surya/python/site-packages/private.py": "private synthetic runtime payload"}
     committed_tree(monkeypatch, extra_files={**required, **private})
     output = tmp_path / "source.zip"
     result = release.create_source_archive(tmp_path, output, "0.7.1")

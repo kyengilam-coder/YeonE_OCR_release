@@ -232,7 +232,7 @@ class RuntimeRecovery(unittest.TestCase):
             stack.enter_context(mock.patch.object(cli, "refit_regions", return_value={"fixed": 0}))
             stack.enter_context(mock.patch.object(cli, "cover_check", return_value=[]))
             stack.enter_context(mock.patch.object(cli, "detect_figures", return_value=[]))
-            second = stack.enter_context(mock.patch.object(cli, "_second_pass", side_effect=lambda *a: advance(7.0, (rr, {}))))
+            second = stack.enter_context(mock.patch.object(cli, "_second_pass", side_effect=lambda *a, **k: advance(7.0, (rr, {}))))
             stack.enter_context(mock.patch.object(cli, "log"))
             record = cli.read_one(work, [None], reader, reader, 1, args)
             self.assertEqual(record["timings"], {"image_load": 5.0, "layer_load": 2.0, "pass1": 3.0,
@@ -250,7 +250,7 @@ class RuntimeRecovery(unittest.TestCase):
             self.assertEqual(reader.read_page.call_count, 1)
             self.assertEqual(work.load_record(1)["timings"], reused["timings"])
 
-            def fail(*args):
+            def fail(*args, **kwargs):
                 clock[0] += 4.0
                 raise rg.ReaderError("server unavailable", fatal=False, kind="infrastructure")
 
