@@ -242,6 +242,26 @@ class FrozenRuntime(unittest.TestCase):
         self.assertTrue(result["ui_save_and_reopen"])
         self.assertEqual(result["network_calls"], 0)
 
+    def test_release_smoke_follows_bookmark_caret_and_matches_pdf_text_size(self):
+        from yeone_ocr.frozen_smoke import bookmark_cursor_probe
+        from yeone_ocr.collate.section_editor import shared_pdf_worker
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = bookmark_cursor_probe(self.root)
+        self.assertNotEqual(shared_pdf_worker().submit(os.getpid).result(timeout=8), os.getpid())
+        self.assertTrue(result["native_pdf_separate_process"])
+        self.assertEqual(result["cursor_pdf_page"], 2)
+        self.assertTrue(result["line_and_glyph_overlays"])
+        self.assertTrue(result["same_paragraph_caret_move"])
+        self.assertTrue(result["font_tracks_pdf_zoom"])
+        self.assertGreater(result["font_sizes"][1], result["font_sizes"][0])
+        self.assertTrue(result["cursor_screen_height_aligned"])
+        self.assertLessEqual(result["cursor_height_error_px"], 2)
+        self.assertTrue(result["source_pdf_and_hwpx_unchanged"])
+        self.assertTrue(result["corrected_file_not_created"])
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

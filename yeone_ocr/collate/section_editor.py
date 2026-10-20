@@ -1,11 +1,32 @@
 """Bookmark-scoped PDF comparison and direct editing of a corrected HWPX."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import difflib
 from pathlib import Path
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk, messagebox
+
+
+_PDF_EXECUTOR = None
+
+
+def shared_pdf_worker():
+    """Isolate native PDF work from the main app's PDF viewers and threads."""
+    global _PDF_EXECUTOR
+    if _PDF_EXECUTOR is None:
+        _PDF_EXECUTOR = ProcessPoolExecutor(max_workers=1)
+    return _PDF_EXECUTOR
+
+
+def validate_pdf_range(path, pdf_pages):
+    import pymupdf
+    with pymupdf.open(path) as document:
+        first, last = map(int, pdf_pages)
+        if not 1 <= first <= last <= len(document):
+            raise ValueError("선택 구획의 PDF 쪽 범위를 확인한 뒤 대조 편집을 여십시오.")
+    return first, last
 
 
 def render_pdf_page(path: str, page_number: int, width: int, zoom: float | None):
@@ -20,7 +41,9 @@ def render_pdf_page(path: str, page_number: int, width: int, zoom: float | None)
         # Keep unusually large page dimensions within a predictable memory bound.
         factor = min(factor, (18_000_000 / max(1, page.rect.width * page.rect.height)) ** .5)
         pix = page.get_pixmap(matrix=pymupdf.Matrix(factor, factor), alpha=False)
-        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        picture = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        picture.info["pdf_scale"] = factor
+        return picture
 
 
 class ChangeReviewDialog(tk.Toplevel):
@@ -72,9 +95,9 @@ class ChangeReviewDialog(tk.Toplevel):
 class BookmarkSectionEditor(tk.Toplevel):
     """Read-only PDF on the left, flowing editable HWPX paragraphs on the right.
 
-    PDF pages and HWPX paragraphs are deliberately independent controls. The
-    backend preserves document structure, verifies snapshots and writes only
-    the cumulative corrected document, with a backup.
+    Cursor following uses verified PDF text positions. Manual page navigation
+    remains available. The backend preserves document structure, verifies
+    snapshots and writes only the cumulative corrected document, with a backup.
     """
     def __init__(self, parent, *, pdf_path, hwpx_path, section_name, section_start,
                  section_end, pdf_pages, can_write=None, on_saved=None, heading_styles=None,
@@ -82,12 +105,10 @@ class BookmarkSectionEditor(tk.Toplevel):
         from .section_edit import SectionEditSession
         # Validate/load before creating a window, so the caller can report failure.
         scope_options = {"heading_styles": list(heading_styles) if heading_styles else None, "anchor_source": anchor_source}
-        session = SectionEditSession.open(str(pdf_path), str(hwpx_path), section_name, section_start, section_end, **scope_options)
-        import pymupdf
-        with pymupdf.open(pdf_path) as document:
-            first, last = map(int, pdf_pages)
-            if not 1 <= first <= last <= len(document):
-                raise ValueError("선택 구획의 PDF 쪽 범위를 확인한 뒤 대조 편집을 여십시오.")
+        pdf_worker = shared_pdf_worker()
+        session = SectionEditSession.open(str(pdf_path), str(hwpx_path),
+                                          section_name, section_start, section_end, **scope_options)
+        first, last = pdf_worker.submit(validate_pdf_range, pdf_path, pdf_pages).result()
         super().__init__(parent)
         self.session = session
         self.pdf_path = str(pdf_path)
@@ -113,6 +134,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._show_marks = True
         self._show_original = True
         self._text_size = 12
+        self._editor_font = tkfont.Font(self, family="Malgun Gothic", size=self._text_size)
         self._saving = False
         self._reviewing = False
         self._closed = False
@@ -123,8 +145,26 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._render_job = None
         self._poll_job = None
         self._layout_job = None
+        self._position_job = None
+        self._position_ensure_visible = False
+        self._layout_follow_cursor = False
+        self._initial_job = None
         self._change_jobs = {}
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bookmark-pdf")
+        self._executor = pdf_worker
+        self._alignment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bookmark-location")
+        self._alignment_generation = 0
+        self._alignment_future = None
+        self._index_future = None
+        self._cursor_map = None
+        self._cursor_generation = 0
+        self._cursor_requested = False
+        self._cursor_future = None
+        self._cursor_job = None
+        self._cursor_location = None
+        self._cursor_scroll_pending = False
+        self._image_size = None
+        self._displayed_page = None
+        self._rendered_scale = 1.0
         self._photo = None
         self.title(f"대조 편집 — {section_name}")
         self.geometry("1280x900")
@@ -136,7 +176,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.bind("<Control-S>", self._save_shortcut)
         self._build()
         self._build_paragraphs()
-        self._initial_job = self.after_idle(self._initial_split)
+        self._start_cursor_map()
+        self._initial_job = self.after(120, self._initial_split)
         self._poll_job = self.after(60, self._poll_render)
 
     @property
@@ -175,6 +216,9 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.panes.grid(row=1, column=0, sticky="nsew", padx=18)
         self.pdf_panel = tk.Frame(self.panes, bg=C["PANEL"], highlightthickness=1, highlightbackground=C["LINE"])
         self.doc_panel = tk.Frame(self.panes, bg=C["PANEL"], highlightthickness=1, highlightbackground=C["LINE"])
+        for panel in (self.pdf_panel, self.doc_panel):
+            panel.configure(width=360, height=300)
+            panel.grid_propagate(False)
         self.panes.add(self.pdf_panel, weight=1); self.panes.add(self.doc_panel, weight=1)
         self._build_pdf()
         self._build_document()
@@ -233,8 +277,17 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.pdf_canvas.bind("<Control-MouseWheel>", lambda event: (self.change_zoom(1 if event.delta > 0 else -1), "break")[1])
         self.pdf_canvas.bind("<Button-4>", lambda _event: self.pdf_canvas.yview_scroll(-3, "units"))
         self.pdf_canvas.bind("<Button-5>", lambda _event: self.pdf_canvas.yview_scroll(3, "units"))
-        self.pdf_note = self._label(panel, "PDF 쪽 이동과 오른쪽 문단 선택은 각각 조작합니다.", muted=True, size=9, justify="left")
-        self.pdf_note.grid(row=3, column=0, sticky="ew", padx=12, pady=8)
+        follow = tk.Frame(panel, bg=self.colors["PANEL"])
+        follow.grid(row=3, column=0, sticky="ew", padx=10, pady=(6, 0))
+        self.v_follow_cursor = tk.BooleanVar(value=True)
+        self.follow_check = tk.Checkbutton(follow, text="커서 따라가기", variable=self.v_follow_cursor,
+                                          command=self._toggle_cursor_follow, bg=self.colors["PANEL"],
+                                          activebackground=self.colors["PANEL"], fg=self.colors["INK"],
+                                          font=("Malgun Gothic", 9), highlightthickness=0)
+        self.follow_check.pack(side="left")
+        self._label(follow, "노랑 · 대응 줄    테두리 · 커서 글자", muted=True, size=9).pack(side="right")
+        self.pdf_note = self._label(panel, "원본의 글자 위치를 연결하고 있습니다.", muted=True, size=9, justify="left")
+        self.pdf_note.grid(row=4, column=0, sticky="ew", padx=12, pady=(3, 8))
         panel.bind("<Configure>", lambda event: self.pdf_note.configure(wraplength=max(180, event.width - 28)))
         self._sync_page_buttons()
 
@@ -251,17 +304,22 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.reload_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
         tools = tk.Frame(panel, bg="#fcfaf5")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
-        self._label(tools, "파랑 · 원본 HWPX와 차이", size=9, muted=True, bg="#fcfaf5").pack(side="left", padx=6)
+        self.v_match_pdf_font = tk.BooleanVar(value=True)
+        self.font_check = tk.Checkbutton(tools, text="PDF 글자 크기 맞춤", variable=self.v_match_pdf_font,
+                                        command=self._sync_text_size, bg="#fcfaf5", activebackground="#fcfaf5",
+                                        fg=self.colors["INK"], font=("Malgun Gothic", 9), highlightthickness=0)
+        self.font_check.pack(side="left")
         self._tool_button(tools, "가+", self.toggle_text_size, width=2).pack(side="right")
+        self._tool_button(tools, "가−", lambda: self.change_text_size(-1), width=2).pack(side="right", padx=2)
         self.marks_button = self._tool_button(tools, "차이 켜짐", self.toggle_marks)
         self.marks_button.pack(side="right", padx=4)
         area = tk.Frame(panel, bg=self.colors["PANEL"])
         area.grid(row=2, column=0, sticky="nsew")
         area.columnconfigure(0, weight=1); area.rowconfigure(0, weight=1)
         self.doc_canvas = tk.Canvas(area, bg=self.colors["PANEL"], highlightthickness=0, width=360, height=300,
-                                    yscrollincrement=24)
+                                    yscrollincrement=1)
         scroll = ttk.Scrollbar(area, orient="vertical", command=self.doc_canvas.yview)
-        self.doc_canvas.configure(yscrollcommand=scroll.set)
+        self.doc_canvas.configure(yscrollcommand=lambda a, b: self._document_scrolled(scroll, a, b))
         self.doc_canvas.grid(row=0, column=0, sticky="nsew"); scroll.grid(row=0, column=1, sticky="ns")
         self.document = tk.Frame(self.doc_canvas, bg=self.colors["PANEL"])
         self._doc_window = self.doc_canvas.create_window(0, 0, anchor="nw", window=self.document)
@@ -294,7 +352,7 @@ class BookmarkSectionEditor(tk.Toplevel):
             marker.pack(anchor="w")
             self._markers[index] = marker
             editor = tk.Text(card, wrap="word", relief="flat", bg=self.colors["PANEL"], fg=self.colors["INK"],
-                             insertbackground=self.colors["ACCENT"], font=("Malgun Gothic", self._text_size),
+                             insertbackground=self.colors["ACCENT"], font=self._editor_font,
                              height=2, padx=0, pady=3, spacing1=2, spacing3=4, undo=paragraph.editable, maxundo=100)
             editor.pack(fill="x")
             editor.insert("1.0", paragraph.corrected_text)
@@ -303,9 +361,11 @@ class BookmarkSectionEditor(tk.Toplevel):
             editor.bind("<<Modified>>", lambda _event, i=index: self._modified(i))
             editor.bind("<FocusIn>", lambda _event, i=index: self.select_paragraph(i))
             editor.bind("<Button-1>", lambda _event, i=index: self.select_paragraph(i), add="+")
+            editor.bind("<ButtonRelease-1>", lambda _event, i=index: self._schedule_cursor(i), add="+")
+            editor.bind("<KeyRelease>", lambda _event, i=index: self._schedule_cursor(i), add="+")
             editor.bind("<MouseWheel>", lambda event: self._wheel(self.doc_canvas, event))
-            editor.bind("<Button-4>", lambda _event: (self.doc_canvas.yview_scroll(-3, "units"), "break")[1])
-            editor.bind("<Button-5>", lambda _event: (self.doc_canvas.yview_scroll(3, "units"), "break")[1])
+            editor.bind("<Button-4>", lambda _event: (self.doc_canvas.yview_scroll(-72, "units"), "break")[1])
+            editor.bind("<Button-5>", lambda _event: (self.doc_canvas.yview_scroll(72, "units"), "break")[1])
             if not paragraph.editable:
                 editor.configure(state="disabled")
                 if "제목" not in paragraph.readonly_reason:
@@ -319,8 +379,27 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     @staticmethod
     def _wheel(canvas, event):
-        canvas.yview_scroll(-3 if event.delta > 0 else 3, "units")
+        step = 72 if float(canvas.cget("yscrollincrement")) == 1 else 3
+        canvas.yview_scroll(-step if event.delta > 0 else step, "units")
         return "break"
+
+    def _document_scrolled(self, scrollbar, first, last):
+        scrollbar.set(first, last)
+        if self._cursor_location is not None:
+            self._schedule_cursor_position()
+
+    def _schedule_cursor_position(self, *, ensure_visible=False):
+        self._position_ensure_visible |= ensure_visible
+        if not self._closed and self._position_job is None:
+            self._position_job = self.after(90, self._position_cursor)
+
+    def _position_cursor(self):
+        self._position_job = None
+        ensure_visible = self._position_ensure_visible
+        self._position_ensure_visible = False
+        if not self._closed:
+            self._cursor_scroll_pending = True
+            self._draw_cursor_marker(ensure_editor_visible=ensure_visible)
 
     def _initial_split(self):
         self._initial_job = None
@@ -330,6 +409,7 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     def _document_resized(self, event):
         self.doc_canvas.itemconfigure(self._doc_window, width=max(250, event.width))
+        self._layout_follow_cursor |= self._cursor_location is not None
         self._schedule_layout()
 
     def _schedule_layout(self):
@@ -346,6 +426,8 @@ class BookmarkSectionEditor(tk.Toplevel):
             if int(editor.cget("height")) != height:
                 editor.configure(height=height)
         self.doc_canvas.configure(scrollregion=self.doc_canvas.bbox("all"))
+        self._schedule_cursor_position(ensure_visible=self._layout_follow_cursor)
+        self._layout_follow_cursor = False
 
     def _modified(self, index):
         if self._closed:
@@ -357,6 +439,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         if not self._paragraphs[index].editable:
             return
         self._update_status()
+        self._schedule_cursor(index)
         self._schedule_layout()
         previous = self._change_jobs.pop(index, None)
         if previous:
@@ -400,6 +483,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._cards[index].configure(highlightbackground="#c9b395")
         self.v_compare.set(f"선택 문단 · {index + 1}  /  원본 HWPX")
         self._update_original()
+        self._schedule_cursor(index)
 
     def _update_original(self):
         if self._active is None:
@@ -435,10 +519,46 @@ class BookmarkSectionEditor(tk.Toplevel):
             self._highlight(index)
 
     def toggle_text_size(self):
-        self._text_size = 14 if self._text_size == 12 else 12
-        for editor in self._editors.values():
-            editor.configure(font=("Malgun Gothic", self._text_size))
+        self.change_text_size(1)
+
+    def change_text_size(self, direction):
+        self.v_match_pdf_font.set(False)
+        current = int(self._editor_font.cget("size"))
+        self._text_size = (max(-128, min(-8, current - 2 * direction)) if current < 0
+                           else max(8, min(48, current + 2 * direction)))
+        self._editor_font.configure(size=self._text_size)
+        self._cursor_scroll_pending = self._cursor_location is not None
+        self._layout_follow_cursor |= self._cursor_location is not None
         self._schedule_layout()
+
+    def _sync_text_size(self):
+        """Match measured CJK width in screen pixels, independent of Windows DPI."""
+        if not self.v_match_pdf_font.get() or self._cursor_map is None or self._image_size is None:
+            return
+        width = self._cursor_map.page_font_width(self._displayed_page)
+        height = self._cursor_map.page_font_height(self._displayed_page)
+        if width is None and height is None:
+            return
+        target = max(8, min(128, width * self._image_size[0] if width is not None
+                            else height * self._image_size[1]))
+        probe = tkfont.Font(self, family=self._editor_font.cget("family"), size=-12)
+        def measured(size):
+            probe.configure(size=-size)
+            return probe.measure("漢") if width is not None else probe.metrics("linespace")
+        lo, hi = 6, 160
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if measured(mid) < target:
+                lo = mid + 1
+            else:
+                hi = mid
+        pixels = min((max(6, lo - 1), lo), key=lambda n: abs(measured(n) - target))
+        if int(self._editor_font.cget("size")) != -pixels:
+            self._text_size = -pixels
+            self._editor_font.configure(size=-pixels)
+            self._cursor_scroll_pending = self._cursor_location is not None
+            self._layout_follow_cursor |= self._cursor_location is not None
+            self._schedule_layout()
 
     def toggle_original(self):
         self._show_original = not self._show_original
@@ -459,13 +579,19 @@ class BookmarkSectionEditor(tk.Toplevel):
             editor.edit_reset(); editor.edit_modified(False)
             self._highlight(index)
         self._update_original(); self._update_status(); self._schedule_layout()
+        self._schedule_cursor(self._active)
 
     def _sync_page_buttons(self):
         self.v_page.set(str(self._pdf_page))
         self.previous_button.configure(state="disabled" if self._pdf_page <= self.pdf_pages[0] else "normal")
         self.next_button.configure(state="disabled" if self._pdf_page >= self.pdf_pages[1] else "normal")
 
-    def set_page(self, page):
+    def set_page(self, page, *, from_cursor=False):
+        if not from_cursor:
+            self._cancel_cursor_request()
+            self._clear_cursor_marker()
+            self.pdf_note.configure(text="PDF 쪽을 직접 이동했습니다. 오른쪽 커서를 움직이면 다시 위치를 찾습니다."
+                                    if self.v_follow_cursor.get() else "커서 따라가기 꺼짐 · PDF를 자유롭게 탐색합니다.")
         page = min(self.pdf_pages[1], max(self.pdf_pages[0], int(page)))
         if page != self._pdf_page:
             self._pdf_page = page
@@ -478,15 +604,11 @@ class BookmarkSectionEditor(tk.Toplevel):
     def set_zoom(self, value):
         self._zoom = None if value is None else min(4.0, max(.35, float(value)))
         self.v_zoom.set("너비 맞춤" if self._zoom is None else f"{self._zoom * 100:.0f}%")
+        self._cursor_scroll_pending = self._cursor_location is not None
         self._request_render()
 
     def change_zoom(self, direction):
-        if self._zoom is None:
-            import pymupdf
-            with pymupdf.open(self.pdf_path) as document:
-                scale = max(180, self.pdf_canvas.winfo_width() - 32) / document[self._pdf_page - 1].rect.width
-        else:
-            scale = self._zoom
+        scale = self._rendered_scale if self._zoom is None else self._zoom
         self.set_zoom(scale * (1.2 if direction > 0 else 1 / 1.2))
 
     def _request_render(self):
@@ -520,9 +642,12 @@ class BookmarkSectionEditor(tk.Toplevel):
                     picture = future.result()
                     self._display_pdf(picture)
                 except Exception as exc:
+                    self._image_size = None
+                    self._displayed_page = None
                     self.pdf_canvas.delete("all")
                     self.pdf_canvas.create_text(20, 25, anchor="nw", width=max(180, self.pdf_canvas.winfo_width() - 40),
                                                 text=f"PDF를 표시하지 못했습니다.\n{exc}", fill=self.colors["INK"])
+        self._poll_cursor()
         self._poll_job = self.after(60, self._poll_render)
 
     def _display_pdf(self, picture):
@@ -531,7 +656,200 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.pdf_canvas.delete("all")
         self.pdf_canvas.create_image(16, 16, anchor="nw", image=self._photo)
         self.pdf_canvas.configure(scrollregion=(0, 0, picture.width + 32, picture.height + 32))
+        self._image_size = picture.size
+        self._displayed_page = self._pdf_page
+        self._rendered_scale = picture.info.get("pdf_scale", self._zoom or 1.0)
         picture.close()
+        self._sync_text_size()
+        self._draw_cursor_marker()
+
+    def _start_cursor_map(self):
+        """Index only the selected PDF pages; no OCR or document writes."""
+        from .cursor_map import read_cursor_pages
+        self._alignment_generation += 1
+        self._cancel_cursor_request()
+        self._clear_cursor_marker()
+        self._cursor_map = None
+        if self._alignment_future is not None:
+            self._alignment_future[1].cancel()
+            self._alignment_future = None
+        if self._index_future is not None:
+            self._index_future[1].cancel()
+        self.pdf_note.configure(text="원본의 글자 위치를 연결하고 있습니다.")
+        # PyMuPDF extraction and rendering share one isolated process. CPU
+        # alignment never opens a PDF and stays off the Tk thread.
+        self._index_future = (self._alignment_generation, self._executor.submit(
+            read_cursor_pages, self.pdf_path, self.pdf_pages))
+        self._cursor_requested = self.v_follow_cursor.get() and self._active is not None
+
+    def _cancel_cursor_request(self):
+        self._cursor_generation += 1
+        self._cursor_requested = False
+        if self._cursor_job is not None:
+            self.after_cancel(self._cursor_job)
+            self._cursor_job = None
+        if self._cursor_future is not None:
+            self._cursor_future[1].cancel()
+            self._cursor_future = None
+
+    def _clear_cursor_marker(self):
+        self._cursor_location = None
+        self._cursor_scroll_pending = False
+        self._position_ensure_visible = False
+        self._layout_follow_cursor = False
+        self.pdf_canvas.delete("cursor-location")
+
+    def _toggle_cursor_follow(self):
+        self._cancel_cursor_request()
+        self._clear_cursor_marker()
+        if not self.v_follow_cursor.get():
+            self.pdf_note.configure(text="커서 따라가기 꺼짐 · PDF를 자유롭게 탐색합니다.")
+        elif self._cursor_map is not None:
+            self._schedule_cursor(self._active)
+        elif self._alignment_future is None and self._index_future is None:
+            self._start_cursor_map()
+        else:
+            self._cursor_requested = self._active is not None
+            self.pdf_note.configure(text="원본의 글자 위치를 연결하고 있습니다.")
+
+    def _schedule_cursor(self, index):
+        if self._closed or index != self._active or not self.v_follow_cursor.get():
+            return
+        self._cancel_cursor_request()
+        self._clear_cursor_marker()
+        self._cursor_requested = True
+        self._cursor_job = self.after(90, self._submit_cursor)
+
+    def _submit_cursor(self):
+        self._cursor_job = None
+        if self._closed or not self.v_follow_cursor.get() or self._active not in self._editors:
+            return
+        mapping = self._cursor_map
+        if mapping is None:
+            return
+        if not mapping.available:
+            self.pdf_note.configure(text="이 구획에 사용할 수 있는 PDF 글자 위치 정보가 없습니다.")
+            return
+        widget = self._editors[self._active]
+        current = widget.get("1.0", "end-1c")
+        # Reading the prefix keeps Python code-point offsets even on Tcl 8.6,
+        # whose string length can count supplementary characters twice.
+        offset = min(len(current), len(widget.get("1.0", "insert")))
+        request = (self._active, current, offset)
+        self._cursor_future = (self._cursor_generation, self._alignment_executor.submit(mapping.locate, *request))
+        self.pdf_note.configure(text="커서의 원본 위치를 찾고 있습니다.")
+
+    def _poll_cursor(self):
+        pending = self._index_future
+        if pending and pending[1].done():
+            self._index_future = None
+            if pending[0] == self._alignment_generation and not pending[1].cancelled():
+                try:
+                    from .cursor_map import align_cursor_map
+                    self._alignment_future = (pending[0], self._alignment_executor.submit(
+                        align_cursor_map, pending[1].result(), tuple(self.session.paragraphs)))
+                except Exception:
+                    self.pdf_note.configure(text="원본의 글자 위치를 불러오지 못했습니다. 커서 따라가기를 다시 켜서 재시도할 수 있습니다.")
+        pending = self._alignment_future
+        if pending and pending[1].done():
+            self._alignment_future = None
+            if pending[0] == self._alignment_generation and not pending[1].cancelled():
+                try:
+                    self._cursor_map = pending[1].result()
+                    self._sync_text_size()
+                    if self.v_follow_cursor.get() and self._cursor_requested:
+                        self._schedule_cursor(self._active)
+                except Exception:
+                    self.pdf_note.configure(text="원본의 글자 위치를 불러오지 못했습니다. 커서 따라가기를 다시 켜서 재시도할 수 있습니다.")
+        pending = self._cursor_future
+        if pending and pending[1].done():
+            self._cursor_future = None
+            if pending[0] == self._cursor_generation and not pending[1].cancelled() and self.v_follow_cursor.get():
+                try:
+                    self._apply_cursor_location(pending[1].result())
+                except Exception:
+                    self._clear_cursor_marker()
+                    self.pdf_note.configure(text="대응 위치를 확인하지 못했습니다. PDF를 직접 확인하십시오.")
+
+    def _apply_cursor_location(self, location):
+        if location is None or not self.pdf_pages[0] <= location.page <= self.pdf_pages[1]:
+            self._clear_cursor_marker()
+            self.pdf_note.configure(text="대응 위치를 확실히 찾지 못했습니다. PDF를 직접 확인하십시오.")
+            return
+        self._cursor_location = location
+        self._cursor_scroll_pending = True
+        self.pdf_note.configure(text=location.message)
+        self.set_page(location.page, from_cursor=True)
+        self._draw_cursor_marker()
+
+    def _draw_cursor_marker(self, *, ensure_editor_visible=True):
+        self.pdf_canvas.delete("cursor-location")
+        location = self._cursor_location
+        if (location is None or self._image_size is None or not self.v_follow_cursor.get()
+                or location.page != self._displayed_page or location.page != self._pdf_page):
+            return
+        width, height = self._image_size
+        def pixels(box):
+            x0, y0, x1, y1 = box
+            return (16 + max(0, min(1, x0)) * width, 16 + max(0, min(1, y0)) * height,
+                    16 + max(0, min(1, x1)) * width, 16 + max(0, min(1, y1)) * height)
+        targets = []
+        for box in location.boxes:
+            rect = pixels(box)
+            targets.append(rect)
+            self.pdf_canvas.create_rectangle(*rect, fill="#ffe28a", stipple="gray25", outline="#d59e20",
+                                             width=1, tags=("cursor-location", "cursor-line"))
+        if location.precise and location.caret_box is not None:
+            rect = pixels(location.caret_box)
+            targets = [rect]
+            self.pdf_canvas.create_rectangle(*rect, outline="#ba3e28", width=2,
+                                             tags=("cursor-location", "cursor-glyph"))
+        if targets and self._cursor_scroll_pending:
+            x0, y0, x1, y1 = targets[0]
+            canvas_width, canvas_height = self.pdf_canvas.winfo_width(), self.pdf_canvas.winfo_height()
+            left, top = self.pdf_canvas.canvasx(0), self.pdf_canvas.canvasy(0)
+            screen_y = self._editor_cursor_y(ensure_visible=ensure_editor_visible)
+            if screen_y is not None:
+                wanted_top = (y0 + y1) / 2 - (screen_y - self.pdf_canvas.winfo_rooty())
+                region_top = min(0, wanted_top - 16)
+                region_bottom = max(height + 32, wanted_top + canvas_height + 16)
+                self.pdf_canvas.configure(scrollregion=(0, region_top, width + 32, region_bottom))
+                self.pdf_canvas.yview_moveto((wanted_top - region_top) / (region_bottom - region_top))
+            elif ensure_editor_visible and (y0 < top + 25 or y1 > top + canvas_height - 25):
+                self.pdf_canvas.yview_moveto(max(0, ((y0 + y1) / 2 - canvas_height / 2) / (height + 32)))
+            if x0 < left + 20 or x1 > left + canvas_width - 20:
+                self.pdf_canvas.xview_moveto(max(0, ((x0 + x1) / 2 - canvas_width / 2) / (width + 32)))
+            self._cursor_scroll_pending = False
+
+    def _editor_cursor_y(self, *, ensure_visible):
+        widget = self._editors.get(self._active)
+        if widget is None:
+            return None
+        box = widget.bbox("insert")
+        if box is None:
+            return None
+        # Tk retains stale root coordinates when a Canvas child is clipped and
+        # unmapped. Compute from document coordinates even for off-screen cards.
+        world_y = (self.doc_canvas.coords(self._doc_window)[1] + self._cards[self._active].winfo_y()
+                   + widget.winfo_y() + box[1] + box[3] / 2)
+        y = self.doc_canvas.winfo_rooty() + world_y - self.doc_canvas.canvasy(0)
+        top = max(self.doc_canvas.winfo_rooty(), self.pdf_canvas.winfo_rooty()) + 24
+        bottom = min(self.doc_canvas.winfo_rooty() + self.doc_canvas.winfo_height(),
+                     self.pdf_canvas.winfo_rooty() + self.pdf_canvas.winfo_height()) - 24
+        if bottom <= top:
+            return None
+        if not top <= y <= bottom:
+            if not ensure_visible:
+                return None
+            bounds = self.doc_canvas.bbox("all")
+            if not bounds or bounds[3] <= bounds[1]:
+                return None
+            desired_y = (top + bottom) / 2
+            scroll_top = self.doc_canvas.canvasy(0) + y - desired_y
+            self.doc_canvas.yview_moveto((scroll_top - bounds[1]) / (bounds[3] - bounds[1]))
+            self.update_idletasks()
+            y = self.doc_canvas.winfo_rooty() + world_y - self.doc_canvas.canvasy(0)
+        return y
 
     def _save_shortcut(self, _event=None):
         self.save()
@@ -641,6 +959,7 @@ class BookmarkSectionEditor(tk.Toplevel):
             self.select_paragraph(previous)
         self._update_status()
         self.v_status.set("교정본을 다시 불러왔습니다.")
+        self._start_cursor_map()
         self._request_render()
         return True
 
@@ -648,7 +967,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         if self._closed:
             return
         self._closed = True
-        for job in (self._initial_job, self._render_job, self._poll_job, self._layout_job, *self._change_jobs.values()):
+        for job in (self._initial_job, self._render_job, self._poll_job, self._layout_job, self._cursor_job,
+                    self._position_job, *self._change_jobs.values()):
             if job is not None:
                 try:
                     self.after_cancel(job)
@@ -656,8 +976,18 @@ class BookmarkSectionEditor(tk.Toplevel):
                     pass
         if self._render_future is not None:
             self._render_future[1].cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        for pending in (self._index_future, self._alignment_future, self._cursor_future):
+            if pending is not None:
+                pending[1].cancel()
+        # The PDF worker belongs to all windows. Closing this one must not
+        # interrupt another window's rendering or create a competing worker.
+        self._alignment_executor.shutdown(wait=False, cancel_futures=True)
         self._photo = None
+        # Explicitly release Tcl-owned objects on the UI thread, even if a
+        # background allocation later collects a closed window's Python cycle.
+        self._editor_font = None
+        for name in ("v_status", "v_compare", "v_page", "v_zoom", "v_follow_cursor", "v_match_pdf_font"):
+            setattr(self, name, None)
 
     def _destroyed(self, event):
         if event.widget is self:

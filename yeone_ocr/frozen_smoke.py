@@ -335,10 +335,129 @@ def bookmark_edit_probe(folder: Path) -> dict:
     finally:
         if window is not None:
             window.destroy()
+            # Finish this window's native reads before the next fixture creates a PDF.
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
         root.destroy()
     return {"saved_into_existing_copy": True, "backup_matches_previous": True,
             "source_and_other_section_preserved": True, "manual_protection": True,
             "ui_save_and_reopen": True, "network_calls": 0}
+
+
+def bookmark_cursor_probe(folder: Path) -> dict:
+    """Exercise real cursor mapping, PDF overlays and matching text size."""
+    import os
+    import tkinter as tk
+    from tkinter import font as tkfont
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_editor import BookmarkSectionEditor
+
+    source = folder / "bookmark-cursor.hwpx"
+    pdf_path = folder / "bookmark-cursor.pdf"
+    body = "天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph(body, style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page(width=760, height=500).insert_text(
+            (40, 60), "瀉白散", fontname="china-t", fontsize=22)
+        pdf.new_page(width=760, height=500).insert_text(
+            (40, 130), body, fontname="china-t", fontsize=22)
+        pdf.save(pdf_path)
+    original, original_pdf = source.read_bytes(), pdf_path.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        body_index = book.texts().index(body)
+    finally:
+        book.doc.close()
+    root = tk.Tk()
+    root.withdraw()
+    window = None
+    try:
+        window = BookmarkSectionEditor(
+            root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 2))
+        assert window._executor.submit(os.getpid).result(timeout=8) != os.getpid()
+        # Map an invisible window so Text.bbox() and viewport geometry are real.
+        window.attributes("-alpha", 0.0)
+        deadline = time.monotonic() + 8
+
+        def pump_until(predicate, message):
+            while time.monotonic() < deadline:
+                root.update()
+                if predicate():
+                    return
+                time.sleep(.01)
+            raise AssertionError(f"{message}: {window.pdf_note.cget('text')}")
+
+        def has_marker():
+            return (window._pdf_page == 2 and window._displayed_page == 2
+                    and bool(window.pdf_canvas.find_withtag("cursor-line"))
+                    and bool(window.pdf_canvas.find_withtag("cursor-glyph")))
+
+        def glyph_coordinates():
+            return tuple(window.pdf_canvas.coords(window.pdf_canvas.find_withtag("cursor-glyph")[0]))
+
+        def cursor_height_error():
+            caret = field.bbox("insert")
+            if not has_marker() or caret is None:
+                return float("inf")
+            glyph = glyph_coordinates()
+            pdf_y = (window.pdf_canvas.winfo_rooty() + (glyph[1] + glyph[3]) / 2
+                     - window.pdf_canvas.canvasy(0))
+            text_y = field.winfo_rooty() + caret[1] + caret[3] / 2
+            return abs(pdf_y - text_y)
+
+        field = window._editors[body_index]
+        assert str(field.cget("state")) == "normal"
+        assert window._pdf_page == 1
+        window.set_zoom(.7)
+        field.mark_set("insert", "1.0+9c")
+        window.select_paragraph(body_index)
+        pump_until(has_marker, "Cursor did not locate the body on PDF page 2")
+        assert window._cursor_location.precise
+        first_box = glyph_coordinates()
+        assert first_box[0] < first_box[2] and first_box[1] < first_box[3]
+        small_font = abs(int(tkfont.Font(root=root, font=field.cget("font")).actual("size")))
+        field.mark_set("insert", "1.0+15c")
+        window.select_paragraph(body_index)
+        pump_until(lambda: has_marker() and glyph_coordinates() != first_box,
+                   "Moving the caret did not update its glyph marker")
+        previous_width = window._image_size[0]
+        window.set_zoom(1.4)
+        pump_until(lambda: has_marker() and window._image_size[0] > previous_width
+                   and abs(int(tkfont.Font(root=root, font=field.cget("font")).actual("size"))) > small_font,
+                   "Document text did not follow the PDF's enlarged character size")
+        pump_until(lambda: cursor_height_error() <= 2,
+                   "The PDF marker and editing caret did not align vertically")
+        height_error = round(cursor_height_error(), 3)
+        large_font = abs(int(tkfont.Font(root=root, font=field.cget("font")).actual("size")))
+        assert not window.dirty
+        assert not window.session.corrected_path.exists()
+        assert source.read_bytes() == original and pdf_path.read_bytes() == original_pdf
+    finally:
+        if window is not None:
+            window.destroy()
+            # Drain prior native work without closing the worker shared by later windows.
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    return {"cursor_pdf_page": 2, "line_and_glyph_overlays": True,
+            "native_pdf_separate_process": True,
+            "same_paragraph_caret_move": True, "font_tracks_pdf_zoom": True,
+            "font_sizes": [small_font, large_font],
+            "cursor_screen_height_aligned": True, "cursor_height_error_px": height_error,
+            "source_pdf_and_hwpx_unchanged": True, "corrected_file_not_created": True,
+            "ocr_calls": 0, "network_calls": 0}
 
 
 def run(report_path: Path) -> int:
@@ -532,6 +651,7 @@ def run(report_path: Path) -> int:
         check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
         check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
         check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
+        check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
         check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
         check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))
 
