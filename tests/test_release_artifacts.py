@@ -438,7 +438,14 @@ def test_release_workflow_runs_complete_tests_and_one_build_before_verified_publ
     assert "needs.build.result == 'success'" in publish
     assert text.count("./tools/build_windows.ps1") == 1
     assert "./tools/test_windows_installer.ps1" in build and "-PreviousInstaller" in build
-    assert "v1.0.2" in build
+    previous = re.findall(r"gh release download v([0-9]+\.[0-9]+\.[0-9]+)\s", build)
+    assert len(previous) == 1
+    current = re.search(r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"',
+                        (root / "yeone_ocr/__init__.py").read_text(encoding="utf-8"), re.MULTILINE)[1]
+    assert tuple(map(int, previous[0].split("."))) < tuple(map(int, current.split(".")))
+    previous_asset = f"YeonE_OCR-{previous[0]}-Setup-x64.exe"
+    assert f"--pattern '{previous_asset}'" in build
+    assert f'-PreviousInstaller "$previousDirectory/{previous_asset}"' in build
     assert "verify_release_bundle.py seal dist --commit $env:GITHUB_SHA" in build
     assert "compression-level: 0" in build and "if-no-files-found: error" in build
     assert "artifact-ids: ${{ needs.build.outputs.artifact_id }}" in publish
