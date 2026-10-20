@@ -687,6 +687,78 @@ class SectionEditorTk(unittest.TestCase):
                 self.assertFalse(self.editor._split_capture_pending)
                 self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
 
+    def test_drag_capture_uses_consistent_child_geometry_before_placement_finishes(self):
+        from tkinter import ttk
+        style = ttk.Style(self.root)
+        previous = style.theme_use()
+        self.addCleanup(lambda: style.theme_use(previous))
+        self.editor.geometry("1024x768")
+        self.editor.deiconify()
+        self.root.update()
+        if self.editor._initial_job is not None:
+            self.editor.after_cancel(self.editor._initial_job)
+            self.editor._initial_job = None
+        panes = self.editor.panes
+        for theme in style.theme_names():
+            with self.subTest(theme=theme):
+                style.theme_use(theme)
+                self.editor.reset_comparison_layout()
+                self.root.update()
+                # Keep an actual complete layout snapshot while the real sash
+                # moves. Tk may expose this state even after one idle callback.
+                old_left_x = self.editor.pdf_panel.winfo_x()
+                old_left_width = self.editor.pdf_panel.winfo_width()
+                old_right_x = self.editor.doc_panel.winfo_x()
+                available = old_left_width + self.editor.doc_panel.winfo_width()
+                wanted = round(available * .45)
+                self.editor._schedule_split()
+                panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
+                panes.event_generate("<B1-Motion>", x=wanted, y=20)
+                panes.event_generate("<ButtonRelease-1>", x=wanted, y=20)
+                self.assertTrue(self.editor._split_capture_pending)
+                if self.editor._split_job is not None:
+                    self.editor.after_cancel(self.editor._split_job)
+                    self.editor._split_job = None
+                with (patch.object(self.editor.pdf_panel, "winfo_x", return_value=old_left_x),
+                      patch.object(self.editor.pdf_panel, "winfo_width", return_value=old_left_width),
+                      patch.object(self.editor.doc_panel, "winfo_x", return_value=old_right_x)):
+                    self.editor._restore_split()
+                self.root.update()
+                # A poisoned ratio moves the sash on the *next* normal restore,
+                # although the first capture appears to leave it untouched.
+                self.editor._restore_split()
+                self.root.update()
+                self.assertLessEqual(abs(panes.sashpos(0) - wanted), 1)
+                self.assertAlmostEqual(self.editor._split_ratio, wanted / available, delta=1 / available)
+
+    def test_collapsed_panes_keep_cached_separator_during_parent_resize(self):
+        self.editor.geometry("1024x768")
+        self.editor.deiconify()
+        self.root.update()
+        panes = self.editor.panes
+        for side in ("left", "right"):
+            with self.subTest(side=side):
+                cached_separator = self.editor._split_separator
+                panes.sashpos(0, 0 if side == "left" else panes.winfo_width())
+                self.root.update_idletasks()
+                collapsed = self.editor.pdf_panel if side == "left" else self.editor.doc_panel
+                self.assertFalse(collapsed.winfo_ismapped())
+                # Parent placement can advance before its one remaining child.
+                # Its previous width must not become a new separator measure.
+                resized_width = panes.winfo_width() + 12
+                with patch.object(panes, "winfo_width", return_value=resized_width):
+                    self.assertEqual(self.editor._split_space(), resized_width - cached_separator)
+                self.assertEqual(self.editor._split_separator, cached_separator)
+                # A first layout with one collapsed pane can still measure the
+                # actual visible edge when there is no complete-layout cache.
+                self.editor._split_separator = None
+                self.assertEqual(self.editor._split_space(), panes.winfo_width() - cached_separator)
+                self.editor.reset_comparison_layout()
+                self.root.update()
+                self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+                self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+                self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+
     def test_closing_hidden_window_cancels_pending_layout_callback(self):
         self.editor._split_capture_pending = True
         self.editor._schedule_split()

@@ -540,6 +540,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._split_initialized = False
         self._split_dragging = False
         self._split_capture_pending = False
+        self._split_separator = None
         self._change_jobs = {}
         self._executor = pdf_worker
         self._alignment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bookmark-location")
@@ -621,6 +622,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         for panel in (self.pdf_panel, self.doc_panel):
             panel.configure(width=360, height=300)
             panel.grid_propagate(False)
+            panel.bind("<Map>", lambda _event: self._schedule_split(), add="+")
         self.panes.add(self.pdf_panel, weight=1); self.panes.add(self.doc_panel, weight=1)
         self._build_pdf()
         self._build_document()
@@ -840,11 +842,31 @@ class BookmarkSectionEditor(tk.Toplevel):
     def _split_space(self):
         if not self.panes.winfo_ismapped() or self.panes.winfo_width() < 400:
             return None
-        # Theme separators vary (5–12 px). The second pane starts immediately
-        # after the sash, even when the first pane was previously collapsed.
-        separator = self.doc_panel.winfo_x() - self.panes.sashpos(0)
-        separator = max(1, min(32, separator))
-        return self.panes.winfo_width() - separator
+        # Child geometry is one consistent layout snapshot. The sash position
+        # can already reflect a drag while both children still have their old
+        # geometry, so it must never participate in measuring the separator.
+        left_visible = self.pdf_panel.winfo_ismapped()
+        right_visible = self.doc_panel.winfo_ismapped()
+        if left_visible and right_visible:
+            separator = (self.doc_panel.winfo_x()
+                         - self.pdf_panel.winfo_x() - self.pdf_panel.winfo_width())
+        elif self._split_separator is not None:
+            # A resize may update the parent before the remaining child. Keep
+            # the last complete layout's separator until both panes are mapped.
+            separator = self._split_separator
+        elif right_visible:
+            # A collapsed pane is unmapped and retains its old winfo_width.
+            separator = self.doc_panel.winfo_x()
+        elif left_visible:
+            separator = (self.panes.winfo_width()
+                         - self.pdf_panel.winfo_x() - self.pdf_panel.winfo_width())
+        else:
+            return None
+        if 0 < separator <= 64:
+            self._split_separator = separator
+        if self._split_separator is None:
+            return None
+        return self.panes.winfo_width() - self._split_separator
 
     def _restore_split(self):
         self._split_job = None
@@ -856,8 +878,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         minimum = min(360, available // 2)
         if self._split_capture_pending:
             # The release binding runs before Tk finishes placing the children.
-            # Capture here, after geometry idle work, so a stale second-pane x
-            # cannot be mistaken for a wider sash and move the user's divider.
+            # The consistent child geometry in _split_space also handles a
+            # geometry update that has not completed by this idle callback.
             position = max(minimum, min(available - minimum, self.panes.sashpos(0)))
             self._split_ratio = position / available
             self._split_capture_pending = False
