@@ -1832,6 +1832,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._update_status()
         self.configure(cursor="watch")
         self.update_idletasks()
+        access_failure = False
         try:
             if self._replacement_plan is None:
                 result = self.session.save(changes)
@@ -1840,12 +1841,33 @@ class BookmarkSectionEditor(tk.Toplevel):
         except (OSError, ValueError) as exc:
             if getattr(exc, "paragraph_index", None) is not None:
                 self._reveal_text(exc.paragraph_index, getattr(exc, "offset", None) or 0)
-            messagebox.showerror("교정본을 저장하지 못했습니다", f"{exc}\n\n입력한 수정은 이 창에 남아 있습니다.", parent=self)
+            access_failure = isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in (5, 32, 33)
+            if access_failure:
+                target = Path(self.session.corrected_path).resolve()
+                blocked = getattr(exc, "path", None) or getattr(exc, "filename2", None) or getattr(exc, "filename", None)
+                details = f"교정본: {target}"
+                if blocked and Path(blocked).resolve() != target:
+                    details += f"\n접근이 막힌 파일: {Path(blocked).resolve()}"
+                code = getattr(exc, "winerror", None) or getattr(exc, "error_code", None)
+                if code is not None:
+                    details += f"\n오류 코드: {code}"
+                message = ("저장할 파일에 접근할 수 없습니다. 다른 앱에서 파일을 사용 중이거나, "
+                           "읽기 전용 또는 쓰기 권한 문제일 수 있습니다.\n\n"
+                           f"{details}\n\n"
+                           "한글 등에서 이 교정본이 열려 있다면 해당 문서를 닫고, "
+                           "이 창의 ‘변경 확인·저장’을 다시 눌러 주세요. 계속 실패하면 파일의 읽기 전용·쓰기 권한을 확인해 주세요.\n\n"
+                           "입력한 수정은 이 창에 그대로 남아 있습니다. ‘본문 내보내기’로 수정한 본문을 TXT로 보관하거나, "
+                           "[확인]을 눌러 계속 편집할 수 있습니다.")
+            else:
+                message = f"{exc}\n\n입력한 수정은 이 창에 남아 있습니다."
+            messagebox.showerror("교정본을 저장하지 못했습니다", message, parent=self)
             return False
         finally:
             self._saving = False
             self.configure(cursor="")
             self._update_status()
+            if access_failure:
+                self.v_status.set("저장되지 않음 · 입력한 수정 유지 · 열린 교정본을 닫고 다시 저장하거나 ‘본문 내보내기’를 이용하세요.")
         self._paragraphs = {p.index: p for p in self.session.paragraphs}
         self._snapshot_generation += 1
         self._baseline = {p.index: p.corrected_text for p in self.session.paragraphs}

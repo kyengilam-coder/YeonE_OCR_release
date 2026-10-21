@@ -410,7 +410,72 @@ class SectionEditorTk(unittest.TestCase):
         self.assertTrue(self.editor.dirty)
         self.assertFalse(self.editor.busy)
         self.assertIn("외부에서 변경", self.error.call_args.args[1])
+        self.assertNotIn("읽기 전용", self.error.call_args.args[1])
         self.saved.assert_not_called()
+
+    def test_save_access_failure_preserves_drafts_caret_undo_export_and_same_window_retry(self):
+        self.edit(11, "手動修改𠀀")
+        self.edit(12, "另一段修改")
+        self.editor._external_changes[99] = "他段手動修改"
+        widget = self.editor._editors[11]
+        widget.edit_separator()
+        widget.insert("end-1c", "疱")
+        widget.edit_separator()
+        widget.mark_set("insert", "1.2")
+        widget.tag_add("sel", "1.1", "1.3")
+        drafts = self.editor._changes()
+        baseline = dict(self.editor._baseline)
+        caret, selection = widget.index("insert"), tuple(map(str, widget.tag_ranges("sel")))
+        error = PermissionError(13, "synthetic temporary-file access failure", str(self.folder / "unsafe-looking.tmp"))
+        error.path, error.winerror = self.session.corrected_path, 5
+        self.session.failure = error
+        self.assertFalse(self.editor.save())
+        message = self.error.call_args.args[1]
+        for text in (str(self.session.corrected_path.resolve()), "한글", "변경 확인·저장", "본문 내보내기", "오류 코드: 5"):
+            self.assertIn(text, message)
+        self.assertNotIn("unsafe-looking.tmp", message)
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertEqual(self.editor._baseline, baseline)
+        self.assertEqual(widget.index("insert"), caret)
+        self.assertEqual(tuple(map(str, widget.tag_ranges("sel"))), selection)
+        self.assertTrue(self.editor.dirty)
+        self.assertFalse(self.editor.busy)
+        self.assertFalse(self.editor.save_button.instate(["disabled"]))
+        self.assertFalse(self.editor.export_button.instate(["disabled"]))
+        self.assertIn("저장되지 않음", self.editor.v_status.get())
+        self.assertEqual(self.session.calls, [])
+        self.saved.assert_not_called()
+        widget.edit_undo()
+        self.assertNotEqual(widget.get("1.0", "end-1c"), drafts[11])
+        widget.edit_redo()
+        self.assertEqual(self.editor._changes(), drafts)
+        output = self.folder / "after-access-failure.txt"
+        self.assertTrue(self.editor.export_changes(output, scope="document"))
+        self.assertIn(drafts[11], output.read_text("utf-8-sig"))
+        self.assertIn(drafts[99], output.read_text("utf-8-sig"))
+        self.assertEqual(self.editor._changes(), drafts)
+        self.session.failure = None
+        self.assertTrue(self.editor.save())
+        self.assertEqual(self.session.calls, [drafts])
+        self.assertFalse(self.editor.dirty)
+        self.saved.assert_called_once_with(self.session.corrected_path)
+
+    def test_save_access_message_identifies_blocked_history_or_windows_sharing_target(self):
+        self.edit(11, "修改")
+        for code in (5, 32, 33):
+            with self.subTest(winerror=code):
+                error = OSError("temporary -> target raw details")
+                error.winerror = code
+                error.path = self.folder / "book_교정.manual-edits.json"
+                self.session.failure = error
+                self.assertFalse(self.editor.save())
+                message = self.error.call_args.args[1]
+                self.assertIn(str(self.session.corrected_path.resolve()), message)
+                self.assertIn(str(error.path.resolve()), message)
+                self.assertIn(f"오류 코드: {code}", message)
+                self.assertNotIn("raw details", message)
+                self.assertTrue(self.editor.dirty)
+                self.assertFalse(self.editor.busy)
 
     def test_busy_parent_blocks_before_review_and_rechecks_after_review(self):
         self.edit(11, "修改")

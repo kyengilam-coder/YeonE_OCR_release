@@ -1,15 +1,15 @@
-# Windows 1.0.5 배포
+# Windows 1.0.6 배포
 
-이 문서는 **1.0.5의 배포 구성과 확인 절차**를 설명한다. 게시 여부·최종 검증 결과·실제 배포 파일은 [v1.0.5 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.0.5)에서 확인한다. 문서와 다운로드 링크의 존재만으로 검증 완료나 공개 게시를 판단하지 않는다.
+이 문서는 **1.0.6의 배포 구성과 확인 절차**를 설명한다. 게시 여부·최종 검증 결과·실제 배포 파일은 [v1.0.6 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.0.6)에서 확인한다. 문서와 다운로드 링크의 존재만으로 검증 완료나 공개 게시를 판단하지 않는다.
 
-1.0.5의 배포 대상 자산은 다음과 같다. 게시 후 공개 릴리스의 실제 파일·버전·SHA-256을 대조한다.
+1.0.6의 배포 대상 자산은 다음과 같다. 게시 후 공개 릴리스의 실제 파일·버전·SHA-256을 대조한다.
 
 | 자산 | 용도 |
 |---|---|
-| `YeonE_OCR-1.0.5-Setup-x64.exe` | Windows 10/11 x64 사용자별 설치 |
+| `YeonE_OCR-1.0.6-Setup-x64.exe` | Windows 10/11 x64 사용자별 설치 |
 | `YeonE_OCR-Windows-x64.exe` | 설치 없이 실행하는 포터블·기존 자동 업데이트 자산 |
-| `YeonE_OCR-1.0.5-source.zip` | 배포 커밋의 소스·테스트·빌드 자료·AB 원본 소스 보존 사본 |
-| `YeonE_OCR-1.0.5-licenses.zip` | 제3자 고지와 라이선스 원문 |
+| `YeonE_OCR-1.0.6-source.zip` | 배포 커밋의 소스·테스트·빌드 자료·AB 원본 소스 보존 사본 |
+| `YeonE_OCR-1.0.6-licenses.zip` | 제3자 고지와 라이선스 원문 |
 | `update.json` | 기존 포터블 업데이트 형식의 버전·파일 크기·SHA-256 |
 | `SHA256SUMS.txt` | 배포 자산의 SHA-256 목록 |
 
@@ -21,7 +21,9 @@
 
 API 키·설정은 기존 `사용자 폴더\.yeone_ocr\config.json`, OCR·교정 기록과 출력 문서는 원본 옆 작업 폴더를 사용한다. 붙여넣은 원본 이미지는 `%LOCALAPPDATA%\YeonE_OCR\screenshots`에 보관한다. 이 사용자 자료를 업데이트·제거 대상으로 등록하지 않는다. API 키와 이용 권한은 사용자가 설정하며 API 이용료는 별도다.
 
-1.0.5는 수동 교정 이후 일반 공백만 달라진 문단이 외부 변경 오류로 차단되던 문제를 수정한다. 유효한 수정 기록과 동일 문단을 확인한 경우 현재 본문을 그대로 보호하여 교정·편집을 계속한다. 실제 문자·문단 구조 차이와 확인할 수 없는 기록은 기존처럼 차단한다. 본문이나 수정 기록을 임의로 되돌리지 않는다.
+1.0.6은 교정본 파일 교체가 잠깐 거부될 때 재시도하고, 계속 잠겨 있으면 한글에서 해당 문서를 닫고 다시 저장하도록 안내한다. 재시도 중 파일 변경은 감지하여 중단한다. 실패한 수정은 편집창에 남으며 본문 내보내기로 별도 보관할 수 있다.
+
+1.0.5에서는 수동 교정 이후 일반 공백만 달라진 문단이 외부 변경 오류로 차단되던 문제를 수정했다. 유효한 수정 기록과 동일 문단을 확인한 경우 현재 본문을 그대로 보호하여 교정·편집을 계속한다. 실제 문자·문단 구조 차이와 확인할 수 없는 기록은 기존처럼 차단한다. 본문이나 수정 기록을 임의로 되돌리지 않는다.
 
 1.0.4부터 일반 OCR·이미지(스크린샷) OCR의 완성된 HWPX 결과도 **나란히 대조 편집**으로 연다. 원본 PDF·이미지·이미지 폴더와 대응하는 편집 범위를 선택하고, 결과 폴더의 `_교정.hwpx`에 누적 저장한다. 기존 OCR 결과는 보존한다. 쪽 이동 시 미저장 수정의 처리 방법을 확인한다. 이미지에 글자 좌표가 없으면 저장된 OCR 영역까지만 표시하며 정확한 글자 위치로 안내하지 않는다.
 
@@ -46,13 +48,13 @@ python -m venv work\windows-release\venv
 & .\tools\build_windows.ps1 `
   -Python .\work\windows-release\venv\Scripts\python.exe `
   -InnoCompiler .\work\windows-release\toolchain\InnoSetup\ISCC.exe `
-  -WorkRoot .\work\release-1.0.5\build `
-  -OutputDirectory .\dist\1.0.5
+  -WorkRoot .\work\release-1.0.6\build `
+  -OutputDirectory .\dist\1.0.6
 ```
 
-이미 설치한 Inno Setup의 경로를 지정해도 된다. `-SkipInstaller`는 실행 파일까지만 만들고 설치 파일은 생략한다. `-WorkRoot`·`-OutputDirectory`를 생략하는 스크립트 기본 경로는 각각 `work/windows-release`·`dist`이므로, 이번 빌드는 위와 같이 `work/release-1.0.5/build`·`dist/1.0.5`을 명시해 이전 빌드와 분리한다.
+이미 설치한 Inno Setup의 경로를 지정해도 된다. `-SkipInstaller`는 실행 파일까지만 만들고 설치 파일은 생략한다. `-WorkRoot`·`-OutputDirectory`를 생략하는 스크립트 기본 경로는 각각 `work/windows-release`·`dist`이므로, 이번 빌드는 위와 같이 `work/release-1.0.6/build`·`dist/1.0.6`을 명시해 이전 빌드와 분리한다.
 
-`packaging/YeonE_OCR.spec`은 설치용 폴더 묶음과 포터블을 만들고, `packaging/YeonE_OCR.iss`는 폴더 묶음으로 설치 파일을 만든다. 빌드 스크립트는 소스의 앱 버전을 읽어 Inno Setup에 전달한다. 이번 배포에서는 앱 버전·설치 파일·태그 `v1.0.5`·업데이트 manifest·소스 ZIP의 버전이 모두 `1.0.5`인지 확인한다. Inno Setup 파일을 직접 사용할 때에도 버전을 명시하고 결과를 검사한다.
+`packaging/YeonE_OCR.spec`은 설치용 폴더 묶음과 포터블을 만들고, `packaging/YeonE_OCR.iss`는 폴더 묶음으로 설치 파일을 만든다. 빌드 스크립트는 소스의 앱 버전을 읽어 Inno Setup에 전달한다. 이번 배포에서는 앱 버전·설치 파일·태그 `v1.0.6`·업데이트 manifest·소스 ZIP의 버전이 모두 `1.0.6`인지 확인한다. Inno Setup 파일을 직접 사용할 때에도 버전을 명시하고 결과를 검사한다.
 
 실행 파일에는 앱과 명시적으로 허용한 사전·문서 서식·아이콘·규칙·안내 문서를 포함한다. 저장소 전체나 사용자 홈, 설정, 실제 문서·캡처·판독 기록·작업 폴더를 묶지 않는다. 통합 전 AB 소스 보존 사본은 **소스 ZIP**의 `references/AB_OCR_0.3.0`에 포함하며 앱 런타임으로 불러오지 않는다. [보존 안내](../references/README.md)
 
@@ -60,7 +62,7 @@ python -m venv work\windows-release\venv
 
 아래 단계의 실제 결과를 모두 수집한 뒤 해당 공개 릴리스에 소스 커밋·검사 범위·성공 여부·제한을 함께 남긴다. 이 문서는 검증 절차를 설명하며 통과 수치를 대신하지 않는다. 이전 버전의 테스트 수나 과거 개발 소스의 통과 기록을 이번 실행 파일의 검증 결과로 대신 쓰지 않는다.
 
-빌드 스크립트는 소스에서 오프라인 자체 검사를 한 뒤 설치용 실행 파일과 포터블에서 같은 검사를 실행한다. 결과는 `work/release-1.0.5/build/smoke/{source,onedir,portable}.json`, 빌드 정보는 같은 폴더의 `build-result.json`에 남긴다. 실패하면 후속 설치 파일 생성으로 진행하지 않는다.
+빌드 스크립트는 소스에서 오프라인 자체 검사를 한 뒤 설치용 실행 파일과 포터블에서 같은 검사를 실행한다. 결과는 `work/release-1.0.6/build/smoke/{source,onedir,portable}.json`, 빌드 정보는 같은 폴더의 `build-result.json`에 남긴다. 실패하면 후속 설치 파일 생성으로 진행하지 않는다.
 
 - 전체 기능 회귀 검사와 기록·사람 교정 보존 검사는 최종 소스에 대해 실행한다.
 - 소스·설치용 실행 파일·포터블의 오프라인 자체 검사, 포함 모듈·리소스·고지 자료의 일치를 확인한다.
@@ -68,12 +70,12 @@ python -m venv work\windows-release\venv
 - 실제 문헌 정확도, 온라인 API 인증, 여섯 로컬 엔진의 실모델 검증은 기능 회귀 검사와 구분해 수행 범위를 기록한다.
 
 ```powershell
-$check = Start-Process -FilePath .\dist\1.0.5\YeonE_OCR-Windows-x64.exe `
+$check = Start-Process -FilePath .\dist\1.0.6\YeonE_OCR-Windows-x64.exe `
   -ArgumentList '--smoke-test', '"C:\검증\연어OCR-smoke.json"' `
   -WindowStyle Hidden -Wait -PassThru
 $check.ExitCode
 Get-Content -LiteralPath 'C:\검증\연어OCR-smoke.json' -Encoding UTF8
-Get-FileHash -LiteralPath .\dist\1.0.5\YeonE_OCR-1.0.5-Setup-x64.exe -Algorithm SHA256
+Get-FileHash -LiteralPath .\dist\1.0.6\YeonE_OCR-1.0.6-Setup-x64.exe -Algorithm SHA256
 ```
 
 이 자체 검사는 사용자 설정·키와 유료 모델을 사용하지 않는다. 실제 스캔의 글자 정확도, 각 제공사의 온라인 인증, Windows 설치·재설치·제거 검증은 별도이며 실제 수행 여부를 릴리스에 구분해서 기록한다.
@@ -82,15 +84,15 @@ Get-FileHash -LiteralPath .\dist\1.0.5\YeonE_OCR-1.0.5-Setup-x64.exe -Algorithm 
 
 ## 소스와 공개 배포
 
-개발 소스 저장소는 `kyengilam-coder/YeonE_OCR`, 공개 배포 저장소는 [kyengilam-coder/YeonE_OCR_release](https://github.com/kyengilam-coder/YeonE_OCR_release)다. 1.0.5의 배포 태그는 `v1.0.5`이다. 소스를 커밋한 뒤 다음 명령으로 **그 커밋**의 소스 ZIP·라이선스 ZIP·업데이트 manifest와 전체 SHA-256 목록을 만든다.
+개발 소스 저장소는 `kyengilam-coder/YeonE_OCR`, 공개 배포 저장소는 [kyengilam-coder/YeonE_OCR_release](https://github.com/kyengilam-coder/YeonE_OCR_release)다. 1.0.6의 배포 태그는 `v1.0.6`이다. 소스를 커밋한 뒤 다음 명령으로 **그 커밋**의 소스 ZIP·라이선스 ZIP·업데이트 manifest와 전체 SHA-256 목록을 만든다.
 
 ```powershell
-python tools/prepare_windows_release.py dist/1.0.5 --revision HEAD
+python tools/prepare_windows_release.py dist/1.0.6 --revision HEAD
 ```
 
 별도 체크아웃은 `--repo <경로>`를 지정한다. 소스 ZIP은 커밋의 허용 목록만 담고 `SOURCE_REVISION.txt`에 버전과 커밋을 기록한다. 공개 테스트의 골든 JSON·라이선스 보완 자료·AB 소스 보존 사본도 포함하되 개인 자료와 모델은 제외한다. `.github/workflows/windows-release.yml`은 수동 실행 시 검사·빌드·설치 검증과 배포 자료 생성을 거쳐 공개 릴리스를 만든다. 문서에 다운로드 주소가 있다고 게시가 완료된 것은 아니므로, 게시 후 실제 자산과 SHA-256을 대조한다.
 
-1.0.3부터 전체 회귀 검사와 실행 파일 빌드·설치 검증을 별도 Windows 작업에서 동시에 수행한다. 전체 회귀는 모듈마다 별도 오프라인 프로세스를 사용하며, 검토된 비GUI 모듈만 두 작업자로 실행한다. GUI/Tk와 분류되지 않은 모듈은 다른 모듈과 겹치지 않게 실행한다. 최근 변경 관련 모듈의 순서를 앞당겨도 전체 검사 범위를 줄이지 않는다. 실패하면 새 모듈 시작을 중단하고 미실행 목록을 남기며 배포하지 않는다. 빌드 작업은 소스·설치용·포터블 자체 검사와 **1.0.4에서의 업그레이드·재설치·제거 검사**를 모두 수행한다.
+1.0.3부터 전체 회귀 검사와 실행 파일 빌드·설치 검증을 별도 Windows 작업에서 동시에 수행한다. 전체 회귀는 모듈마다 별도 오프라인 프로세스를 사용하며, 검토된 비GUI 모듈만 두 작업자로 실행한다. GUI/Tk와 분류되지 않은 모듈은 다른 모듈과 겹치지 않게 실행한다. 최근 변경 관련 모듈의 순서를 앞당겨도 전체 검사 범위를 줄이지 않는다. 실패하면 새 모듈 시작을 중단하고 미실행 목록을 남기며 배포하지 않는다. 빌드 작업은 소스·설치용·포터블 자체 검사와 **1.0.5에서의 업그레이드·재설치·제거 검사**를 모두 수행한다.
 
 게시 작업은 회귀와 빌드 작업이 **모두 성공한 뒤** 시작한다. 이미 검증한 파일을 artifact ID로 내려받아 여섯 자산의 정확한 파일 목록·크기·SHA-256, 업데이트 manifest, 소스 ZIP의 버전·커밋을 다시 확인한다. 빌드 작업이 별도로 전달한 영수증 SHA-256도 대조하므로 파일과 그 체크섬을 함께 바꾼 묶음은 거부한다. 게시 작업에서 실행 파일을 다시 빌드하지 않는다.
 
@@ -108,7 +110,7 @@ CI 기록은 `windows-release-regression`(전체 회귀), `windows-release-valid
 
 ## 이전 버전 기록
 
-- **0.9.0 Windows 공개판:** 아래 수치는 당시 검증 기록이며 1.0.5의 결과가 아니다. 세부 공개 소스 정리와 추가 검사 결과는 [릴리스 기록](release-notes.md), 당시 자산은 [v0.9.0 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)에 보존한다.
+- **0.9.0 Windows 공개판:** 아래 수치는 당시 검증 기록이며 1.0.6의 결과가 아니다. 세부 공개 소스 정리와 추가 검사 결과는 [릴리스 기록](release-notes.md), 당시 자산은 [v0.9.0 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)에 보존한다.
   - 기능 통합 기준으로 61개 모듈·고유 테스트 1,080개가 통과했고 실패·오류·건너뜀·미완료는 0개였다.
   - 소스·설치용 실행 파일·포터블의 오프라인 자체 검사는 각각 26개를 통과했다. 로컬 비교와 편집·복구, AI의 모의 이미지 재검증과 번체·부호 제안, 사람의 채택·되돌리기·재열기를 포함했다.
   - 두 실행 파일의 앱 모듈 각각 75개·명시적 리소스 17개·라이선스 참조 162개가 소스와 일치했다. 당시 보고서는 `work/windows-ai-0.9/verify-build.json`, 자체 검사 보고서는 `work/windows-ai-0.9/smoke/{source,onedir,portable}.json`이다.

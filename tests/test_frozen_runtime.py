@@ -299,6 +299,11 @@ class FrozenRuntime(unittest.TestCase):
                       "space_adjusted_manual_save_reopens", "external_character_changes_still_blocked",
                       "source_pdf_and_hwpx_unchanged"):
             self.assertTrue(result[field], field)
+        for field in ("locked_save_preserves_document_and_history", "unlocked_save_retries_same_session"):
+            if sys.platform == "win32":
+                self.assertTrue(result[field], field)
+            else:
+                self.assertIsNone(result[field], field)
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 

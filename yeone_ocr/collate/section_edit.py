@@ -47,6 +47,21 @@ class ManualProtectionError(SectionEditError):
     """Manual edit history cannot safely be applied to the current document."""
 
 
+class SaveAccessError(PermissionError):
+    """A save destination remained inaccessible; no lock/ACL cause is assumed."""
+    def __init__(self, path, error: OSError):
+        destination = Path(path)
+        winerror = getattr(error, "winerror", None)
+        error_code = winerror if winerror is not None else error.errno
+        code = f" (오류 코드 {error_code})" if error_code is not None else ""
+        super().__init__(error.errno, f"파일에 접근할 수 없어 저장하지 못했습니다{code}: {destination}", str(destination))
+        self.path, self.winerror, self.error_code = destination, winerror, error_code
+
+
+_SAVE_ACCESS_ATTEMPTS = 5
+_SAVE_ACCESS_SECONDS = 0.75
+
+
 @dataclass(frozen=True)
 class TextStyleSpan:
     """Saved HWPX display style on a half-open range of paragraph text.
@@ -1210,34 +1225,55 @@ class SectionEditSession:
             if backup is not None:
                 backup_stage = _stage_bytes(backup, self._target_bytes)
                 stages.append(backup_stage)
-                os.replace(backup_stage, backup)
+                self._retry_save_access(lambda: os.replace(backup_stage, backup), backup)
             if self._history_bytes is not None:
                 history_backup = history_path.with_suffix(".bak.json")
                 history_backup_stage = _stage_bytes(history_backup, self._history_bytes)
                 stages.append(history_backup_stage)
-                os.replace(history_backup_stage, history_backup)
+                self._retry_save_access(lambda: os.replace(history_backup_stage, history_backup), history_backup)
             self._assert_unchanged()
-            os.replace(intent_stage, history_path)
+            self._retry_save_access(lambda: os.replace(intent_stage, history_path), history_path)
             published_history = True
             # The durable intent protects both old and new text if publication
             # fails or the process stops between the two atomic replacements.
             self._assert_unchanged(published_history=history_bytes)
-            os.replace(stage, self.corrected_path)
+            self._retry_save_access(lambda: os.replace(stage, self.corrected_path), self.corrected_path,
+                                    published_history=history_bytes)
         except BaseException:
-            if published_history and _fingerprint(history_path) == _sha(history_bytes):
+            try:
+                own_intent = published_history and _fingerprint(history_path) == _sha(history_bytes)
+            except OSError:
+                own_intent = False
+            if own_intent:
                 try:
                     if self._history_bytes is None:
-                        history_path.unlink()
+                        self._retry_save_access(history_path.unlink, history_path,
+                                                published_history=history_bytes, rollback=True)
                     else:
                         rollback = _stage_bytes(history_path, self._history_bytes)
                         stages.append(rollback)
-                        os.replace(rollback, history_path)
-                except OSError:
-                    pass   # Durable merged intent still protects the old file.
+                        self._retry_save_access(lambda: os.replace(rollback, history_path), history_path,
+                                                published_history=history_bytes, rollback=True)
+                except (OSError, ConflictError):
+                    # If only our own intent remains, remember that durable
+                    # snapshot so releasing the lock permits the same session
+                    # to save again. Competing writes must still fail closed.
+                    try:
+                        self._assert_unchanged(published_history=history_bytes)
+                    except (OSError, ConflictError):
+                        pass
+                    else:
+                        self._history_bytes, self._history = history_bytes, history
+                        self._protected.update(edits)
             raise
         finally:
             for path in stages:
-                path.unlink(missing_ok=True)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    # A temporary-file lock must not hide the actual save
+                    # failure, or report failure after publication succeeded.
+                    pass
         self._target_bytes, self._history_bytes, self._history = new_bytes, history_bytes, history
         self._protected.update(edits)
         self._generation += 1
@@ -1246,6 +1282,39 @@ class SectionEditSession:
         memory = memory_from_snapshot(history, verified.paragraphs, self._pdf_hash, history_path)
         return SaveResult(self.corrected_path, len(edits), backup, True,
                           memory.count, history_path, learning_warning or memory.warning)
+
+    def _retry_save_access(self, operation, path: Path, *, published_history: bytes | None = None,
+                           rollback: bool = False) -> None:
+        """Retry only brief Windows access failures, rechecking before each try.
+
+        The initial transaction checks remain at the call sites. A rollback
+        compares only its own durable history intent, so a competing document
+        save does not prevent restoring our previous history. Another writer's
+        history is never replaced or removed by that rollback.
+        """
+        deadline = time.monotonic() + _SAVE_ACCESS_SECONDS
+        last_error = None
+        for attempt in range(_SAVE_ACCESS_ATTEMPTS):
+            if rollback:
+                if published_history is None or _fingerprint(path) != _sha(published_history):
+                    raise ConflictError("저장 복구 중 수정 기록이 외부에서 변경되었습니다. 외부 기록은 덮어쓰지 않았습니다.")
+            elif attempt:
+                self._assert_unchanged(published_history=published_history)
+            if attempt and time.monotonic() >= deadline:
+                raise SaveAccessError(path, last_error) from last_error
+            try:
+                operation()
+                return
+            except OSError as exc:
+                code = getattr(exc, "winerror", None)
+                if not isinstance(exc, PermissionError) and code not in {5, 32, 33}:
+                    raise
+                remaining = deadline - time.monotonic()
+                if (code not in {5, 32, 33} or attempt + 1 >= _SAVE_ACCESS_ATTEMPTS
+                        or remaining <= 0):
+                    raise SaveAccessError(path, exc) from exc
+                last_error = exc
+                time.sleep(min(0.05 * 2 ** attempt, 0.25, remaining))
 
     def correction_records(self) -> list[dict]:
         """Committed human edits in this section, using this session snapshot."""

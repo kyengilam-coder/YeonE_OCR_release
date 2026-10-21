@@ -500,7 +500,7 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
     from .collate.hwpx_edit import Editor, HP, _canon, _slots, _tag_of, paragraph_text
     from .collate.sections import HwpxBook
     from .collate.section_edit import (
-        ManualProtectionError, SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
+        ManualProtectionError, SaveAccessError, SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
     )
 
     source = folder / "manual-style.hwpx"
@@ -652,6 +652,48 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
             raise AssertionError("An external character change must remain protected")
     assert target.read_bytes() == invalid_bytes and history_path.read_bytes() == final_history_bytes
     target.write_bytes(valid_bytes)  # Leave this synthetic probe's valid result in place.
+    locked_save_preserved = unlocked_retry_saved = None
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        # Simulate an open HWPX in another application: reads remain possible,
+        # but replacing/deleting this exact synthetic file is denied by Windows.
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        pending = {index: final_text.replace("辛", "壬")}
+        snapshot = [(p.index, p.corrected_text) for p in reopened.paragraphs]
+        handle = kernel.CreateFileW(str(target), 0x80000000, 0x1 | 0x2, None, 3, 0x80, None)
+        if handle == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            try:
+                reopened.save(pending)
+            except SaveAccessError as exc:
+                assert Path(exc.path).resolve() == target.resolve()
+                assert exc.winerror in (5, 32, 33)
+            else:
+                raise AssertionError("Replacing a Windows sharing-locked HWPX must fail safely")
+            assert target.read_bytes() == valid_bytes and history_path.read_bytes() == final_history_bytes
+            assert [(p.index, p.corrected_text) for p in reopened.paragraphs] == snapshot
+            locked_save_preserved = True
+        finally:
+            assert kernel.CloseHandle(handle)
+        saved = reopened.save(pending)
+        assert saved.backup_path.read_bytes() == valid_bytes
+        assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == pending[index]
+        lock_history = json.loads(history_path.read_bytes())
+        assert lock_history["correction_events"][:-1] == final_history["correction_events"]
+        assert lock_history["correction_events"][-1]["before"] == final_text
+        assert lock_history["correction_events"][-1]["after"] == pending[index]
+        final_session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        assert next(p.corrected_text for p in final_session.paragraphs if p.index == index) == pending[index]
+        assert manual_protected_paragraphs(target) == {index}
+        unlocked_retry_saved = True
     assert all(path.read_bytes() == data for path, data in originals.items())
     return {"edited_marks_cleared": True, "mixed_author_styles_restored": True,
             "untouched_marks_and_paragraphs_preserved": True, "existing_copy_and_backup_preserved": True,
@@ -659,6 +701,8 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
             "cross_style_length_change_saved_and_reopened": True,
             "ascii_space_only_changes_preserve_protection": True, "space_validation_is_read_only": True,
             "space_adjusted_manual_save_reopens": True, "external_character_changes_still_blocked": True,
+            "locked_save_preserves_document_and_history": locked_save_preserved,
+            "unlocked_save_retries_same_session": unlocked_retry_saved,
             "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
 
 

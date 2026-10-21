@@ -15,7 +15,7 @@ from lxml import etree
 
 from yeone_ocr.collate.hwpx_edit import HP, HH, Editor, _slots, _tag_of, paragraph_text
 from yeone_ocr.collate.section_edit import (
-    ConflictError, ManualProtectionError, SectionEditError, SectionEditSession,
+    ConflictError, ManualProtectionError, SaveAccessError, SectionEditError, SectionEditSession,
     TextStyleSpan, _Archive, _style_key, manual_history_path, manual_protected_paragraphs,
     _replace_text,
 )
@@ -844,6 +844,220 @@ class ManualSectionEditing(unittest.TestCase):
         self.assertEqual(manual_protected_paragraphs(self.corrected), {2})
         self.assertFalse(list(self.root.glob(".*.tmp")))
 
+    @staticmethod
+    def access_error(code=5):
+        error = PermissionError(13, "synthetic Windows access failure")
+        error.winerror = code
+        return error
+
+    def test_transient_access_retries_all_publication_destinations(self):
+        session = self.open()
+        session.save({2: "Alpha better gamma."})
+        before = self.corrected.read_bytes()
+        history = manual_history_path(self.corrected)
+        before_history = history.read_bytes()
+        original = self.source.read_bytes()
+        real_replace = os.replace
+        attempts = {}
+        def transient(src, dst):
+            destination = Path(dst)
+            count = attempts.get(destination, 0)
+            attempts[destination] = count + 1
+            if count < 3:
+                raise self.access_error((5, 32, 33)[count])
+            return real_replace(src, dst)
+        with patch("yeone_ocr.collate.section_edit.os.replace", side_effect=transient), \
+                patch("yeone_ocr.collate.section_edit.time.sleep"):
+            result = session.save({4: "Memo changed text."})
+        self.assertEqual(attempts, {self.corrected.with_suffix(".bak.hwpx"): 4,
+                                    history.with_suffix(".bak.json"): 4, history: 4, self.corrected: 4})
+        self.assertEqual(result.backup_path.read_bytes(), before)
+        self.assertEqual(history.with_suffix(".bak.json").read_bytes(), before_history)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(manual_protected_paragraphs(self.corrected), {2, 4})
+        self.assertFalse(list(self.root.glob(".*.tmp")))
+
+    def test_persistent_access_error_is_bounded_identifies_path_and_same_session_retries(self):
+        session = self.open()
+        session.save({2: "Alpha better gamma."})
+        before = self.corrected.read_bytes()
+        history_path = manual_history_path(self.corrected)
+        before_history = history_path.read_bytes()
+        real_replace = os.replace
+        attempts = []
+        def inaccessible(src, dst):
+            if Path(dst) == self.corrected:
+                attempts.append(True)
+                raise self.access_error(5)
+            return real_replace(src, dst)
+        changes = {4: "Memo changed text."}
+        with patch("yeone_ocr.collate.section_edit.os.replace", side_effect=inaccessible), \
+                patch("yeone_ocr.collate.section_edit.time.sleep") as sleep, \
+                self.assertRaises(SaveAccessError) as caught:
+            session.save(changes)
+        self.assertIsInstance(caught.exception, PermissionError)
+        self.assertEqual((caught.exception.path, caught.exception.winerror, caught.exception.error_code),
+                         (self.corrected, 5, 5))
+        self.assertEqual(len(attempts), 5)
+        self.assertEqual(sleep.call_count, 4)
+        self.assertLessEqual(sum(call.args[0] for call in sleep.call_args_list), 0.75)
+        self.assertEqual(self.corrected.read_bytes(), before)
+        self.assertEqual(history_path.read_bytes(), before_history)
+        self.assertEqual(next(p.corrected_text for p in session.paragraphs if p.index == 4), "Memo body text.")
+        self.assertEqual(changes, {4: "Memo changed text."})
+        self.assertFalse(list(self.root.glob(".*.tmp")))
+        self.assertEqual(session.save(changes).saved_count, 1)
+        self.assertEqual(next(p.corrected_text for p in self.open().paragraphs if p.index == 4), changes[4])
+
+    def test_unrelated_access_codes_are_not_retried_and_deadline_limits_retry(self):
+        session = self.open()
+        for code in (123, None):
+            error = self.access_error(code)
+            with self.subTest(code=code), patch("yeone_ocr.collate.section_edit.time.sleep") as sleep, \
+                    patch("yeone_ocr.collate.section_edit.os.replace", side_effect=error) as replace, \
+                    self.assertRaises(SaveAccessError):
+                session.save({2: "Alpha better gamma."})
+            replace.assert_called_once()
+            sleep.assert_not_called()
+        with patch("yeone_ocr.collate.section_edit.time.monotonic", side_effect=(0, 1)), \
+                patch("yeone_ocr.collate.section_edit.time.sleep") as sleep, \
+                patch("yeone_ocr.collate.section_edit.os.replace", side_effect=self.access_error()) as replace, \
+                self.assertRaises(SaveAccessError):
+            session._retry_save_access(lambda: os.replace("stage", self.corrected), self.corrected)
+        replace.assert_called_once()
+        sleep.assert_not_called()
+        self.assertFalse(self.corrected.exists())
+        self.assertFalse(manual_history_path(self.corrected).exists())
+
+    def test_competing_writes_during_access_wait_are_never_overwritten(self):
+        session = self.open()
+        session.save({2: "Alpha better gamma."})
+        history_path = manual_history_path(self.corrected)
+        baseline = {path: path.read_bytes() for path in (self.source, self.corrected, self.pdf, history_path)}
+        real_replace = os.replace
+        for changed in baseline:
+            with self.subTest(changed=changed.name):
+                for path, data in baseline.items():
+                    path.write_bytes(data)
+                current = self.open()
+                attempts = []
+                external = baseline[changed] + b"external writer"
+                def inaccessible(src, dst):
+                    if Path(dst) == self.corrected:
+                        attempts.append(True)
+                        raise self.access_error(32)
+                    return real_replace(src, dst)
+                with patch("yeone_ocr.collate.section_edit.os.replace", side_effect=inaccessible), \
+                        patch("yeone_ocr.collate.section_edit.time.sleep", side_effect=lambda _: changed.write_bytes(external)), \
+                        self.assertRaises(ConflictError):
+                    current.save({4: "Memo changed text."})
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(changed.read_bytes(), external)
+                if changed != history_path:
+                    self.assertEqual(history_path.read_bytes(), baseline[history_path])
+                if changed != self.corrected:
+                    self.assertEqual(self.corrected.read_bytes(), baseline[self.corrected])
+                self.assertFalse(list(self.root.glob(".*.tmp")))
+
+    def test_rollback_retry_compares_own_intent_but_does_not_require_unchanged_document(self):
+        self.open().save({2: "Alpha better gamma."})
+        history_path = manual_history_path(self.corrected)
+        target_bytes, history_bytes = self.corrected.read_bytes(), history_path.read_bytes()
+        real_replace = os.replace
+        for competing in (self.corrected, history_path):
+            with self.subTest(competing=competing.name):
+                self.corrected.write_bytes(target_bytes)
+                history_path.write_bytes(history_bytes)
+                session = self.open()
+                publications = []
+                external = (target_bytes if competing == self.corrected else history_bytes) + b"competing"
+                def fail_then_rollback(src, dst):
+                    if Path(dst) == self.corrected:
+                        raise PermissionError("persistent primary failure")
+                    if Path(dst) == history_path:
+                        publications.append(True)
+                        if len(publications) == 2:
+                            raise self.access_error(33)
+                    return real_replace(src, dst)
+                with patch("yeone_ocr.collate.section_edit.os.replace", side_effect=fail_then_rollback), \
+                        patch("yeone_ocr.collate.section_edit.time.sleep", side_effect=lambda _: competing.write_bytes(external)), \
+                        self.assertRaises(SaveAccessError) as caught:
+                    session.save({4: "Memo changed text."})
+                self.assertEqual(caught.exception.path, self.corrected)
+                self.assertEqual(competing.read_bytes(), external)
+                self.assertEqual(len(publications), 3 if competing == self.corrected else 2)
+                if competing == self.corrected:
+                    self.assertEqual(history_path.read_bytes(), history_bytes)
+
+    def test_rollback_first_attempt_rechecks_history_after_staging(self):
+        from yeone_ocr.collate import section_edit
+        session = self.open()
+        session.save({2: "Alpha better gamma."})
+        history_path = manual_history_path(self.corrected)
+        history_bytes, target_bytes = history_path.read_bytes(), self.corrected.read_bytes()
+        external = history_bytes + b"external history during rollback staging"
+        real_stage, real_replace = section_edit._stage_bytes, os.replace
+        def competing_stage(destination, data):
+            result = real_stage(destination, data)
+            if destination == history_path and data == history_bytes:
+                history_path.write_bytes(external)
+            return result
+        def fail_document(src, dst):
+            if Path(dst) == self.corrected:
+                raise PermissionError("primary access failure")
+            return real_replace(src, dst)
+        with patch.object(section_edit, "_stage_bytes", side_effect=competing_stage), \
+                patch.object(section_edit.os, "replace", side_effect=fail_document), \
+                self.assertRaises(SaveAccessError):
+            session.save({4: "Memo changed text."})
+        self.assertEqual(history_path.read_bytes(), external)
+        self.assertEqual(self.corrected.read_bytes(), target_bytes)
+        with self.assertRaises(ConflictError):
+            session.save({4: "Memo changed text."})
+
+    def test_access_error_names_blocked_backup_or_history_file(self):
+        self.open().save({2: "Alpha better gamma."})
+        history_path = manual_history_path(self.corrected)
+        history_bytes, target_bytes = history_path.read_bytes(), self.corrected.read_bytes()
+        real_replace = os.replace
+        for blocked in (self.corrected.with_suffix(".bak.hwpx"), history_path.with_suffix(".bak.json"), history_path):
+            with self.subTest(blocked=blocked.name):
+                session = self.open()
+                def denied(src, dst):
+                    if Path(dst) == blocked:
+                        raise self.access_error(32)
+                    return real_replace(src, dst)
+                with patch("yeone_ocr.collate.section_edit.os.replace", side_effect=denied), \
+                        patch("yeone_ocr.collate.section_edit.time.sleep"), self.assertRaises(SaveAccessError) as caught:
+                    session.save({4: "Memo changed text."})
+                self.assertEqual(caught.exception.path, blocked)
+                self.assertEqual(caught.exception.error_code, 32)
+                self.assertEqual(history_path.read_bytes(), history_bytes)
+                self.assertEqual(self.corrected.read_bytes(), target_bytes)
+                self.assertFalse(list(self.root.glob(".*.tmp")))
+
+    def test_stage_cleanup_failure_does_not_hide_save_error_or_success(self):
+        real_unlink, real_replace = Path.unlink, os.replace
+        def locked_stage(path, *args, **kwargs):
+            if path.suffix == ".tmp":
+                raise PermissionError("temporary file cleanup locked")
+            return real_unlink(path, *args, **kwargs)
+        def fail_document(src, dst):
+            if Path(dst) == self.corrected:
+                raise PermissionError("primary document access failure")
+            return real_replace(src, dst)
+        session = self.open()
+        with patch("pathlib.Path.unlink", new=locked_stage), \
+                patch("yeone_ocr.collate.section_edit.os.replace", side_effect=fail_document), \
+                self.assertRaises(SaveAccessError) as caught:
+            session.save({2: "Alpha better gamma."})
+        self.assertEqual(caught.exception.path, self.corrected)
+        self.assertFalse(self.corrected.exists())
+        self.assertFalse(manual_history_path(self.corrected).exists())
+        with patch("pathlib.Path.unlink", new=locked_stage):
+            self.assertEqual(session.save({2: "Alpha better gamma."}).saved_count, 1)
+        self.assertEqual(next(p.corrected_text for p in self.open().paragraphs if p.index == 2), "Alpha better gamma.")
+
     def test_failed_document_and_metadata_rollback_leave_safe_durable_intent(self):
         session = self.open()
         session.save({2: "Alpha better gamma."})
@@ -867,6 +1081,10 @@ class ManualSectionEditing(unittest.TestCase):
         reopened = self.open()
         self.assertEqual(next(p.corrected_text for p in reopened.paragraphs if p.index == 4), "Memo body text.")
         self.assertFalse(list(self.root.glob(".*.tmp")))
+        # The session adopts only its own still-valid durable intent, allowing
+        # another save after both locks are released without losing the draft.
+        self.assertEqual(session.save({4: "Memo changed text."}).saved_count, 1)
+        self.assertEqual(next(p.corrected_text for p in self.open().paragraphs if p.index == 4), "Memo changed text.")
 
     def test_history_intent_is_durable_before_document_replacement(self):
         session = self.open()
