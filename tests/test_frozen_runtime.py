@@ -295,6 +295,8 @@ class FrozenRuntime(unittest.TestCase):
         for field in ("edited_marks_cleared", "mixed_author_styles_restored",
                       "untouched_marks_and_paragraphs_preserved", "existing_copy_and_backup_preserved",
                       "manual_history_and_protection_retained", "saved_file_reopened",
+                      "ascii_space_only_changes_preserve_protection", "space_validation_is_read_only",
+                      "space_adjusted_manual_save_reopens", "external_character_changes_still_blocked",
                       "source_pdf_and_hwpx_unchanged"):
             self.assertTrue(result[field], field)
         self.assertEqual(result["ocr_calls"], 0)

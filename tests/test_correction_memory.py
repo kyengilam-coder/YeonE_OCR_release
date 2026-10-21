@@ -182,6 +182,31 @@ class CorrectionMemoryTests(unittest.TestCase):
         self.assertEqual(memory.count, 1)
         self.assertNotIn('"사람이 저장한 글자":"瀉"', memory.prompt)
 
+    def test_external_ascii_spaces_do_not_activate_learning_or_join_old_chain(self):
+        self.session.save({self.index: self.after})
+        self.assertEqual(self.memory().count, 1)
+        archive = _Archive(self.target.read_bytes())
+        current = self.after.replace("火", " 火 ")
+        _replace_text(archive.paragraphs[self.index], current)
+        archive.write(self.target, {archive.locations[self.index][0]})
+        target_bytes = self.target.read_bytes()
+        history_bytes = manual_history_path(self.target).read_bytes()
+        memory = self.memory()
+        self.assertEqual(memory.count, 0)
+        self.assertEqual(memory.prompt, "")
+        self.assertEqual(memory.warning, "")
+        self.assertEqual(manual_protected_paragraphs(self.target), {self.index})
+        self.assertEqual(self.open().correction_records(), [])
+        self.assertEqual(self.target.read_bytes(), target_bytes)
+        self.assertEqual(manual_history_path(self.target).read_bytes(), history_bytes)
+        self.open().save({self.index: current.replace("肺熱", "肺火")})
+        events = self.history()["correction_events"]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["before"], current)
+        self.assertIsNone(events[-1]["parent_id"])
+        self.assertEqual(self.memory().count, 1)
+        self.assertNotIn('"사람이 저장한 글자":"瀉"', self.memory().prompt)
+
     def test_conflicting_same_context_examples_are_excluded(self):
         self.session.save({self.index: self.after, self.index + 1: self.before.replace("사", "紗")})
         self.assertEqual(self.memory().count, 0)

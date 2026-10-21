@@ -15,7 +15,7 @@ from yeone_ocr.collate import run
 from yeone_ocr.collate.collate import Item
 from yeone_ocr.collate.hwpx_edit import paragraph_text
 from yeone_ocr.collate.section_edit import (
-    SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
+    SectionEditSession, _Archive, _replace_text, manual_history_path, manual_protected_paragraphs,
 )
 from yeone_ocr.collate.sections import HwpxBook
 from yeone_ocr.schema import PageReading
@@ -165,6 +165,27 @@ class ManualCollationReplay(unittest.TestCase):
             book.doc.close()
         self.assertEqual(observed, {"repeat": [], "witness": []})
         self.assertEqual(self.target.read_bytes(), before)
+
+    def test_external_ascii_spaces_remain_protected_from_ocr_replay(self):
+        current = "天 骨皮 一錢。 "
+        archive = _Archive(self.target.read_bytes())
+        _replace_text(archive.paragraphs[self.manual_index], current)
+        archive.write(self.target, {archive.locations[self.manual_index][0]})
+        protected_xml = self._paragraph_xml(self.manual_index)
+        history_bytes = manual_history_path(self.target).read_bytes()
+        held = self._proposal(self.manual_index, "天", "地")
+        eligible = self._proposal(self.other_index, "甘", "炙")
+        result = self._replay([held, eligible])
+        self.assertFalse(held.auto)
+        self.assertEqual(self._paragraph_xml(self.manual_index), protected_xml)
+        self.assertEqual(manual_history_path(self.target).read_bytes(), history_bytes)
+        self.assertEqual(self.source.read_bytes(), self.original_bytes)
+        saved = _Archive(self.target.read_bytes())
+        self.assertEqual(paragraph_text(saved.paragraphs[self.manual_index]), current)
+        self.assertEqual(paragraph_text(saved.paragraphs[self.other_index]), "炙草二錢。")
+        self.assertEqual(manual_protected_paragraphs(self.target), {self.manual_index})
+        report = json.loads(Path(result["report"]).with_suffix(".json").read_text("utf-8"))
+        self.assertEqual(report["manual_held_items"], 1)
 
     def test_outline_mismatch_keeps_manual_corrected_file_and_history_in_place(self):
         archive = _Archive(self.target.read_bytes())

@@ -222,8 +222,10 @@ def _load_history(target: Path, data: bytes | None) -> dict:
 def manual_protected_paragraphs(target_path, paragraphs=None) -> set[int]:
     """Validated manual paragraphs for a loaded ``HwpxBook.paragraphs``.
 
-    Missing history means no manual edits. Malformed history or a changed
-    protected paragraph fails closed rather than permitting an OCR overwrite.
+    Missing history means no manual edits. The exact identity/hash path remains
+    authoritative. A validated text event can additionally prove that only
+    ASCII spaces changed; that paragraph stays protected without rewriting its
+    current text, formatting or history. Learning still requires an exact chain.
     """
     target = Path(target_path)
     try:
@@ -236,14 +238,40 @@ def manual_protected_paragraphs(target_path, paragraphs=None) -> set[int]:
     if len(paragraphs) != history["paragraph_count"]:
         raise ManualProtectionError("수동 교정 이후 문단 수가 달라졌습니다. 구획의 위치를 다시 확인하십시오.")
     protected = set()
+    space_keys = None
     for key, record in history["paragraphs"].items():
         index = int(key)
         paragraph = _element(paragraphs[index])
-        if (_signature(paragraph) != record["signature"]
-                or _text_hash(paragraph_text(paragraph)) not in record["text_hashes"]):
-            raise ManualProtectionError(f"수동 교정한 {index + 1}번 문단이 외부에서 변경되었습니다. 자동 교정 전에 해당 문단을 확인하십시오.")
+        message = f"수동 교정한 {index + 1}번 문단과 수정 기록의 일치를 확인할 수 없습니다. 자동 교정 전에 해당 문단의 글자·구조와 수정 기록을 확인하십시오."
+        if _signature(paragraph) != record["signature"]:
+            raise ManualProtectionError(message)
+        text = paragraph_text(paragraph)
+        if _text_hash(text) not in record["text_hashes"]:
+            if space_keys is None:
+                space_keys = _protected_ascii_space_keys(history)
+            if text.replace(" ", "") not in space_keys.get(index, set()):
+                raise ManualProtectionError(message)
         protected.add(index)
     return protected
+
+
+def _protected_ascii_space_keys(history: dict) -> dict[int, set[str]]:
+    """Read independently validated event text; malformed/legacy data proves nothing."""
+    from ..correction_memory import _events
+    try:
+        events = _events(history)
+    except ValueError:
+        return {}
+    result: dict[int, set[str]] = {}
+    for event in events:
+        index = event["paragraph"]
+        record = history["paragraphs"].get(str(index))
+        if (record is None or event["signature"] != record["signature"]
+                or event["before_sha256"] not in record["text_hashes"]
+                or event["after_sha256"] not in record["text_hashes"]):
+            continue
+        result.setdefault(index, set()).update(text.replace(" ", "") for text in (event["before"], event["after"]))
+    return result
 
 
 class _Archive:

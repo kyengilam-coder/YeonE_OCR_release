@@ -17,6 +17,7 @@ from yeone_ocr.collate.hwpx_edit import HP, HH, Editor, _slots, _tag_of, paragra
 from yeone_ocr.collate.section_edit import (
     ConflictError, ManualProtectionError, SectionEditError, SectionEditSession,
     TextStyleSpan, _Archive, _style_key, manual_history_path, manual_protected_paragraphs,
+    _replace_text,
 )
 from yeone_ocr.collate.sections import HwpxBook
 
@@ -911,6 +912,97 @@ class ManualSectionEditing(unittest.TestCase):
         archive.write(self.corrected, {"Contents/section0.xml"})
         with self.assertRaises(ManualProtectionError):
             manual_protected_paragraphs(self.corrected)
+
+    def test_ascii_space_only_external_edit_stays_protected_without_rewriting_text_color_or_history(self):
+        self.mark_copy()
+        saved_text = "Alpha better gamma. "
+        self.open().save({2: saved_text})
+        saved_bytes = self.corrected.read_bytes()
+        history_path = manual_history_path(self.corrected)
+        history_bytes = history_path.read_bytes()
+        source_bytes = self.source.read_bytes()
+        # The first case removes exactly three U+0020 characters. The second
+        # moves word boundaries; protection preserves the actual current text.
+        for current in (saved_text.replace(" ", ""), " Al phabetterga mma.  ", "Alphabeta gamma."):
+            with self.subTest(current=current):
+                self.corrected.write_bytes(saved_bytes)
+                history_path.write_bytes(history_bytes)
+                archive = _Archive(saved_bytes)
+                _replace_text(archive.paragraphs[2], current)
+                archive.write(self.corrected, {archive.locations[2][0]})
+                external_bytes = self.corrected.read_bytes()
+                self.assertEqual(manual_protected_paragraphs(self.corrected), {2})
+                session = self.open()
+                self.assertEqual(next(p.corrected_text for p in session.paragraphs if p.index == 2), current)
+                self.assertEqual(session.save({}).saved_count, 0)
+                self.assertEqual(self.corrected.read_bytes(), external_bytes)
+                self.assertEqual(history_path.read_bytes(), history_bytes)
+                self.assertEqual(self.source.read_bytes(), source_bytes)
+                session.save({2: current + "!"})
+                self.assertEqual(next(p.corrected_text for p in self.open().paragraphs if p.index == 2), current + "!")
+                self.assertEqual(manual_protected_paragraphs(self.corrected), {2})
+
+    def test_space_equivalence_never_normalizes_other_characters_or_structure(self):
+        saved_text = "Alpha bétta gamma."
+        self.open().save({2: saved_text})
+        saved = self.corrected.read_bytes()
+        for changed in ("Alpha betta gamma.", "Alpha be\u0301tta gamma.", "Alpha bétta gamma,",
+                        "Alpha\tbétta gamma.", "Alpha\nbétta gamma.", "Alpha\r bétta gamma.",
+                        "Alpha\u00a0bétta gamma.", "Alpha\u3000bétta gamma.", "Alpha\u200bbétta gamma."):
+            with self.subTest(changed=changed):
+                archive = _Archive(saved)
+                slots = _slots(archive.paragraphs[2])
+                for slot in slots:
+                    slot.text = ""
+                slots[0].text = changed
+                archive.write(self.corrected, {archive.locations[2][0]})
+                before = self.corrected.read_bytes()
+                with self.assertRaises(ManualProtectionError):
+                    manual_protected_paragraphs(self.corrected)
+                self.assertEqual(self.corrected.read_bytes(), before)
+        archive = _Archive(saved)
+        _replace_text(archive.paragraphs[2], saved_text.replace(" ", ""))
+        archive.paragraphs[2].set("id", "999999")
+        archive.write(self.corrected, {archive.locations[2][0]})
+        with self.assertRaises(ManualProtectionError):
+            manual_protected_paragraphs(self.corrected)
+
+    def test_space_fallback_requires_valid_bound_event_and_both_registered_hashes(self):
+        self.open().save({2: "Alpha better gamma."})
+        archive = _Archive(self.corrected.read_bytes())
+        _replace_text(archive.paragraphs[2], "Alphabettergamma.")
+        archive.write(self.corrected, {archive.locations[2][0]})
+        path = manual_history_path(self.corrected)
+        original = json.loads(path.read_text("utf-8"))
+        variants = []
+        legacy = deepcopy(original)
+        legacy.pop("feedback_version")
+        legacy.pop("correction_events")
+        variants.append(legacy)
+        for mutate in (
+            lambda history: history.update(feedback_version=2),
+            lambda history: history["correction_events"][0].update(after_sha256="0" * 64),
+            lambda history: history["correction_events"][0].update(signature="0" * 64),
+            lambda history: history["correction_events"][0].update(paragraph=3),
+            lambda history: history["correction_events"][0].update(parent_id=history["correction_events"][0]["id"]),
+            lambda history: history["paragraphs"]["2"]["text_hashes"].remove(history["correction_events"][0]["before_sha256"]),
+            lambda history: history["paragraphs"]["2"]["text_hashes"].remove(history["correction_events"][0]["after_sha256"]),
+        ):
+            history = deepcopy(original)
+            mutate(history)
+            variants.append(history)
+        for index, history in enumerate(variants):
+            with self.subTest(variant=index):
+                path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+                with self.assertRaises(ManualProtectionError):
+                    manual_protected_paragraphs(self.corrected)
+        path.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(manual_protected_paragraphs(self.corrected), {2})
+
+    def test_exact_hash_fast_path_does_not_validate_or_require_learning_extension(self):
+        self.open().save({2: "Alpha better gamma."})
+        with patch("yeone_ocr.correction_memory._events", side_effect=AssertionError("exact hash needs no fallback")):
+            self.assertEqual(manual_protected_paragraphs(self.corrected), {2})
 
     def test_plain_editor_serialization_keeps_manual_history_valid(self):
         self.open().save({2: "Alpha better gamma."})

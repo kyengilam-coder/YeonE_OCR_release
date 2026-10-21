@@ -492,13 +492,16 @@ def color_only_collation_probe(folder: Path) -> dict:
 
 def manual_style_cleanup_probe(folder: Path) -> dict:
     """Restore only human-edited OCR marks while keeping author formatting."""
+    import hashlib
     import pymupdf
     from hwpx.document import HwpxDocument
     from lxml import etree
     from .collate.collate import Item
-    from .collate.hwpx_edit import Editor, _canon, _slots, _tag_of
+    from .collate.hwpx_edit import Editor, HP, _canon, _slots, _tag_of, paragraph_text
     from .collate.sections import HwpxBook
-    from .collate.section_edit import SectionEditSession, manual_history_path, manual_protected_paragraphs
+    from .collate.section_edit import (
+        ManualProtectionError, SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
+    )
 
     source = folder / "manual-style.hwpx"
     target = folder / "manual-style_교정.hwpx"
@@ -595,11 +598,67 @@ def manual_style_cleanup_probe(folder: Path) -> dict:
     assert history["correction_events"][-1]["before"] == "甲辛丙丁壬己"
     assert history["correction_events"][-1]["after"] == "甲子丑寅卯辰巳己"
     assert manual_protected_paragraphs(target) == {index}
+
+    # A new human correction has spaces in its saved journal. Simulate an
+    # external editor removing/adding ASCII spaces without changing characters,
+    # paragraph identity or any run's formatting.
+    spaced = "甲 子丑寅 卯辰巳庚"
+    reopened.save({index: spaced})
+    history_path = manual_history_path(target)
+    history_bytes = history_path.read_bytes()
+    history = json.loads(history_bytes)
+
+    def externally_edit_text(transform):
+        archive = _Archive(target.read_bytes())
+        paragraph = archive.paragraphs[index]
+        for node in paragraph.iter(HP + "t"):
+            if node.text:
+                node.text = transform(node.text)
+        current = paragraph_text(paragraph)
+        archive.write(target, {archive.locations[index][0]})
+        return current
+
+    for operation in (lambda text: text.replace(" ", ""), lambda text: " " + text + " "):
+        current = externally_edit_text(operation)
+        assert current.replace(" ", "") == spaced.replace(" ", "") and current != spaced
+        # Neither variant may accidentally pass the pre-existing exact-hash path.
+        assert hashlib.sha256(current.encode("utf-8")).hexdigest() not in history["paragraphs"][str(index)]["text_hashes"]
+        changed_bytes = target.read_bytes()
+        assert manual_protected_paragraphs(target) == {index}
+        reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == current
+        assert target.read_bytes() == changed_bytes and history_path.read_bytes() == history_bytes
+
+    final_text = current.replace("庚", "辛")
+    saved = reopened.save({index: final_text})
+    assert saved.backup_path.read_bytes() == changed_bytes
+    final_history = json.loads(history_path.read_bytes())
+    assert final_history["correction_events"][:-1] == history["correction_events"]
+    assert final_history["correction_events"][-1]["before"] == current
+    assert final_history["correction_events"][-1]["after"] == final_text
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == final_text
+    assert manual_protected_paragraphs(target) == {index}
+    valid_bytes, final_history_bytes = target.read_bytes(), history_path.read_bytes()
+    externally_edit_text(lambda text: text.replace("甲", "乙"))
+    invalid_bytes = target.read_bytes()
+    for load in (lambda: manual_protected_paragraphs(target),
+                 lambda: SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)):
+        try:
+            load()
+        except ManualProtectionError:
+            pass
+        else:
+            raise AssertionError("An external character change must remain protected")
+    assert target.read_bytes() == invalid_bytes and history_path.read_bytes() == final_history_bytes
+    target.write_bytes(valid_bytes)  # Leave this synthetic probe's valid result in place.
     assert all(path.read_bytes() == data for path, data in originals.items())
     return {"edited_marks_cleared": True, "mixed_author_styles_restored": True,
             "untouched_marks_and_paragraphs_preserved": True, "existing_copy_and_backup_preserved": True,
             "manual_history_and_protection_retained": True, "saved_file_reopened": True,
             "cross_style_length_change_saved_and_reopened": True,
+            "ascii_space_only_changes_preserve_protection": True, "space_validation_is_read_only": True,
+            "space_adjusted_manual_save_reopens": True, "external_character_changes_still_blocked": True,
             "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
 
 
