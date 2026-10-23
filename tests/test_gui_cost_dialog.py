@@ -268,6 +268,10 @@ class CostDialogRealTk(unittest.TestCase):
         cell = [w for w in d.inner.winfo_children() if w.winfo_class() == "Label" and str(w.cget("text")).strip()][3]
         self.assertIn(str(d), cell.bindtags()); self.assertEqual(cell.bind("<MouseWheel>"), "")
         self.assertTrue(d.bind("<MouseWheel>") and d.bind("<Button-5>") and d.bind("<Next>"))
+        # This test simulates a visible scrollbar. Also provide overflowing
+        # content: the natural dialog can fit on hosts with different Tk fonts.
+        d.cv.configure(scrollregion=(0, 0, d.cv.winfo_width(),
+                       max(d.inner.winfo_reqheight(), d.cv.winfo_height() + P(200))))
         with mock.patch.object(d.sb, "winfo_ismapped", lambda: True):
             for ev in (types.SimpleNamespace(widget=cell, num=5, delta=0), types.SimpleNamespace(widget=cell, num=0, delta=-120)):
                 # Each wheel format starts at the top. At high DPI one unit can

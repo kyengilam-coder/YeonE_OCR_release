@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.14.5'
+          python-version: '3.13.15'
           architecture: x64
           cache: pip
           cache-dependency-path: packaging/requirements-windows.lock.txt
@@ -38,13 +38,24 @@ jobs:
           python -m venv work/windows-release/venv
           if ($LASTEXITCODE -ne 0) { throw 'Virtual environment creation failed' }
           $python = (Resolve-Path work/windows-release/venv/Scripts/python.exe).Path
-          & $python -m pip install -r packaging/requirements-windows.lock.txt
+          $env:PYYAML_FORCE_LIBYAML = '0'
+          & $python -m pip wheel PyYAML==6.0.1 --wheel-dir work/windows-release/wheels
+          if ($LASTEXITCODE -ne 0) { throw 'PyYAML wheel creation failed' }
+          & $python -m pip install --find-links work/windows-release/wheels -r packaging/requirements-windows.lock.txt
           if ($LASTEXITCODE -ne 0) { throw 'Pinned dependency installation failed' }
           "BUILD_PYTHON=$python" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Test application and release tools
         run: |
           & $env:BUILD_PYTHON -B -X utf8 tools/check_regression.py --output work/release-regression
           if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+      - name: Prepare pinned offline PP-OCRv6 payload
+        run: |
+          python tools/prepare_msvc_runtime.py --output work/msvc-runtime --cache work/msvc-download
+          if ($LASTEXITCODE -ne 0) { throw 'Microsoft runtime extraction failed' }
+          python scripts/install_ppocrv6.py --root work/engine-source
+          if ($LASTEXITCODE -ne 0) { throw 'Engine setup failed' }
+          & ./work/engine-source/tools/ppocrv6/venv/Scripts/python.exe tools/prepare_ppocrv6_bundle.py --source work/engine-source/tools/ppocrv6 --output work/engine-bundle --msvc-runtime work/msvc-runtime
+          if ($LASTEXITCODE -ne 0) { throw 'Engine bundle preparation failed' }
       - name: Locate Inno Setup
         run: |
           $candidates = @(
@@ -61,7 +72,7 @@ jobs:
           "INNO_COMPILER=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build and verify installer and portable application
         run: |
-          ./tools/build_windows.ps1 -Python $env:BUILD_PYTHON -InnoCompiler $env:INNO_COMPILER
+          ./tools/build_windows.ps1 -Python $env:BUILD_PYTHON -InnoCompiler $env:INNO_COMPILER -PPOCRv6Bundle work/engine-bundle
       - name: Verify installation, reinstall and removal
         run: |
           $build = Get-Content -LiteralPath work/windows-release/build-result.json -Raw | ConvertFrom-Json

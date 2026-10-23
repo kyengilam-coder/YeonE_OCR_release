@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "engine": "ppocrv6",
+  "rapidocr_version": "3.10.0",
+  "onnxruntime_version": "1.25.1",
+  "model_family": "PP-OCRv6",
+  "model_profile": "medium",
+  "license": "Apache-2.0",
+  "source": "https://github.com/RapidAI/RapidOCR/blob/8ac45f4e731f50c37a1f5f9cf89294e08c1b2c15/python/rapidocr/default_models.yaml",
+  "models": [
+    {
+      "file": "PP-OCRv6_det_medium.onnx",
+      "sha256": "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/det/PP-OCRv6_det_medium.onnx"
+    },
+    {
+      "file": "PP-OCRv6_rec_medium.onnx",
+      "sha256": "eef444829dbbe18d7fea59a3f6eb75647518d2b3a9568d27c92e42940204894b",
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/rec/PP-OCRv6_rec_medium.onnx"
+    }
+  ],
+  "packages": {
+    "certifi": "2026.10.23",
+    "charset-normalizer": "3.5.2",
+    "colorama": "0.4.6",
+    "colorlog": "6.12.0",
+    "flatbuffers": "25.12.19",
+    "idna": "3.20",
+    "numpy": "2.5.4",
+    "omegaconf": "2.4.0",
+    "onnxruntime": "1.25.1",
+    "opencv-python-headless": "5.0.0.93",
+    "packaging": "26.3",
+    "pillow": "13.0.0",
+    "protobuf": "7.36.2",
+    "pyclipper": "1.4.0",
+    "PyYAML": "6.0.3",
+    "rapidocr": "3.10.0",
+    "requests": "2.34.2",
+    "shapely": "2.2.0",
+    "six": "1.17.0",
+    "tqdm": "4.70.1",
+    "urllib3": "2.8.0"
+  },
+  "license_file": {
+    "file": "LICENSE.RapidOCR.txt",
+    "url": "https://raw.githubusercontent.com/RapidAI/RapidOCR/8ac45f4e731f50c37a1f5f9cf89294e08c1b2c15/LICENSE",
+    "sha256": "3e0af25fdd06aa9586ae97adb00ea927ebe5a3805ac77d2d3a81ce5f55693333"
+  }
+}

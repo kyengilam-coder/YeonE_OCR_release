@@ -12,7 +12,10 @@ from pathlib import Path
 import tempfile
 import time
 
+from .reading_order import VERTICAL_RTL_ENGINES, order_vertical_payload
+
 ENGINE_LANGUAGES = {
+    "ppocrv6": ("chi_sim", "chi_tra", "chi_sim+eng", "chi_tra+eng"),
     "rapidocr": ("chi_sim", "chi_tra", "kor", "chi_sim+eng", "chi_tra+eng", "kor+eng"),
     "easyocr": ("chi_sim", "chi_tra", "kor"),
 }
@@ -53,21 +56,24 @@ def inspect_engine(engine: str, *, should_stop=None, engine_root=None) -> dict:
     is a hard error: it must never select another model as an implicit fallback.
     """
     from .ocr import OCRError, OCRCancelled, _cached_file_sha256, _cancelled
-    from .runtime import default_engine_root, worker_path
+    from .runtime import engine_root_for, worker_path
     if engine not in ENGINE_LANGUAGES:
         raise ValueError("지원하지 않는 OCR 엔진입니다: " + str(engine))
     info = {"available": False, "engine": engine, "languages": []}
     try:
         _cancelled(should_stop)
-        selected_root = default_engine_root(engine_root)
+        selected_root = engine_root_for(engine, engine_root)
         folder = selected_root / "tools" / engine
-        executable = folder / "venv" / "Scripts" / "python.exe"
-        if not executable.is_file():
+        if not (folder / "installation.json").is_file():
+            raise OCRError(f"{engine}가 준비되지 않았습니다. docs/LOCAL_OCR.md의 로컬 엔진 설치 절차를 확인하세요.")
+        installation = _read_json(folder / "installation.json", 1_000_000)
+        standalone = engine == "ppocrv6" and installation.get("runtime_layout") == "standalone-python"
+        executable = folder / "runtime" / "python.exe" if standalone else folder / "venv" / "Scripts" / "python.exe"
+        if not standalone and not executable.is_file():
             executable = folder / "venv" / "bin" / "python"
         worker = worker_path(engine)
         if not executable.is_file() or not worker.is_file() or not (folder / "installation.json").is_file():
             raise OCRError(f"{engine}가 준비되지 않았습니다. docs/LOCAL_OCR.md의 로컬 엔진 설치 절차를 확인하세요.")
-        installation = _read_json(folder / "installation.json", 1_000_000)
         if installation.get("engine") != engine:
             raise OCRError("로컬 엔진 설치 기록의 엔진 이름이 일치하지 않습니다.")
         records, mapping = installation.get("models"), installation.get("language_models")
@@ -133,10 +139,13 @@ def parse_worker_result(path: Path, width: int, height: int) -> dict:
     return payload
 
 
-def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, should_stop, engine_root=None):
+def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, should_stop, engine_root=None,
+                         direction="horizontal"):
     from .ocr import OCRError, RecognitionResult, _cancelled, _render, _run, file_sha256
     from .runtime import subprocess_environment
     start = time.monotonic()
+    if direction not in ("horizontal", "vertical"):
+        raise ValueError("읽기 방향은 horizontal 또는 vertical이어야 합니다.")
     source = Path(path).expanduser().resolve()
     if not source.is_file():
         raise OCRError("원본 파일을 찾을 수 없습니다.")
@@ -150,6 +159,15 @@ def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, 
         raise OCRError(info["message"])
     if languages not in info["languages"]:
         raise OCRError("선택한 언어의 모델이 설치되지 않았습니다: " + languages)
+    model_names = list(info["language_models"][languages])
+    if engine == "easyocr" and languages == "chi_tra" and direction == "vertical":
+        # The auxiliary recognizer is part of the ordinary EasyOCR installation.
+        # Include its verified bytes even if this page needs no auxiliary call.
+        auxiliary = "zh_sim_g2.pth"
+        if auxiliary not in info["models"]:
+            raise OCRError("EasyOCR 번체 세로쓰기의 보조 인식 모델이 없습니다. EasyOCR 설치를 완료하세요: " + auxiliary)
+        if auxiliary not in model_names:
+            model_names.append(auxiliary)
     original_hash = file_sha256(source)
     with tempfile.TemporaryDirectory(prefix=f"abocr-{engine}-") as folder:
         image_path, output = Path(folder) / "input.png", Path(folder) / "reading.json"
@@ -158,14 +176,18 @@ def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, 
         _cancelled(should_stop)
         argv = [info["executable"], "-I", "-X", "utf8", info["worker"], "--input", str(image_path),
                 "--output", str(output), "--languages", languages, "--model-dir", info["model_dir"]]
+        if engine in ("easyocr", "rapidocr", "ppocrv6"):
+            argv.extend(["--direction", direction])
         _run(argv, timeout=timeout, should_stop=should_stop, engine_name=engine, include_stderr=False,
              env=subprocess_environment())
         payload = parse_worker_result(output, width, height)
+        if engine in VERTICAL_RTL_ENGINES and direction == "vertical":
+            payload = order_vertical_payload(payload)
     if file_sha256(source) != original_hash:
         raise OCRError("인식 중 원본 파일이 변경되어 결과를 적용하지 않습니다.")
     _cancelled(should_stop)
     metadata = dict(payload["engine_metadata"])
-    metadata["model_files"] = {name: info["models"][name] for name in info["language_models"][languages]}
+    metadata["model_files"] = {name: info["models"][name] for name in model_names}
     metadata["installation"] = info["installation"]
     metadata["psm_applicable"] = False
     return RecognitionResult(text=payload["text"], words=payload["words"], source_path=str(source),

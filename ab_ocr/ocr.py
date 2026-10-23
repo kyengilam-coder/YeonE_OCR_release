@@ -64,7 +64,7 @@ def file_sha256(path: str | Path) -> str:
 
 
 def find_tesseract(executable=None, *, engine_root=None) -> Path | None:
-    from .runtime import default_engine_root
+    from .runtime import engine_root_for
     explicit = str(executable or os.environ.get("YEONE_OCR_TESSERACT", "")
                    or os.environ.get("AB_OCR_TESSERACT", "")).strip().strip('"')
     if explicit:
@@ -73,7 +73,7 @@ def find_tesseract(executable=None, *, engine_root=None) -> Path | None:
             raise OCRError("지정한 Tesseract 실행 파일을 찾을 수 없습니다: " + str(path))
         return path.resolve()
     # An explicitly selected home must never fall back to an unrelated PATH copy.
-    installed = default_engine_root(engine_root) / "tools" / "tesseract" / "tesseract.exe"
+    installed = engine_root_for("tesseract", engine_root) / "tools" / "tesseract" / "tesseract.exe"
     if engine_root is not None or os.environ.get("YEONE_OCR_ENGINE_ROOT") or os.environ.get("AB_OCR_ENGINE_ROOT"):
         return installed.resolve() if installed.is_file() else None
     candidates = [installed]
@@ -372,8 +372,14 @@ def parse_tsv(content: str, width: int, height: int, *, strict=True, warnings=No
 
 def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number=1, psm=3,
                    dpi=300, executable=None, tessdata_dir=None, timeout=180.0,
-                   should_stop=None, engine="tesseract", engine_root=None) -> RecognitionResult:
-    """Recognize one selected page without altering the source or correcting characters."""
+                   should_stop=None, engine="tesseract", engine_root=None, direction="horizontal",
+                   verify_chinese_glyphs=False) -> RecognitionResult:
+    """Recognize a page; optionally verify Chinese Tesseract lines with local fonts."""
+    if verify_chinese_glyphs and (engine != "tesseract" or languages not in
+                                 ("chi_sim", "chi_tra", "chi_sim_vert", "chi_tra_vert")):
+        raise ValueError("자형 검증은 Tesseract의 단일 중국어 언어팩에서 지원합니다.")
+    if direction not in ("horizontal", "vertical"):
+        raise ValueError("읽기 방향은 horizontal 또는 vertical이어야 합니다.")
     if engine != "tesseract":
         from .local_engines import recognize_local_file
         if executable is not None or tessdata_dir is not None:
@@ -381,7 +387,8 @@ def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number
         if psm not in (None, 3):
             raise ValueError("PSM은 Tesseract 전용입니다. 선택한 엔진은 자체 영역 검출을 사용합니다.")
         return recognize_local_file(path, engine=engine, languages=languages, page_number=page_number,
-                                    dpi=dpi, timeout=timeout, should_stop=should_stop, engine_root=engine_root)
+                                    dpi=dpi, timeout=timeout, should_stop=should_stop, engine_root=engine_root,
+                                    direction=direction)
     start = time.monotonic()
     source = Path(path).expanduser().resolve()
     if not source.is_file():
@@ -400,6 +407,7 @@ def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number
         raise OCRError("설치되지 않은 언어: " + ", ".join(missing) +
                        ". 다른 언어로 자동 대체하지 않습니다. 설치 언어: " + ", ".join(info["languages"]))
     original_hash = file_sha256(source)
+    supplement = {}
     _cancelled(should_stop)
     with tempfile.TemporaryDirectory(prefix="abocr-") as folder:
         temporary = Path(folder)
@@ -423,6 +431,16 @@ def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number
             preprocessing["omitted_word_boxes"] = sum(warning["kind"] == "omitted_box" for warning in coordinate_warnings)
             preprocessing["clipped_word_boxes"] = sum(warning["kind"] == "clipped_box" for warning in coordinate_warnings)
             preprocessing["raw_text_preserved"] = True
+        if verify_chinese_glyphs:
+            from .tesseract_glyph import refine
+            def check_verification():
+                _cancelled(should_stop)
+                if time.monotonic()-start >= timeout:
+                    raise OCRError("OCR 실행 제한 시간을 초과했습니다.")
+            text, words, supplement = refine(image_path, text, tsv, words,
+                vertical=languages.endswith("_vert"), check=check_verification)
+            if coordinate_warnings:
+                preprocessing["raw_text_location"] = "engine_metadata.model_result.text"
     if file_sha256(source) != original_hash:
         raise OCRError("인식 중 원본 파일이 변경되어 결과를 적용하지 않습니다.")
     _cancelled(should_stop)
@@ -430,4 +448,4 @@ def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number
                              page_number=page_number, image_width=width, image_height=height,
                              engine_version=info["version"], languages=languages, psm=psm,
                              duration_seconds=time.monotonic() - start, preprocessing=preprocessing,
-                             engine_metadata=_engine_metadata(info, selected))
+                             engine_metadata={**_engine_metadata(info, selected), **supplement})

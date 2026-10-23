@@ -31,7 +31,7 @@ MODEL_SUFFIXES = {".onnx", ".ort", ".pth", ".pt", ".ckpt", ".safetensors", ".tra
                   ".h5", ".hdf5", ".pkl", ".pickle", ".bin", ".model", ".pdmodel", ".pdiparams"}
 SOURCE_DATA = {"yeone_ocr/data/normalization_260929.json", "yeone_ocr/data/preset_basic.json",
                "yeone_ocr/data/preset_kaibao.json", "yeone_ocr/data/preset_regions.json"}
-SOURCE_ENGINE_LOCKS = {"scripts/tesseract-lock.json", "scripts/rapidocr-lock.json", "scripts/easyocr-lock.json"}
+SOURCE_ENGINE_LOCKS = {"scripts/tesseract-lock.json", "scripts/rapidocr-lock.json", "scripts/easyocr-lock.json", "scripts/ppocrv6-lock.json"}
 SOURCE_JSON_DOCS = {"docs/AB_OCR_PROVENANCE.json"}
 SOURCE_TEST_FIXTURES = {f"tests/golden/{name}.json" for name in (
     "flow_default", "flow_records_template3", "flow_template", "flow_template2_pagenum", "flow_template_plain",
@@ -59,7 +59,8 @@ tests/test_editor_gui.py tests/test_evaluation.py tests/test_gui.py tests/test_l
 tests/test_ocr.py tests/test_ocr_document.py tests/test_rapidocr_worker.py tests/test_reports.py
 """.split())
 SOURCE_PACKAGING = {"packaging/YeonE_OCR.spec", "packaging/YeonE_OCR.iss",
-                    "packaging/THIRD_PARTY_NOTICES.txt", "packaging/requirements-windows.lock.txt"}
+                    "packaging/THIRD_PARTY_NOTICES.txt", "packaging/requirements-windows.lock.txt",
+                    "packaging/msvc-runtime-lock.json"}
 LICENSE_SUFFIXES = {"", ".txt", ".md", ".rst", ".py", ".terms", ".apache2", ".mit", ".apache", ".bsd", ".markdown-it"}
 
 
@@ -94,7 +95,7 @@ def source_allowed(name: str) -> bool:
                 or name in SOURCE_DATA
                 or (path.parts[1] == "assets" and path.suffix.lower() in {".ico", ".png", ".svg"}))
     if path.parts[0] in {"tools", "scripts", "tests"}:
-        if path.parts[0] == "tools" and path.parts[1].lower() in {"tesseract", "rapidocr", "easyocr"}:
+        if path.parts[0] == "tools" and path.parts[1].lower() in {"tesseract", "rapidocr", "easyocr", "ppocrv6"}:
             return False
         return path.suffix.lower() in {".py", ".ps1"} or name in SOURCE_ENGINE_LOCKS | SOURCE_TEST_FIXTURES
     if path.parts[0] == "docs":

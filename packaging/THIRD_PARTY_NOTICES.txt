@@ -7,7 +7,7 @@ The referenced license texts and METADATA.txt files are included alongside this 
 Package-provided notices can cover additional native libraries within a wheel.
 The PyInstaller bootloader is listed separately from the application's Python dependencies.
 
-Python 3.14.5
+Python 3.13.15
   URL: https://www.python.org/
   License: See the Python runtime's bundled LICENSE.txt.
   License/notice file: third_party_licenses/python/LICENSE.txt

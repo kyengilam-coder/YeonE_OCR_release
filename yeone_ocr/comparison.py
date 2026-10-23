@@ -20,12 +20,14 @@ import threading
 import uuid
 
 from ab_ocr import ocr
+from ab_ocr.reading_order import VERTICAL_RTL_ENGINES, VERTICAL_RTL_POLICY
 
 FORMAT = "yeone-ocr-comparison"
 VERSION = 1
 MAX_BYTES = 256_000_000
 MAX_TEXT = 2_000_000
-ENGINES = ("tesseract", "rapidocr", "easyocr")
+DEFAULT_ENGINES = ("tesseract", "rapidocr", "easyocr")
+ENGINES = (*DEFAULT_ENGINES, "ppocrv6")
 PROFILES = ("traditional", "simplified", "mixed")
 _HEX = re.compile(r"[a-f0-9]{64}")
 _AI_SECRET_FIELDS = {"apikey", "authorization", "accesstoken", "refreshtoken", "clientsecret", "password",
@@ -119,7 +121,14 @@ def _same_file(a, b):
 def _read(path):
     try:
         with path.open("rb") as stream:
-            data = stream.read(MAX_BYTES + 1)
+            # A bounded read(n) may reserve n bytes even for a tiny project.
+            # Avoid a 256 MB allocation while OCR models are in memory.
+            data = bytearray()
+            while len(data) <= MAX_BYTES:
+                chunk = stream.read(min(1_048_576, MAX_BYTES+1-len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
         if len(data) > MAX_BYTES:
             raise ComparisonError("프로젝트 파일이 허용 크기를 넘습니다.")
         def pairs(items):
@@ -258,10 +267,10 @@ def _eligibility(run, span, baseline_span, explicitly_selected=False):
     languages = run["raw"].get("languages", "")
     has_han = any(_han(c) for c in span + baseline_span)
     has_kor = any(_hangul(c) for c in span + baseline_span)
-    if run["engine"] in ("rapidocr", "easyocr"):
+    if run["engine"] in ("rapidocr", "easyocr", "ppocrv6"):
         if has_han and languages == "kor":
             return False, "이 한국어 모델은 한자를 지원하지 않아 누락을 합의 근거로 세지 않습니다."
-        if has_kor and languages in ("chi_sim", "chi_tra"):
+        if has_kor and languages in ("chi_sim", "chi_tra", "chi_sim+eng", "chi_tra+eng"):
             return False, "이 중국어 모델은 한글을 지원하지 않습니다."
     return True, ""
 
@@ -497,6 +506,35 @@ class ComparisonProject:
             if (not isinstance(review, dict) or not isinstance(review.get("at"), str)
                     or type(review.get("before")) is not bool or type(review.get("after")) is not bool):
                 raise ComparisonError("사람의 검수 이력이 올바르지 않습니다.")
+        if page.get("baseline_choice") not in (None, "manual", "automatic"):
+            raise ComparisonError("기준 판독 선택 방식이 올바르지 않습니다.")
+        selections = page.get("auto_selections", [])
+        if not isinstance(selections, list):
+            raise ComparisonError("자동 엔진 선택 이력이 올바르지 않습니다.")
+        selection_ids = set()
+        for selection in selections:
+            if (not isinstance(selection, dict) or selection.get("policy") != "local-auto-engine-quality-v1"
+                    or not isinstance(selection.get("id"), str) or not re.fullmatch(r"[a-f0-9]{32}", selection["id"])
+                    or selection["id"] in selection_ids or not isinstance(selection.get("at"), str)
+                    or type(selection.get("applied")) is not bool or type(selection.get("needs_review")) is not bool
+                    or type(selection.get("preserved_human_work")) is not bool
+                    or selection.get("profile") not in PROFILES or selection.get("direction") not in ("horizontal", "vertical")
+                    or not isinstance(selection.get("scores"), list)):
+                raise ComparisonError("자동 엔진 선택 근거가 올바르지 않습니다.")
+            selection_ids.add(selection["id"])
+            scored = set()
+            for score in selection["scores"]:
+                if (not isinstance(score, dict) or score.get("run_id") not in local_ids
+                        or score["run_id"] in scored or score.get("engine") != local_ids[score["run_id"]]["engine"]
+                        or type(score.get("score")) not in (float, int)
+                        or not math.isfinite(score["score"]) or not 0 <= score["score"] <= 1):
+                    raise ComparisonError("자동 엔진 비교 점수 또는 판독 연결이 올바르지 않습니다.")
+                scored.add(score["run_id"])
+            selected = selection.get("selected_run_id")
+            if (selected is not None and (selected not in scored or selection.get("selected_engine") != local_ids[selected]["engine"])):
+                raise ComparisonError("자동 선택한 엔진의 판독 근거가 없습니다.")
+            if selected is None and (selection.get("selected_engine") is not None or selection["applied"]):
+                raise ComparisonError("빈 자동 선택을 적용할 수 없습니다.")
         _json_copy(page)
 
     def _validate_ai_review(self, review, number, runs, previous):
@@ -804,18 +842,47 @@ class ComparisonProject:
             self._revision += 1
             return run["id"]
 
-    def choose_baseline(self, number, engine):
+    def choose_baseline(self, number, engine, *, automatic=False):
         with self._lock:
             page = self._page(number)
             run = _latest_runs(page).get(engine)
             if run is None:
                 raise ComparisonError("선택한 엔진의 판독 결과가 없습니다.")
+            choice = "automatic" if automatic else "manual"
+            if page.get("baseline_choice") != choice:
+                page["baseline_choice"] = choice
+                self._revision += 1
             if page["baseline_run_id"] != run["id"]:
                 page["baseline_engine"], page["baseline_run_id"] = engine, run["id"]
                 page["suggestions"] = []
                 self._invalidate_review(page, "baseline-changed")
                 self._revision += 1
             return self.text(number)
+
+    def record_auto_selection(self, number, selection):
+        """Record the estimate and choose a whole reading; preserve human work."""
+        record = _json_copy(selection)
+        with self._lock:
+            self.validate_source()
+            page = self._page(number)
+            run = next((r for r in page["runs"] if r["id"] == record.get("selected_run_id")), None)
+            protected = (page["corrected_text"] is not None or bool(page["edits"])
+                         or page["reviewed"] or page.get("baseline_choice") == "manual"
+                         or record.get("preserve_baseline", False))
+            record.update(id=uuid.uuid4().hex, at=_now(), applied=bool(run) and not protected,
+                          preserved_human_work=bool(protected))
+            if record["applied"]:
+                self.choose_baseline(number, run["engine"], automatic=True)
+            elif protected and record.get("preserved_baseline_run_id"):
+                original = next((r for r in page["runs"] if r["id"] == record["preserved_baseline_run_id"]), None)
+                if original is not None:
+                    page["baseline_engine"], page["baseline_run_id"] = original["engine"], original["id"]
+                    page["baseline_choice"] = "manual"
+            if run is not None:
+                self.compare_page(number)
+            page.setdefault("auto_selections", []).append(record)
+            self._revision += 1
+            return copy.deepcopy(record)
 
     def compare_page(self, number, baseline=None):
         with self._lock:
@@ -827,6 +894,9 @@ class ComparisonProject:
                 matching = [r for r in _latest_runs(page).values() if _run_profile(r) == (page["profile"], page["direction"])]
                 candidates = [r for r in matching if r["engine"] == preferred]
                 chosen = candidates[-1] if candidates else (matching[-1] if matching else self._baseline(page))
+                current = self._baseline(page)
+                if current is not None and page.get("baseline_choice") in ("manual", "automatic"):
+                    chosen = current
                 if page["baseline_run_id"] != chosen["id"]:
                     self._invalidate_review(page, "baseline-changed")
                 page["baseline_engine"], page["baseline_run_id"] = chosen["engine"], chosen["id"]
@@ -1295,6 +1365,10 @@ def _models_unchanged(run, engine_root):
     """A resume checkpoint is valid only for the recorded installed model bytes."""
     engine = run["engine"]
     metadata = run["raw"].get("engine_metadata", {})
+    if "glyph_font_sources" in metadata:
+        from ab_ocr.glyph_verifier import font_sources
+        if metadata["glyph_font_sources"] != font_sources():
+            return False
     models = metadata.get("model_files", {})
     if not isinstance(models, dict):
         return False
@@ -1322,8 +1396,8 @@ def _models_unchanged(run, engine_root):
 
 
 def run_page(project, number, profile="traditional", direction="horizontal", dpi=300,
-             should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False):
-    """Run three local engines sequentially; checkpoint each completed reading.
+             should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False, engines=None):
+    """Run selected local engines sequentially; checkpoint each completed reading.
 
     A failed engine never removes successful raw results or human edits.  Model
     confidence is not used as an accuracy score or as permission to auto-correct.
@@ -1332,6 +1406,11 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
     """
     if profile not in PROFILES or direction not in ("horizontal", "vertical"):
         raise ComparisonError("문서 종류 또는 읽기 방향을 확인하세요.")
+    selected = tuple(DEFAULT_ENGINES if engines is None else engines)
+    if not selected or len(set(selected)) != len(selected) or any(e not in ENGINES for e in selected):
+        raise ComparisonError("비교할 로컬 엔진을 중복 없이 선택하세요.")
+    if profile == "mixed" and selected == ("ppocrv6",):
+        raise ComparisonError("PP-OCRv6 medium은 간체·번체 문서에서 사용하세요. 한글·한자 혼용은 지원하지 않습니다.")
     if type(dpi) is not int or not 72 <= dpi <= 600:
         raise ComparisonError("렌더링 DPI는 72~600이어야 합니다.")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
@@ -1339,23 +1418,57 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
     project._check_page(number)
     project.validate_source()
     request = _request(profile, direction, dpi, engine_root)
-    outcome = {"completed": [], "errors": {}, "cancelled": False, "skipped": []}
+    outcome = {"completed": [], "errors": {}, "cancelled": False, "skipped": [], "unsupported": {}}
     with project._lock:
         page = project._page(number)
         if page["profile"] != profile or page["direction"] != direction:
             page["profile"], page["direction"] = profile, direction
             page["suggestions"] = []
             project._revision += 1
-    for engine in ENGINES:
+    for engine in selected:
         if should_stop is not None and should_stop():
             outcome["cancelled"] = True
             break
+        if engine == "ppocrv6" and profile == "mixed":
+            outcome["unsupported"][engine] = "PP-OCRv6 medium은 간체·번체 전용이며 한글·한자 혼용을 지원하지 않습니다."
+            continue
         engine_request = dict(request)
-        manifest = Path(request["engine_root"]) / "tools" / engine / "installation.json"
+        from ab_ocr.runtime import engine_root_for
+        resolved_root = engine_root_for(engine, engine_root)
+        engine_request["engine_root"] = str(resolved_root)
+        if engine in VERTICAL_RTL_ENGINES and direction == "vertical":
+            engine_request["reading_order_policy"] = VERTICAL_RTL_POLICY
+            if engine == "easyocr":
+                from ab_ocr.easyocr_worker import VERTICAL_RECOGNITION_POLICY
+                engine_request["recognition_policy"] = VERTICAL_RECOGNITION_POLICY
+                if profile == "traditional":
+                    from ab_ocr.glyph_verifier import font_sources
+                    engine_request["glyph_font_sources"] = font_sources()
+        if engine == "easyocr" and direction == "horizontal" and profile in ("traditional", "simplified"):
+            from ab_ocr.easyocr_worker import HORIZONTAL_RECOGNITION_POLICY
+            from ab_ocr.glyph_verifier import font_sources
+            engine_request["recognition_policy"] = HORIZONTAL_RECOGNITION_POLICY
+            engine_request["glyph_font_sources"] = font_sources()
+        if engine == "rapidocr" and profile in ("traditional", "simplified"):
+            from ab_ocr.rapidocr_worker import RECOGNITION_POLICY
+            from ab_ocr.glyph_verifier import font_sources
+            engine_request["recognition_policy"] = RECOGNITION_POLICY
+            engine_request["glyph_font_sources"] = font_sources()
+        if engine == "tesseract" and profile in ("traditional", "simplified"):
+            from ab_ocr.tesseract_glyph import RECOGNITION_POLICY
+            from ab_ocr.glyph_verifier import font_sources
+            engine_request["recognition_policy"] = RECOGNITION_POLICY
+            engine_request["glyph_font_sources"] = font_sources()
+        if engine == "ppocrv6" and profile == "traditional" and direction == "horizontal":
+            from ab_ocr.ppocrv6_worker import HORIZONTAL_RECOGNITION_POLICY
+            from ab_ocr.glyph_verifier import font_sources
+            engine_request["recognition_policy"] = HORIZONTAL_RECOGNITION_POLICY
+            engine_request["glyph_font_sources"] = font_sources()
+        manifest = resolved_root / "tools" / engine / "installation.json"
         engine_request["installation_sha256"] = ocr.file_sha256(manifest) if manifest.is_file() else None
         existing = _latest_runs(project.page(number)).get(engine)
         if (not force and existing and existing.get("request") == engine_request
-                and _models_unchanged(existing, request["engine_root"])):
+                and _models_unchanged(existing, str(resolved_root))):
             outcome["skipped"].append(engine)
             continue
         languages = ("kor+chi_tra" if engine == "tesseract" else "kor") if profile == "mixed" else (
@@ -1367,9 +1480,12 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
             languages = languages.replace("kor", "kor_vert")
             psm = 5
         try:
+            options = {"direction": direction} if engine in VERTICAL_RTL_ENGINES else {}
+            if engine == "tesseract" and profile in ("traditional", "simplified"):
+                options["verify_chinese_glyphs"] = True
             result = ocr.recognize_file(project.source_path, engine=engine, page_number=number,
                                         languages=languages, psm=psm, dpi=dpi, timeout=timeout,
-                                        should_stop=should_stop, engine_root=engine_root)
+                                        should_stop=should_stop, engine_root=resolved_root, **options)
             project.add_result(result, request=engine_request)
         except ocr.OCRCancelled:
             outcome["cancelled"] = True

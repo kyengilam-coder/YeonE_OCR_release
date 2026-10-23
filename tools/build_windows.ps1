@@ -9,6 +9,7 @@ param(
     [string]$InnoCompiler = '',
     [string]$WorkRoot = '',
     [string]$OutputDirectory = '',
+    [string]$PPOCRv6Bundle = '',
     [switch]$SkipInstaller
 )
 
@@ -113,7 +114,13 @@ try {
         $Artifacts = @($PublishedPortable)
         if (-not $SkipInstaller) {
             $InstallerScript = Join-Path $RepoRoot 'packaging\YeonE_OCR.iss'
-            & $InnoCompiler "/DAppVersion=$Version" "/DSourceDir=$AppSource" "/DOutputDir=$OutputDirectory" $InstallerScript
+            $BundleArgs = @()
+            if ($PPOCRv6Bundle) {
+                $PPOCRv6Bundle = (Resolve-Path -LiteralPath $PPOCRv6Bundle).Path
+                Invoke-Python @((Join-Path $RepoRoot 'tools\verify_ppocrv6_bundle.py'), $PPOCRv6Bundle)
+                $BundleArgs = @("/DPPOCRv6Dir=$PPOCRv6Bundle")
+            }
+            & $InnoCompiler "/DAppVersion=$Version" "/DSourceDir=$AppSource" "/DOutputDir=$OutputDirectory" @BundleArgs $InstallerScript
             if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
             $Installer = Join-Path $OutputDirectory "YeonE_OCR-$Version-Setup-x64.exe"
             if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) { throw "Expected installer missing: $Installer" }
@@ -125,6 +132,10 @@ try {
         }
         [IO.File]::WriteAllText((Join-Path $OutputDirectory 'SHA256SUMS.txt'), (($Lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
         $BuildInfo | Add-Member -NotePropertyName artifacts -NotePropertyValue @($Artifacts | ForEach-Object { [IO.Path]::GetFileName($_) })
+        if ($PPOCRv6Bundle -and -not $SkipInstaller) {
+            $ManifestHash = (Get-FileHash -LiteralPath (Join-Path $PPOCRv6Bundle 'bundle-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+            $BuildInfo | Add-Member -NotePropertyName ppocrv6_bundle_sha256 -NotePropertyValue $ManifestHash
+        }
         $BuildInfo | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $WorkRoot 'build-result.json') -Encoding UTF8
         Write-Host "Build complete. Release files: $OutputDirectory"
     } finally {

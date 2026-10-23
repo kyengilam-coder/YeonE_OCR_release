@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "0.9.0"
+#define AppVersion "0.11.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\work\windows-release\dist\YeonE_OCR"
@@ -49,6 +49,9 @@ Name: "desktopicon"; Description: "바탕 화면에 바로가기 만들기"; Gro
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#ifdef PPOCRv6Dir
+Source: "{#PPOCRv6Dir}\*"; DestDir: "{app}\tools\ppocrv6"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{group}\연어OCR"; Filename: "{app}\YeonE_OCR.exe"; WorkingDir: "{userdocs}"; AppUserModelID: "YeonE.OCR.Desktop"

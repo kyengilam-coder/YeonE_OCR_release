@@ -55,7 +55,7 @@ class HostedComparisonEditor(unittest.TestCase):
         self.preview_patch = mock.patch.object(ComparisonEditor, "_request_render")
         self.preview_patch.start()
         self.addCleanup(self.preview_patch.stop)
-        self.editor = ComparisonEditor(self.root, project=self.project, work_dir=self.folder)
+        self.editor = ComparisonEditor(self.root, project=self.project, work_dir=self.folder, automatic=False)
         self.addCleanup(self.editor._dispose)
 
     def raw(self, engine, text, languages="chi_tra", page_number=1):
@@ -224,10 +224,51 @@ class HostedComparisonEditor(unittest.TestCase):
         with mock.patch("ab_ocr.ocr.doctor", side_effect=doctor) as check, mock.patch.object(self.editor, "_show_engine_info") as show:
             self.editor.inspect_engines()
             self.pump(lambda: not self.editor.busy)
-            self.assertEqual(check.call_count, 3)
+            self.assertEqual(check.call_count, 4)
             show.assert_called_once()
-            self.assertEqual(len(show.call_args.args[0][1]), 3)
+            self.assertEqual(len(show.call_args.args[0][1]), 4)
         self.assertTrue(all(identifier != ui_thread for identifier in threads))
+
+    def test_v6_tab_and_selection_forward_to_background_recognition(self):
+        self.assertIn("ppocrv6", self.editor.raw_widgets)
+        self.assertFalse(self.editor.engine_vars["ppocrv6"].get())
+        for engine, variable in self.editor.engine_vars.items():
+            variable.set(engine == "ppocrv6")
+        def run(project, number, **kwargs):
+            self.assertEqual(kwargs["engines"], ("ppocrv6",))
+            raw = self.raw("ppocrv6", "醫藥臺裏爲")
+            project.add_result(raw)
+            kwargs["on_result"](raw)
+            return {"completed": ["ppocrv6"], "errors": {}, "cancelled": False}
+        with mock.patch("yeone_ocr.comparison.run_page", side_effect=run) as recognize:
+            self.editor.recognize()
+            self.pump(lambda: not self.editor.busy)
+        recognize.assert_called_once()
+        self.assertIn("醫藥臺裏爲", self.editor.raw_widgets["ppocrv6"].get("1.0", "end"))
+
+    def test_automatic_mode_uses_background_selector_and_disables_manual_checks(self):
+        self.editor.automatic.set(True)
+        self.editor._auto_mode_changed()
+        self.assertTrue(all(str(check.cget("state")) == "disabled" for check in self.editor.engine_checks))
+        ui_thread = threading.get_ident()
+        def recognize(project, number, **options):
+            self.assertNotEqual(threading.get_ident(), ui_thread)
+            self.assertNotIn("engines", options)
+            raw = self.raw("ppocrv6", "醫藥臺裏爲")
+            identifier = project.add_result(raw)
+            from yeone_ocr.automatic_ocr import assess_readings
+            from yeone_ocr.comparison import latest_runs
+            decision = assess_readings(list(latest_runs(project.page(number)).values()), "traditional")
+            decision.update(profile="traditional", direction="horizontal")
+            project.record_auto_selection(number, decision)
+            options["on_result"](raw)
+            return {"completed": ["ppocrv6"], "errors": {}, "cancelled": False}
+        with mock.patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=recognize) as run:
+            self.editor.recognize()
+            self.pump(lambda: not self.editor.busy)
+        run.assert_called_once()
+        self.assertEqual(self.project.page(1)["baseline_engine"], "ppocrv6")
+        self.assertIn("PP-OCRv6", self.editor.auto_result.get())
 
     def test_save_conflict_never_overwrites_external_project_and_can_close_with_recovery(self):
         from yeone_ocr.comparison import ComparisonError, ComparisonProject

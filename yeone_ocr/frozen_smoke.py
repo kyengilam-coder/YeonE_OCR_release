@@ -332,6 +332,11 @@ def run(report_path: Path) -> int:
                 assert worker.is_file(), f"Missing application-owned worker: {worker.name}"
                 compile(worker.read_text(encoding="utf-8"), worker.name, "exec")
                 checked.append(worker.name)
+            helper = resource_root() / "ab_ocr" / "reading_order.py"
+            assert helper.is_file(), "Missing EasyOCR vertical geometry helper"
+            assert (resource_root() / "ab_ocr" / "glyph_verifier.py").is_file(), "Missing local glyph verifier"
+            compile(helper.read_text(encoding="utf-8"), helper.name, "exec")
+            checked.append(helper.name)
             for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py",
                          "rapidocr-lock.json", "install_easyocr.py", "easyocr-lock.json"):
                 resource = resource_root() / "scripts" / name
@@ -383,6 +388,7 @@ def run(report_path: Path) -> int:
                     time.sleep(.02)
                 assert editor._preview is not None, "Original image preview did not render"
                 assert editor.master is root and isinstance(editor, tk.Toplevel)
+                assert editor.automatic.get(), "Automatic local engine selection must be the default"
                 editor.text.insert("end-1c", "，確認")
                 editor.text.edit_modified(True)
                 editor._commit_text()
@@ -398,6 +404,60 @@ def run(report_path: Path) -> int:
                     editor.destroy()
                 root.destroy()
         check("local-comparison-editor-offline", comparison_editor_probe)
+
+    def bundled_ppocrv6_probe():
+        from ab_ocr.runtime import application_root
+        from ab_ocr.local_engines import inspect_engine
+        from .comparison_editor import default_selected_engines
+        root = application_root()
+        manifest = root / "tools/ppocrv6/installation.json"
+        if not manifest.is_file():
+            return {"bundled": False}
+        installation = json.loads(manifest.read_text(encoding="utf-8"))
+        if installation.get("runtime_layout") != "standalone-python":
+            return {"bundled": False}
+        legacy = report_path.parent / "legacy saved engine folder"
+        info = inspect_engine("ppocrv6", engine_root=legacy)
+        assert info["available"], info["message"]
+        assert Path(info["executable"]) == root / "tools/ppocrv6/runtime/python.exe"
+        assert default_selected_engines(legacy) == ("ppocrv6",)
+        assert Path(info["engine_root"]) == root
+        return {"bundled": True, "languages": info["languages"],
+                "default_engines": ["ppocrv6"], "model_hashes": {n: r["sha256"] for n, r in info["models"].items()}}
+    check("bundled-ppocrv6-installation", bundled_ppocrv6_probe)
+
+    def automatic_probe():
+        from unittest.mock import patch
+        from PIL import Image
+        from ab_ocr import ocr
+        from .comparison import ComparisonProject
+        from .automatic_ocr import run_automatic_page
+        with tempfile.TemporaryDirectory(prefix="yeone-auto-smoke-") as temporary:
+            folder = Path(temporary)
+            source = folder / "synthetic.png"
+            Image.new("RGB", (400, 200), "white").save(source)
+            project = ComparisonProject.open(source)
+            def recognize(_source, **options):
+                engine = options["engine"]
+                return ocr.RecognitionResult(text="天地玄黃，宇宙洪荒。" if engine == "ppocrv6" else "\ufffd\ufffd",
+                    engine=engine, source_path=str(source), source_sha256=project.source_sha256,
+                    page_number=1, image_width=400, image_height=200, words=[],
+                    engine_version="synthetic-smoke", languages="chi_tra", psm=6 if engine == "tesseract" else None,
+                    duration_seconds=0)
+            with patch("yeone_ocr.automatic_ocr.memory_status", return_value=None), \
+                    patch.object(ocr, "doctor", return_value={"available": True, "languages": ["chi_tra"]}), \
+                    patch.object(ocr, "recognize_file", side_effect=recognize):
+                result = run_automatic_page(project, 1)
+            assert result["selection"]["selected_engine"] == "ppocrv6"
+            assert result["selection"]["applied"]
+            project.compare_page(1)
+            assert project.text(1) == "天地玄黃，宇宙洪荒。"
+            path = folder / "selection.json"
+            project.save(path)
+            reopened = ComparisonProject.load(path)
+            assert reopened.page(1)["auto_selections"] == project.page(1)["auto_selections"]
+            return {"selected": "ppocrv6", "engines_compared": 4, "history": "saved and reopened", "network_calls": 0}
+    check("automatic-local-engine-selection", automatic_probe)
 
     report["ok"] = all(item["ok"] for item in report["checks"])
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

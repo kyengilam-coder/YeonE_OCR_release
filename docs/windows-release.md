@@ -1,4 +1,30 @@
-# Windows 0.9.0 배포
+# Windows 0.11.0 설치판
+
+0.11.0은 같은 고정 PP-OCRv6 환경을 포함하고 내장 엔진의 독립 탐색과 쪽별 자동 선택을 추가한다. 기존 0.10.0 설치를 같은 AppId로 갱신할 수 있다. 새 빌드는 아래 명령에서 `WorkRoot`를 `work/windows-0.11/build`, `OutputDirectory`를 `dist/0.11.0`으로 지정한다. 현재 버전은 앱 소스에서 읽는다. 검증 스크립트의 `-AutomaticOCR` 옵션으로 구형 엔진 폴더 설정이 있는 상태에서 설치된 EXE의 기본 자동 OCR을 확인한다.
+
+## 0.10.0부터 포함한 독립 실행 환경
+
+0.10.0 설치 파일은 PP-OCRv6 medium 모델 두 개와 Python 3.13.15·RapidOCR 3.10.0·ONNX Runtime 1.25.1 실행 환경을 포함한다. 인식할 때 인터넷이나 별도 Python 설치가 필요 없다. 앱과 함께 설치되는 `tools/ppocrv6`를 자동 탐색하며 새 설치에서는 해당 엔진만 기본 선택한다. 기존에 저장한 엔진 폴더가 있으면 그 선택이 우선한다.
+
+```powershell
+# 먼저 scripts/install_ppocrv6.py로 고정 모델과 엔진 venv를 준비한다.
+python tools/prepare_msvc_runtime.py --output work/windows-0.10/msvc-runtime --cache work/windows-0.10/msvc-download
+& .\tools\ppocrv6\venv\Scripts\python.exe tools/prepare_ppocrv6_bundle.py `
+  --source tools/ppocrv6 --output 'work/windows-0.10/engine pack/tools/ppocrv6' --msvc-runtime work/windows-0.10/msvc-runtime
+& .\tools\build_windows.ps1 `
+  -Python .\work\windows-0.10\build-venv\Scripts\python.exe `
+  -InnoCompiler .\work\windows-0.10\toolchain\InnoSetup\ISCC.exe `
+  -WorkRoot .\work\windows-0.10\build -OutputDirectory .\dist\0.10.0 `
+  -PPOCRv6Bundle 'work/windows-0.10/engine pack/tools/ppocrv6'
+```
+
+빌드 환경은 `packaging/requirements-windows.lock.txt`를 설치하고 같은 Python으로 `tools/build_notices.py`를 실행한다. Python 3.13에서 hanja의 고정 의존성 PyYAML 6.0.1은 환경 변수 `PYYAML_FORCE_LIBYAML=0`을 지정하고 `pip wheel PyYAML==6.0.1 --wheel-dir work/windows-0.10/wheels`로 순수 Python wheel을 만든 뒤 `pip install --find-links work/windows-0.10/wheels -r packaging/requirements-windows.lock.txt`로 설치한다.
+
+설치용 엔진 묶음은 venv의 외부 Python 경로를 복사하지 않는다. 독립 Python과 표준 라이브러리, 잠금 목록의 배포 RECORD 파일·네이티브 DLL·라이선스만 수집하고 `_pth`로 포함 경로를 제한한다. 모델은 잠금 SHA-256으로 확인하며, `bundle-manifest.json`으로 전체 파일 목록·크기·SHA-256을 설치 파일 생성 전에 검증한다. Windows 글꼴과 사용자 자료는 포함하지 않는다.
+
+포터블 단일 실행 파일은 종전 업데이트 형식을 유지하며 모델·엔진 환경을 별도로 설치한다. 완전한 오프라인 PP-OCRv6 환경이 필요하면 `YeonE_OCR-0.10.0-Setup-x64.exe`를 사용한다. 이번 로컬 빌드는 공개 게시와 별개다.
+
+## 이전 0.9.0 배포 기록
 
 0.9.0 다운로드 주소는 [v0.9.0 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)다. 배포 완료 후 아래 자산을 이 주소에서 받는다. 공개 완료 여부와 실제 파일은 GitHub 릴리스 화면에서 확인한다.
 

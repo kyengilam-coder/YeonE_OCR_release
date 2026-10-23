@@ -2,7 +2,11 @@
 param(
     [Parameter(Mandatory=$true)][string]$Installer,
     [string]$TestRoot = '',
-    [string]$ExpectedVersion = ''
+    [string]$ExpectedVersion = '',
+    [string]$PPOCRv6Fixture = '',
+    [string]$TestPython = '',
+    [switch]$AutomaticOCR,
+    [string]$PreviousInstaller = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -18,7 +22,7 @@ if (-not $ExpectedVersion) {
     $ExpectedVersion = [regex]::Match($VersionSource, '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
     if (-not $ExpectedVersion) { throw 'Application version not found.' }
 }
-$AppPath = Join-Path $TestRoot 'installed-app'
+$AppPath = Join-Path $TestRoot 'installed app 한글'
 $RegistryKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{CDCDCE06-51D4-4AB5-B44D-B48133508FD9}_is1'
 if (Test-Path -LiteralPath $RegistryKey) {
     throw 'An installation with this AppId already exists. The test will not touch it.'
@@ -42,6 +46,13 @@ function Invoke-TestProcess([string]$File, [string[]]$ProcessArguments) {
 }
 $InstallArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS','/TASKS=',('/DIR="' + $AppPath + '"'))
 try {
+    if ($PreviousInstaller) {
+        $PreviousInstaller = (Resolve-Path -LiteralPath $PreviousInstaller).Path
+        Invoke-TestProcess $PreviousInstaller ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'previous-install.log') + '"'))
+        $Previous = Get-ItemProperty -LiteralPath $RegistryKey
+        if ([IO.Path]::GetFullPath($Previous.InstallLocation).TrimEnd('\') -ne $AppPath) { throw 'Unexpected previous installation directory.' }
+        $Checks.upgrade_from = $Previous.DisplayVersion
+    }
     Invoke-TestProcess $Installer ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'install.log') + '"'))
     $Executable = Join-Path $AppPath 'YeonE_OCR.exe'
     $Registered = Get-ItemProperty -LiteralPath $RegistryKey
@@ -57,6 +68,16 @@ try {
     Invoke-TestProcess $Installer ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'reinstall.log') + '"'))
     if ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash -ne $InstalledHash) { throw 'Reinstall changed the executable unexpectedly.' }
     $Checks.reinstall = $true
+    if ($PPOCRv6Fixture) {
+        if (-not $TestPython) { throw 'Specify -TestPython for the installed OCR verifier.' }
+        & $TestPython (Join-Path $RepoRoot 'tools\verify_ppocrv6_bundle.py') (Join-Path $AppPath 'tools\ppocrv6')
+        if ($LASTEXITCODE -ne 0) { throw 'Installed engine inventory verification failed.' }
+        $AutomaticArgs = @()
+        if ($AutomaticOCR) { $AutomaticArgs = @('--automatic') }
+        & $TestPython (Join-Path $RepoRoot 'tools\verify_installed_ppocrv6.py') --app $AppPath --fixture $PPOCRv6Fixture --output (Join-Path $TestRoot 'ocr') @AutomaticArgs
+        if ($LASTEXITCODE -ne 0) { throw 'Installed PP-OCRv6 inference failed.' }
+        $Checks.installed_ppocrv6 = $true
+    }
 } finally {
     $Uninstaller = Join-Path $AppPath 'unins000.exe'
     if (Test-Path -LiteralPath $Uninstaller) {

@@ -18,7 +18,7 @@
            자형 혼동 자리는 3차 판별로 가림(--no-glyph-check 면 안 함). --list 는 구획 짝 목록만
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
-  compare-engines 로컬 세 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
+  compare-engines 선택한 로컬 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
@@ -2493,7 +2493,7 @@ def build_parser():
     ap.add_argument("--version", action="version", version=f"YeonE_OCR {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    local = sub.add_parser("compare-engines", help="로컬 세 엔진 비교·원본 보존 프로젝트 만들기(API 호출 없음)")
+    local = sub.add_parser("compare-engines", help="로컬 엔진 비교·원본 보존 프로젝트 만들기(API 호출 없음)")
     local.add_argument("pdf", help="원본 PDF 또는 이미지")
     local.add_argument("--work", help="기존 연어OCR 작업 폴더")
     local.add_argument("--project", help="비교 프로젝트 저장 경로")
@@ -2502,6 +2502,10 @@ def build_parser():
     local.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
     local.add_argument("--dpi", type=int, default=300)
     local.add_argument("--engine-root", help="tools 폴더를 포함하는 로컬 엔진 설치 루트")
+    engine_mode = local.add_mutually_exclusive_group()
+    engine_mode.add_argument("--auto-engine", action="store_true", help="설치된 엔진을 비교해 쪽별 결과 자동 선택(기본)")
+    engine_mode.add_argument("--engines", nargs="+", choices=("tesseract", "rapidocr", "easyocr", "ppocrv6"),
+                            help="자동 선택을 끄고 비교할 엔진을 직접 지정")
     local.add_argument("--force", action="store_true", help="완료 엔진도 다시 읽고 이전 원시 결과를 이력에 보존")
     from .comparison_cli import command as comparison_command
     local.set_defaults(fn=comparison_command)

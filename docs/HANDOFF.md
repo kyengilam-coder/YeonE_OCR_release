@@ -1,15 +1,16 @@
 # 연어OCR 개발 인수인계
 
-현재 소스 버전은 **0.9.0**이다. 연어OCR의 기존 작업 흐름에 AB_OCR 0.3.0의 로컬 세 엔진 비교·원본 대조 편집 기반을 통합하고 AI 이미지·문맥 재검증과 번체자·중문부호 교정 제안을 연결한다. 세로 읽기·책갈피 OCR·이미지 OCR을 유지하며 원시 판독, AI 응답·제안, 사람이 확정한 교정을 구분한다.
+현재 소스 버전은 **0.11.0**이다. 내장 PP-OCRv6를 저장된 구형 엔진 폴더와 독립적으로 탐색하고 `automatic_ocr.py`에서 쪽별 엔진 비교·선택 근거를 기록한다. 자동 선택이 기본이며 기존 직접 교정과 사람의 기준은 보존한다. 설치 파일에 PP-OCRv6 medium 모델과 독립 Python 환경을 포함하며 `build_windows.ps1 -PPOCRv6Bundle <경로>`로 연결한다. 자동 선택 정책은 `docs/AUTOMATIC_OCR.md`를 따른다.
 
 ## 시작할 때 읽을 문서
 
-1. `README.md`: 0.9.0 사용 흐름·다운로드 주소와 로컬 엔진 별도 설치.
+1. `README.md`: 0.11.0 개발 기능과 기존 공개 0.9.0 다운로드·실행 방법.
 2. `docs/INTEGRATION.md`: 구현 범위, 프로젝트 형식, 교정 이력, 기존 기록 가져오기·출력 정책.
 3. `docs/LOCAL_OCR.md`: 엔진 폴더·설치·모델 언어 제한과 설치판 실행 방식.
 4. `docs/release-notes.md`: 최종 테스트 결과와 배포 상태.
 5. `yeone_ocr/지침.md`: 기존 문헌 판독·교정 규칙.
 6. `docs/AI_REVIEW.md`: AI 전송 범위·두 단계 검증·정책·이력·재개.
+7. `docs/DEVELOPMENT_CHECKPOINT_0.11.0.md`: 중국어 보완·설치·자동 선택 검증과 실제 문헌 76쪽의 개선 전 기준. 초창결은 사용자 요청으로 56쪽에서 중단했으므로 나머지 OCR을 재개하지 않는다.
 
 ## 실제 구현
 
@@ -21,7 +22,7 @@
 | 기록·출력 연결 | `yeone_ocr/comparison_bridge.py`: 검증한 기존 연어·AB 기록을 읽기 전용으로 가져오고 TXT·HWPX·DOCX 출력 후 재검사 |
 | 명령줄 | `yeone_ocr/comparison_cli.py`: `compare-engines`, 쪽 범위 검사, 엔진별 저장·중지·오류 종료 코드 |
 | AI 재검증 | `yeone_ocr/comparison_ai.py`: 승인한 계획의 이미지·문맥 전송, 시각 재검증과 번체자·부호 제안, 공급사별 단일 요청·상한·취소·재개 |
-| 로컬 엔진 | `ab_ocr/ocr.py`, `local_engines.py`, `runtime.py`, 두 작업자: 독립된 엔진 환경에서 Tesseract·RapidOCR·EasyOCR 실행 |
+| 로컬 엔진 | `ab_ocr/ocr.py`, `local_engines.py`, `runtime.py`, 엔진별 작업자: 독립 환경에서 Tesseract·PP-OCRv5·EasyOCR·PP-OCRv6 실행; `reading_order.py`, `glyph_verifier.py`, `tesseract_glyph.py`에서 순서·자형 보완 |
 | 설치·배포 구성 | `scripts/install_*.py`, 잠금 JSON, `packaging/YeonE_OCR.spec`: 명시적 공개 모델 설치와 설치판 작업자 리소스 허용 목록 |
 
 AB 코드의 원본 파일 해시는 `docs/AB_OCR_PROVENANCE.json`에 기록했다. 원래 AB_OCR 프로젝트는 수정하지 않는다. 연어OCR 코드는 다른 프로젝트의 Python 소스를 가져오지 않는다. 현재 개발 PC에서는 기존 AB 설치의 공개 모델·별도 실행 환경만 재사용한다. 설치판은 개발용 형제 프로젝트 탐색을 하지 않는다.

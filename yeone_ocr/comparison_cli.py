@@ -1,4 +1,4 @@
-"""Headless local three-engine jobs; no cloud reader or shared CLI globals."""
+"""Headless selected local-engine jobs; no cloud reader or shared CLI globals."""
 from pathlib import Path
 import re
 import threading
@@ -22,6 +22,7 @@ def parse_pages(value, count):
 def command(args):
     from ab_ocr.ocr import document_info, OCRError
     from .comparison import ComparisonProject, run_page
+    from .automatic_ocr import run_automatic_page
     from .comparison_bridge import default_project_path, open_project
     stop = threading.Event()
     project = None
@@ -32,23 +33,34 @@ def command(args):
             except (OSError, ValueError):
                 print("복구 사본을 저장하지 못했습니다. 마지막 정상 프로젝트와 엔진별 완료 기록을 확인하세요.", flush=True)
     try:
-        numbers = parse_pages(args.pages, document_info(args.pdf)["page_count"])
+        source = Path(args.pdf).expanduser().resolve()
+        numbers = parse_pages(args.pages, document_info(source)["page_count"])
         if not 72 <= args.dpi <= 600:
             raise ValueError("렌더링 DPI는 72~600이어야 합니다.")
         if args.project and Path(args.project).exists():
-            project = ComparisonProject.load(args.project, source_path=args.pdf)
+            project = ComparisonProject.load(args.project, source_path=source)
         else:
-            project = open_project(args.pdf, args.work)
-        path = Path(args.project) if args.project else (project.project_path or default_project_path(args.pdf, args.work))
+            project = open_project(source, args.work)
+        path = Path(args.project) if args.project else (project.project_path or default_project_path(source, args.work))
         path.parent.mkdir(parents=True, exist_ok=True)
         project.save(path)
         failures = 0
+        automatic = bool(getattr(args, "auto_engine", False)) or (
+            hasattr(args, "auto_engine") and getattr(args, "engines", None) is None)
         for number in numbers:
-            result = run_page(project, number, profile=args.profile, direction=args.direction,
+            recognize = run_automatic_page if automatic else run_page
+            options = {} if automatic else {"engines": getattr(args, "engines", None)}
+            result = recognize(project, number, profile=args.profile, direction=args.direction,
                 dpi=args.dpi, should_stop=stop.is_set, on_result=lambda _result: project.save(path),
-                engine_root=args.engine_root, force=args.force)
+                engine_root=args.engine_root, force=args.force, **options)
             project.save(path)
-            failures += bool(result["errors"])
+            selection = result.get("selection", {})
+            failures += (not bool(selection.get("selected_engine"))) if automatic else bool(result["errors"])
+            if automatic and selection:
+                print(f"{number}쪽: 자동 선택 {selection.get('selected_engine') or '없음'} · "
+                      + ("기존 교정 유지" if selection.get("preserved_human_work") else "원본 대조 권장" if selection.get("needs_review") else "결과 일치"), flush=True)
+            for engine, message in result.get("unsupported", {}).items():
+                print(f"{number}쪽: {engine} 제외 · {message}", flush=True)
             print(f"{number}쪽: 완료 {len(result['completed'])}개 엔진 · 재사용 {len(result.get('skipped', []))}개 · 실패 {len(result['errors'])}개", flush=True)
             if result["cancelled"]:
                 return 130

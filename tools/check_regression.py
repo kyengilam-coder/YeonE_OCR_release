@@ -40,7 +40,15 @@ def _fingerprint(module):
 def _write_json(path, payload):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    for attempt in range(6):
+        try:
+            os.replace(temporary, path)
+            break
+        except PermissionError:
+            # Windows scanners may briefly hold a just-written report open.
+            if attempt == 5:
+                raise
+            time.sleep(.02 * (2 ** attempt))
 
 
 def _offline():

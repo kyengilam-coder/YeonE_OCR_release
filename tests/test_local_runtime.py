@@ -90,6 +90,17 @@ class LocalRuntimeTests(unittest.TestCase):
         self.assertEqual(recognize.call_args.kwargs["engine_root"], "chosen-home")
         self.assertEqual(dict(os.environ), before)
 
+    def test_easyocr_vertical_requires_verified_auxiliary_before_starting_worker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source=Path(folder)/'source.png'
+            source.write_bytes(b'not rendered when required model is missing')
+            info={'available':True,'languages':['chi_tra'],'models':{},
+                  'language_models':{'chi_tra':[]}}
+            with patch.object(local_engines,'inspect_engine',return_value=info), \
+                 patch.object(ocr,'_run') as run, self.assertRaisesRegex(ocr.OCRError,'보조 인식 모델'):
+                ocr.recognize_file(source,engine='easyocr',languages='chi_tra',direction='vertical')
+            run.assert_not_called()
+
     def test_subprocess_environment_disables_telemetry_without_mutating_parent(self):
         with patch.dict(os.environ, {"PYTHONPATH": "unrelated-source", "PYTHONHOME": "unrelated-runtime",
                                      "PATH": "native-dll-search"}, clear=True):

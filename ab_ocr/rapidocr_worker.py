@@ -1,7 +1,8 @@
 """Offline subprocess bridge for the isolated RapidOCR/PP-OCRv5 runtime.
 
-No text correction, script conversion, language fallback or model download.
-All boxes and confidences refer to detected *lines*, not individual characters.
+No script conversion, language fallback or model download. Chinese output may
+include separately recorded local glyph verification; original neural lines
+are retained. Composite verified regions have null confidence.
 """
 from __future__ import annotations
 
@@ -23,6 +24,20 @@ CLASSIFIER = "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
 CHINESE = "ch_PP-OCRv5_rec_server.onnx"
 CHINESE_MOBILE = "ch_PP-OCRv5_rec_mobile.onnx"
 KOREAN = "korean_PP-OCRv5_rec_mobile.onnx"
+RECOGNITION_POLICY = "ppocrv5-local-glyph-verified-v1"
+
+
+def _helper_module(name):
+    if name not in ("glyph_verifier", "reading_order"):
+        raise ValueError("Unknown local helper")
+    import importlib
+    import importlib.util
+    if __package__:
+        return importlib.import_module("."+name, __package__)
+    spec = importlib.util.spec_from_file_location("yeone_"+name, Path(__file__).with_name(name+".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def language_route(languages: str) -> str:
@@ -111,6 +126,7 @@ class Worker:
             raise ValueError("Unsupported recognition profile")
         self.profile = profile
         self.engines = {}
+        self.glyph_verifier = None
 
     def engine(self, languages: str):
         route = language_route(languages)
@@ -158,7 +174,9 @@ class Worker:
         self.engines[route] = (engine, metadata)
         return engine, metadata
 
-    def recognize(self, image_path: Path, languages: str) -> dict:
+    def recognize(self, image_path: Path, languages: str, direction: str = "horizontal") -> dict:
+        if direction not in ("horizontal", "vertical"):
+            raise ValueError("Unsupported reading direction")
         # Enforce local files before the library can interpret URLs as images.
         if not image_path.is_file():
             raise ValueError("OCR input must be an existing local image")
@@ -170,6 +188,32 @@ class Worker:
         result = engine(str(image_path.resolve()))
         text, words = serialize_lines(result.boxes, result.txts, result.scores)
         metadata = dict(metadata)
+        if language_route(languages) == "ch":
+            import numpy as np
+            module = _helper_module("glyph_verifier")
+            if self.glyph_verifier is None:
+                self.glyph_verifier = module.GlyphVerifier(module.font_sources())
+            with Image.open(image_path) as image:
+                gray = np.asarray(image.convert("L"))
+            original = {"text": text, "words": words}
+            if direction == "horizontal":
+                words, evidence = module.refine_horizontal(self.glyph_verifier, gray, words)
+                stage = "horizontal_preprocessing"
+            else:
+                columns = _helper_module("reading_order").vertical_column_indices(words)
+                words, evidence = module.refine_vertical_columns(self.glyph_verifier, gray, words, columns)
+                stage = "vertical_preprocessing"
+            words = [dict(word, line=line) for line, word in enumerate(words, 1)]
+            text = "\n".join(w["text"] for w in words)
+            metadata.update({"recognition_policy": RECOGNITION_POLICY,
+                "recognition_pipeline": "PP-OCRv5 "+self.profile+" + local printed-glyph verification",
+                "model_result": original, stage: {"regions": evidence},
+                "glyph_font_sources": self.glyph_verifier.sources,
+                "glyph_verification_policy": module.POLICY,
+                "glyph_verification_status": "enabled" if self.glyph_verifier.sources else "disabled: no installed font sources",
+                "glyph_verification_thresholds": {"min_similarity": module.MIN_SIMILARITY, "min_margin": module.MIN_MARGIN},
+                "text_policy": "verified glyph output; unmodified neural lines retained in model_result; no script conversion",
+                "confidence_granularity": "null for verified composites; native line scores retained in model_result"})
         metadata["stage_seconds"] = [float(value) for value in (result.elapse_list or [])]
         metadata["detection_resize_policy"] = "RapidOCR max-side policy: 960 below 960px, 1500 below 1500px, otherwise 2000px; dimensions rounded to multiples of 32"
         return {"text": text, "words": words, "image_width": width, "image_height": height,
@@ -186,6 +230,7 @@ def main() -> int:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--profile", choices=("server", "mobile"), default="mobile")
     parser.add_argument("--batch", type=Path)
+    parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
     args = parser.parse_args()
     block_network()
     try:
@@ -200,7 +245,8 @@ def main() -> int:
             destination = Path(item["output"])
             if destination.exists():
                 raise FileExistsError("OCR output already exists")
-            result = worker.recognize(Path(item["input"]), item.get("languages", args.languages))
+            result = worker.recognize(Path(item["input"]), item.get("languages", args.languages),
+                                      item.get("direction", args.direction))
             atomic_output(destination, result)
             # Progress intentionally contains no document text or source path.
             print(json.dumps({"completed": index, "total": len(items), "seconds": round(result["duration_seconds"], 3)}), flush=True)

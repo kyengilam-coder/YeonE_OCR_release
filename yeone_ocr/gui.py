@@ -1941,7 +1941,7 @@ class App(tk.Tk):
         tabs.pack(side="left", fill="y"); self._tab_buttons = list(tabs.winfo_children())
         local_tools = tk.Frame(self, bg=C["PANEL"])
         local_tools.pack(fill="x")
-        self.b_comparison = self._btn(local_tools, "3엔진 비교·교정", self.open_local_comparison,
+        self.b_comparison = self._btn(local_tools, "자동 로컬 OCR·비교", self.open_local_comparison,
             style="Link.TButton", tip="선택한 원본을 Tesseract·RapidOCR·EasyOCR로 비교하고 원본 옆에서 교정합니다. 로컬 처리이며 API를 호출하지 않습니다.")
         self.b_comparison.pack(side="left", padx=(P(24), P(12)), pady=(0, P(3)))
         tk.Label(local_tools, text="원본 대조 편집 · 로컬 처리", font=self.fonts["CAP"],
@@ -5113,7 +5113,7 @@ class App(tk.Tk):
                 return
         window = ComparisonEditor(self, source_path=source or None,
             work_dir=work_dir_for(source) if source else None,
-            engine_root=default_engine_root(vars(self).get("cfg", {}).get("local_engine_root")),
+            engine_root=vars(self).get("cfg", {}).get("local_engine_root") or None,
             on_engine_root=lambda path: App._remember_local_engine_root(self, path),
             on_ai_settings=lambda: App._comparison_ai_settings(self),
             profile="mixed" if mode == "vertical" else ("simplified" if mode == "horizontal_zh" else None),

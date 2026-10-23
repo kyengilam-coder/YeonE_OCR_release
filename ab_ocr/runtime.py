@@ -1,12 +1,13 @@
 """Application-owned resources and explicitly selected, offline engine homes.
 
 An engine home contains ``tools/tesseract``, ``tools/rapidocr`` and/or
-``tools/easyocr``. It is independent of this package's location. In particular,
+``tools/easyocr`` / ``tools/ppocrv6``. It is independent of this package's location. In particular,
 reusing a development installation does not import another project's Python.
 """
 from __future__ import annotations
 
 import os
+import json
 from contextlib import contextmanager
 from pathlib import Path
 import sys
@@ -35,7 +36,7 @@ def user_engine_root() -> Path:
 
 def _has_engine_home(root: Path) -> bool:
     return any((root / "tools" / engine / "installation.json").is_file()
-               for engine in ("tesseract", "rapidocr", "easyocr"))
+               for engine in ("tesseract", "rapidocr", "easyocr", "ppocrv6"))
 
 
 def default_engine_root(selected_root: str | Path | None = None) -> Path:
@@ -65,9 +66,51 @@ def default_engine_root(selected_root: str | Path | None = None) -> Path:
 
 
 def worker_path(engine: str) -> Path:
-    if engine not in ("rapidocr", "easyocr"):
+    if engine not in ("rapidocr", "easyocr", "ppocrv6"):
         raise ValueError("지원하지 않는 로컬 OCR 작업자입니다.")
     return resource_root() / "ab_ocr" / f"{engine}_worker.py"
+
+
+def bundled_ppocrv6_root() -> Path | None:
+    """The app-owned engine is independent of a saved legacy engine home.
+
+    Return its home even if its payload is damaged: the verifier must report the
+    error instead of silently using another copy of the same engine.
+    """
+    root = application_root()
+    folder = root / "tools/ppocrv6"
+    manifest = folder / "installation.json"
+    if not manifest.is_file():
+        return root if (folder / "runtime/python.exe").is_file() else None
+    if getattr(sys, "frozen", False):
+        return root
+    try:
+        if manifest.stat().st_size <= 1_000_000:
+            data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict) and data.get("runtime_layout") == "standalone-python":
+                return root
+    except (OSError, ValueError):
+        if (folder / "runtime/python.exe").is_file():
+            return root
+    return None
+
+
+def engine_root_for(engine: str, selected_root=None) -> Path:
+    """Resolve each engine; bundled v6 takes precedence over legacy settings."""
+    if engine not in ("tesseract", "rapidocr", "easyocr", "ppocrv6"):
+        raise ValueError("지원하지 않는 로컬 OCR 엔진입니다.")
+    if engine == "ppocrv6" and (bundled := bundled_ppocrv6_root()) is not None:
+        return bundled
+    if selected_root or any(os.environ.get(key, "").strip() for key in ("YEONE_OCR_ENGINE_ROOT", "AB_OCR_ENGINE_ROOT")):
+        return default_engine_root(selected_root)
+    local, per_user = application_root(), user_engine_root()
+    candidates = [local, per_user]
+    if not getattr(sys, "frozen", False):
+        candidates.append(local.parent / "AB_OCR")
+    for root in candidates:
+        if (root / "tools" / engine / "installation.json").is_file():
+            return root.resolve()
+    return default_engine_root()
 
 
 def subprocess_environment() -> dict[str, str]:
