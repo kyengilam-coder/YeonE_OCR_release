@@ -19,6 +19,1321 @@ import time
 import traceback
 
 
+COMPARISON_WORKER_ENGINES = ("rapidocr", "easyocr", "ppocrv6", "paddle_server", "glmocr", "surya")
+COMPARISON_INSTALLER_RESOURCES = (
+    "install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py", "rapidocr-lock.json",
+    "install_easyocr.py", "easyocr-lock.json", "install_paddle_server.py", "paddle-server-lock.json",
+    "install_ppocrv6.py", "ppocrv6-lock.json", "create_chinese_ocr_fixture.py",
+    "install_paddle_server_gpu.py", "paddle-server-gpu-lock.json", "install_glmocr.py", "glmocr-models.lock.json",
+    "install_surya.py", "install_surya_cuda.py", "surya-lock.json", "surya-requirements.txt",
+)
+COMPARISON_DOCUMENTS = ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md",
+                        "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "PADDLE_SERVER.md",
+                        "GLM_OCR.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md", "release-notes.md", "AB_OCR_PROVENANCE.json")
+
+
+def comparison_resources_probe() -> dict:
+    from ab_ocr.runtime import resource_root, worker_path
+    checked = []
+    workers = {}
+    for engine in COMPARISON_WORKER_ENGINES:
+        worker = worker_path(engine)
+        assert worker.is_file(), f"Missing application-owned worker: {worker.name}"
+        compile(worker.read_text(encoding="utf-8"), worker.name, "exec")
+        workers[engine] = worker.name
+        if worker.name not in checked:
+            checked.append(worker.name)
+    helper = resource_root() / "ab_ocr" / "worker_sessions.py"
+    assert helper.is_file(), "Missing persistent-worker protocol helper"
+    compile(helper.read_text(encoding="utf-8"), helper.name, "exec")
+    checked.append(helper.name)
+    for name in ("reading_order.py", "glyph_verifier.py"):
+        helper = resource_root() / "ab_ocr" / name
+        assert helper.is_file(), f"Missing local geometry/glyph helper: {name}"
+        compile(helper.read_text(encoding="utf-8"), helper.name, "exec")
+        checked.append(helper.name)
+    import sqlite3
+    with contextlib.closing(sqlite3.connect(":memory:")) as database:
+        assert database.execute("SELECT 1").fetchone() == (1,)
+    for name in COMPARISON_INSTALLER_RESOURCES:
+        resource = resource_root() / "scripts" / name
+        assert resource.is_file(), f"Missing installer resource: {name}"
+        if name.endswith(".json"):
+            assert isinstance(json.loads(resource.read_text(encoding="utf-8")), dict)
+        elif name.endswith(".txt"):
+            requirements = [line.strip() for line in resource.read_text(encoding="utf-8").splitlines()
+                            if line.strip() and not line.lstrip().startswith("#")]
+            assert requirements and all("==" in requirement for requirement in requirements)
+        else:
+            compile(resource.read_text(encoding="utf-8"), name, "exec")
+        checked.append(name)
+    for name in COMPARISON_DOCUMENTS:
+        resource = resource_root() / "docs" / name
+        assert resource.is_file(), f"Missing comparison documentation: {name}"
+        assert resource.read_text(encoding="utf-8").strip(), f"Empty comparison documentation: {name}"
+    return {"application_resources": checked, "workers": workers,
+            "persistent_worker_helper": helper.name, "gpu_queue_database": "sqlite3 available",
+            "documentation": list(COMPARISON_DOCUMENTS),
+            "external_models_loaded": False, "network_calls": 0}
+
+
+def source_preservation_probe(folder: Path) -> dict:
+    """Exercise the new record policy and exact evaluation without model calls."""
+    from PIL import Image
+    from .cli import nfc_reading
+    from .evaluate import build_unit, flatten_source_exact, source_exact_metrics
+    from .merge import merge_passes
+    from .schema import Column, PageReading, Paragraph, Region, RegionReread
+    from .state import Work
+    from .text_policy import LEGACY_TEXT_POLICY, SOURCE_TEXT_POLICY, record_text_policy
+
+    literal = "靑硏敎眞樂神\U0002f800漢\ufe00字\U000e0100한\u200b"
+    first = PageReading(pdf_page=1, regions=[Region(id="body", kind="본문",
+        paragraphs=[Paragraph(columns=[Column(n=1, t=literal)])])])
+    second = RegionReread(columns=[Column(n=1, t=literal)])
+    before = first.model_dump(), second.model_dump()
+    assert nfc_reading(first, text_policy=SOURCE_TEXT_POLICY).model_dump() == before[0]
+    merged, stats = merge_passes(first, {"body": second}, text_policy=SOURCE_TEXT_POLICY)
+    assert merged.regions[0].paragraphs[0].columns[0].text == literal and stats["marks"] == 0
+    assert (first.model_dump(), second.model_dump()) == before
+    historical = nfc_reading(first.model_copy(deep=True))
+    assert "樂" not in historical.regions[0].paragraphs[0].columns[0].text
+    assert record_text_policy({}) == LEGACY_TEXT_POLICY
+    projected = flatten_source_exact([(1, " " + literal + "\n")], expand=False)
+    assert projected.text == literal
+
+    source = folder / "source-policy.png"
+    with Image.new("RGB", (64, 48), "white") as image:
+        image.save(source)
+    work = Work(str(source), str(folder / "source-policy-work"))
+    raw = first.model_dump()
+    raw["regions"][0]["paragraphs"][0]["columns"][0]["text"] = "樂一"
+    record = {"pdf_page": 1, "text_policy": SOURCE_TEXT_POLICY, "pass1": raw,
+              "merged": raw, "pass2": {}, "human_edits": [{"text": "kept"}]}
+    work.save_record(1, record)
+    original = work.record_path(1).read_bytes()
+    exact = source_exact_metrics(build_unit(work, None, "synthetic", [1], ["樂一\ufe00"]))
+    assert exact["available"] and exact["stages"]["final"]["edits"] == 2
+    assert work.record_path(1).read_bytes() == original and work.load_record(1) == record
+    return {"text_policy": SOURCE_TEXT_POLICY, "compatibility_and_selectors_preserved": True,
+            "legacy_policy_unchanged": True, "source_exact_edits": 2,
+            "evaluation_record_unchanged": True, "network_calls": 0}
+
+
+def glyph_location_hold_probe() -> dict:
+    """A synthetic answer cannot confirm a position on a blank source image."""
+    from dataclasses import asdict
+    from PIL import Image
+    from . import adjudicate
+    from .schema import Column, GlyphChoice, PageReading, Paragraph, Region
+
+    reading = PageReading(pdf_page=1, regions=[Region(id="body", kind="본문",
+        bbox=[100, 100, 900, 900],
+        paragraphs=[Paragraph(columns=[Column(n=1, t="甲〔入/人〕乙")])])])
+    record = {"pdf_page": 1, "pass1": reading.model_dump(), "merged": reading.model_dump(),
+              "human_edits": [{"text": "historical correction remains"}]}
+
+    class FixtureReader:
+        model = "offline-location-fixture"
+        calls = 0
+
+        def adjudicate(self, *_args):
+            self.calls += 1
+            return GlyphChoice(choice="人", window="甲人乙", evidence="synthetic fixture")
+
+    reader = FixtureReader()
+    with Image.new("L", (120, 120), 255) as image:
+        adjudicate.adjudicate_page(record, image, reader, True, batch=1)
+    entry = record["adjudications"][0]
+    assert reader.calls == 1 and entry["choice"] == "" and entry["unconfirmed_choice"] == "人"
+    assert entry["location_check"]["reason"] == "unmeasured-location"
+    assert not entry["location_check"]["verified"] and record["merged"] == reading.model_dump()
+    assert record["human_edits"] == [{"text": "historical correction remains"}]
+    legacy = reading.model_copy(deep=True)
+    old = {**asdict(adjudicate.find_sites(legacy)[0]), "choice": "人",
+           "loc": "uniform", "window": "", "evidence": "legacy"}
+    assert adjudicate.apply_adjudications(legacy, [old]) == 1
+    assert legacy.regions[0].paragraphs[0].columns[0].text == "甲人乙"
+    return {"new_unmeasured_choice": "held", "legacy_decision_replay": "preserved",
+            "mock_answers": reader.calls, "network_calls": 0}
+
+
+def small_annotations_probe(folder: Path) -> dict:
+    """Detect both layouts and persist proposals without changing old records."""
+    import tkinter as tk
+    from PIL import Image, ImageDraw
+    from .cli import build_parser
+    from .schema import Column, PageReading, Paragraph, Region
+    from .small_annotation_detection import detect_small_annotations
+    from .small_annotation_ui import SmallAnnotationDialog
+    from .small_annotations import load_bundle, scan_work
+    from .state import Work
+
+    assert issubclass(SmallAnnotationDialog, tk.Toplevel)
+
+    def glyph(draw, x, y, width, height):
+        draw.rectangle((x, y, x + width - 1, y + height - 1), outline=0, width=2)
+        draw.line((x, y + height // 2, x + width - 1, y + height // 2), fill=0, width=2)
+
+    counts = {}
+    for horizontal in (False, True):
+        label = "horizontal" if horizontal else "vertical"
+        source = folder / f"small-{label}.png"
+        with Image.new("L", (900, 650) if horizontal else (420, 400), 255) as image:
+            draw = ImageDraw.Draw(image)
+            if horizontal:
+                for y in (30, 80, 130):
+                    for x in range(25, 810, 34):
+                        glyph(draw, x, y, 26, 30)
+                for y in (240, 390, 440, 490):
+                    for x in range(25, 230, 34):
+                        glyph(draw, x, y, 26, 30)
+                for row in range(2):
+                    for x in range(280, 800 if row == 0 else 390, 18):
+                        glyph(draw, x, 235 + row * 24, 12, 14)
+                for row in range(5):
+                    for x in range(280, 800 if row < 4 else 600, 26):
+                        glyph(draw, x, 380 + row * 32, 18, 20)
+            else:
+                for x in (255, 320):
+                    for y in range(25, 365, 34):
+                        glyph(draw, x, y, 24, 26)
+                for y in (25, 59, 263, 297, 331):
+                    glyph(draw, 160, y, 24, 26)
+                for x in (160, 176):
+                    for y in range(110, 207, 16):
+                        glyph(draw, x, y, 10, 12)
+            reading = PageReading(pdf_page=1, regions=[Region(id="body", kind="본문",
+                bbox=[0, 0, 1000, 1000], reading_direction="가로" if horizontal else "세로",
+                paragraphs=[Paragraph(columns=[Column(n=1, t="人手樂\ufe00校正")])])])
+            detected = detect_small_annotations(image, reading, horizontal=horizontal)
+            expected = [2, 5] if horizontal else [2]
+            assert [len(c["subcolumns"]) for c in detected["candidates"]] == expected
+            image.save(source)
+        work = Work(str(source), str(folder / f"small-{label}-work"))
+        record = {"pdf_page": 1, "pass1": reading.model_dump(), "pass2": {},
+                  "merged": reading.model_dump(), "adjudications": [{"choice": "曰"}],
+                  "mode": "horizontal_zh" if horizontal else "vertical",
+                  "unknown_old_metadata": {"keep": "unchanged"}}
+        work.save_record(1, record)
+        originals = {path: path.read_bytes() for path in (source, work.record_path(1))}
+        bundle = scan_work(source, work.dir, pages=[1], horizontal=horizontal)
+        candidates = bundle["pages"][0]["candidates"]
+        assert [len(c["subcolumns"]) for c in candidates] == expected
+        for candidate in candidates:
+            sides = [side["side"] for side in candidate["subcolumns"]]
+            assert sides == ([f"line-{n}" for n in range(1, len(sides) + 1)]
+                             if horizontal else ["right", "left"])
+            assert candidate["status"] == "detected" and Path(candidate["crop_path"]).is_file()
+        assert load_bundle(work.dir)["pages"][0]["stale"] is False
+        assert all(path.read_bytes() == content for path, content in originals.items())
+        counts[label] = {"candidates": len(candidates), "lines": sum(expected)}
+    args = build_parser().parse_args(["annotations", str(source), "--direction", "horizontal"])
+    assert callable(args.fn) and args.direction == "horizontal"
+    return {"layouts": counts, "ui_imported": True, "original_and_records_unchanged": True,
+            "automatic_insertions": 0, "network_calls": 0}
+
+
+def bookmark_section_probe(folder: Path) -> dict:
+    """Exercise the shipped bookmark matcher with an earlier narrative mention."""
+    from hwpx.document import HwpxDocument
+    from lxml import etree
+    import pymupdf
+    from .collate.sections import HwpxBook
+    from .collate.pdf_outline import find_title_pages
+    from .collate.run import index_both
+
+    path = folder / "bookmark-navigation.hwpx"
+    hp = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        heading = document.paragraphs[-1].element
+        run = etree.SubElement(heading, hp + "run", charPrIDRef="0")
+        ctrl = etree.SubElement(run, hp + "ctrl")
+        etree.SubElement(ctrl, hp + "bookmark", name="    瀉白散")
+        document.add_paragraph("本方正文。", style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(path))
+    finally:
+        document.close()
+    before = path.read_bytes()
+    with pymupdf.open() as pdf:
+        for lines in (["方書載有瀉白散等多種方劑。"],
+                      ["瀉白散", "本方正文。"], ["葦莖湯", "下一方正文。"]):
+            page = pdf.new_page()
+            for row, text in enumerate(lines):
+                page.insert_text((40, 70 + row * 40), text, fontname="china-t", fontsize=18)
+        assert find_title_pages(pdf, "瀉白散", "葦莖湯") == (2, 3)
+        pdf.set_toc([[1, "사백산", 2], [1, "위경탕", 3]])
+        book = HwpxBook(str(path))
+        try:
+            anchors, _, matches = index_both(pdf, book)
+            assert [a.name.strip() for a in anchors] == ["瀉白散", "葦莖湯"]
+            assert [m.pdf.page if m.pdf else None for m in matches] == [2, 3]
+            assert len({a.para for a in anchors}) == len(anchors)
+        finally:
+            book.doc.close()
+    assert path.read_bytes() == before
+    return {"canonical_sections": 2, "body_heading_pages": [2, 3],
+            "earlier_mention_rejected": True, "input_unchanged": True, "network_calls": 0}
+
+
+def bookmark_edit_probe(folder: Path) -> dict:
+    """Save a manual edit through the shipped UI, preserving source and other text."""
+    import tkinter as tk
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import SectionEditSession, manual_protected_paragraphs
+    from .collate.section_editor import BookmarkSectionEditor
+
+    source = folder / "bookmark-edit.hwpx"
+    pdf_path = folder / "bookmark-edit.pdf"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph("本方正文。", style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=18)
+        pdf.save(pdf_path)
+    original = source.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        anchors = book.anchors()
+        section = book.section(anchors, 0)
+    finally:
+        book.doc.close()
+    session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    editable = next(p.index for p in session.paragraphs if p.editable)
+    first = session.save({editable: "本方正文甲。"})
+    previous = first.path.read_bytes()
+    root = tk.Tk()
+    root.withdraw()
+    window = None
+    try:
+        window = BookmarkSectionEditor(root, pdf_path=pdf_path, hwpx_path=source,
+            section_name="瀉白散", section_start=section.start, section_end=section.end,
+            pdf_pages=(1, 1))
+        window.withdraw()
+        field = window._editors[editable]
+        field.delete("1.0", "end")
+        field.insert("1.0", "本方正文乙。")
+        window._confirm_changes = lambda changes: changes == {editable: "本方正文乙。"}
+        assert window.dirty
+        assert window.save()
+        assert not window.dirty
+        assert first.path.with_suffix(".bak.hwpx").read_bytes() == previous
+        assert manual_protected_paragraphs(first.path) == {editable}
+        reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        assert next(p.corrected_text for p in reopened.paragraphs if p.index == editable) == "本方正文乙。"
+        check = HwpxBook(str(first.path))
+        try:
+            assert "下一方正文。" in check.texts()
+        finally:
+            check.doc.close()
+        assert source.read_bytes() == original
+    finally:
+        if window is not None:
+            window.destroy()
+            # Finish this window's native reads before the next fixture creates a PDF.
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    return {"saved_into_existing_copy": True, "backup_matches_previous": True,
+            "source_and_other_section_preserved": True, "manual_protection": True,
+            "ui_save_and_reopen": True, "network_calls": 0}
+
+
+def correction_memory_probe(folder: Path) -> dict:
+    """Keep a human correction separately and reuse only active same-PDF hints."""
+    import hashlib
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import SectionEditSession, manual_history_path, manual_protected_paragraphs
+    from .correction_memory import load_correction_memory
+
+    source = folder / "human-correction.hwpx"
+    pdf_path = folder / "human-correction.pdf"
+    other_pdf = folder / "human-correction-other.pdf"
+    before, after = "方解：사火之劑。", "方解：瀉火之劑。"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph(before, style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    for path, text in ((pdf_path, after), (other_pdf, "別本正文。")):
+        with pymupdf.open() as pdf:
+            pdf.new_page().insert_text((40, 60), text, fontname="china-t", fontsize=18)
+            pdf.save(path)
+    originals = {path: path.read_bytes() for path in (source, pdf_path, other_pdf)}
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+    finally:
+        book.doc.close()
+    session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    editable = next(row.index for row in session.paragraphs if row.editable)
+    saved = session.save({editable: after})
+    history_path = manual_history_path(saved.path)
+    history = json.loads(history_path.read_text("utf-8"))
+    event = history["correction_events"][-1]
+    assert event["before"] == before and event["after"] == after
+    assert event["paragraph"] == editable and event["section"]["name"] == "瀉白散"
+    assert event["time"] and event["pdf"]["sha256"] == hashlib.sha256(originals[pdf_path]).hexdigest()
+    assert saved.learning_count == 1 and saved.learning_path == history_path and not saved.learning_warning
+    memory = load_correction_memory(saved.path, pdf_path)
+    assert memory.count == 1 and memory.digest and not memory.warning and memory.path == history_path
+    assert '"수정 전":"사"' in memory.prompt and '"사람이 저장한 글자":"瀉"' in memory.prompt
+    assert load_correction_memory(saved.path, other_pdf).count == 0
+    saved_bytes, history_bytes = saved.path.read_bytes(), history_path.read_bytes()
+    assert load_correction_memory(saved.path, pdf_path) == memory
+    assert saved.path.read_bytes() == saved_bytes and history_path.read_bytes() == history_bytes
+    assert manual_protected_paragraphs(saved.path) == {editable}
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(row.corrected_text for row in reopened.paragraphs if row.index == editable) == after
+    undone = reopened.save({editable: before})
+    assert undone.path == saved.path and undone.learning_count == 0
+    assert undone.backup_path.read_bytes() == saved_bytes
+    inactive = load_correction_memory(saved.path, pdf_path)
+    assert inactive.count == 0 and not inactive.prompt and not inactive.digest
+    journal = json.loads(history_path.read_text("utf-8"))["correction_events"]
+    assert len(journal) == 2 and journal[0] == event
+    assert journal[1]["before"] == after and journal[1]["after"] == before
+    assert manual_protected_paragraphs(saved.path) == {editable}
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    return {"before_after_journal_saved": True, "same_pdf_hint_count": memory.count,
+            "hangul_to_hanja_hint": True, "other_pdf_excluded": True,
+            "read_only_hint_loading": True, "undo_excluded_history_retained": True,
+            "existing_copy_and_backup_preserved": True, "manual_protection_retained": True,
+            "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
+
+
+def color_only_collation_probe(folder: Path) -> dict:
+    """Exercise color-only output and safe memo cleanup in the packaged app."""
+    from hwpx.document import HwpxDocument
+    from .collate.collate import Item
+    from .collate.hwpx_edit import Editor, HP, _slots
+    from .collate.sections import HwpxBook
+    from .collate.memo_cleanup import clean_corrected_memos
+    from .hwpx_memo import count_memos, MemoWriter
+
+    source = folder / "color-only.hwpx"
+    target = folder / "color-only_교정.hwpx"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        style = document.styles.ensure_run(size=11)
+        document.add_paragraph("甲乙丙丁", style_id_ref=0, char_pr_id_ref=style, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    source_bytes = source.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        index = book.texts().index("甲乙丙丁")
+        editor = Editor(book, memo="none")
+        applied = editor.apply([
+            Item("A", "replace", index, 1, 2, "乙", "己", "己", auto=True),
+            Item("B1", "mark", index, 2, 3, "丙", "丁", "", note="확인"),
+        ])
+        assert all(entry.ok and not entry.memo for entry in applied)
+        assert book.texts()[index] == "甲己丙丁"
+        assert count_memos(p.element for p in book.paragraphs) == 0
+        assert not editor.add_legend_memo()
+        color_path = editor.save_copy(str(folder / "color-output.hwpx"))
+    finally:
+        book.doc.close()
+    output = HwpxBook(color_path)
+    try:
+        assert output.texts()[index] == "甲己丙丁"
+        assert count_memos(p.element for p in output.paragraphs) == 0
+        inspector = Editor(output, memo="none")
+        colors = {char: inspector._char_pr(slot.run.get("charPrIDRef")).get("textColor")
+                  for slot in _slots(output.paragraphs[index].element) for char in slot.text}
+        assert colors["己"] == "#1F4FBF" and colors["丙"] == "#C00000"
+    finally:
+        output.doc.close()
+    book = HwpxBook(str(source))
+    try:
+        editor = Editor(book, memo="all")
+        editor.apply([Item("B1", "mark", index, 1, 2, "乙", "己", "", note="확인")])
+        assert editor.add_legend_memo()
+        run = book.paragraphs[index].element.find(HP + "run")
+        assert MemoWriter(book.doc, author="교정자", start=10).wrap_run(run, "[확인] 사람이 남긴 의견")
+        editor.save_copy(str(target))
+        before_text = book.texts()
+        assert count_memos(p.element for p in book.paragraphs) == 3
+    finally:
+        book.doc.close()
+    before = target.read_bytes()
+    result = clean_corrected_memos(source)
+    assert result.removed == 2 and result.skipped == 0
+    assert result.backup_path.read_bytes() == before
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts() == before_text
+        assert count_memos(p.element for p in book.paragraphs) == 1
+        assert "사람이 남긴 의견" in "".join(book.paragraphs[index].element.itertext())
+    finally:
+        book.doc.close()
+    after = target.read_bytes()
+    assert clean_corrected_memos(source).removed == 0
+    assert target.read_bytes() == after and source.read_bytes() == source_bytes
+    return {"color_only_no_memos_or_inline_text": True, "owned_memos_removed": 2,
+            "human_memo_preserved": True, "text_and_original_preserved": True,
+            "backup_matches_previous": True, "repeated_cleanup_no_write": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
+def manual_style_cleanup_probe(folder: Path) -> dict:
+    """Restore only human-edited OCR marks while keeping author formatting."""
+    import hashlib
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from lxml import etree
+    from .collate.collate import Item
+    from .collate.hwpx_edit import Editor, HP, _canon, _slots, _tag_of, paragraph_text
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import (
+        ManualProtectionError, SaveAccessError, SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
+    )
+
+    source = folder / "manual-style.hwpx"
+    target = folder / "manual-style_교정.hwpx"
+    pdf_path = folder / "manual-style.pdf"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        normal = document.styles.ensure_run(size=11)
+        author = document.styles.ensure_run(size=15, bold=True, color="#A020F0",
+            highlight="#CCDDEE", underline=True, underline_shape="SOLID")
+        paragraph = document.add_paragraph("", style_id_ref=0, include_run=False, inherit_style=False)
+        paragraph.add_run("甲乙丙", char_pr_id_ref=normal)
+        paragraph.add_run("丁戊己", char_pr_id_ref=author)
+        document.add_paragraph("此段待確認。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=18)
+        pdf.save(pdf_path)
+    originals = {path: path.read_bytes() for path in (source, pdf_path)}
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        index = book.texts().index("甲乙丙丁戊己")
+        other = book.texts().index("此段待確認。")
+        editor = Editor(book, memo="none")
+        baseline = {char: _canon(editor._char_pr(slot.run.get("charPrIDRef")))
+                    for slot in _slots(book.paragraphs[index].element) for char in slot.text}
+        applied = editor.apply([
+            Item("A", "replace", index, 1, 2, "乙", "庚", "庚", auto=True),
+            Item("B1", "mark", index, 2, 3, "丙", "辛", "", note="확인"),
+            Item("B1", "mark", index, 4, 5, "戊", "壬", "", note="확인"),
+            Item("B1", "mark", other, 1, 2, "段", "文", "", note="확인"),
+        ])
+        assert all(entry.ok for entry in applied)
+        assert book.texts()[index] == "甲庚丙丁戊己"
+        editor.save_copy(str(target))
+    finally:
+        book.doc.close()
+    before = target.read_bytes()
+    book = HwpxBook(str(target))
+    try:
+        untouched = {i: etree.tostring(p.element) for i, p in enumerate(book.paragraphs) if i != index}
+        inspector = Editor(book, memo="none")
+        marked_before = {char: _canon(inspector._char_pr(slot.run.get("charPrIDRef")))
+                         for slot in _slots(book.paragraphs[index].element) for char in slot.text}
+    finally:
+        book.doc.close()
+    session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    saved = session.save({index: "甲辛丙丁壬己"})
+    assert saved.path == target and saved.backup_path.read_bytes() == before
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts()[index] == "甲辛丙丁壬己"
+        inspector = Editor(book, memo="none")
+        styles = {char: inspector._char_pr(slot.run.get("charPrIDRef"))
+                  for slot in _slots(book.paragraphs[index].element) for char in slot.text}
+        assert _canon(styles["辛"]) == baseline["乙"]
+        assert _canon(styles["壬"]) == baseline["戊"]
+        assert _canon(styles["丙"]) == marked_before["丙"]
+        assert _tag_of(styles["丙"]) == "#C00000"
+        assert _canon(styles["丁"]) == baseline["丁"] and _canon(styles["己"]) == baseline["己"]
+        assert all(etree.tostring(book.paragraphs[i].element) == data for i, data in untouched.items())
+    finally:
+        book.doc.close()
+    history = json.loads(manual_history_path(target).read_text("utf-8"))
+    assert history["correction_events"][-1]["before"] == "甲庚丙丁戊己"
+    assert history["correction_events"][-1]["after"] == "甲辛丙丁壬己"
+    assert manual_protected_paragraphs(target) == {index}
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == "甲辛丙丁壬己"
+    # A single length-changing replacement crosses normal/red/author styles.
+    # This used to raise the same error as a manual edit in a real OCR paragraph.
+    before_cross_style = target.read_bytes()
+    saved = reopened.save({index: "甲子丑寅卯辰巳己"})
+    assert saved.backup_path.read_bytes() == before_cross_style
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts()[index] == "甲子丑寅卯辰巳己"
+        inspector = Editor(book, memo="none")
+        styles = [inspector._char_pr(slot.run.get("charPrIDRef"))
+                  for slot in _slots(book.paragraphs[index].element) for _ in slot.text]
+        assert all(_tag_of(style) not in {"#0B7A3B", "#1F4FBF", "#C00000"} for style in styles)
+        assert _canon(styles[0]) == baseline["甲"] and _canon(styles[-1]) == baseline["己"]
+        assert all(etree.tostring(book.paragraphs[i].element) == data for i, data in untouched.items())
+    finally:
+        book.doc.close()
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == "甲子丑寅卯辰巳己"
+    history = json.loads(manual_history_path(target).read_text("utf-8"))
+    assert history["correction_events"][-1]["before"] == "甲辛丙丁壬己"
+    assert history["correction_events"][-1]["after"] == "甲子丑寅卯辰巳己"
+    assert manual_protected_paragraphs(target) == {index}
+
+    # A new human correction has spaces in its saved journal. Simulate an
+    # external editor removing/adding ASCII spaces without changing characters,
+    # paragraph identity or any run's formatting.
+    spaced = "甲 子丑寅 卯辰巳庚"
+    reopened.save({index: spaced})
+    history_path = manual_history_path(target)
+    history_bytes = history_path.read_bytes()
+    history = json.loads(history_bytes)
+
+    def externally_edit_text(transform):
+        archive = _Archive(target.read_bytes())
+        paragraph = archive.paragraphs[index]
+        for node in paragraph.iter(HP + "t"):
+            if node.text:
+                node.text = transform(node.text)
+        current = paragraph_text(paragraph)
+        archive.write(target, {archive.locations[index][0]})
+        return current
+
+    for operation in (lambda text: text.replace(" ", ""), lambda text: " " + text + " "):
+        current = externally_edit_text(operation)
+        assert current.replace(" ", "") == spaced.replace(" ", "") and current != spaced
+        # Neither variant may accidentally pass the pre-existing exact-hash path.
+        assert hashlib.sha256(current.encode("utf-8")).hexdigest() not in history["paragraphs"][str(index)]["text_hashes"]
+        changed_bytes = target.read_bytes()
+        assert manual_protected_paragraphs(target) == {index}
+        reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == current
+        assert target.read_bytes() == changed_bytes and history_path.read_bytes() == history_bytes
+
+    final_text = current.replace("庚", "辛")
+    saved = reopened.save({index: final_text})
+    assert saved.backup_path.read_bytes() == changed_bytes
+    final_history = json.loads(history_path.read_bytes())
+    assert final_history["correction_events"][:-1] == history["correction_events"]
+    assert final_history["correction_events"][-1]["before"] == current
+    assert final_history["correction_events"][-1]["after"] == final_text
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == final_text
+    assert manual_protected_paragraphs(target) == {index}
+    valid_bytes, final_history_bytes = target.read_bytes(), history_path.read_bytes()
+    externally_edit_text(lambda text: text.replace("甲", "乙"))
+    invalid_bytes = target.read_bytes()
+    for load in (lambda: manual_protected_paragraphs(target),
+                 lambda: SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)):
+        try:
+            load()
+        except ManualProtectionError:
+            pass
+        else:
+            raise AssertionError("An external character change must remain protected")
+    assert target.read_bytes() == invalid_bytes and history_path.read_bytes() == final_history_bytes
+    target.write_bytes(valid_bytes)  # Leave this synthetic probe's valid result in place.
+    locked_save_preserved = unlocked_retry_saved = None
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        # Simulate an open HWPX in another application: reads remain possible,
+        # but replacing/deleting this exact synthetic file is denied by Windows.
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        pending = {index: final_text.replace("辛", "壬")}
+        snapshot = [(p.index, p.corrected_text) for p in reopened.paragraphs]
+        handle = kernel.CreateFileW(str(target), 0x80000000, 0x1 | 0x2, None, 3, 0x80, None)
+        if handle == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            try:
+                reopened.save(pending)
+            except SaveAccessError as exc:
+                assert Path(exc.path).resolve() == target.resolve()
+                assert exc.winerror in (5, 32, 33)
+            else:
+                raise AssertionError("Replacing a Windows sharing-locked HWPX must fail safely")
+            assert target.read_bytes() == valid_bytes and history_path.read_bytes() == final_history_bytes
+            assert [(p.index, p.corrected_text) for p in reopened.paragraphs] == snapshot
+            locked_save_preserved = True
+        finally:
+            assert kernel.CloseHandle(handle)
+        saved = reopened.save(pending)
+        assert saved.backup_path.read_bytes() == valid_bytes
+        assert next(p.corrected_text for p in reopened.paragraphs if p.index == index) == pending[index]
+        lock_history = json.loads(history_path.read_bytes())
+        assert lock_history["correction_events"][:-1] == final_history["correction_events"]
+        assert lock_history["correction_events"][-1]["before"] == final_text
+        assert lock_history["correction_events"][-1]["after"] == pending[index]
+        final_session = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+        assert next(p.corrected_text for p in final_session.paragraphs if p.index == index) == pending[index]
+        assert manual_protected_paragraphs(target) == {index}
+        unlocked_retry_saved = True
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    return {"edited_marks_cleared": True, "mixed_author_styles_restored": True,
+            "untouched_marks_and_paragraphs_preserved": True, "existing_copy_and_backup_preserved": True,
+            "manual_history_and_protection_retained": True, "saved_file_reopened": True,
+            "cross_style_length_change_saved_and_reopened": True,
+            "ascii_space_only_changes_preserve_protection": True, "space_validation_is_read_only": True,
+            "space_adjusted_manual_save_reopens": True, "external_character_changes_still_blocked": True,
+            "locked_save_preserves_document_and_history": locked_save_preserved,
+            "unlocked_save_retries_same_session": unlocked_retry_saved,
+            "source_pdf_and_hwpx_unchanged": True, "ocr_calls": 0, "network_calls": 0}
+
+
+@contextlib.contextmanager
+def _isolated_tk_clipboard(root):
+    """Observe real Tk copy commands without changing the user's OS clipboard."""
+    original = f"__yeone_smoke_clipboard_{id(root)}"
+    captured = {"text": "", "writes": 0}
+
+    def clipboard(operation, *arguments):
+        if operation == "clear":
+            captured["text"] = ""
+        elif operation == "append" and arguments:
+            captured["text"] += str(arguments[-1])
+            captured["writes"] += 1
+        else:
+            raise ValueError(f"Unexpected clipboard operation in copy probe: {operation}")
+        return ""
+
+    root.tk.call("rename", "clipboard", original)
+    try:
+        root.tk.createcommand("clipboard", clipboard)
+        yield captured
+    finally:
+        root.tk.deletecommand("clipboard")
+        root.tk.call("rename", original, "clipboard")
+
+
+def bookmark_replace_probe(folder: Path) -> dict:
+    """Recover paragraph input and replace through the shipped comparison UI."""
+    import tkinter as tk
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from lxml import etree
+    from .collate import section_editor
+    from .collate.collate import Item
+    from .collate.hwpx_edit import Editor, HP, _canon, _slots, _tag_of
+    from .collate.sections import HwpxBook
+    from .collate.section_edit import (
+        SectionEditSession, _Archive, manual_history_path, manual_protected_paragraphs,
+    )
+
+    source = folder / "bookmark-replace.hwpx"
+    target = folder / "bookmark-replace_교정.hwpx"
+    pdf_path = folder / "bookmark-replace.pdf"
+    document = HwpxDocument.new()
+    try:
+        normal = document.styles.ensure_run(size=11)
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph("單純皰疹。皰液。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.add_paragraph("保留原文。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        document.add_heading("皰疹別方", level=1)
+        document.add_paragraph("他段皰疹。", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        special = document.add_paragraph("保留皰", style_id_ref=0, char_pr_id_ref=normal, inherit_style=False)
+        etree.SubElement(special.element.find(HP + "run").find(HP + "t"), HP + "tab").tail = "原文"
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=18)
+        pdf.save(pdf_path)
+    originals = {path: path.read_bytes() for path in (source, pdf_path)}
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        local = book.texts().index("單純皰疹。皰液。")
+        outside = book.texts().index("他段皰疹。")
+        retained = book.texts().index("保留原文。")
+        editor = Editor(book, memo="none")
+        baseline = _canon(editor._char_pr(normal))
+        marks = [
+            Item("B1", "mark", index, offset, offset + 1, "皰", "疱", "", note="확인")
+            for index in (local, outside)
+            for offset, char in enumerate(book.texts()[index]) if char == "皰"
+        ]
+        assert all(item.ok for item in editor.apply(marks))
+        # Stored marks can exist without a text difference, especially review
+        # requests. Exercise all three persisted grades through the shipped UI.
+        for offset, grade in enumerate(("green", "blue", "red")):
+            editor._recolor_range(book.paragraphs[retained].element, offset, offset + 1,
+                                  editor._style_for(normal, grade), None)
+        editor.save_copy(str(target))
+    finally:
+        book.doc.close()
+    before = target.read_bytes()
+    snapshot = _Archive(before)
+    untouched = {i: etree.tostring(p) for i, p in enumerate(snapshot.paragraphs) if i not in (local, outside)}
+    root = tk.Tk()
+    root.withdraw()
+    window = dialog = None
+    try:
+        window = section_editor.BookmarkSectionEditor(
+            root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 1))
+        window.withdraw()
+        field = window._editors[local]
+        def paint_at(widget, offset):
+            colors = {name: str(widget.cget(name)).upper() for name in ("foreground", "background")}
+            for tag in widget.tag_names(f"1.0+{offset}c"):
+                for name in colors:
+                    value = widget.tag_cget(tag, name)
+                    if value:
+                        colors[name] = str(value).upper()
+            return colors
+        retained_field = window._editors[retained]
+        assert paint_at(field, 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+        assert paint_at(retained_field, 0)["foreground"] == "#0B7A3B"
+        assert paint_at(retained_field, 1) == {"foreground": "#1F4FBF", "background": "#E1EBFF"}
+        assert paint_at(retained_field, 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+        assert not window.dirty and target.read_bytes() == before
+        field.delete("1.0", "end")
+        field.insert("1.0", "單純皰疹。皰液。\r\n確認\t句。")
+        prompt = section_editor.messagebox.askyesno
+        confirmations = []
+        try:
+            section_editor.messagebox.askyesno = lambda *args, **kwargs: confirmations.append(args) or True
+            assert window._prepare_paragraph_input()
+        finally:
+            section_editor.messagebox.askyesno = prompt
+        expected_draft = "單純皰疹。皰液。 確認 句。"
+        assert confirmations and field.get("1.0", "end-1c") == expected_draft
+        dialog = section_editor.FindReplaceDialog(window)
+        dialog.withdraw()
+        dialog.v_find.set("皰")
+        dialog.v_replace.set("疱")
+        assert dialog.preview() and dialog.plan.matches == 2
+        dialog.v_scope.set("교정본 전체")
+        assert dialog.preview()
+        plan = dialog.plan
+        assert plan.matches == 3 and plan.paragraph_count == 2 and plan.skipped_count == 2
+        assert target.read_bytes() == before and not manual_history_path(target).exists()
+        assert dialog.replace_all()
+        assert target.read_bytes() == before
+        assert field.get("1.0", "end-1c") == expected_draft.replace("皰", "疱")
+        assert paint_at(field, 2)["foreground"] not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+        assert paint_at(field, 2)["background"] not in {"#FFFF00", "#E1EBFF"}
+        # Exercise the actual editor selection and bindings. Redirect only Tcl's
+        # clipboard command so an image or other user clipboard format survives.
+        window.deiconify()
+        root.update()
+        field.focus_force()
+        field.tag_add("sel", "1.2", "1.3")
+        root.update()
+        before_copy = window._changes()
+        with _isolated_tk_clipboard(root) as copied:
+            for shortcut in ("<Control-c>", "<Control-C>", "<Control-Insert>", "<<Copy>>"):
+                writes = copied["writes"]
+                field.event_generate(shortcut)
+                root.update()
+                assert copied["writes"] == writes + 1 and copied["text"] == "疱", shortcut
+            if sys.platform == "win32":
+                from types import SimpleNamespace
+                key = SimpleNamespace(state=0x0004, keycode=67, keysym="??")
+                writes = copied["writes"]
+                assert section_editor._copy_control_key(field, key) == "break"
+                assert copied["writes"] == writes + 1 and copied["text"] == "疱"
+            # Invoking the menu's copy action uses the selected Text directly,
+            # including after focus moves to another field.
+            dialog.deiconify()
+            dialog.find_entry.focus_force()
+            dialog.find_entry.selection_range(0, "end")
+            root.update()
+            writes = copied["writes"]
+            field._copy_menu.invoke(0)
+            assert copied["writes"] == writes + 1 and copied["text"] == "疱"
+            assert field.get("sel.first", "sel.last") == "疱"
+            # One action crosses paragraph boxes without selecting each field.
+            assert window.copy_section_text()
+            assert copied["text"] == ("瀉白散\n\n" + expected_draft.replace("皰", "疱")
+                                      + "\n\n保留原文。")
+            assert "他段疱疹" not in copied["text"]
+            if sys.platform == "win32":
+                key = SimpleNamespace(state=0x0004, keycode=65, keysym="Hangul")
+                assert section_editor._copy_control_key(field, key) == "break"
+                assert field.get("sel.first", "sel.last") == expected_draft.replace("皰", "疱")
+        assert root.tk.call("info", "commands", "clipboard") == ("clipboard",)
+        assert window._changes() == before_copy and target.read_bytes() == before
+        draft_path = folder / "bookmark-unsaved-draft.txt"
+        assert window.export_changes(draft_path)
+        backup_text = draft_path.read_text(encoding="utf-8-sig")
+        assert backup_text == ("瀉白散\n\n" + expected_draft.replace("皰", "疱") + "\n\n保留原文。")
+        document_path = folder / "bookmark-whole-document.txt"
+        assert window.export_changes(document_path, scope="document")
+        assert document_path.read_text(encoding="utf-8-sig") == "\n\n".join([
+            "", "瀉白散", expected_draft.replace("皰", "疱"), "保留原文。",
+            "皰疹別方", "他段疱疹。", "保留皰\t原文",
+        ])
+        assert window._changes() == before_copy and window.dirty and target.read_bytes() == before
+        assert not manual_history_path(target).exists()
+        window.withdraw()
+        window._confirm_changes = lambda changes: changes == plan.changes
+        assert window.save() and not window.dirty
+        assert paint_at(field, 2)["foreground"] not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+        assert paint_at(field, 2)["background"] not in {"#FFFF00", "#E1EBFF"}
+        assert paint_at(retained_field, 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+        assert window.reload() and not window.dirty
+        assert paint_at(window._editors[local], 2)["foreground"] not in {"#0B7A3B", "#1F4FBF", "#C00000"}
+        assert paint_at(window._editors[retained], 2) == {"foreground": "#C00000", "background": "#FFFF00"}
+    finally:
+        if dialog is not None:
+            dialog.destroy()
+        if window is not None:
+            window.destroy()
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    assert target.with_suffix(".bak.hwpx").read_bytes() == before
+    saved = _Archive(target.read_bytes())
+    assert all(etree.tostring(saved.paragraphs[i]) == data for i, data in untouched.items())
+    for name, data in snapshot.entries.items():
+        if name != "Contents/header.xml" and name not in {part for part, _ in snapshot.locations}:
+            assert saved.entries[name] == data
+    book = HwpxBook(str(target))
+    try:
+        assert book.texts()[local] == "單純疱疹。疱液。 確認 句。"
+        assert book.texts()[outside] == "他段疱疹。"
+        inspector = Editor(book, memo="none")
+        restored = [inspector._char_pr(slot.run.get("charPrIDRef"))
+                    for index in (local, outside) for slot in _slots(book.paragraphs[index].element)
+                    for char in slot.text if char == "疱"]
+        assert len(restored) == 3 and all(_canon(style) == baseline for style in restored)
+        assert all(_tag_of(style) not in {"#0B7A3B", "#1F4FBF", "#C00000"} for style in restored)
+    finally:
+        book.doc.close()
+    assert manual_protected_paragraphs(target) == {local, outside}
+    history = json.loads(manual_history_path(target).read_text("utf-8"))
+    assert {entry["paragraph"] for entry in history["correction_events"]} == {local, outside}
+    reopened = SectionEditSession.open(pdf_path, source, "瀉白散", section.start, section.end)
+    assert next(p.corrected_text for p in reopened.paragraphs if p.index == local) == "單純疱疹。疱液。 確認 句。"
+    assert all(path.read_bytes() == data for path, data in originals.items())
+    return {"editable_occurrences": 3, "readonly_skipped": 2,
+            "stored_hwpx_grade_colors_displayed": True, "unchanged_review_marks_displayed": True,
+            "manual_colors_cleared_after_save_and_reload": True,
+            "input_line_join_preserved_text": True, "section_and_document_scopes": True,
+            "pending_edits_preserved": True, "edited_marks_cleared": True,
+            "edited_text_copy_shortcuts": True, "copy_context_menu": True,
+            "unicode_copy_and_drafts_preserved": True, "user_clipboard_untouched": True,
+            "whole_section_copy_includes_unsaved_edits": True, "unsaved_changes_exported_to_text": True,
+            "source_and_other_content_preserved": True, "existing_copy_and_backup_preserved": True,
+            "manual_history_and_protection_retained": True, "saved_file_reopened": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
+def generated_editor_probe(folder: Path) -> dict:
+    """Open real generated PDF/image results, edit, save and reopen offline."""
+    import tkinter as tk
+    import pymupdf
+    from PIL import Image
+    from .blocks import Block, meta_line
+    from .collate.section_editor import BookmarkSectionEditor
+    from .collate.cursor_map import read_cursor_pages, align_cursor_map
+    from .collate.section_edit import manual_history_path
+    from .hwpx_builder import build_hwpx
+    from .state import Work
+
+    pdf = folder / "generated-source.pdf"
+    with pymupdf.open() as document:
+        for number in range(1, 7):
+            document.new_page().insert_text((40, 60), f"天地皰黃宇宙洪荒 第{number}頁",
+                                           fontname="china-t", fontsize=18)
+        document.save(pdf)
+    screenshot = folder / "generated-screenshot.png"
+    images = folder / "generated-images"
+    images.mkdir()
+    for path in (screenshot, images / "page2.png", images / "page10.png"):
+        with Image.new("RGB", (400, 600), "white") as picture:
+            picture.save(path)
+    root = tk.Tk()
+    root.withdraw()
+    checked = []
+    try:
+        for source, pages in ((pdf, (2, 5)), (screenshot, (1,)), (images, (1, 2))):
+            work = Work(str(source), str(folder / (source.name + "-work")))
+            blocks = []
+            for number in pages:
+                body = f"天地皰黃宇宙洪荒 第{number}頁"
+                record = {"file": source.name, "pdf_page": number, "merged": {
+                    "pdf_page": number, "print_page": "", "regions": [{
+                        "id": "body", "kind": "본문", "bbox": [100, 100, 300, 900],
+                        "paragraphs": [{"columns": [{"col_from_right": 1, "text": body}]}],
+                    }],
+                }}
+                work.save_record(number, record)
+                blocks.extend([Block(type="meta", text=meta_line(record, None), page=number),
+                               Block(type="para", text=body, page=number,
+                                     spans=[(0, 1, "green"), (1, 2, "blue"), (2, 3, "red")])])
+            output = work.out_dir / (source.stem + ".hwpx")
+            assert build_hwpx(blocks, str(output))["validate_issues"] == 0
+            originals = {path: path.read_bytes() for path in
+                         ((list(source.iterdir()) if source.is_dir() else [source]) + [output])}
+            window = None
+            try:
+                window = BookmarkSectionEditor(root, pdf_path=source, hwpx_path=output,
+                    generated=True, generated_page=pages[0], work_dir=work.dir)
+                window.withdraw()
+                assert tuple(window.session.generated_pages) == pages
+                assert window.pdf_pages == (pages[0], pages[0])
+                rows = [row for row in window.session.paragraphs if "天地皰黃" in row.corrected_text]
+                assert len(rows) == 1 and rows[0].editable
+                row = rows[0]
+                assert {style.kind for style in row.corrected_styles} >= {"green", "blue", "red"}
+                # The raster fallback must identify an existing OCR region,
+                # never a fabricated character caret or a font-size estimate.
+                snapshot = window._executor.submit(read_cursor_pages, str(source), window.pdf_pages,
+                                                    work_dir=str(work.dir)).result(timeout=8)
+                mapping = align_cursor_map(snapshot, window.session.paragraphs)
+                if source != pdf:
+                    location = mapping.locate(row.index, row.corrected_text, 2)
+                    assert location is not None and not location.precise and location.caret_box is None
+                    assert "OCR 영역" in location.message and not snapshot.page_font_heights
+                field = window._editors[row.index]
+                field.delete("1.2", "1.3")
+                field.insert("1.2", "疱")
+                expected = row.corrected_text.replace("皰", "疱")
+                window._highlight(row.index)
+                with _isolated_tk_clipboard(root) as copied:
+                    assert window.copy_section_text()
+                    assert expected in copied["text"] and "天地皰黃" not in copied["text"]
+                window._confirm_changes = lambda changes: bool(changes)
+                assert window.save() and not window.dirty
+                target = window.session.corrected_path
+                assert target.is_file() and manual_history_path(target).is_file()
+                assert window.reload()
+                saved = next(p for p in window.session.paragraphs if p.index == row.index)
+                assert saved.corrected_text == expected
+                assert not any(style.start <= 2 < style.end and style.kind for style in saved.corrected_styles)
+                assert {style.kind for style in saved.corrected_styles} >= {"green", "blue"}
+                if len(pages) > 1:
+                    assert window.switch_generated_page(pages[1])
+                    assert window.pdf_pages == (pages[1], pages[1])
+                    assert window.session.corrected_path == target
+                    assert window.switch_generated_page(pages[0])
+                    assert next(p for p in window.session.paragraphs if p.index == row.index).corrected_text == expected
+                assert all(path.read_bytes() == data for path, data in originals.items())
+                checked.append("PDF" if source == pdf else "image" if source == screenshot else "image-folder")
+            finally:
+                if window is not None:
+                    window.destroy()
+                    window._executor.submit(time.time).result(timeout=8)
+                    window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+    finally:
+        root.destroy()
+    return {"sources": checked, "partial_output_page_mapping": True,
+            "generated_grade_colors_and_manual_cleanup": True, "copy_current_body": True,
+            "cumulative_save_reload_and_page_navigation": True,
+            "cached_image_region_without_fake_caret": True,
+            "source_and_ocr_output_preserved": True, "manual_history_saved": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
+def bookmark_cursor_probe(folder: Path) -> dict:
+    """Exercise real cursor mapping, PDF overlays and matching text size."""
+    import os
+    import tkinter as tk
+    from tkinter import font as tkfont
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_editor import BookmarkSectionEditor
+
+    source = folder / "bookmark-cursor.hwpx"
+    pdf_path = folder / "bookmark-cursor.pdf"
+    body = "天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph(body, style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        pdf.new_page(width=760, height=500).insert_text(
+            (40, 60), "瀉白散", fontname="china-t", fontsize=22)
+        pdf.new_page(width=760, height=500).insert_text(
+            (40, 130), body, fontname="china-t", fontsize=22)
+        pdf.save(pdf_path)
+    original, original_pdf = source.read_bytes(), pdf_path.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        body_index = book.texts().index(body)
+    finally:
+        book.doc.close()
+    root = tk.Tk()
+    root.withdraw()
+    window = None
+    try:
+        window = BookmarkSectionEditor(
+            root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 2))
+        assert window._executor.submit(os.getpid).result(timeout=8) != os.getpid()
+        # Map an invisible window so Text.bbox() and viewport geometry are real.
+        window.attributes("-alpha", 0.0)
+        deadline = time.monotonic() + 8
+
+        def pump_until(predicate, message):
+            while time.monotonic() < deadline:
+                root.update()
+                if predicate():
+                    return
+                time.sleep(.01)
+            raise AssertionError(f"{message}: {window.pdf_note.cget('text')}")
+
+        def has_marker():
+            return (window._pdf_page == 2 and window._displayed_page == 2
+                    and bool(window.pdf_canvas.find_withtag("cursor-line"))
+                    and bool(window.pdf_canvas.find_withtag("cursor-glyph")))
+
+        def glyph_coordinates():
+            return tuple(window.pdf_canvas.coords(window.pdf_canvas.find_withtag("cursor-glyph")[0]))
+
+        def cursor_height_error():
+            caret = field.bbox("insert")
+            if not has_marker() or caret is None:
+                return float("inf")
+            glyph = glyph_coordinates()
+            pdf_y = (window.pdf_canvas.winfo_rooty() + (glyph[1] + glyph[3]) / 2
+                     - window.pdf_canvas.canvasy(0))
+            text_y = field.winfo_rooty() + caret[1] + caret[3] / 2
+            return abs(pdf_y - text_y)
+
+        field = window._editors[body_index]
+        assert str(field.cget("state")) == "normal"
+        assert window._pdf_page == 1
+        window.set_zoom(.7)
+        field.mark_set("insert", "1.0+9c")
+        window.select_paragraph(body_index)
+        pump_until(has_marker, "Cursor did not locate the body on PDF page 2")
+        assert window._cursor_location.precise
+        first_box = glyph_coordinates()
+        assert first_box[0] < first_box[2] and first_box[1] < first_box[3]
+        small_font = abs(int(tkfont.Font(root=root, font=field.cget("font")).actual("size")))
+        field.mark_set("insert", "1.0+15c")
+        window.select_paragraph(body_index)
+        pump_until(lambda: has_marker() and glyph_coordinates() != first_box,
+                   "Moving the caret did not update its glyph marker")
+        previous_width = window._image_size[0]
+        window.set_zoom(1.4)
+        pump_until(lambda: has_marker() and window._image_size[0] > previous_width
+                   and abs(int(tkfont.Font(root=root, font=field.cget("font")).actual("size"))) > small_font,
+                   "Document text did not follow the PDF's enlarged character size")
+        pump_until(lambda: cursor_height_error() <= 2,
+                   "The PDF marker and editing caret did not align vertically")
+        height_error = round(cursor_height_error(), 3)
+        large_font = abs(int(tkfont.Font(root=root, font=field.cget("font")).actual("size")))
+        assert not window.dirty
+        assert not window.session.corrected_path.exists()
+        assert source.read_bytes() == original and pdf_path.read_bytes() == original_pdf
+    finally:
+        if window is not None:
+            window.destroy()
+            # Drain prior native work without closing the worker shared by later windows.
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    return {"cursor_pdf_page": 2, "line_and_glyph_overlays": True,
+            "native_pdf_separate_process": True,
+            "same_paragraph_caret_move": True, "font_tracks_pdf_zoom": True,
+            "font_sizes": [small_font, large_font],
+            "cursor_screen_height_aligned": True, "cursor_height_error_px": height_error,
+            "source_pdf_and_hwpx_unchanged": True, "corrected_file_not_created": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
+def bookmark_layout_probe(folder: Path) -> dict:
+    """Keep both comparison panes usable after a delayed first show and reload."""
+    import tkinter as tk
+    import pymupdf
+    from hwpx.document import HwpxDocument
+    from .collate.sections import HwpxBook
+    from .collate.section_editor import BookmarkSectionEditor
+
+    source = folder / "bookmark-layout.hwpx"
+    pdf_path = folder / "bookmark-layout.pdf"
+    body = "天地玄黃宇宙洪荒日月盈昃辰宿列張寒來暑往秋收冬藏"
+    document = HwpxDocument.new()
+    try:
+        document.add_heading("瀉白散", level=1)
+        document.add_paragraph(body, style_id_ref=0, inherit_style=False)
+        document.add_heading("葦莖湯", level=1)
+        document.add_paragraph("下一方正文。", style_id_ref=0, inherit_style=False)
+        document.save_to_path(str(source))
+    finally:
+        document.close()
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=760, height=500)
+        page.insert_text((40, 60), "瀉白散", fontname="china-t", fontsize=22)
+        page.insert_text((40, 130), body, fontname="china-t", fontsize=22)
+        page = pdf.new_page(width=620, height=840)
+        page.insert_text((40, 60), "下一頁", fontname="china-t", fontsize=26)
+        page.insert_text((40, 130), "春夏秋冬東西南北。", fontname="china-t", fontsize=26)
+        pdf.save(pdf_path)
+    original, original_pdf = source.read_bytes(), pdf_path.read_bytes()
+    book = HwpxBook(str(source))
+    try:
+        section = book.section(book.anchors(), 0)
+        body_index = book.texts().index(body)
+    finally:
+        book.doc.close()
+    root = tk.Tk()
+    root.withdraw()
+    window = None
+    try:
+        window = BookmarkSectionEditor(
+            root, pdf_path=pdf_path, hwpx_path=source, section_name="瀉白散",
+            section_start=section.start, section_end=section.end, pdf_pages=(1, 2))
+        window.attributes("-alpha", 0.0)
+        window.withdraw()
+
+        def pump_until(predicate, message, seconds=8):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                root.update()
+                if predicate():
+                    return
+                time.sleep(.01)
+            raise AssertionError(message)
+
+        # Reproduce the first-show race: the old 120 ms split timer used a
+        # withdrawn Panedwindow's one-pixel geometry and permanently chose zero.
+        delay = time.monotonic() + .3
+        pump_until(lambda: time.monotonic() >= delay, "Delayed-show timer did not complete")
+        assert not window.winfo_ismapped()
+        assert window._image_size is None and window._render_future is None
+        assert int(window._editor_font.cget("size")) == 12
+        window.deiconify()
+
+        def balanced():
+            return (window.pdf_panel.winfo_width() >= 360
+                    and window.doc_panel.winfo_width() >= 360
+                    and abs(window.pdf_panel.winfo_width() - window.doc_panel.winfo_width()) <= 2)
+
+        def display_matches_width():
+            if (window._displayed_page != 1 or window._image_size is None
+                    or window._cursor_map is None or window.pdf_canvas.winfo_width() < 180):
+                return False
+            # This fixture uses fit-to-width, with a 32-pixel image margin.
+            return abs(window._image_size[0] - (window.pdf_canvas.winfo_width() - 32)) <= 2
+
+        # A legitimate first layout may finish just before the window is hidden,
+        # leaving the 100 ms render timer to run with no mapped canvas.
+        pump_until(balanced, "First mapped layout did not balance the comparison")
+        assert window._image_size is None
+        window.withdraw()
+        pump_until(lambda: window._render_job is None, "Hidden initial render timer did not run")
+        assert window._image_size is None
+        window.deiconify()
+        pump_until(lambda: balanced() and display_matches_width(),
+                   "Delayed first show did not restore both panes and render the PDF")
+        window.select_paragraph(body_index)
+        pump_until(lambda: int(window._editor_font.cget("size")) < 0,
+                   "Text size did not follow the visible PDF")
+        glyph_width = window._cursor_map.page_font_width(1) * window._image_size[0]
+        assert glyph_width >= 12
+        assert abs(window._editor_font.measure("漢") - glyph_width) <= 2
+
+        # Use real sash events to retain a deliberate user adjustment.
+        sash = window.panes.sashpos(0)
+        y = max(1, window.panes.winfo_height() // 2)
+        wanted = int(window.panes.winfo_width() * .58)
+        window.panes.event_generate("<ButtonPress-1>", x=sash + 2, y=y)
+        window.panes.event_generate("<B1-Motion>", x=wanted + 2, y=y)
+        window.panes.event_generate("<ButtonRelease-1>", x=wanted + 2, y=y)
+        root.update()
+        assert abs(window.panes.sashpos(0) - wanted) <= 1
+        selected_ratio = window.panes.sashpos(0) / window.panes.winfo_width()
+        assert .53 < selected_ratio < .64, selected_ratio
+        assert window.reload()
+        pump_until(display_matches_width, "Reload did not retain a visible PDF")
+        assert abs(window.panes.sashpos(0) / window.panes.winfo_width() - selected_ratio) < .02
+        assert window._editors[body_index].get("1.0", "end-1c") == body
+
+        # The explicit recovery action must repair an already collapsed pane.
+        window.panes.sashpos(0, 0)
+        root.update_idletasks()
+        window.reset_comparison_layout()
+        pump_until(lambda: balanced() and display_matches_width(),
+                   "Reset did not restore the collapsed PDF pane")
+        window.withdraw()
+        assert window.reload()
+        window.deiconify()
+        pump_until(lambda: balanced() and display_matches_width(),
+                   "Hidden reload and redisplay did not preserve the comparison")
+        glyph_width = window._cursor_map.page_font_width(1) * window._image_size[0]
+        assert glyph_width >= 12 and abs(window._editor_font.measure("漢") - glyph_width) <= 2
+
+        # Reopening at the same width must replay a page/zoom request skipped
+        # while hidden. Different page dimensions prove the actual PDF changed.
+        window.v_follow_cursor.set(False)
+        window._toggle_cursor_follow()
+        pump_until(lambda: window._render_job is None and window._render_future is None,
+                   "Previous visible render did not finish")
+        window.withdraw()
+        window.set_page(2)
+        window.set_zoom(1.25)
+        pump_until(lambda: window._render_job is None, "Hidden page/zoom timer did not run")
+        assert window._displayed_page == 1
+        window.deiconify()
+        pump_until(lambda: window._displayed_page == 2 and window._image_size == (775, 1050)
+                   and abs(window._rendered_scale - 1.25) < .001,
+                   "Redisplay lost the hidden page/zoom request")
+        glyph_width = window._cursor_map.page_font_width(2) * window._image_size[0]
+        assert abs(window._editor_font.measure("漢") - glyph_width) <= 2
+        window.set_zoom(None)
+        pump_until(lambda: window._image_size is not None and
+                   abs(window._image_size[0] - (window.pdf_canvas.winfo_width() - 32)) <= 2,
+                   "Fit-to-width did not recover after replaying a hidden request")
+        assert not window.dirty and not window.session.corrected_path.exists()
+        assert source.read_bytes() == original and pdf_path.read_bytes() == original_pdf
+    finally:
+        if window is not None:
+            window.destroy()
+            window._executor.submit(time.time).result(timeout=8)
+            window._alignment_executor.shutdown(wait=True, cancel_futures=True)
+        root.destroy()
+    return {"delayed_first_show_balanced": True, "collapsed_pane_restored": True,
+            "reload_preserves_comparison": True, "pdf_and_font_follow_available_width": True,
+            "manual_resize_preserved": True, "source_pdf_and_hwpx_unchanged": True,
+            "corrected_file_not_created": True, "hidden_render_replayed": True,
+            "ocr_calls": 0, "network_calls": 0}
+
+
 def run(report_path: Path) -> int:
     from . import __version__
     report_path = Path(report_path).resolve()
@@ -207,6 +1522,18 @@ def run(report_path: Path) -> int:
             assert (work / "out" / "fixture_normalization.html").is_file()
             return {"pipeline": "mock PDF → OCR records → HWPX/DOCX → normalization/review", "network_calls": 0}
         check("offline-ocr-pipeline", pipeline_probe)
+        check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
+        check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
+        check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
+        check("human-correction-memory", lambda: correction_memory_probe(folder))
+        check("bookmark-color-only-and-memo-cleanup", lambda: color_only_collation_probe(folder))
+        check("manual-edit-style-cleanup", lambda: manual_style_cleanup_probe(folder))
+        check("bookmark-find-replace-and-paragraph-input", lambda: bookmark_replace_probe(folder))
+        check("general-and-image-side-by-side-edit", lambda: generated_editor_probe(folder))
+        check("bookmark-cursor-follow", lambda: bookmark_cursor_probe(folder))
+        check("bookmark-layout-after-delayed-show-and-reload", lambda: bookmark_layout_probe(folder))
+        check("glyph-location-hold-and-legacy-replay", glyph_location_hold_probe)
+        check("small-annotations-layouts-and-record-preservation", lambda: small_annotations_probe(folder))
 
         def comparison_project_probe():
             from .comparison import ComparisonProject
@@ -214,7 +1541,8 @@ def run(report_path: Path) -> int:
             source = folder / "image.png"
             project = ComparisonProject.open(source)
             source_hash = file_sha256(source)
-            texts = {"tesseract": "漢樂一\ufe00，", "rapidocr": "漢樂一\ufe00，", "easyocr": "漢樂一\ufe00。"}
+            texts = {"tesseract": "漢樂一\ufe00，", "rapidocr": "漢樂一\ufe00，", "easyocr": "漢樂一\ufe00。",
+                     "paddle_server": "漢樂一\ufe00，", "glmocr": "漢樂一\ufe00，", "surya": "漢樂一\ufe00。"}
             for engine, text in texts.items():
                 raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
                        "coordinate_system": "rendered-image pixels, xyxy",
@@ -246,9 +1574,51 @@ def run(report_path: Path) -> int:
             reopened.save_recovery(recovery)
             assert ComparisonProject.load(recovery).text(1) == corrected
             assert file_sha256(source) == source_hash
-            return {"raw_runs": 3, "unicode": "compatibility ideograph and variation selector preserved",
+            return {"raw_runs": 6, "engines": list(texts), "unicode": "compatibility ideograph and variation selector preserved",
                     "audit": "candidate → undo → manual", "storage": "project and recovery reopen", "network_calls": 0}
         check("local-comparison-project", comparison_project_probe)
+
+        def refinement_probe():
+            from .comparison import ComparisonProject
+            from .comparison_refinement import (build_candidates, evaluate_proposals,
+                                                 accept_proposal, reject_proposal, proposals)
+            from .comparison_ai import AISettings, ReviewPolicy, prepare_plan, _prompt
+            from ab_ocr.ocr import RecognitionResult
+            source = folder / "image.png"
+            project = ComparisonProject.open(source)
+            original = "甲乙丙丁,戊己庚辛"
+            expected = original.replace(",", "，")
+            for engine, value in (("glmocr", original), ("easyocr", expected), ("surya", original)):
+                raw = RecognitionResult(text=value, words=[] if engine == "glmocr" else [
+                    {"text": value, "bbox": [1, 1, 63, 47], "confidence": None}],
+                    source_path=str(source), source_sha256=project.source_sha256, page_number=1,
+                    image_width=64, image_height=48, engine_version="offline-refinement",
+                    languages="chi_tra", psm=None, duration_seconds=0, engine=engine,
+                    engine_metadata={"generation_complete": True})
+                project.add_result(raw, request={"profile": "traditional", "direction": "horizontal",
+                                                 "dpi": 300, "engine_root": None, "policy": "local-three-engine-v1"})
+            project.choose_baseline(1, "glmocr")
+            raw_runs = project.page(1)["runs"]
+            items = build_candidates(project, 1)
+            assert len(items) == 1 and evaluate_proposals(project, 1)["text"] == expected
+            assert project.text(1) == original and not project.page(1)["edits"]
+            plan = prepare_plan(project, [1], ReviewPolicy(punctuation=True, visual_scope="page"),
+                                settings=AISettings("openai", "offline-refinement-fixture"))
+            assert plan.summary["refinement_proposals"] == 1
+            assert "local_refinement_unconfirmed" in _prompt(plan.batches[0], plan.policy, [])
+            item = proposals(project, 1)[0]
+            accept_proposal(project, 1, item["review_id"], item["id"])
+            assert project.text(1) == expected
+            assert project.undo_edit(1) and project.text(1) == original
+            reject_proposal(project, 1, item["review_id"], item["id"])
+            destination = folder / "local-refinement.json"
+            project.save(destination)
+            page = ComparisonProject.load(destination).page(1)
+            assert page["runs"] == raw_runs and not page["ai_reviews"] and not page["ai_decisions"]
+            assert [entry["decision"] for entry in page["refinement_decisions"]] == ["accepted", "undone", "rejected"]
+            return {"unconfirmed_candidates": 1, "AI_context": "frozen pending evidence",
+                    "raw_unchanged": True, "human_decisions": "accept/undo/reject/reopen", "network_calls": 0}
+        check("local-refinement-history-and-ai-context", refinement_probe)
 
         def comparison_ai_probe():
             from types import SimpleNamespace
@@ -257,12 +1627,14 @@ def run(report_path: Path) -> int:
             from ab_ocr.ocr import file_sha256
             source = folder / "image.png"
             project = ComparisonProject.open(source)
-            original = "误汉,樂一\ufe00한글"
-            for engine, text in (("tesseract", original), ("rapidocr", "论汉,樂一\ufe00한글"),
-                                 ("easyocr", "论汉,樂一\ufe00한글")):
+            # Exact positional context and two eligible mixed-script witnesses
+            # exercise the same source-fidelity gate used by the editor.
+            original = "ABCD误汉天地玄黃,樂一\ufe00한글"
+            for engine, text in (("tesseract", original), ("glmocr", "ABCD论汉天地玄黃，樂一\ufe00한글"),
+                                 ("surya", "ABCD论汉天地玄黃，樂一\ufe00한글")):
                 raw = {"kind": "recognition", "schema_version": 1, "engine": engine,
                        "coordinate_system": "rendered-image pixels, xyxy", "text": text,
-                       "words": [{"text": text, "bbox": [1, 1, 63, 47], "confidence": None,
+                       "words": [] if engine == "glmocr" else [{"text": text, "bbox": [1, 1, 63, 47], "confidence": None,
                                   "block": 1, "paragraph": 1, "line": 1}],
                        "source_path": str(source), "source_sha256": file_sha256(source), "page_number": 1,
                        "image_width": 64, "image_height": 48, "engine_version": "offline-ai-fixture",
@@ -273,7 +1645,7 @@ def run(report_path: Path) -> int:
             project.compare_page(1, baseline="tesseract")
             raw_runs = project.page(1)["runs"]
             settings = AISettings(provider="openai", model="offline-vision-fixture", max_calls=2)
-            policy = ReviewPolicy(traditional=True, punctuation=True)
+            policy = ReviewPolicy(traditional=True, punctuation=True, visual_scope="page")
             plan = prepare_plan(project, [1], policy, settings=settings)
             assert plan.summary["calls"] == 2
             requests = []
@@ -286,9 +1658,9 @@ def run(report_path: Path) -> int:
                 data = json.loads(prompt.split("Source DATA (JSON):\n", 1)[1].rsplit("\nReturn JSON", 1)[0])
                 items = []
                 for target in data["targets"]:
-                    patches = [(0, 1, "误", "论", "recognition")] if data["phase"] == "visual" else [
-                        (0, 1, "误", "論", "traditional"), (1, 2, "汉", "漢", "traditional"),
-                        (2, 3, ",", "，", "punctuation")]
+                    patches = [(4, 5, "误", "论", "recognition")] if data["phase"] == "visual" else [
+                        (4, 5, "误", "論", "traditional"), (5, 6, "汉", "漢", "traditional"),
+                        (10, 11, ",", "，", "punctuation")]
                     proposals = [{"start": start, "end": end, "before": before, "after": after,
                                   "kind": kind, "reason": "offline synthetic protocol fixture", "uncertain": False}
                                  for start, end, before, after, kind in patches
@@ -305,10 +1677,13 @@ def run(report_path: Path) -> int:
             assert len(checkpoints) == 2 and project.text(1) == original
             reviews = project.page(1)["ai_reviews"]
             assert len(reviews) == 2 and project.page(1)["runs"] == raw_runs
+            from .comparison_fidelity import SOURCE_FIDELITY_CONTRACT
+            assert all(r["metadata"]["source_fidelity"]["contract"] == SOURCE_FIDELITY_CONTRACT for r in reviews)
+            assert reviews[0]["metadata"]["source_fidelity"]["proposals"][0]["supporting_families"] == ["glmocr", "surya"]
             for ending in ("論", "漢", "，"):
                 proposal = next(item for item in project.ai_proposals(1) if item["after"] == ending)
                 project.accept_ai_proposal(1, proposal["review_id"], proposal["id"])
-            assert project.text(1) == "論漢，樂一\ufe00한글"
+            assert project.text(1) == "ABCD論漢天地玄黃，樂一\ufe00한글"
             for _ in range(3):
                 assert project.undo_edit(1)
             assert project.text(1) == original and project.page(1)["ai_reviews"] == reviews
@@ -383,29 +1758,6 @@ def run(report_path: Path) -> int:
                     "full_page_images": 0, "resume_calls": 0, "raw_preserved": True, "network_calls": 0}
         check("selective-single-ppocrv6-review-offline", selective_single_engine_probe)
 
-        def comparison_resources_probe():
-            from ab_ocr.runtime import resource_root, worker_path
-            checked = []
-            for engine in ("rapidocr", "easyocr"):
-                worker = worker_path(engine)
-                assert worker.is_file(), f"Missing application-owned worker: {worker.name}"
-                compile(worker.read_text(encoding="utf-8"), worker.name, "exec")
-                checked.append(worker.name)
-            helper = resource_root() / "ab_ocr" / "reading_order.py"
-            assert helper.is_file(), "Missing EasyOCR vertical geometry helper"
-            assert (resource_root() / "ab_ocr" / "glyph_verifier.py").is_file(), "Missing local glyph verifier"
-            compile(helper.read_text(encoding="utf-8"), helper.name, "exec")
-            checked.append(helper.name)
-            for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py",
-                         "rapidocr-lock.json", "install_easyocr.py", "easyocr-lock.json"):
-                resource = resource_root() / "scripts" / name
-                assert resource.is_file(), f"Missing installer resource: {name}"
-                if name.endswith(".json"):
-                    assert isinstance(json.loads(resource.read_text(encoding="utf-8")), dict)
-                else:
-                    compile(resource.read_text(encoding="utf-8"), name, "exec")
-                checked.append(name)
-            return {"application_resources": checked, "external_models_loaded": False, "network_calls": 0}
         check("local-comparison-worker-resources", comparison_resources_probe)
 
         def comparison_cli_probe():

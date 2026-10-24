@@ -1,5 +1,6 @@
 """Synthetic regressions for v6 isolation, verification and app comparison."""
 import hashlib
+from contextlib import contextmanager
 import io
 import json
 import os
@@ -11,7 +12,11 @@ from unittest.mock import patch
 
 from PIL import Image
 from ab_ocr import ocr, local_engines, runtime, ppocrv6_worker as worker
-from yeone_ocr.comparison import ComparisonProject, ComparisonError, ENGINES, latest_runs, run_page
+from yeone_ocr.comparison import ComparisonProject, ComparisonError, latest_runs, run_page
+
+# These cache migrations compare the four original Chinese engines. The full
+# registry also contains optional server/generative engines with other models.
+FOUR_ENGINES = ("tesseract", "rapidocr", "easyocr", "ppocrv6")
 
 
 class PPOCRv6Tests(unittest.TestCase):
@@ -34,11 +39,11 @@ class PPOCRv6Tests(unittest.TestCase):
     def test_four_selected_engines_checkpoint_resume_and_reopen(self):
         checkpoints = []
         with patch.object(ocr, "recognize_file", side_effect=self.recognize):
-            result = run_page(self.project, 1, engines=ENGINES, on_result=lambda r: checkpoints.append(r.engine))
-            resumed = run_page(self.project, 1, engines=ENGINES)
-        self.assertEqual(result["completed"], list(ENGINES))
-        self.assertEqual(checkpoints, list(ENGINES))
-        self.assertEqual(resumed["skipped"], list(ENGINES))
+            result = run_page(self.project, 1, engines=FOUR_ENGINES, on_result=lambda r: checkpoints.append(r.engine))
+            resumed = run_page(self.project, 1, engines=FOUR_ENGINES)
+        self.assertEqual(result["completed"], list(FOUR_ENGINES))
+        self.assertEqual(checkpoints, list(FOUR_ENGINES))
+        self.assertEqual(resumed["skipped"], list(FOUR_ENGINES))
         path = self.root / "comparison.json"
         self.project.save(path)
         loaded = ComparisonProject.load(path)
@@ -46,9 +51,9 @@ class PPOCRv6Tests(unittest.TestCase):
 
     def test_mixed_profile_never_calls_v6_with_korean_or_changes_old_results(self):
         with patch.object(ocr, "recognize_file", side_effect=self.recognize):
-            run_page(self.project, 1, engines=ENGINES)
+            run_page(self.project, 1, engines=FOUR_ENGINES)
             old_v6 = latest_runs(self.project.page(1))["ppocrv6"]
-            outcome = run_page(self.project, 1, engines=ENGINES, profile="mixed")
+            outcome = run_page(self.project, 1, engines=FOUR_ENGINES, profile="mixed")
         self.assertIn("ppocrv6", outcome["unsupported"])
         self.assertEqual(len(self.calls), 7)
         self.assertEqual(latest_runs(self.project.page(1))["ppocrv6"], old_v6)
@@ -61,8 +66,8 @@ class PPOCRv6Tests(unittest.TestCase):
                 raise ocr.OCRError("missing local weights")
             return self.recognize(source, **kwargs)
         with patch.object(ocr, "recognize_file", side_effect=recognize):
-            result = run_page(self.project, 1, engines=ENGINES)
-        self.assertEqual(result["completed"], list(ENGINES[:-1]))
+            result = run_page(self.project, 1, engines=FOUR_ENGINES)
+        self.assertEqual(result["completed"], list(FOUR_ENGINES[:-1]))
         self.assertIn("ppocrv6", result["errors"])
 
     def test_invalid_selection_rejected_before_recognition(self):
@@ -150,9 +155,13 @@ class PPOCRv6Tests(unittest.TestCase):
             profile="traditional", direction="horizontal", engine_root=self.root, force=False,
             engines=["ppocrv6"])
         previous = Path.cwd()
+        @contextmanager
+        def session(engine, languages, **options):
+            yield SimpleNamespace(recognize_file=lambda source, **kwargs: self.recognize(
+                source, engine=engine, languages=languages, **kwargs))
         try:
             os.chdir(self.root)
-            with patch.object(ocr, "recognize_file", side_effect=self.recognize):
+            with patch("ab_ocr.local_engines.RecognitionSession", side_effect=session):
                 self.assertEqual(command(args), 0)
                 self.assertEqual(command(args), 0)
         finally:
@@ -169,11 +178,11 @@ class PPOCRv6Tests(unittest.TestCase):
                 result.engine_metadata["model_files"] = {model.name: {"sha256": ocr.file_sha256(model)}}
             return result
         with patch.object(ocr, "recognize_file", side_effect=recognize):
-            run_page(self.project, 1, engines=ENGINES, engine_root=self.root)
+            run_page(self.project, 1, engines=FOUR_ENGINES, engine_root=self.root)
             model.write_bytes(b"medium changed")
-            outcome = run_page(self.project, 1, engines=ENGINES, engine_root=self.root)
+            outcome = run_page(self.project, 1, engines=FOUR_ENGINES, engine_root=self.root)
         self.assertEqual(outcome["completed"], ["ppocrv6"])
-        self.assertEqual(outcome["skipped"], list(ENGINES[:-1]))
+        self.assertEqual(outcome["skipped"], list(FOUR_ENGINES[:-1]))
 
     def test_easyocr_auxiliary_model_change_invalidates_vertical_cache(self):
         model = self.root / 'tools/easyocr/models/zh_sim_g2.pth'
@@ -185,15 +194,15 @@ class PPOCRv6Tests(unittest.TestCase):
                 result.engine_metadata['model_files'] = {model.name: {'sha256':ocr.file_sha256(model)}}
             return result
         with patch.object(ocr,'recognize_file',side_effect=recognize):
-            run_page(self.project,1,engines=ENGINES,direction='vertical',engine_root=self.root)
+            run_page(self.project,1,engines=FOUR_ENGINES,direction='vertical',engine_root=self.root)
             model.write_bytes(b'auxiliary changed')
-            outcome=run_page(self.project,1,engines=ENGINES,direction='vertical',engine_root=self.root)
+            outcome=run_page(self.project,1,engines=FOUR_ENGINES,direction='vertical',engine_root=self.root)
         self.assertEqual(outcome['completed'],['easyocr'])
-        self.assertEqual(outcome['skipped'],[e for e in ENGINES if e!='easyocr'])
+        self.assertEqual(outcome['skipped'],[e for e in FOUR_ENGINES if e!='easyocr'])
 
     def test_vertical_direction_reaches_local_engines_and_preserves_tesseract_settings(self):
         with patch.object(ocr, "recognize_file", side_effect=self.recognize):
-            run_page(self.project, 1, engines=ENGINES, direction="vertical", engine_root=self.root)
+            run_page(self.project, 1, engines=FOUR_ENGINES, direction="vertical", engine_root=self.root)
         calls = {call["engine"]: call for call in self.calls}
         for engine in ("rapidocr", "easyocr", "ppocrv6"):
             self.assertEqual(calls[engine]["direction"], "vertical")
@@ -206,7 +215,7 @@ class PPOCRv6Tests(unittest.TestCase):
         old_request = {"profile": "traditional", "direction": "vertical", "dpi": 200,
                        "engine_root": str(self.root), "policy": "local-three-engine-v1",
                        "installation_sha256": None}
-        for engine in ENGINES:
+        for engine in FOUR_ENGINES:
             result = self.recognize(self.source, engine=engine, page_number=1,
                                     languages="chi_tra_vert" if engine == "tesseract" else "chi_tra",
                                     psm=5 if engine == "tesseract" else None)
@@ -221,19 +230,19 @@ class PPOCRv6Tests(unittest.TestCase):
         old_runs = self.project.page(1)["runs"]
         self.calls.clear()
         with patch.object(ocr, "recognize_file", side_effect=self.recognize):
-            outcome = run_page(self.project, 1, engines=ENGINES, direction="vertical", dpi=200,
+            outcome = run_page(self.project, 1, engines=FOUR_ENGINES, direction="vertical", dpi=200,
                                engine_root=self.root)
             path = self.root / "vertical-comparison.json"
             self.project.save(path)
             loaded = ComparisonProject.load(path)
-            resumed = run_page(loaded, 1, engines=ENGINES, direction="vertical", dpi=200,
+            resumed = run_page(loaded, 1, engines=FOUR_ENGINES, direction="vertical", dpi=200,
                                engine_root=self.root)
         expected = (["tesseract", "rapidocr", "easyocr"] if all_already_sorted else
                     ["tesseract", "rapidocr", "easyocr"] + ([] if v6_already_sorted else ["ppocrv6"]))
         self.assertEqual(outcome["completed"], expected)
-        self.assertEqual(outcome["skipped"], [e for e in ENGINES if e not in expected])
+        self.assertEqual(outcome["skipped"], [e for e in FOUR_ENGINES if e not in expected])
         self.assertEqual([call["engine"] for call in self.calls], expected)
-        self.assertEqual(resumed["skipped"], list(ENGINES))
+        self.assertEqual(resumed["skipped"], list(FOUR_ENGINES))
         self.assertEqual(loaded.page(1)["runs"][:4], old_runs)
         for engine in ("rapidocr", "easyocr", "ppocrv6"):
             latest = latest_runs(loaded.page(1))[engine]
@@ -268,29 +277,29 @@ class PPOCRv6Tests(unittest.TestCase):
             return result
         with patch.object(ocr,'recognize_file',side_effect=recognize), \
              patch.object(glyph_verifier,'font_sources',return_value=first) as sources:
-            run_page(self.project,1,engines=ENGINES,direction='vertical',engine_root=self.root)
-            unchanged=run_page(self.project,1,engines=ENGINES,direction='vertical',engine_root=self.root)
-            self.assertEqual(unchanged['skipped'],list(ENGINES))
+            run_page(self.project,1,engines=FOUR_ENGINES,direction='vertical',engine_root=self.root)
+            unchanged=run_page(self.project,1,engines=FOUR_ENGINES,direction='vertical',engine_root=self.root)
+            self.assertEqual(unchanged['skipped'],list(FOUR_ENGINES))
             sources.return_value=second
-            changed=run_page(self.project,1,engines=ENGINES,direction='vertical',engine_root=self.root)
+            changed=run_page(self.project,1,engines=FOUR_ENGINES,direction='vertical',engine_root=self.root)
         self.assertEqual(changed['completed'],['tesseract','rapidocr','easyocr'])
         self.assertEqual(changed['skipped'],['ppocrv6'])
 
     def test_legacy_horizontal_cache_reruns_glyph_engines_and_keeps_history(self):
         request={'profile':'traditional','direction':'horizontal','dpi':200,
                  'engine_root':str(self.root),'policy':'local-three-engine-v1','installation_sha256':None}
-        for engine in ENGINES:
+        for engine in FOUR_ENGINES:
             result=self.recognize(self.source,engine=engine,page_number=1,languages='chi_tra',
                                   psm=6 if engine=='tesseract' else None)
             self.project.add_result(result,request=request)
         previous=self.project.page(1)['runs']
         with patch.object(ocr,'recognize_file',side_effect=self.recognize):
-            outcome=run_page(self.project,1,engines=ENGINES,dpi=200,engine_root=self.root)
-            resumed=run_page(self.project,1,engines=ENGINES,dpi=200,engine_root=self.root)
-        self.assertEqual(outcome['completed'],list(ENGINES))
+            outcome=run_page(self.project,1,engines=FOUR_ENGINES,dpi=200,engine_root=self.root)
+            resumed=run_page(self.project,1,engines=FOUR_ENGINES,dpi=200,engine_root=self.root)
+        self.assertEqual(outcome['completed'],list(FOUR_ENGINES))
         self.assertEqual(outcome['skipped'],[])
         self.assertEqual(self.project.page(1)['runs'][:4],previous)
-        self.assertEqual(resumed['skipped'],list(ENGINES))
+        self.assertEqual(resumed['skipped'],list(FOUR_ENGINES))
         from ab_ocr.easyocr_worker import HORIZONTAL_RECOGNITION_POLICY
         self.assertEqual(latest_runs(self.project.page(1))['easyocr']['request']['recognition_policy'],HORIZONTAL_RECOGNITION_POLICY)
 
@@ -300,26 +309,26 @@ class PPOCRv6Tests(unittest.TestCase):
         second=[{'path':'local.ttf','face_index':0,'sha256':'2'*64}]
         with patch.object(ocr,'recognize_file',side_effect=self.recognize), \
              patch.object(glyph_verifier,'font_sources',return_value=first) as sources:
-            run_page(self.project,1,engines=ENGINES,engine_root=self.root)
+            run_page(self.project,1,engines=FOUR_ENGINES,engine_root=self.root)
             sources.return_value=second
-            changed=run_page(self.project,1,engines=ENGINES,engine_root=self.root)
-            self.assertEqual(changed['completed'],list(ENGINES))
+            changed=run_page(self.project,1,engines=FOUR_ENGINES,engine_root=self.root)
+            self.assertEqual(changed['completed'],list(FOUR_ENGINES))
             self.assertEqual(changed['skipped'],[])
             run_page(self.project,1,engines=('easyocr',),profile='mixed',engine_root=self.root)
         self.assertNotIn('glyph_font_sources',latest_runs(self.project.page(1))['easyocr']['request'])
 
     def test_previous_native_v5_cache_refreshes_only_v5_after_easyocr_upgrade(self):
         with patch.object(ocr,'recognize_file',side_effect=self.recognize):
-            run_page(self.project,1,engines=ENGINES,engine_root=self.root)
+            run_page(self.project,1,engines=FOUR_ENGINES,engine_root=self.root)
             legacy=next(r for r in self.project._page(1)['runs'] if r['engine']=='rapidocr')
             legacy['request'].pop('recognition_policy')
             legacy['request'].pop('glyph_font_sources')
             original_raw=legacy['raw']
-            outcome=run_page(self.project,1,engines=ENGINES,engine_root=self.root)
-            resumed=run_page(self.project,1,engines=ENGINES,engine_root=self.root)
+            outcome=run_page(self.project,1,engines=FOUR_ENGINES,engine_root=self.root)
+            resumed=run_page(self.project,1,engines=FOUR_ENGINES,engine_root=self.root)
         self.assertEqual(outcome['completed'],['rapidocr'])
         self.assertEqual(outcome['skipped'],['tesseract','easyocr','ppocrv6'])
-        self.assertEqual(resumed['skipped'],list(ENGINES))
+        self.assertEqual(resumed['skipped'],list(FOUR_ENGINES))
         self.assertEqual(self.project.page(1)['runs'][1]['raw'],original_raw)
 
 

@@ -6,11 +6,13 @@ its original text, engine identity, model hashes and rendered-image coordinates.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from pathlib import Path
 import tempfile
 import time
+import uuid
+from pathlib import Path, PurePosixPath
 
 from .reading_order import VERTICAL_RTL_ENGINES, order_vertical_payload
 
@@ -18,8 +20,59 @@ ENGINE_LANGUAGES = {
     "ppocrv6": ("chi_sim", "chi_tra", "chi_sim+eng", "chi_tra+eng"),
     "rapidocr": ("chi_sim", "chi_tra", "kor", "chi_sim+eng", "chi_tra+eng", "kor+eng"),
     "easyocr": ("chi_sim", "chi_tra", "kor"),
+    "paddle_server": ("chi_sim", "chi_tra", "chi_sim+eng", "chi_tra+eng"),
+    "glmocr": ("chi_sim", "chi_tra", "kor", "eng", "chi_sim+eng", "chi_tra+eng", "kor+eng", "kor+chi_tra", "kor+chi_tra+eng"),
+    "surya": ("chi_sim", "chi_tra", "kor", "eng", "chi_sim+eng", "chi_tra+eng", "kor+eng", "kor+chi_tra", "kor+chi_tra+eng"),
 }
 MAX_WORKER_BYTES = 32_000_000
+
+
+def runtime_inventory(records: dict) -> dict:
+    """Compact proof of the verified relative names, file hashes and sizes."""
+    rows = [[name, value["sha256"], value["bytes"]] for name, value in sorted(records.items())]
+    encoded = json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return {"schema": "local-runtime-files-sha256-v1", "files": len(rows),
+            "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def installation_file(directory: Path, name: str, *, nested: bool = False) -> Path:
+    """Resolve an installation-owned file without drive, traversal or link escape."""
+    from .ocr import OCRError
+    if (not isinstance(name, str) or not name or "\\" in name or ":" in name
+            or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/"))
+            or (not nested and "/" in name) or PurePosixPath(name).is_absolute()):
+        raise OCRError("로컬 엔진 설치 파일의 상대 경로가 올바르지 않습니다.")
+    root = Path(directory).resolve()
+    target = (root / name).resolve()
+    if not target.is_relative_to(root):
+        raise OCRError("로컬 엔진 설치 경로가 지정 폴더를 벗어났습니다.")
+    return target
+
+
+def _verified_records(directory, records, *, nested=False, required=False, should_stop=None):
+    from .ocr import OCRError, _cached_file_sha256, _cancelled
+    if not isinstance(records, list):
+        raise OCRError("로컬 엔진 파일 기록이 올바르지 않습니다.")
+    verified, seen = {}, set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise OCRError("로컬 엔진 모델 기록이 올바르지 않습니다.")
+        name, expected = record.get("filename", record.get("file")), record.get("sha256")
+        model = installation_file(directory, name, nested=nested)
+        if (not isinstance(expected, str) or len(expected) != 64
+                or any(char not in "0123456789abcdef" for char in expected.lower()) or name in seen):
+            raise OCRError("로컬 엔진 파일명 또는 해시가 올바르지 않습니다.")
+        seen.add(name)
+        _cancelled(should_stop)
+        if not model.is_file():
+            if required:
+                raise OCRError("로컬 OCR 실행 파일이 누락되었습니다: " + name)
+            continue
+        actual = _cached_file_sha256(model)
+        if actual != expected.lower():
+            raise OCRError("로컬 OCR 파일이 설치 후 변경되었습니다: " + name)
+        verified[name] = {**record, "sha256": actual, "bytes": model.stat().st_size}
+    return verified
 
 
 def _read_json(path: Path, limit: int) -> dict:
@@ -40,10 +93,10 @@ def _read_json(path: Path, limit: int) -> dict:
             raise ValueError("JSON too large")
         value = json.loads(content.decode("utf-8-sig"), object_pairs_hook=unique, parse_constant=invalid)
         if not isinstance(value, dict):
-            raise ValueError("JSON object required")
+            raise TypeError("JSON object required")
         json.dumps(value, allow_nan=False)
         return value
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
         # Do not echo a worker payload or document content into UI/error logs.
         raise OCRError("로컬 OCR 기록이 없거나 올바른 JSON 형식이 아닙니다.") from exc
 
@@ -72,30 +125,34 @@ def inspect_engine(engine: str, *, should_stop=None, engine_root=None) -> dict:
         if not standalone and not executable.is_file():
             executable = folder / "venv" / "bin" / "python"
         worker = worker_path(engine)
-        if not executable.is_file() or not worker.is_file() or not (folder / "installation.json").is_file():
+        manifest_path = folder / "installation.json"
+        if not worker.is_file() or not manifest_path.is_file():
             raise OCRError(f"{engine}가 준비되지 않았습니다. docs/LOCAL_OCR.md의 로컬 엔진 설치 절차를 확인하세요.")
         if installation.get("engine") != engine:
             raise OCRError("로컬 엔진 설치 기록의 엔진 이름이 일치하지 않습니다.")
+        if "python_executable" in installation:
+            executable = installation_file(folder, installation["python_executable"], nested=True)
+        elif not standalone:
+            executable = folder / "venv" / "Scripts" / "python.exe"
+            if not executable.is_file():
+                executable = folder / "venv" / "bin" / "python"
+        if not executable.is_file():
+            raise OCRError("로컬 OCR의 독립 Python 실행 환경이 없습니다.")
         records, mapping = installation.get("models"), installation.get("language_models")
         if not isinstance(records, list) or not isinstance(mapping, dict):
             raise OCRError("로컬 엔진 설치 기록에 언어별 모델 정보가 없습니다. 설치 기록을 다시 생성하세요.")
-        models = {}
         directory = folder / "models"
-        for record in records:
-            if not isinstance(record, dict):
-                raise OCRError("로컬 엔진 모델 기록이 올바르지 않습니다.")
-            name, expected = record.get("filename", record.get("file")), record.get("sha256")
-            if (not isinstance(name, str) or Path(name).name != name or "/" in name or "\\" in name
-                    or not isinstance(expected, str) or len(expected) != 64
-                    or any(char not in "0123456789abcdef" for char in expected.lower()) or name in models):
-                raise OCRError("로컬 엔진 모델 파일명 또는 해시가 올바르지 않습니다.")
-            model = directory / name
-            if model.is_file():
-                _cancelled(should_stop)
-                actual = _cached_file_sha256(model)
-                if actual != expected.lower():
-                    raise OCRError("로컬 OCR 모델이 설치 후 변경되었습니다: " + name)
-                models[name] = {**record, "sha256": actual, "bytes": model.stat().st_size}
+        models = _verified_records(directory, records,
+                                   nested=installation.get("model_layout") == "relative-paths-v1",
+                                   should_stop=should_stop)
+        runtime_files = {}
+        if engine in ("glmocr", "surya") and not installation.get("runtime_files"):
+            raise OCRError("로컬 OCR 실행 런타임의 해시 기록이 없습니다.")
+        if installation.get("runtime_files"):
+            name = installation.get("runtime_root", "runtime" if engine == "glmocr" else ".")
+            runtime_root = folder if name == "." else installation_file(folder, name, nested=True)
+            runtime_files = _verified_records(runtime_root, installation["runtime_files"],
+                                             nested=True, required=True, should_stop=should_stop)
         languages = []
         for language in ENGINE_LANGUAGES[engine]:
             required = mapping.get(language)
@@ -104,9 +161,14 @@ def inspect_engine(engine: str, *, should_stop=None, engine_root=None) -> dict:
                 languages.append(language)
         if not languages:
             raise OCRError("사용 가능한 로컬 OCR 언어 모델이 없습니다.")
+        worker_args = ["--profile", "server"] if engine == "paddle_server" else []
+        if engine == "paddle_server" and installation.get("execution_provider") == "cuda":
+            worker_args += ["--provider", "cuda"]
         return {**info, "available": True, "languages": languages, "executable": str(executable),
                 "worker": str(worker), "engine_root": str(selected_root), "model_dir": str(directory), "models": models,
-                "language_models": mapping, "installation": installation,
+                "language_models": mapping, "installation": installation, "worker_args": worker_args,
+                "runtime_files": runtime_files, "installation_sha256": _cached_file_sha256(manifest_path),
+                "worker_sha256": _cached_file_sha256(worker),
                 "message": "로컬 모델 해시 확인 완료. PSM 대신 엔진 자체 영역 검출을 사용합니다."}
     except OCRCancelled:
         raise
@@ -114,7 +176,41 @@ def inspect_engine(engine: str, *, should_stop=None, engine_root=None) -> dict:
         return {**info, "message": str(exc)}
 
 
-def parse_worker_result(path: Path, width: int, height: int) -> dict:
+def installed_run_unchanged(engine: str, engine_root, metadata: dict) -> bool:
+    """Verify a new run's pinned deployment; old runs retain their legacy checks."""
+    info = inspect_engine(engine, engine_root=engine_root)
+    if not info["available"]:
+        return False
+    if "worker_protocol_sha256" in metadata:
+        from .ocr import file_sha256
+        helper = Path(info["worker"]).with_name("worker_sessions.py")
+        if not helper.is_file() or file_sha256(helper) != metadata["worker_protocol_sha256"]:
+            return False
+    if engine in ("paddle_server", "glmocr", "surya"):
+        language = metadata.get("requested_languages")
+        required = info["language_models"].get(language) if isinstance(language, str) else None
+        full_runtime = (isinstance(metadata.get("runtime_files"), dict)
+                        and set(metadata["runtime_files"]) == set(info["runtime_files"]))
+        compact_runtime = metadata.get("runtime_inventory") == runtime_inventory(info["runtime_files"])
+        if (not required or not isinstance(metadata.get("model_files"), dict)
+                or set(metadata["model_files"]) != set(required)
+                or not (full_runtime or compact_runtime)
+                or any(metadata.get(key) != info[key] for key in ("installation_sha256", "worker_sha256"))):
+            return False
+    for key in ("installation_sha256", "worker_sha256"):
+        if key in metadata and metadata[key] != info[key]:
+            return False
+    for group in ("model_files", "runtime_files"):
+        recorded = metadata.get(group, {})
+        current = info["models" if group == "model_files" else group]
+        if not isinstance(recorded, dict) or any(
+                name not in current or not isinstance(record, dict)
+                or record.get("sha256") != current[name]["sha256"] for name, record in recorded.items()):
+            return False
+    return True
+
+
+def parse_worker_result(path: Path, width: int, height: int, *, engine=None) -> dict:
     """Validate the worker boundary without changing text or geometry silently."""
     from .ocr import OCRError
     payload = _read_json(path, MAX_WORKER_BYTES)
@@ -122,6 +218,10 @@ def parse_worker_result(path: Path, width: int, height: int) -> dict:
             or not isinstance(payload.get("engine_version"), str) or not payload["engine_version"]
             or not isinstance(payload.get("engine_metadata"), dict)):
         raise OCRError("로컬 OCR 결과의 필수 텍스트·엔진 정보가 올바르지 않습니다.")
+    completion = payload["engine_metadata"].get("generation_complete")
+    if (("generation_complete" in payload["engine_metadata"] and type(completion) is not bool)
+            or (engine in ("glmocr", "surya") and type(completion) is not bool)):
+        raise OCRError("로컬 OCR 응답의 완료 상태가 올바르지 않습니다.")
     for word in payload["words"]:
         if not isinstance(word, dict) or not isinstance(word.get("text"), str):
             raise OCRError("로컬 OCR 영역 텍스트 형식이 올바르지 않습니다.")
@@ -139,9 +239,16 @@ def parse_worker_result(path: Path, width: int, height: int) -> dict:
     return payload
 
 
-def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, should_stop, engine_root=None,
-                         direction="horizontal"):
-    from .ocr import OCRError, RecognitionResult, _cancelled, _render, _run, file_sha256
+def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, timeout, should_stop, engine_root=None,
+                               direction="horizontal"):
+    from .ocr import (
+        OCRCancelled,
+        OCRError,
+        _cancelled,
+        _render,
+        _run,
+        file_sha256,
+    )
     from .runtime import subprocess_environment
     start = time.monotonic()
     if direction not in ("horizontal", "vertical"):
@@ -169,29 +276,329 @@ def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, 
         if auxiliary not in model_names:
             model_names.append(auxiliary)
     original_hash = file_sha256(source)
+    info["used_model_names"] = model_names
     with tempfile.TemporaryDirectory(prefix=f"abocr-{engine}-") as folder:
         image_path, output = Path(folder) / "input.png", Path(folder) / "reading.json"
         preprocessing = {}
         width, height = _render(source, image_path, page_number, dpi, details=preprocessing)
         _cancelled(should_stop)
-        argv = [info["executable"], "-I", "-X", "utf8", info["worker"], "--input", str(image_path),
-                "--output", str(output), "--languages", languages, "--model-dir", info["model_dir"]]
+        argv = [info["executable"], "-I", "-B", "-X", "utf8", info["worker"], "--input", str(image_path),
+                "--output", str(output), "--languages", languages, "--model-dir", info["model_dir"],
+                *info.get("worker_args", [])]
         if engine in ("easyocr", "rapidocr", "ppocrv6"):
             argv.extend(["--direction", direction])
-        _run(argv, timeout=timeout, should_stop=should_stop, engine_name=engine, include_stderr=False,
-             env=subprocess_environment())
-        payload = parse_worker_result(output, width, height)
+        if engine == "glmocr":
+            argv += ["--timeout", str(timeout)]
+        try:
+            _run(argv, timeout=timeout, should_stop=should_stop, engine_name=engine, include_stderr=False,
+                 env=subprocess_environment())
+        except OCRCancelled:
+            raise
+        except OCRError:
+            failure_path = output.with_name(output.name + ".failure.json")
+            if engine != "surya" or not failure_path.is_file():
+                raise
+            failure = _read_json(failure_path, MAX_WORKER_BYTES)
+            if failure.get("engine") != "surya" or failure.get("status") != "failed":
+                raise OCRError("로컬 OCR 실패 원시 기록의 종류가 올바르지 않습니다.") from None
+            # Retain failed model responses without accepting them as OCR text.
+            payload = {"text": "", "words": [], "engine_version": str(info["installation"].get("engine_version", "surya")),
+                       "engine_metadata": {"generation_complete": False, "raw_failure": failure,
+                                           "text_policy": "failed raw responses preserved; no accepted OCR text"}}
+        else:
+            payload = parse_worker_result(output, width, height, engine=engine)
         if engine in VERTICAL_RTL_ENGINES and direction == "vertical":
             payload = order_vertical_payload(payload)
     if file_sha256(source) != original_hash:
         raise OCRError("인식 중 원본 파일이 변경되어 결과를 적용하지 않습니다.")
     _cancelled(should_stop)
+    return _recognition_result(payload, info, source, original_hash, page_number, dpi, width, height,
+                               languages, preprocessing, time.monotonic() - start)
+
+
+def _recognition_result(payload, info, source, original_hash, page_number, dpi, width, height,
+                        languages, preprocessing, duration):
+    from .ocr import RecognitionResult
     metadata = dict(payload["engine_metadata"])
-    metadata["model_files"] = {name: info["models"][name] for name in model_names}
-    metadata["installation"] = info["installation"]
+    metadata["engine_root"] = info.get("engine_root")
+    metadata["requested_languages"] = languages
+    metadata["model_files"] = {name: info["models"][name] for name in info.get("used_model_names", info["language_models"][languages])}
+    metadata["installation"] = dict(info["installation"])
+    if len(info["runtime_files"]) > 128:
+        # Thousands of repeated runtime records would exhaust the project size
+        # limit on a long book. Keep a canonical fingerprint and the original
+        # manifest SHA; the complete inventory remains in that local manifest.
+        inventory = runtime_inventory(info["runtime_files"])
+        metadata.pop("runtime_files", None)
+        metadata["installation"].pop("runtime_files", None)
+        metadata["installation"]["runtime_inventory"] = inventory
+        metadata["installation"]["inventory_policy"] = "compact view; complete runtime inventory remains in the SHA-pinned local installation manifest"
+        metadata["runtime_inventory"] = inventory
+    else:
+        metadata["runtime_files"] = info["runtime_files"]
+    for key in ("installation_sha256", "worker_sha256"):
+        metadata[key] = info[key]
     metadata["psm_applicable"] = False
     return RecognitionResult(text=payload["text"], words=payload["words"], source_path=str(source),
                              source_sha256=original_hash, page_number=page_number, image_width=width,
                              image_height=height, engine_version=payload["engine_version"], languages=languages,
-                             psm=None, duration_seconds=time.monotonic() - start, preprocessing=preprocessing,
-                             engine_metadata=metadata, engine=engine)
+                             psm=None, duration_seconds=duration, preprocessing=preprocessing,
+                             engine_metadata=metadata, engine=info["engine"])
+
+
+def _device(info, requested=None):
+    from .ocr import OCRError
+    if requested not in (None, "cpu", "cuda"):
+        raise ValueError("장치는 cpu 또는 cuda로 명시하세요.")
+    engine = info["engine"]
+    installed = ("cuda" if engine == "glmocr" else info["installation"].get("backend_device", "cpu")
+                 if engine == "surya" else info["installation"].get("execution_provider", "cpu"))
+    selected = requested or installed
+    if selected == "cuda" and (engine not in ("paddle_server", "glmocr", "surya") or installed != "cuda"):
+        raise OCRError("이 엔진의 CUDA 실행 환경이 명시적으로 준비되지 않았습니다.")
+    return selected
+
+
+def recognize_local_file(path, *, engine, languages, page_number, dpi, timeout, should_stop,
+                         engine_root=None, direction="horizontal"):
+    """Legacy single-page API also participates in the PC-wide GPU queue."""
+    from dataclasses import replace
+    from .gpu_queue import GPULease
+    if engine not in ENGINE_LANGUAGES or languages not in ENGINE_LANGUAGES[engine]:
+        raise ValueError("이 로컬 엔진은 선택한 언어 조합을 지원하지 않습니다. 다른 언어로 자동 대체하지 않습니다.")
+    info = inspect_engine(engine, should_stop=should_stop, engine_root=engine_root)
+    if not info["available"]:
+        from .ocr import OCRError
+        raise OCRError(info["message"])
+    if _device(info) == "cuda":
+        with GPULease(engine, should_stop=should_stop) as lease:
+            result = _recognize_local_file_once(path, engine=engine, languages=languages,
+                page_number=page_number, dpi=dpi, timeout=timeout, should_stop=should_stop, engine_root=engine_root,
+                direction=direction)
+            return replace(result, engine_metadata={**result.engine_metadata, "gpu_lease": lease.evidence()})
+    return _recognize_local_file_once(path, engine=engine, languages=languages, page_number=page_number,
+        dpi=dpi, timeout=timeout, should_stop=should_stop, engine_root=engine_root, direction=direction)
+
+
+class RecognitionSession:
+    """Pinned sequential local recognitions, with bounded FIFO GPU ownership.
+
+    Each request supplies one independent image. At most max_requests (default8)
+    reuse a private worker/server before yielding the GPU and taking a new ticket.
+    No failed inference is replayed. Completed raw payloads belong to each result.
+    """
+    def __init__(self, engine, languages, *, engine_root=None, device=None, timeout=300,
+                 should_stop=None, on_wait=None, max_requests=8, psm=None, direction="horizontal"):
+        if engine not in ("tesseract", *ENGINE_LANGUAGES):
+            raise ValueError("지원하지 않는 OCR 엔진입니다.")
+        if type(max_requests) is not int or not 1 <= max_requests <= 64:
+            raise ValueError("세션 묶음은 1~64개 요청이어야 합니다.")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("요청 제한 시간은 양수여야 합니다.")
+        if device not in (None, "cpu", "cuda"):
+            raise ValueError("장치는 cpu 또는 cuda로 명시하세요.")
+        self.engine, self.languages = engine, languages
+        if direction not in ("horizontal", "vertical"):
+            raise ValueError("읽기 방향은 horizontal 또는 vertical이어야 합니다.")
+        self.direction = direction
+        self.engine_root, self.device, self.timeout = engine_root, device, timeout
+        self.should_stop, self.on_wait = should_stop, on_wait
+        self.max_requests, self.psm = max_requests, psm
+        self.info = self.pin = self.worker = self.lease = self.folder = None
+        self.active = False
+        self.count = 0
+        self.cleanup_failures = []
+
+    def __enter__(self):
+        if self.active:
+            raise RuntimeError("OCR 세션을 중복 시작할 수 없습니다.")
+        self.active = True
+        return self
+
+    def _inspection(self):
+        from .ocr import OCRError, file_sha256
+        info = inspect_engine(self.engine, should_stop=self.should_stop, engine_root=self.engine_root)
+        if not info["available"] or self.languages not in info["languages"]:
+            raise OCRError("OCR 세션의 설치 또는 언어가 준비되지 않았습니다.")
+        helper = Path(info["worker"]).with_name("worker_sessions.py")
+        pin = {"installation": info["installation_sha256"], "worker": info["worker_sha256"],
+               "runtime": runtime_inventory(info["runtime_files"]), "models": info["models"],
+               "protocol": file_sha256(helper), "device": _device(info, self.device), "languages": self.languages}
+        if self.pin is not None and pin != self.pin:
+            self._release_batch()
+            raise OCRError("OCR 세션 중 모델·실행 환경·장치 조건이 변경되어 종료했습니다.")
+        self.info, self.pin = info, pin
+        return info
+
+    def condition_snapshot(self):
+        """Verified root/device/deployment; no GPU lease or recognition call."""
+        from .ocr import OCRError, doctor, _engine_metadata
+        from .runtime import default_engine_root
+        if self.engine == "tesseract":
+            if self.device == "cuda":
+                raise OCRError("Tesseract는 현재 CPU 환경입니다.")
+            info = doctor(engine_root=self.engine_root, should_stop=self.should_stop)
+            if not info["available"] or not set(self.languages.split("+")).issubset(info["languages"]):
+                raise OCRError("Tesseract 세션의 설치 또는 언어가 준비되지 않았습니다.")
+            metadata = _engine_metadata(info, self.languages.split("+"))
+            pin = {"device": "cpu", "languages": self.languages,
+                "executable_sha256": metadata.get("executable_sha256"), "models": metadata["model_files"]}
+            if self.pin is not None and self.pin != pin:
+                raise OCRError("Tesseract 세션의 설치 조건이 변경되었습니다.")
+            self.pin = pin
+            actual_root = default_engine_root(self.engine_root)
+        else:
+            info = self._inspection()
+            actual_root = info.get("engine_root") or default_engine_root(self.engine_root)
+        return json.loads(json.dumps({"engine": self.engine, "languages": self.languages,
+            "engine_root": str(Path(actual_root).resolve()), "device": self.pin["device"],
+            "pin": self.pin}, ensure_ascii=False, allow_nan=False))
+
+    def _start_batch(self):
+        from .gpu_queue import GPULease
+        from .worker_sessions import WorkerProcess
+        info = self._inspection()
+        selected_device = self.pin["device"]
+        try:
+            if selected_device == "cuda":
+                self.lease = GPULease(self.engine, should_stop=self.should_stop, on_wait=self.on_wait)
+                self.lease.__enter__()
+                self._inspection()  # Revalidate after a possibly long FIFO wait.
+            self.folder = tempfile.TemporaryDirectory(prefix="yeone-session-")
+            folder = Path(self.folder.name)
+            args = list(info.get("worker_args", []))
+            if self.engine == "paddle_server":
+                args = ["--profile", "server", "--provider", selected_device]
+            elif self.engine in ("surya", "glmocr"):
+                args += ["--device", selected_device]
+            if self.engine == "glmocr":
+                args += ["--timeout", str(self.timeout)]
+            argv = [info["executable"], "-I", "-B", "-X", "utf8", info["worker"], "--model-dir", info["model_dir"],
+                "--languages", self.languages, "--session-root", str(folder), "--max-requests", str(self.max_requests), *args]
+            self.worker = WorkerProcess(argv, folder, should_stop=self.should_stop, timeout=self.timeout)
+            self.count = 0
+        except BaseException:
+            self._release_batch()
+            raise
+
+    def recognize_file(self, path, *, page_number=1, dpi=300, psm=None):
+        from dataclasses import replace
+        from .ocr import OCRCancelled, OCRError, _cancelled, _render, file_sha256, recognize_file
+        if not self.active:
+            raise OCRError("with RecognitionSession 문 안에서 인식하세요.")
+        if self.cleanup_failures:
+            raise OCRError("이전 OCR 세션 정리가 실패해 새 요청을 시작하지 않습니다. "
+                           "완료 원시 결과는 보존되며 자동 재시도하지 않습니다.")
+        _cancelled(self.should_stop)
+        if self.engine in ("tesseract", "easyocr", "ppocrv6") or (self.engine == "rapidocr" and self.direction == "vertical"):
+            if self.device == "cuda":
+                raise OCRError("이 엔진은 현재 CPU 환경입니다.")
+            before = self.condition_snapshot()
+            if self.engine == "tesseract":
+                result = recognize_file(path, engine=self.engine, languages=self.languages, page_number=page_number,
+                    dpi=dpi, psm=psm if psm is not None else self.psm if self.psm is not None else 6,
+                    timeout=self.timeout, should_stop=self.should_stop, engine_root=self.engine_root,
+                    direction=self.direction)
+            else:
+                result = _recognize_local_file_once(path, engine=self.engine, languages=self.languages,
+                    page_number=page_number, dpi=dpi, timeout=self.timeout, should_stop=self.should_stop,
+                    engine_root=self.engine_root, direction=self.direction)
+            if self.condition_snapshot() != before:
+                raise OCRError("OCR 단건 세션의 실행 조건이 변경되었습니다.")
+            return replace(result, engine_metadata={**result.engine_metadata,
+                "engine_root": before["engine_root"], "session_conditions": before["pin"]})
+        started = time.monotonic()
+        source = Path(path).expanduser().resolve(strict=True)
+        original_hash = file_sha256(source)
+        try:
+            self._inspection()
+            if self.worker is None:
+                self._start_batch()
+            token = uuid.uuid4().hex
+            folder = Path(self.folder.name)
+            image, output, ack = (folder / (token + suffix) for suffix in (".png", ".json", ".ack.json"))
+            preprocessing = {}
+            width, height = _render(source, image, page_number, dpi, details=preprocessing)
+            request = {"id": token, "input": image.name, "output": output.name,
+                       "ack": ack.name, "languages": self.languages}
+            response_error = None
+            try:
+                status = self.worker.request(request)
+            except OCRCancelled:
+                raise
+            except OCRError as error:
+                # A completed atomic file survives a crash between file and ack.
+                # Recover that exact output once, without executing it again.
+                status, response_error = {"status": "failed"}, error
+            if output.is_file():
+                payload = parse_worker_result(output, width, height, engine=self.engine)
+                session = payload["engine_metadata"].get("worker_session", {})
+                if session.get("request_id") != token:
+                    raise OCRError("OCR 세션의 원시 결과 ID가 일치하지 않습니다.")
+                if response_error is not None:
+                    payload["engine_metadata"]["session_ack_missing_recovered_from_atomic_output"] = True
+            else:
+                failure = output.with_name(output.name + ".failure.json")
+                if self.engine != "surya" or not failure.is_file():
+                    raise response_error or OCRError("전용 OCR 요청이 실패했습니다. 자동 재시도하지 않습니다.")
+                evidence = _read_json(failure, MAX_WORKER_BYTES)
+                payload = {"text": "", "words": [], "engine_version": str(self.info["installation"].get("engine_version", "surya")),
+                    "engine_metadata": {"generation_complete": False, "raw_failure": evidence,
+                        "worker_session": evidence.get("worker_session", {"request_id": token, "session_id": folder.name,
+                                           "request_ordinal": self.count + 1}),
+                        "text_policy": "failed raw model response preserved; no accepted OCR text"}}
+            _cancelled(self.should_stop)
+            if file_sha256(source) != original_hash:
+                raise OCRError("인식 중 원본이 변경되어 결과를 적용하지 않습니다.")
+            self._inspection()
+            payload["engine_metadata"]["session_conditions"] = self.pin
+            if self.lease is not None:
+                payload["engine_metadata"]["gpu_lease"] = self.lease.evidence()
+            result = _recognition_result(payload, self.info, source, original_hash, page_number, dpi, width, height,
+                self.languages, preprocessing, time.monotonic() - started)
+            self.count += 1
+            if (self.count >= self.max_requests or status["status"] != "ok" or response_error is not None
+                    or result.engine_metadata.get("generation_complete") is False):
+                self._release_batch()
+            if self.cleanup_failures:
+                # The model response is already complete in memory. Return it
+                # so the caller can checkpoint before a cleanup error is raised
+                # on the next request/context exit. Never discard paid/computed
+                # evidence because a queue row or temporary file cannot close.
+                result = replace(result, engine_metadata={**result.engine_metadata,
+                    "session_cleanup_failures": json.loads(json.dumps(self.cleanup_failures)),
+                    "session_halted_after_completed_raw": True})
+            return replace(result, engine_metadata={**result.engine_metadata,
+                "worker_protocol_sha256": self.pin["protocol"]})
+        except BaseException:
+            self._release_batch()
+            raise
+
+    def _release_batch(self):
+        # Always attempt every owned-resource cleanup. These failures must not
+        # mask an original recognition/source/cancellation exception, or prevent
+        # a completed response from reaching its durable project checkpoint.
+        resources = (("worker", self.worker, "close"), ("gpu_lease", self.lease, "close"),
+                     ("temporary_files", self.folder, "cleanup"))
+        self.worker = self.lease = self.folder = None
+        for stage, resource, method in resources:
+            if resource is not None:
+                try:
+                    getattr(resource, method)()
+                except Exception as error:
+                    self.cleanup_failures.append({"stage": stage, "error_type": type(error).__name__})
+
+    def close(self):
+        self.active = False
+        self._release_batch()
+        if self.cleanup_failures:
+            from .ocr import OCRError
+            raise OCRError("OCR 원시 결과 저장 후 세션 정리 오류가 확인되었습니다. "
+                           "새 요청과 자동 재시도는 중단했습니다.")
+
+    def __exit__(self, exception_type, _exception, _traceback):
+        if exception_type is not None:
+            self.active = False
+            self._release_batch()
+        else:
+            self.close()

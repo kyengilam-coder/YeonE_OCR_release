@@ -14,6 +14,28 @@ from yeone_ocr import gui, launcher, runtime, state, updater, windows_app
 
 
 class FrozenRuntime(unittest.TestCase):
+    def test_windows_redirected_cli_logs_preserve_unicode_in_utf8(self):
+        text = "판독 — 樂𠀀漢\U000e0100"
+        output = io.BytesIO()
+        errors = io.BytesIO()
+        stdout = io.TextIOWrapper(output, encoding="cp949")
+        stderr = io.TextIOWrapper(errors, encoding="cp949")
+        stdin = io.StringIO("unchanged input")
+        try:
+            with mock.patch.object(sys, "platform", "win32"), \
+                 mock.patch.object(sys, "stdout", stdout), \
+                 mock.patch.object(sys, "stderr", stderr), \
+                 mock.patch.object(sys, "stdin", stdin):
+                runtime.ensure_standard_streams()
+                print(text, flush=True)
+                print(text, file=sys.stderr, flush=True)
+                self.assertIs(sys.stdin, stdin)
+            self.assertEqual(output.getvalue().decode("utf-8").strip(), text)
+            self.assertEqual(errors.getvalue().decode("utf-8").strip(), text)
+        finally:
+            stdout.close()
+            stderr.close()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -150,6 +172,186 @@ class FrozenRuntime(unittest.TestCase):
         text = windows_app.redact_log(" ".join(keys))
         self.assertTrue(all(key not in text for key in keys))
         self.assertEqual(text.count("[REDACTED]"), 3)
+
+    def test_all_six_engine_worker_and_installer_resources_are_self_contained(self):
+        from yeone_ocr.frozen_smoke import comparison_resources_probe
+        from ab_ocr import runtime as engine_runtime
+        result = comparison_resources_probe()
+        self.assertEqual(set(result["workers"]), {"rapidocr", "easyocr", "paddle_server", "glmocr", "surya"})
+        self.assertEqual(len(set(result["workers"].values())), 4)
+        self.assertEqual(result["workers"]["paddle_server"], "rapidocr_worker.py")
+        self.assertFalse(result["external_models_loaded"])
+        self.assertEqual(result["network_calls"], 0)
+        resources = set(result["application_resources"])
+        self.assertIn("worker_sessions.py", resources)
+        self.assertEqual(result["gpu_queue_database"], "sqlite3 available")
+        for name in ("install_paddle_server.py", "paddle-server-lock.json", "install_glmocr.py",
+                     "glmocr-models.lock.json", "install_surya.py", "surya-lock.json", "surya-requirements.txt"):
+            self.assertIn(name, resources)
+        self.assertTrue({"GLM_OCR.md", "PADDLE_SERVER.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md"}
+                        <= set(result["documentation"]))
+        # A frozen installation must resolve its own workers, never the source
+        # checkout or another project's runtime if one bundled file is missing.
+        with self.frozen():
+            self.assertTrue(engine_runtime.worker_path("glmocr").is_relative_to(self.install))
+            with self.assertRaisesRegex(AssertionError, "Missing application-owned worker"):
+                comparison_resources_probe()
+
+    def test_release_smoke_preserves_source_codes_and_measures_literal_errors(self):
+        from yeone_ocr.frozen_smoke import source_preservation_probe
+        result = source_preservation_probe(self.root)
+        self.assertEqual(result["source_exact_edits"], 2)
+        self.assertTrue(result["evaluation_record_unchanged"])
+        self.assertTrue(result["compatibility_and_selectors_preserved"])
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_holds_new_unlocated_answers_and_replays_legacy(self):
+        from yeone_ocr.frozen_smoke import glyph_location_hold_probe
+        result = glyph_location_hold_probe()
+        self.assertEqual(result["new_unmeasured_choice"], "held")
+        self.assertEqual(result["legacy_decision_replay"], "preserved")
+        self.assertEqual(result["mock_answers"], 1)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_uses_unique_sections_and_rejects_earlier_mentions(self):
+        from yeone_ocr.frozen_smoke import bookmark_section_probe
+        result = bookmark_section_probe(self.root)
+        self.assertEqual(result["canonical_sections"], 2)
+        self.assertEqual(result["body_heading_pages"], [2, 3])
+        self.assertTrue(result["earlier_mention_rejected"])
+        self.assertTrue(result["input_unchanged"])
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_scans_both_annotation_layouts_without_editing_records(self):
+        from yeone_ocr.frozen_smoke import small_annotations_probe
+        result = small_annotations_probe(self.root)
+        self.assertEqual(result["layouts"], {"vertical": {"candidates": 1, "lines": 2},
+                                            "horizontal": {"candidates": 2, "lines": 7}})
+        self.assertTrue(result["ui_imported"])
+        self.assertTrue(result["original_and_records_unchanged"])
+        self.assertEqual(result["automatic_insertions"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_edits_existing_bookmark_copy_with_backup(self):
+        from yeone_ocr.frozen_smoke import bookmark_edit_probe
+        result = bookmark_edit_probe(self.root)
+        self.assertTrue(result["saved_into_existing_copy"])
+        self.assertTrue(result["backup_matches_previous"])
+        self.assertTrue(result["source_and_other_section_preserved"])
+        self.assertTrue(result["manual_protection"])
+        self.assertTrue(result["ui_save_and_reopen"])
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_follows_bookmark_caret_and_matches_pdf_text_size(self):
+        from yeone_ocr.frozen_smoke import bookmark_cursor_probe
+        from yeone_ocr.collate.section_editor import shared_pdf_worker
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = bookmark_cursor_probe(self.root)
+        self.assertNotEqual(shared_pdf_worker().submit(os.getpid).result(timeout=8), os.getpid())
+        self.assertTrue(result["native_pdf_separate_process"])
+        self.assertEqual(result["cursor_pdf_page"], 2)
+        self.assertTrue(result["line_and_glyph_overlays"])
+        self.assertTrue(result["same_paragraph_caret_move"])
+        self.assertTrue(result["font_tracks_pdf_zoom"])
+        self.assertGreater(result["font_sizes"][1], result["font_sizes"][0])
+        self.assertTrue(result["cursor_screen_height_aligned"])
+        self.assertLessEqual(result["cursor_height_error_px"], 2)
+        self.assertTrue(result["source_pdf_and_hwpx_unchanged"])
+        self.assertTrue(result["corrected_file_not_created"])
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_color_only_and_owned_memo_cleanup(self):
+        from yeone_ocr.frozen_smoke import color_only_collation_probe
+        result = color_only_collation_probe(self.root)
+        self.assertEqual(result["owned_memos_removed"], 2)
+        for field in ("color_only_no_memos_or_inline_text", "human_memo_preserved",
+                      "text_and_original_preserved", "backup_matches_previous",
+                      "repeated_cleanup_no_write"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_remembers_human_correction_without_cross_document_or_undo_reuse(self):
+        from yeone_ocr.frozen_smoke import correction_memory_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = correction_memory_probe(self.root)
+        self.assertEqual(result["same_pdf_hint_count"], 1)
+        for field in ("before_after_journal_saved", "hangul_to_hanja_hint", "other_pdf_excluded",
+                      "read_only_hint_loading", "undo_excluded_history_retained",
+                      "existing_copy_and_backup_preserved", "manual_protection_retained",
+                      "source_pdf_and_hwpx_unchanged"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_clears_only_manually_edited_ocr_marks(self):
+        from yeone_ocr.frozen_smoke import manual_style_cleanup_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = manual_style_cleanup_probe(self.root)
+        for field in ("edited_marks_cleared", "mixed_author_styles_restored",
+                      "untouched_marks_and_paragraphs_preserved", "existing_copy_and_backup_preserved",
+                      "manual_history_and_protection_retained", "saved_file_reopened",
+                      "ascii_space_only_changes_preserve_protection", "space_validation_is_read_only",
+                      "space_adjusted_manual_save_reopens", "external_character_changes_still_blocked",
+                      "source_pdf_and_hwpx_unchanged"):
+            self.assertTrue(result[field], field)
+        for field in ("locked_save_preserves_document_and_history", "unlocked_save_retries_same_session"):
+            if sys.platform == "win32":
+                self.assertTrue(result[field], field)
+            else:
+                self.assertIsNone(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_replaces_across_sections_and_recovers_paragraph_input(self):
+        from yeone_ocr.frozen_smoke import bookmark_replace_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = bookmark_replace_probe(self.root)
+        self.assertEqual(result["editable_occurrences"], 3)
+        self.assertEqual(result["readonly_skipped"], 2)
+        for field in ("input_line_join_preserved_text", "section_and_document_scopes",
+                      "stored_hwpx_grade_colors_displayed", "unchanged_review_marks_displayed",
+                      "manual_colors_cleared_after_save_and_reload",
+                      "pending_edits_preserved", "edited_marks_cleared",
+                      "edited_text_copy_shortcuts", "copy_context_menu",
+                      "unicode_copy_and_drafts_preserved", "user_clipboard_untouched",
+                      "source_and_other_content_preserved", "existing_copy_and_backup_preserved",
+                      "manual_history_and_protection_retained", "saved_file_reopened"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_edits_generated_pdf_image_and_image_folder_results(self):
+        from yeone_ocr.frozen_smoke import generated_editor_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = generated_editor_probe(self.root)
+        self.assertEqual(result["sources"], ["PDF", "image", "image-folder"])
+        for field in ("partial_output_page_mapping", "generated_grade_colors_and_manual_cleanup",
+                      "copy_current_body", "cumulative_save_reload_and_page_navigation",
+                      "cached_image_region_without_fake_caret", "source_and_ocr_output_preserved",
+                      "manual_history_saved"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
+
+    def test_release_smoke_keeps_comparison_visible_after_delayed_show_and_reload(self):
+        from yeone_ocr.frozen_smoke import bookmark_layout_probe
+        with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
+             mock.patch("socket.getaddrinfo", side_effect=AssertionError("Unexpected DNS access")):
+            result = bookmark_layout_probe(self.root)
+        for field in ("delayed_first_show_balanced", "collapsed_pane_restored",
+                      "reload_preserves_comparison", "pdf_and_font_follow_available_width",
+                      "manual_resize_preserved", "source_pdf_and_hwpx_unchanged",
+                      "corrected_file_not_created", "hidden_render_replayed"):
+            self.assertTrue(result[field], field)
+        self.assertEqual(result["ocr_calls"], 0)
+        self.assertEqual(result["network_calls"], 0)
 
 
 if __name__ == "__main__":

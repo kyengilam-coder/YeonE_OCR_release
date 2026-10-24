@@ -52,10 +52,19 @@ def safe_output_path(path: str | Path, source: str | Path) -> Path:
 
 
 def ensure_standard_streams() -> None:
-    """pythonw/무창 실행기의 CLI·검사 경로도 print/flush 를 안전하게 쓸 수 있게 한다."""
+    """무창 CLI·검사의 출력과 Windows 리다이렉트 로그를 UTF-8로 쓸 수 있게 한다."""
     for name, mode in (("stdin", "r"), ("stdout", "w"), ("stderr", "w")):
-        if getattr(sys, name) is None:
+        stream = getattr(sys, name)
+        if stream is None:
             setattr(sys, name, open(os.devnull, mode, encoding="utf-8"))
+        elif name != "stdin" and sys.platform == "win32":
+            # Windowed executables inherit the ANSI code page when their output
+            # is redirected. An em dash or supplementary Han character in a log
+            # must not abort OCR or document export. Keep custom GUI/StringIO
+            # streams intact; only text streams supporting reconfigure change.
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 @contextmanager

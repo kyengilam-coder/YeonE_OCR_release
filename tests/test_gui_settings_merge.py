@@ -133,6 +133,39 @@ class SettingsMerge(unittest.TestCase):
         b = fake_app(gui, dict(gui.DEFAULTS))                                             # 옛 설정(열쇠 없음)은 켬
         self.assertEqual(gui.App._answered_opts(b), ["--skip-answered", "any-model"])
 
+    def test_bookmark_color_default_migrates_once_and_preserves_later_choice(self):
+        gui = self.gui
+        self.assertEqual(gui.DEFAULTS["collate_memo"], "none")
+        for old in ("notice", "inline", True, False, None, ["broken"]):
+            with self.subTest(old=old):
+                raw = {"collate_memo": old, "memo_mode": "all"}
+                cfg = gui.upgrade_config(dict(gui.DEFAULTS, **raw), raw)
+                self.assertEqual((cfg["collate_memo"], cfg["memo_mode"]), ("none", "all"))
+                self.assertEqual(cfg["collate_display_version"], 1)
+        for explicit in ("none", "all"):
+            raw = {"collate_memo": explicit}
+            self.assertEqual(gui.upgrade_config(dict(gui.DEFAULTS, **raw), raw)["collate_memo"], explicit)
+        gui.save_config({"collate_memo": "notice", "memo_mode": "inline"})
+        cfg = gui.load_config()
+        self.assertEqual((cfg["collate_memo"], cfg["memo_mode"]), ("none", "inline"))
+        self.assertEqual(self.disk()["collate_memo"], "notice")  # Loading alone does not rewrite settings.
+        gui.save_config(cfg)
+        for chosen in ("notice", "inline", "all", "none"):
+            cfg["collate_memo"] = chosen
+            gui.save_config(cfg)
+            self.assertEqual(gui.load_config()["collate_memo"], chosen)
+
+    def test_bookmark_color_mode_does_not_add_unsupported_general_ocr_option(self):
+        gui = self.gui
+        self.assertIn("none", gui.MEMO_LABELS)
+        self.assertNotIn("none", gui.GENERAL_MEMO_LABELS)
+        for mode, label in gui.MEMO_LABELS.items():
+            app = types.SimpleNamespace(v_cmemo=Var(label))
+            self.assertEqual(gui.App.collate_memo_mode(app), mode)
+        for mode, label in gui.GENERAL_MEMO_LABELS.items():
+            app = types.SimpleNamespace(v_memo=Var(label))
+            self.assertEqual(gui.App.memo_mode(app), mode)
+
     def test_fake_window_without_snapshot_writes_whole_config(self):
         gui = self.gui
         app = types.SimpleNamespace(cfg={"workers": 3, "template": "T.hwpx"})

@@ -110,6 +110,89 @@ class ResultFilesGui(unittest.TestCase):
         self.open_path.assert_not_called()
         self.info.assert_called_once()
 
+    def test_result_editor_pins_active_input_output_and_work_for_pdf_image_and_folder(self):
+        for name, directory in (("원본.pdf", False), ("캡처.png", False), ("이미지 모음", True)):
+            with self.subTest(source=name):
+                source = self.root / name
+                source.mkdir() if directory else source.write_bytes(b"synthetic source")
+                work = self.gui.work_dir_for(str(source))
+                result = self.result(source.stem + "_p002-005", work=work, tick=4)
+                self.result(source.stem + "_교정", work=work, tick=9)
+                app = self.app()
+                app.v_pdf.set(str(source))
+                app.v_status = Var()
+                window = SimpleNamespace()
+                with mock.patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor", return_value=window) as constructor:
+                    self.gui.App.open_result_editor(app)
+                arguments = constructor.call_args.kwargs
+                self.assertEqual(arguments["pdf_path"], str(source.resolve()))
+                self.assertEqual(arguments["hwpx_path"], result.resolve())
+                self.assertEqual(arguments["work_dir"], work.resolve())
+                self.assertTrue(arguments["generated"])
+                self.assertTrue(arguments["can_write"]())
+                app.running = True
+                self.assertFalse(arguments["can_write"]())
+                app.v_pdf.set(str(self.source))
+                self.assertEqual(window._generated_key[0], os.path.normcase(str(source.resolve())))
+                self.assertEqual(app._collate_edit_windows, [window])
+
+    def test_result_editor_reuses_exact_result_without_discarding_unsaved_edits(self):
+        result = self.result(self.source.stem)
+        app = self.app()
+        key = tuple(os.path.normcase(str(path.resolve())) for path in (self.source, result, self.work))
+        window = SimpleNamespace(_generated_key=key, winfo_exists=lambda: True, dirty=True, busy=False,
+                                 reload=mock.Mock(), deiconify=mock.Mock(), lift=mock.Mock(), focus_set=mock.Mock())
+        app._collate_edit_windows = [window]
+        with mock.patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:
+            self.gui.App.open_result_editor(app)
+            window.reload.assert_not_called()
+            window.dirty = False
+            self.gui.App.open_result_editor(app)
+        constructor.assert_not_called()
+        window.reload.assert_called_once()
+        self.assertEqual(window.lift.call_count, 2)
+
+    def test_result_editor_missing_or_running_never_opens_or_creates_output(self):
+        app = self.app()
+        with mock.patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:
+            self.gui.App.open_result_editor(app)
+            self.assertIn(str(self.work / "out"), self.info.call_args.args[1])
+            self.assertFalse(self.work.exists())
+            self.result(self.source.stem)
+            app.running = True
+            self.gui.App.open_result_editor(app)
+        constructor.assert_not_called()
+        self.assertIn("OCR 작업이 끝난 뒤", self.info.call_args.args[1])
+
+    def test_result_editor_drafts_block_regeneration_before_worker_or_cost_dialog(self):
+        app = self.app()
+        app.running = False
+        app._prepare_env = mock.Mock(return_value=True)
+        window = SimpleNamespace(_generated_key=(os.path.normcase(str(self.source.resolve())), "result", "work"),
+                                 winfo_exists=lambda: True, dirty=True, busy=False, deiconify=mock.Mock(), lift=mock.Mock())
+        app._collate_edit_windows = [window]
+        with mock.patch.object(self.gui.threading, "Thread") as worker:
+            self.gui.App.start(app, ["run", str(self.source)], "인식")
+            self.gui.App.start(app, ["build", str(self.source)], "문서 만들기")
+            self.gui.App.do_run(app)
+        worker.assert_not_called()
+        app._prepare_env.assert_not_called()
+        self.assertEqual(window.lift.call_count, 3)
+        self.assertTrue(self.gui.App._result_editors_ready(app, self.root / "other.pdf"))
+        window.dirty = False
+        self.assertTrue(self.gui.App._result_editors_ready(app, self.source))
+
+    def test_result_editor_participates_in_main_window_close_draft_guard(self):
+        app = self.app()
+        app.v_status = Var()
+        window = SimpleNamespace(_generated_key=(str(self.source),), winfo_exists=lambda: True,
+                                 close=mock.Mock(return_value=False), lift=mock.Mock())
+        app._collate_edit_windows = [window]
+        self.gui.App.on_close(app)
+        window.close.assert_called_once()
+        window.lift.assert_called_once()
+        self.assertIn("저장 상태", app.v_status.get())
+
     def test_save_folder_button_opens_out_instead_of_work_root(self):
         expected = self.result(self.source.stem).parent
         self.gui.App.open_output_folder(self.app())

@@ -134,7 +134,8 @@ def _settings(args, remaining):
     from .comparison_ai import AISettings
     from .providers import default_model
     return AISettings(args.reader, getattr(args, "model", None) or default_model(args.reader),
-                      max_calls=max(1, remaining), max_total_output_tokens=max(1, remaining) * 4096)
+                      max_calls=max(1, remaining), max_output_tokens=4096,
+                      max_total_output_tokens=max(1, remaining) * 4096)
 
 
 def command(args, *, work=None, doc=None):

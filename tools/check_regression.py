@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 import gc
 import hashlib
@@ -22,6 +23,54 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Explicit source review, not a filename/Tk-string heuristic. These modules use
+# pure data or temporary PDF/HWPX/image fixtures and mocked readers. They do not
+# create windows, access the clipboard/focus, or run an external OCR engine.
+# Every newly added or unreviewed module remains exclusive. Review fixtures and
+# imported test helpers again before adding a module or changing its resources.
+PARALLEL_SAFE_MODULES = frozenset({
+    "tests/test_adjudicate_location_hold.py",
+    "tests/test_atomic_save_retries.py",
+    "tests/test_basic_styles.py",
+    "tests/test_block_ops.py",
+    "tests/test_bookmark_cursor_map.py",
+    "tests/test_chunks.py",
+    "tests/test_collate_color_only.py",
+    "tests/test_collate_manual_replay.py",
+    "tests/test_collate_memo_cleanup.py",
+    "tests/test_collate_section_edit.py",
+    "tests/test_comparison_ai.py",
+    "tests/test_comparison_ai_refinement.py",
+    "tests/test_comparison_ai_sdk.py",
+    "tests/test_comparison_ai_source_fidelity.py",
+    "tests/test_comparison_ai_state.py",
+    "tests/test_comparison_bridge.py",
+    "tests/test_comparison_fidelity_v2.py",
+    "tests/test_comparison_fidelity_v3.py",
+    "tests/test_comparison_fidelity_v4.py",
+    "tests/test_comparison_incremental.py",
+    "tests/test_comparison_incremental_api.py",
+    "tests/test_comparison_pdf_punctuation.py",
+    "tests/test_comparison_refinement_batch.py",
+    "tests/test_comparison_refinement_consensus.py",
+    "tests/test_comparison_refinement_guarded.py",
+    "tests/test_comparison_refinement_source.py",
+    "tests/test_correction_memory.py",
+    "tests/test_evaluate_source_exact.py",
+    "tests/test_export_source_preservation.py",
+    "tests/test_hwpx_golden.py",
+    "tests/test_image_direction.py",
+    "tests/test_marks.py",
+    "tests/test_merge.py",
+    "tests/test_normalization.py",
+    "tests/test_normalization_report.py",
+    "tests/test_pdf_only.py",
+    "tests/test_record_preservation.py",
+    "tests/test_text_preservation.py",
+})
+
+COUNT_KEYS = ("passed", "failed", "error", "skipped", "incomplete")
 
 
 def _fingerprint(module):
@@ -40,15 +89,16 @@ def _fingerprint(module):
 def _write_json(path, payload):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    for attempt in range(6):
+    # Windows scanners can briefly open the previous receipt without share-delete.
+    # Keep the complete pending file and retry only that transient sharing failure.
+    for attempt in range(20):
         try:
             os.replace(temporary, path)
-            break
-        except PermissionError:
-            # Windows scanners may briefly hold a just-written report open.
-            if attempt == 5:
+            return
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 19:
                 raise
-            time.sleep(.02 * (2 ** attempt))
+            time.sleep(min(0.01 * 2 ** attempt, 0.1))
 
 
 def _offline():
@@ -138,68 +188,153 @@ def _counts(payload):
             counts["passed"] += 1
         else:
             counts["incomplete"] += 1
-    return {key: counts[key] for key in ("passed", "failed", "error", "skipped", "incomplete")}
+    return {key: counts[key] for key in COUNT_KEYS}
 
 
-def run(output, modules, timeout):
+def _run_module(output, index, module, timeout):
+    """Own one child, log, receipt and temporary directory; never initialize Tk."""
+    stem = Path(module).stem
+    result_path, log_path = output / (stem + ".json"), output / (stem + ".log")
+    # A module name can itself be meaningful document text in legacy tests.
+    child_temp = output / "temp" / f"{index:03d}-{uuid.uuid4().hex[:10]}"
+    child_temp.mkdir()
+    environment = os.environ.copy()
+    environment.update(TEMP=str(child_temp), TMP=str(child_temp), PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+                       PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
+    argv = [sys.executable, "-B", "-X", "utf8", str(Path(__file__).resolve()),
+            "--_child", module, "--_child-result", str(result_path), "--_child-temp", str(child_temp)]
+    creation = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    module_started = time.monotonic()
+    timed_out, launch_error = False, None
+    with log_path.open("wb") as stream:
+        try:
+            process = subprocess.run(argv, cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
+                                     stdout=stream, stderr=subprocess.STDOUT, timeout=timeout, **creation)
+            code = process.returncode
+        except subprocess.TimeoutExpired:
+            code, timed_out = None, True
+        except OSError as exc:
+            code, launch_error = None, str(exc)
+            stream.write((launch_error + "\n").encode("utf-8", errors="replace"))
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
+    except (ValueError, OSError):
+        payload = {}
+    identifiers = payload.get("collected", [])
+    complete = (payload.get("module") == module and payload.get("status") == "complete"
+                and payload.get("exit_code") == code == 0 and not payload.get("collection_errors")
+                and bool(identifiers) and len(identifiers) == len(set(identifiers)))
+    return {"module": module, "exit_code": code, "timed_out": timed_out,
+            "collected": len(identifiers), "counts": _counts(payload), "complete": complete,
+            "duration_seconds": round(time.monotonic() - module_started, 3),
+            "log": log_path.name, "result": result_path.name, "launch_error": launch_error}
+
+
+def _passed(entry):
+    return entry["complete"] and not any(entry["counts"][key] for key in COUNT_KEYS if key != "passed")
+
+
+def _schedule(modules, workers, prioritize):
+    """Priority modules are exclusive; then batch reviewed modules, then others."""
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if len(modules) != len(set(modules)) or len(prioritize) != len(set(prioritize)):
+        raise ValueError("Repeated test module")
+    if not set(prioritize).issubset(modules):
+        raise ValueError("Priority modules must belong to the selected test coverage")
+    remaining = [module for module in modules if module not in prioritize]
+    batches = [(False, [module]) for module in prioritize]
+    if workers > 1:
+        parallel = [module for module in remaining if module in PARALLEL_SAFE_MODULES]
+        if parallel:
+            batches.append((True, parallel))
+        remaining = [module for module in remaining if module not in PARALLEL_SAFE_MODULES]
+    batches.extend((False, [module]) for module in remaining)
+    return batches
+
+
+def run(output, modules, timeout, *, workers=1, fail_fast=False, prioritize=()):
+    batches = _schedule(modules, workers, prioritize)
+    planned = [module for _, batch in batches for module in batch]
     output.mkdir(parents=True, exist_ok=False)
-    child_root = output / "temp"
-    child_root.mkdir()
+    (output / "temp").mkdir()
     results = []
     started = time.monotonic()
+    started_modules = set()
+    stop = False
     summary = {"format": "yeone-offline-regression", "version": 1,
                "started_at": datetime.now(timezone.utc).isoformat(),
                "isolation": "one process per module; pytest collects unittest and pytest functions",
-               "network": "blocked in every child", "module_count": len(modules), "modules": results}
-    for index, module in enumerate(modules, 1):
-        stem = Path(module).stem
-        result_path, log_path = output / (stem + ".json"), output / (stem + ".log")
-        # A module name can itself be meaningful document text in legacy tests.
-        # Keep temporary source paths neutral rather than embedding test names.
-        child_temp = child_root / f"{index:03d}-{uuid.uuid4().hex[:10]}"
-        child_temp.mkdir()
-        environment = os.environ.copy()
-        environment.update(TEMP=str(child_temp), TMP=str(child_temp), PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
-                           PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
-        argv = [sys.executable, "-B", "-X", "utf8", str(Path(__file__).resolve()),
-                "--_child", module, "--_child-result", str(result_path), "--_child-temp", str(child_temp)]
-        creation = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-        module_started = time.monotonic()
-        timed_out = False
-        with log_path.open("wb") as stream:
-            try:
-                process = subprocess.run(argv, cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
-                                         stdout=stream, stderr=subprocess.STDOUT, timeout=timeout, **creation)
-                code = process.returncode
-            except subprocess.TimeoutExpired:
-                code, timed_out = None, True
-        if result_path.exists():
-            try:
-                payload = json.loads(result_path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                payload = {}
-        else:
-            payload = {}
-        counts = _counts(payload)
-        complete = payload.get("status") == "complete" and code == 0 and not payload.get("collection_errors")
-        entry = {"module": module, "exit_code": code, "timed_out": timed_out,
-                 "collected": len(payload.get("collected", [])), "counts": counts,
-                 "complete": complete, "duration_seconds": round(time.monotonic() - module_started, 3),
-                 "log": log_path.name, "result": result_path.name}
-        results.append(entry)
-        summary["counts"] = {key: sum(item["counts"][key] for item in results) for key in counts}
+               "network": "blocked in every child", "module_count": len(modules), "modules": results,
+               "workers": workers, "fail_fast": fail_fast, "prioritized_modules": list(prioritize),
+               "requested_modules": list(modules), "scheduled_modules": planned,
+               "parallel_modules": [module for parallel, batch in batches if parallel for module in batch],
+               "success": False}
+
+    def checkpoint():
+        summary["counts"] = {key: sum(item["counts"][key] for item in results) for key in COUNT_KEYS}
         summary["collected"] = sum(item["collected"] for item in results)
         summary["modules_complete"] = sum(item["complete"] for item in results)
+        summary["modules_started"] = len(started_modules)
+        summary["unrun_modules"] = [module for module in planned if module not in started_modules]
+        summary["stopped_early"] = stop
         summary["duration_seconds"] = round(time.monotonic() - started, 3)
         _write_json(output / "summary.json", summary)
-        state = "PASS" if complete and not counts["skipped"] else "CHECK"
-        print(f"[{index}/{len(modules)}] {stem}: {state} {counts} exit={code}", flush=True)
+
+    def record(entry):
+        nonlocal stop
+        results.append(entry)
+        # Stable output order does not depend on which worker finishes first.
+        results.sort(key=lambda item: planned.index(item["module"]))
+        passed = _passed(entry)
+        if fail_fast and not passed:
+            stop = True
+        checkpoint()
+        state = "PASS" if passed else "CHECK"
+        print(f"[{len(results)}/{len(modules)}] {Path(entry['module']).stem}: "
+              f"{state} {entry['counts']} exit={entry['exit_code']}", flush=True)
+
+    checkpoint()
+    for parallel, batch in batches:
+        if stop:
+            break
+        if not parallel:
+            module = batch[0]
+            started_modules.add(module)
+            record(_run_module(output, planned.index(module) + 1, module, timeout))
+            continue
+        # Submit at most workers children. On failure, collect all already-running
+        # children, but never start the rest. Serial/GUI work waits for this pool.
+        pending = iter(batch)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="regression-child") as executor:
+            active = {}
+
+            def fill():
+                while not stop and len(active) < workers:
+                    module = next(pending, None)
+                    if module is None:
+                        break
+                    started_modules.add(module)
+                    future = executor.submit(_run_module, output, planned.index(module) + 1, module, timeout)
+                    active[future] = module
+
+            fill()
+            while active:
+                done, _ = wait(active, return_when=FIRST_COMPLETED)
+                # Observe every completed result before refilling: a simultaneous
+                # failure must not be hidden by an earlier successful future.
+                for future in sorted(done, key=lambda item: planned.index(active[item])):
+                    active.pop(future)
+                    record(future.result())
+                fill()
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
-    summary["success"] = (summary["modules_complete"] == len(modules)
-                          and not any(summary["counts"][key] for key in ("failed", "error", "skipped", "incomplete")))
-    _write_json(output / "summary.json", summary)
+    summary["success"] = (len(results) == len(modules) and bool(results) and all(_passed(entry) for entry in results))
+    checkpoint()
     print(json.dumps({"success": summary["success"], "modules": len(modules), "collected": summary["collected"],
-                      "counts": summary["counts"], "report": str(output / "summary.json")}), flush=True)
+                      "counts": summary["counts"], "unrun": len(summary["unrun_modules"]),
+                      "report": str(output / "summary.json")}), flush=True)
     return 0 if summary["success"] else 1
 
 
@@ -276,6 +411,12 @@ def main():
     parser.add_argument("--output", type=Path, help="New report directory, default work/regression-<unique>.")
     parser.add_argument("--module", action="append", help="Run selected test file(s); otherwise collect every tests/test*.py.")
     parser.add_argument("--timeout", type=float, default=180.0, help="Maximum seconds per module.")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Concurrent children for explicitly reviewed non-GUI modules only (default 1).")
+    parser.add_argument("--fail-fast", action="store_true",
+                        help="Stop starting modules after a failure; record remaining modules as unrun.")
+    parser.add_argument("--prioritize", action="append", default=[],
+                        help="Run this selected tests/test*.py first, exclusively; repeat for more modules.")
     parser.add_argument("--consolidate", nargs="+", type=Path, help="Finished report directories, full initial run followed by audited retries.")
     parser.add_argument("--summary", type=Path, help="New consolidated summary JSON path.")
     parser.add_argument("--retry-note", default="", help="Explain why a module was retried in the consolidated audit.")
@@ -291,6 +432,8 @@ def main():
         return consolidate(args.consolidate, args.summary, args.retry_note)
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
     output = args.output or ROOT / "work" / ("regression-" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8])
     modules = args.module or [path.relative_to(ROOT).as_posix() for path in sorted((ROOT / "tests").glob("test*.py"))]
     if not modules:
@@ -304,7 +447,16 @@ def main():
         checked.append(selected.relative_to(ROOT).as_posix())
     if len(checked) != len(set(checked)):
         parser.error("Repeated test module")
-    return run(output.expanduser().resolve(), checked, args.timeout)
+    prioritized = []
+    for module in args.prioritize:
+        selected = (ROOT / module).resolve()
+        if selected not in {ROOT / name for name in checked}:
+            parser.error("--prioritize must name a module in the selected test coverage")
+        prioritized.append(selected.relative_to(ROOT).as_posix())
+    if len(prioritized) != len(set(prioritized)):
+        parser.error("Repeated priority module")
+    return run(output.expanduser().resolve(), checked, args.timeout,
+               workers=args.workers, fail_fast=args.fail_fast, prioritize=prioritized)
 
 
 if __name__ == "__main__":

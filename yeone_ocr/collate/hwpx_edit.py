@@ -5,11 +5,11 @@
 - 글자 번호는 python-hwpx 의 paragraph.text 와 같은 셈법이다: hp:t 의 글 + 안쪽 요소(hp:tab 은 "\\t", 그 밖은 자기 글) + 그 뒤 글(tail),
   run 바로 아래의 hp:tab / ctrl(id=tab) 은 "\\t" 한 글자.
 - 고친 글자는 원래 글자 모양을 바탕으로 색·형광펜·밑줄만 바꾼 글자 모양(charPr)을 새로 만들어 입힌다(일반 OCR 과 같은 확인 등급).
-    초록(점선 밑줄)  자동 교정 — 판독(1차·2차 일치)대로, 또는 3차 자형 판별로 승격한 것(A)
-    파랑(파선 밑줄)  자동 교정 — 간체 한 글자가 여러 번체로 갈려 사전으로 고른 것(B2), 글자층·반복 근거로 승격한 것
+    초록(점선 밑줄)  자동 교정 — 3차 자형 판별로 확정한 것(A)
+    파랑(파선 밑줄)  자동 교정·확인 권장 — 판독 일치, 번체 후보 선택(B2), 글자층·반복 근거로 반영한 것
     빨강(굵게+노랑) 확인 요청 — 글자는 HWPX 그대로(B1·C 표시, 긴 구간 삽입 제안 — 어느 정책에서도 자동으로 넣지 않음, 반영하지 않은 제안)
   교정이 만든 글자 모양에는 보이지 않는 표지(취소선 '없음'의 색 = 등급 색)를 단다 — 일반 OCR 로 만든 문서의 같은 색 글자와 가르려고.
-- 메모(memo_mode): notice(기본) = 색으로 전할 수 없는 고지 사항에만 — 지운 글자, 폭 없는 표시, 구조 차이(C), 반영하지 않은 제안,
+- 메모(memo_mode): none = 색만 표시(폭 없는 제안·삭제는 인접 글자에 표시). notice = 색으로 전할 수 없는 고지 사항에만 — 지운 글자, 폭 없는 표시, 구조 차이(C), 반영하지 않은 제안,
   한글 풀이 자리 — 와 문서 앞의 범례 하나. all = 모든 항목에 근거(0.6.3 까지의 방식). inline = 메모 없이 고지만 글 뒤(폭 있는 표시는 그 범위 뒤) 〔…〕
   — 이미 있는 〔…〕 안이면 그 〕 뒤에(괄호를 겹치지 않게), 제목(구획 기준) 문단에는 넣지 않고 색만(구획 이름이 바뀌지 않게, 지운 글자·폭 없는
   표시는 보고에만). 반영하지 않은 제안은 〔제안: …〕·〔삽입 제안: …〕 로 적는다(고친 것처럼 〔원: …〕 으로 적지 않게).
@@ -28,7 +28,7 @@ HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 BLUE, GREEN = "#1F4FBF", "#D8F5C8"            # 0.6.3 까지의 자동 교정 색(다시 돌릴 때 알아보려고 남김)
 RED, YELLOW = "#C00000", "#FFFF00"
 # 표지를 달기 전 판의 교정 메모 머리(_memo_text) — 일반 OCR 의 '[확인 필요 — …]' 와 겹치지 않게 닫는 괄호(와 빈칸)까지
-MEMO_HEADS = ("[자동 교정]", "[자동 교정·확인]", "[자동 삽입·확인]", "[확인 필요] ", "[확인] ")
+MEMO_HEADS = ("[자동 교정]", "[자동 교정·확인]", "[자동 삽입·확인]", "[확인 필요] ", "[확인] ", "[제안] ")
 LEGACY_NOTES = ("〔원: ", "〔삭제: ", "〔확인: 판독 ", "〔삽입·확인〕")   # 표지 이전 판의 글 속 표기 가운데 사람이 손으로 칠 법하지 않은 것(맨 〔확인〕·〔삽입〕 은 뺀다)
 
 
@@ -114,7 +114,100 @@ class Applied:
     ok: bool
     note: str = ""
     memo: bool = False          # 메모나 글 속 〔…〕 표기를 실제로 달았는지(보고의 메모 수)
-    hidden: bool = False        # inline 제목 문단이라 표기 없이 문서에서 안 보이는 표시(지운 글자·폭 없는 표시 — 보고에만)
+    hidden: bool = False        # inline 제목 또는 none 빈 문단에서 색을 칠할 글자가 없는 표시 — 보고에만
+
+
+@dataclass(frozen=True)
+class MemoCleanup:
+    removed: int = 0
+    skipped: int = 0
+
+
+def remove_collate_memos(book, *, author: str = "YeonE_OCR") -> MemoCleanup:
+    """앱이 만든 책갈피 교정 메모만 제거한다. 본문·run·색·문단·일반 OCR 메모는 그대로 둔다.
+
+    소유 여부는 작성자와 교정 메모 머리를 함께 확인한다. 문서 전체에서 고유한 시작/끝 ID 쌍이 같은 본문 문단
+    안에 순서대로 놓인 단독 ctrl일 때만 제거하며, 사용자 메모·다른 필드·불확실한 구조는 보존한다.
+    파일 저장·백업·충돌 검사는 호출자가 맡는다. book에는 paragraphs[*].element만 있어도 된다.
+    """
+    from collections import Counter, defaultdict
+    from ..grades import COLLATE_LEGEND
+
+    paragraphs = list(book.paragraphs)
+    fields = []
+    seen = set()
+    for paragraph in paragraphs:
+        for node in paragraph.element.iter():
+            if node.tag in (f"{HP}fieldBegin", f"{HP}fieldEnd") and node not in seen:
+                fields.append(node)
+                seen.add(node)
+    begins = [node for node in fields if node.tag == f"{HP}fieldBegin"]
+    ends = [node for node in fields if node.tag == f"{HP}fieldEnd"]
+    begin_ids = Counter(node.get("id") for node in begins)
+    field_ids = Counter(node.get("fieldid") for node in begins)
+    by_begin, by_field = defaultdict(list), defaultdict(list)
+    for node in ends:
+        by_begin[node.get("beginIDRef")].append(node)
+        by_field[node.get("fieldid")].append(node)
+    body_paragraphs = {paragraph.element: paragraph for paragraph in paragraphs}
+    legend = legend_head(COLLATE_LEGEND)
+
+    def body_control(node):
+        control = node.getparent()
+        run = control.getparent() if control is not None else None
+        paragraph = run.getparent() if run is not None else None
+        if (control is None or control.tag != f"{HP}ctrl" or len(control) != 1 or
+                run is None or run.tag != f"{HP}run" or paragraph not in body_paragraphs):
+            return None
+        # 메모 안의 메모·각주 등은 본문 문단 목록에 들어오더라도 삭제하지 않는다.
+        if any(parent.tag in (f"{HP}subList", f"{HP}fieldBegin") for parent in paragraph.iterancestors()):
+            return None
+        if any((text or "").strip() for text in (control.text, control.tail, node.tail)):
+            return None
+        return control, paragraph
+
+    removed = skipped = 0
+    for begin in begins:
+        if begin.get("type") != "MEMO":
+            continue
+        author_node = begin.find(f"{HP}parameters/{HP}stringParam[@name='Author']")
+        sub = begin.find(f"{HP}subList")
+        if author_node is None or author_node.text != author or sub is None:
+            continue
+        memo_text = "".join(paragraph_text(p) for p in sub if p.tag == f"{HP}p").lstrip()
+        if not (memo_text.startswith(MEMO_HEADS) or memo_text.startswith(legend)):
+            continue
+        ident, field = begin.get("id"), begin.get("fieldid")
+        matching = by_begin[ident]
+        valid = (bool(ident and field) and begin_ids[ident] == field_ids[field] == 1 and
+                 len(matching) == 1 and len(by_field[field]) == 1 and
+                 matching[0] is by_field[field][0] and matching[0].get("fieldid") == field)
+        # 메모 내부에 다른 필드가 들어 있으면 그 소유권까지 확정할 수 없으므로 전체를 보존한다.
+        nested_fields = (any(node is not begin for node in begin.iter(f"{HP}fieldBegin")) or
+                         next(begin.iter(f"{HP}fieldEnd"), None) is not None)
+        if not valid or nested_fields:
+            skipped += 1
+            continue
+        end = matching[0]
+        start_at, end_at = body_control(begin), body_control(end)
+        if start_at is None or end_at is None or start_at[1] is not end_at[1]:
+            skipped += 1
+            continue
+        start_control, paragraph = start_at
+        end_control, _ = end_at
+        order = {node: index for index, node in enumerate(paragraph.iter())}
+        if order[start_control] >= order[end_control]:
+            skipped += 1
+            continue
+        start_control.getparent().remove(start_control)
+        end_control.getparent().remove(end_control)
+        removed += 1
+        section = getattr(body_paragraphs[paragraph], "section", None)
+        if section is not None and hasattr(section, "mark_dirty"):
+            section.mark_dirty()
+    if removed and hasattr(book, "_texts"):
+        book._texts = None
+    return MemoCleanup(removed, skipped)
 
 
 def _rid() -> str:
@@ -161,13 +254,13 @@ def _slots(pel: etree._Element) -> list[Slot]:
 
 class Editor:
     def __init__(self, book, *, author: str = "YeonE_OCR", memo: bool | str = True, heads=None):
-        """memo: "notice" | "all" | "inline". 예전 호출과 맞게 True 는 "all", False 는 "inline".
+        """memo: "none" | "notice" | "all" | "inline". 예전 호출과 맞게 True 는 "all", False 는 "inline".
         heads: 이번 실행의 구획 기준 문단 번호들(PDF 책갈피 제목·--heading-styles 로 찾은 것 포함). 없으면 book.anchors() 기본값."""
         self.book = book
         self.doc = book.doc
         self.author = author
-        self.memo_mode = memo if memo in ("notice", "all", "inline") else ("all" if memo else "inline")   # 파이썬에서 부를 때 기본은 all(0.6.3 과 같게)
-        self.use_memo = self.memo_mode != "inline"
+        self.memo_mode = memo if memo in ("none", "notice", "all", "inline") else ("all" if memo else "inline")   # 파이썬에서 부를 때 기본은 all(0.6.3 과 같게)
+        self.use_memo = self.memo_mode in ("notice", "all")
         self._pr_cache: dict[tuple[str, str, str], str] = {}
         self._memo_no = self._count_memos()
         self._short = ""
@@ -176,7 +269,7 @@ class Editor:
         self.log: list[Applied] = []
         self._legacy = False                                # 표지 이전의 교정본(일반 OCR 문서) — 표지를 달지 않고 예전처럼
         self._ours: set[str] = self._marked_char_prs()      # 이전 실행이 만든 색 글자 모양 id — 같은 자리를 또 표시하지 않기 위해
-        self._heads: set[int] = (set(heads) if heads is not None else self._head_paras()) if not self.use_memo else set()
+        self._heads: set[int] = (set(heads) if heads is not None else self._head_paras()) if self.memo_mode == "inline" else set()
 
     def _marked_char_prs(self) -> set[str]:
         """이전 교정이 만든 색 글자 모양 id. 표지(_tag_of = 글자 색)가 있으면 교정이 만든 것이다. 표지 없는 등급 색은 표지를 달기 전의 교정본
@@ -455,6 +548,8 @@ class Editor:
         (이어 교정할 때 구획 문단 번호가 같아야 하므로). 이미 교정 범례 메모가 있으면 달지 않는다. 단 메모가 있으면 True.
         일반 OCR 로 만든 문서의 범례('[연어OCR 표시 범례] …')는 색의 뜻이 달라(파랑 = 확인 권장 / 자동 교정) 교정 범례로 치지 않는다."""
         from ..grades import COLLATE_LEGEND
+        if self.memo_mode == "none":
+            return False
         if self._has_collate_legend():
             return False
         try:
@@ -481,7 +576,7 @@ class Editor:
         auto = it.auto and it.action in ("replace", "insert", "delete")
         grade = item_grade(it)
         from ..grades import needs_memo
-        memo = self._memo_text(it) if needs_memo(it, self.memo_mode) else None
+        memo = self._memo_text(it) if self.memo_mode != "none" and needs_memo(it, self.memo_mode) else None
         self._short = self._short_note(it)              # 메모를 끌 때 글 뒤에 붙일 짧은 표시
         slots = _slots(pel)
         if not slots:
@@ -491,7 +586,7 @@ class Editor:
                 over = [s for s in slots if s.start < it.end and s.end > it.start and s.end > s.start]
                 if over and all(s.run.get("charPrIDRef") in self._ours for s in over):
                     raise _AlreadyMarked("이미 표시된 자리")
-            elif any(s.run.get("charPrIDRef") in self._ours and s.start <= it.start <= s.end for s in slots):
+            elif self.memo_mode != "none" and any(s.run.get("charPrIDRef") in self._ours and s.start <= it.start <= s.end for s in slots):
                 raise _AlreadyMarked("이미 표시된 자리")        # 폭 없는 표시(빈 run + 메모)가 그 자리에 이미 있음
         base_pr = self._locate(slots, it.start).run.get("charPrIDRef")
         pr = self._style_for(base_pr, grade)
@@ -506,13 +601,42 @@ class Editor:
                 self._delete_range(pel, it.start, it.end)
             run = self._split_at(pel, it.start)
             self._new_run_after(pel, run, pr, it.new if it.action != "delete" else "", memo)
+            if self.memo_mode == "none" and (it.action == "delete" or not it.new):
+                self._mark_neighbour(pel, it.start, grade)
             return
         # 표시만: 글자는 두고 모양을 바꾸고 메모를 단다
         if it.end > it.start:
             self._recolor_range(pel, it.start, it.end, pr, memo)
+        elif self.memo_mode == "none":
+            self._mark_neighbour(pel, it.start, grade)
         else:
             run = self._split_at(pel, it.start)
             self._new_run_after(pel, run, pr, "", memo)
+
+    def _mark_neighbour(self, pel: etree._Element, pos: int, grade: str) -> None:
+        """색만 표시할 때 폭 없는 자리 옆의 실제 글자 하나를 표시한다. 공백·탭은 건너뛰며 본문은 추가하지 않는다.
+
+        오른쪽에서 가장 가까운 글자, 없으면 왼쪽 끝 글자를 고른다. 이미 더 강한 확인 색이 있으면 유지한다.
+        문단에 색을 칠할 글자가 전혀 없으면 보고에만 남긴다.
+        """
+        from ..grades import GRADE_STYLE
+        slots = _slots(pel)
+        candidates = [(s.start + offset, s) for s in slots for offset, char in enumerate(s.text) if not char.isspace()]
+        right = next(((at, slot) for at, slot in candidates if at >= pos), None)
+        chosen = right or (candidates[-1] if candidates else None)
+        if chosen is None:
+            self._hidden = True
+            return
+        at, slot = chosen
+        base_pr = slot.run.get("charPrIDRef")
+        base = self._char_pr(base_pr)
+        if base is not None:
+            color = (base.get("textColor") or "").upper()
+            priority = {"green": 1, "blue": 2, "red": 3, "red_ctx": 3}
+            existing = next((key for key, style in GRADE_STYLE.items() if style["color"].upper() == color), None)
+            if existing and priority[existing] >= priority[grade]:
+                return
+        self._recolor_range(pel, at, at + 1, self._style_for(base_pr, grade), None)
 
     def _recolor_range(self, pel: etree._Element, start: int, end: int, pr: str, memo: str | None) -> None:
         self._split_at(pel, end)
@@ -565,7 +689,7 @@ class Editor:
         return f"[확인] {it.note} · {where}"
 
     # ----- 저장 -----
-    def save_copy(self, out_path: str) -> str:
+    def save_copy(self, out_path: str, *, check_current=None) -> str:
         """같은 폴더의 임시 파일(<이름>.tmp.hwpx)에 다 쓴 뒤 바꿔 넣는다 — 쓰다 멈춰도 쌓아 온 교정본이 깨지지 않게.
         있던 교정본은 <이름>.bak.hwpx 로 한 세대만 남긴다(이전 .bak 은 덮어씀). 백업은 옮기지 않고 복사 — 바꿔 넣기가 실패해도
         (한컴에 열린 교정본 등) 교정본이 사라지는 틈이 없고, 어디서 실패하든 임시 파일은 지운다."""
@@ -576,8 +700,12 @@ class Editor:
         tmp = f"{root}.tmp{ext}"                        # 확장자는 그대로(.hwp 로 저장하면 python-hwpx 가 확장자로 가른다)
         try:
             self.doc.save_to_path(tmp)
+            if check_current is not None:
+                check_current()
             if os.path.exists(out):
                 shutil.copy2(out, f"{root}.bak{ext}")
+            if check_current is not None:
+                check_current()
             os.replace(tmp, out)
         except BaseException:
             try:

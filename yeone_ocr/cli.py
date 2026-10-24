@@ -6,6 +6,7 @@
   read     모델(기본 gemini)로 영역 분류·판독 → 확대 재판독 비교 → 텍스트 레이어 대조 → 구조 검사
   build    도판 잘라내기(외곽 검사) → HWPX(+DOCX) 조립 → 파일 구조 검사
   remerge  저장된 1차·2차 판독으로 비교·표시만 다시 계산 (모델 호출 없음)
+  annotations 쌍행소주 후보 검출·별도 재판독 (--reread일 때만 모델 호출, 본문 반영은 앱에서 위치 지정)
   adjudicate  3차 글자 판별: 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 모델에 자형만으로 묻는다. 이어서 합의 판독 의심
            (1차·2차가 같은데 글자층과 자형 혼동 쌍 한 글자가 다른 자리)도 묻고, 본문은 두고 확인 항목만 단다(--no-suspects 면 안 함)
   ledger   혼동 장부: 어느 글자가 어느 글자로 읽혔는지 결과 폴더 전체에서 모아 confusion.json 과 표로 (모델 호출 없음)
@@ -416,14 +417,14 @@ def refresh_stale_records(work: "Work", doc, pages: list[int]) -> int:
             sd = work.readings_dir / "stale"; sd.mkdir(exist_ok=True)
             work.record_path(pg).replace(sd / work.record_path(pg).name); stale.append((pg, fix["max_shift"]))
             continue
-        bk = work.backup_record(pg)                        # 다시 비교하면 merged 의 손 고침이 사라진다 — 덮어쓰기 전 prev/ 에 남긴다(앞의 사본은 덮지 않음)
+        bk = work.backup_record(pg)                        # 기존 교정 보존과 별도로 재계산 전 사본도 남긴다.
         if bk:
             backed.append(bk)
         rec["pass1"] = p1.model_dump(); rec["bbox_fix"] = fix
         rec = remerge_record(rec, layer.get("plain", "")); rec["version"] = __version__
         work.save_record(pg, rec); n += 1
     if n:
-        log(f"이전 판의 판독 기록 {n}쪽을 지금 규칙으로 다시 비교했습니다(모델 호출 없음). 손으로 고친 merged 가 있었다면 readings/prev/ 에 남아 있습니다"
+        log(f"이전 판의 판독 기록 {n}쪽을 저장된 문자 정책으로 다시 비교했습니다(모델 호출 없음). 기존 교정은 보존하고 이전 기록도 readings/prev/ 에 남겼습니다"
             + (f"(이번에 {len(backed)}쪽 복사: {', '.join(b.name for b in backed[:4])}{' …' if len(backed) > 4 else ''})." if backed
                else "(같은 내용의 사본이 이미 있음)."))
     if stale:
@@ -499,17 +500,27 @@ def fill_page_marks(pr: PageReading) -> None:
             pr.running_header = t
 
 
-def remerge_record(rec: dict, layer_plain: str, layer: dict | None = None) -> dict:
-    """저장된 1차·2차 판독으로 비교·표시를 다시 계산한다(모델 호출 없음). merged 에 손으로 고친 내용은 사라진다.
+def remerge_record(rec: dict, layer_plain: str, layer: dict | None = None, *, mode: str | None = None) -> dict:
+    """저장된 문자 정책으로 비교를 다시 계산하고, 기계 재현본과 다른 기존 교정은 보존한다.
     layer(글자층 사전)를 주면 아직 좌표 보정을 안 한 기록의 영역 좌표를 글자층 줄 위치에 맞춘다."""
+    from .text_policy import record_fold_zh, record_text_policy
+    from .record_preservation import preserve_manual_regions
+    from .adjudicate import apply_adjudications
+    policy = record_text_policy(rec)
+    if mode is not None and mode not in ("vertical", "horizontal_zh"):
+        raise ValueError(f"지원하지 않는 읽기 모드: {mode!r}")
+    target_fold = record_fold_zh(rec) if mode is None else mode == "horizontal_zh"
     p1 = PageReading.model_validate(rec["pass1"])
+    rereads = {k: RegionReread.model_validate(v) for k, v in (rec.get("pass2") or {}).items()}
+    previous_base, _ = merge_passes(p1, rereads, text_policy=policy, fold_zh=record_fold_zh(rec))
+    fill_page_marks(previous_base)
+    apply_adjudications(previous_base, rec.get("adjudications"))
     if layer and not rec.get("bbox_fix"):
         from . import prompts
-        fix = refit_regions(None, p1, (rec.get("mode") or prompts.MODE) == "horizontal_zh", layer)
+        fix = refit_regions(None, p1, (mode or rec.get("mode") or prompts.MODE) == "horizontal_zh", layer)
         if fix["fixed"]:
             rec["pass1"] = p1.model_dump(); rec["bbox_fix"] = fix
-    rereads = {k: RegionReread.model_validate(v) for k, v in (rec.get("pass2") or {}).items()}
-    merged, mstats = merge_passes(p1, rereads)
+    merged, mstats = merge_passes(p1, rereads, text_policy=policy, fold_zh=target_fold)
     fill_page_marks(merged)
     from .adjudicate import SUSPECT_NOTE, suspect_notices
     keep = [u for u in PageReading.model_validate(rec["merged"]).uncertain
@@ -523,10 +534,14 @@ def remerge_record(rec: dict, layer_plain: str, layer: dict | None = None) -> di
     keep.extend(u for u in suspect_notices(rec) if u not in keep)       # 합의 의심(자형이 글자층 쪽)은 기록(rec['suspects'])에서 다시 만든다 — 항목이 사라진 기록도
     merged.uncertain.extend(u for u in keep if u not in merged.uncertain)
     if rec.get("adjudications"):
-        from .adjudicate import apply_adjudications
         mstats["adjudicated"] = apply_adjudications(merged, rec["adjudications"], stats=mstats)     # 3차 판별로 확정한 글자는 다시 계산해도 남긴다(자리를 못 찾으면 unmapped)
+    merged, preserved = preserve_manual_regions(rec, previous_base, merged)
+    if preserved:
+        mstats["manual_preserved_regions"] = preserved
     rec["merged"] = merged.model_dump(); rec["merge_stats"] = mstats
-    rec["textlayer_diff"] = compare_textlayer(merged, layer_plain)
+    rec["textlayer_diff"] = compare_textlayer(merged, layer_plain, fold_zh=target_fold)
+    if mode is not None:
+        rec["mode"] = mode
     rec["verify"] = verify_page(merged)
     rec["remerged_at"] = time.strftime("%Y-%m-%d %H:%M:%S"); rec["version"] = __version__
     return rec
@@ -548,7 +563,8 @@ def cmd_remerge(args, work: Work | None = None, doc=None):
             log(f"  {n}쪽: 1차 판독 원본이 없어 건너뜀"); continue
         before = len(rec["merged"].get("uncertain", []))
         layer_d = _load_layer(work, doc, n)
-        rec = remerge_record(rec, layer_d.get("plain", ""), layer_d)
+        work.backup_record(n)
+        rec = remerge_record(rec, layer_d.get("plain", ""), layer_d, mode=args.mode)
         work.save_record(n, rec)
         m = rec["merged"]; ms = rec["merge_stats"]
         if m["uncertain"] or any(i["level"] == "error" for i in rec["verify"]):
@@ -638,10 +654,13 @@ def cover_check(img: Image.Image, p1: PageReading, horizontal: bool = False) -> 
     return notes
 
 
-def nfc_reading(pr: PageReading) -> PageReading:
-    """모델이 돌려준 모든 글을 NFC 로 정규화한다(호환 한자 → 표준 한자). 자형은 같고 부호값만 바뀐다.
-    자형이 다른 호환 한자(塚 U+FA10 등 U+FA0E~FAFF)는 merge.nfc_text 가 그대로 둔다(지침 21: 이체자를 바꾸지 않는다)."""
+def nfc_reading(pr: PageReading, *, text_policy: str = "legacy-nfc-v1") -> PageReading:
+    """새 판독은 문자 코드를 보존하고, 과거 정책일 때만 당시 정규화를 재현한다.
+    기본값은 이전 호출과의 호환용이며 read_one은 새 판독의 보존 정책을 명시한다."""
     from .merge import INVISIBLE, nfc_text
+    from .text_policy import SOURCE_TEXT_POLICY, validate_text_policy
+    if validate_text_policy(text_policy) == SOURCE_TEXT_POLICY:
+        return pr                         # 새 원시 판독은 문자 코드·선택자·자모를 그대로 보관한다.
     f = lambda t: INVISIBLE.sub("", nfc_text(t or ""))
     for r in pr.regions:
         r.title_text = f(r.title_text); r.note = f(r.note)
@@ -782,7 +801,7 @@ def _reread_batch(reader2, batch: list, n: int, rereads: dict) -> None:
             log(f"    {n}쪽: 반 묶음({len(half)}장) 2차 판독 실패({str(e)[:60]}) → 빠진 영역은 낱개로")
 
 
-def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str, RegionReread], dict]:
+def _second_pass(reader2, img, p1: PageReading, n: int, args, *, text_policy: str = "legacy-nfc-v1") -> tuple[dict[str, RegionReread], dict]:
     """문자 영역마다 확대 조각을 만들어 2차 독립 판독. 기본은 조각들을 한 호출에 묶어 보내고(빠르고 쌈), 빠진 영역은 낱개로 다시 묻는다.
 
     0.6.0: 조각당 글자 수를 줄여 글자당 픽셀을 늘린다.
@@ -792,6 +811,8 @@ def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str,
     낱개로 읽어도 차례가 다르면 1차 차례를 확인 항목으로). 조각은 늘 그림 차례대로 — 1차 위치로 옮기지 않는다."""
     from . import prompts
     from .merge import nfc_text
+    from .text_policy import SOURCE_TEXT_POLICY, validate_text_policy
+    preserve_source = validate_text_policy(text_policy) == SOURCE_TEXT_POLICY
     horizontal = prompts.MODE == "horizontal_zh"
     max_bands = max(0, int(getattr(args, "chunk_lines", 8) or 0))
     items: list[tuple[str, str, Image.Image]] = []
@@ -941,7 +962,8 @@ def _second_pass(reader2, img, p1: PageReading, n: int, args) -> tuple[dict[str,
         meta[base]["chunks_read"] = got
     for rr in rereads.values():
         for c in rr.columns:
-            c.text = nfc_text(c.text or "")            # 이체자 호환 한자는 그대로(merge.nfc_text)
+            if not preserve_source:
+                c.text = nfc_text(c.text or "")        # 과거 부분 기록은 당시 문자 정책으로 이어 읽는다.
     return rereads, meta
 
 
@@ -961,11 +983,40 @@ def partial_path(work: Work, n: int) -> Path:
 PASS1_CFG0 = ["auto", "auto", None]   # 1차 설정을 적지 않은 기록·부분 기록(0.6.8 시험판)은 기본 설정으로 읽은 것으로 본다
 
 
+def _load_manual_corrections(args):
+    """명령 시작 때 책별 사례를 한 번 읽는다. 판독기·공통 지침에는 상태를 넣지 않는다."""
+    target = getattr(args, "manual_corrections", None)
+    if not target and getattr(args, "hwpx", None):
+        from .collate.run import corrected_path
+        target = getattr(args, "out", None) or corrected_path(args.hwpx)
+    if not target:
+        return None
+    from .correction_memory import load_correction_memory
+    memory = load_correction_memory(Path(target), Path(args.pdf))
+    if memory.warning:
+        log(f"주의: 사람 수정 사례 — {memory.warning}")
+    if memory.count and memory.prompt:
+        log(f"사람 수정 사례 {memory.count}개를 새 1차 판독에 참고합니다. 원본 이미지가 우선이며 2·3차는 독립 판독합니다.")
+        log("  기존 판독 기록은 바꾸지 않습니다. 완료 쪽에 새 사례를 쓰려면 '기록 있는 쪽도 다시 판독' 또는 --force를 선택하십시오.")
+    return memory
+
+
+def _manual_correction_provenance(args) -> dict:
+    memory = getattr(args, "_correction_memory", None)
+    if not memory or not memory.count or not memory.prompt:
+        return {}
+    return {"digest": memory.digest, "count": memory.count, "path": str(memory.path)}
+
+
 def _pass1_cfg(args) -> list:
     """1차(쪽 전체) 판독 설정 [생각 수준, 쪽 해상도, 생각 예산(auto 일 때)] — 요청한 값(모델이 거부해 판독기가 실행 중에 끈 것과 상관없이).
     다시 쓸 1차가 지금 설정으로 읽은 것인지 가르고, 기록·부분 기록에 남겨 측정(eval)이 설정이 다른 판독을 섞지 않게 한다."""
     think = getattr(args, "page_thinking", "auto") or "auto"
-    return [think, getattr(args, "page_media_resolution", "auto") or "auto", getattr(args, "thinking_budget", None) if think == "auto" else None]
+    cfg = [think, getattr(args, "page_media_resolution", "auto") or "auto", getattr(args, "thinking_budget", None) if think == "auto" else None]
+    memory = _manual_correction_provenance(args)
+    if memory:
+        cfg.append({"manual_corrections": memory["digest"]})
+    return cfg
 
 
 def _same_pass1(d: dict, reader, args) -> bool:
@@ -982,9 +1033,19 @@ def _record_provider(d: dict) -> str:
     return "gemini" if model.startswith("gemini") else ("anthropic" if model.startswith("claude") else ("openai" if model.startswith(("gpt", "o1", "o3", "o4")) else ""))
 
 
+def _pass1_without_memory(cfg: list) -> list:
+    """Ignore only the known memory extension; unknown future settings still differ."""
+    if (len(cfg) > 3 and isinstance(cfg[3], dict) and set(cfg[3]) == {"manual_corrections"}
+            and isinstance(cfg[3]["manual_corrections"], str) and cfg[3]["manual_corrections"]):
+        return cfg[:3] + cfg[4:]
+    return cfg
+
+
 def _can_resume_pass1(d: dict, reader, args) -> bool:
-    """제공사를 바꿔도 읽기 방향이 같은 유효 1차 결과를 이어 쓴다. 강제 판독은 별도로 처리한다."""
-    if _same_pass1(d, reader, args):
+    """사례가 바뀌어도 이미 산 1차는 원래 출처로 이어 쓴다. --force는 정확한 설정으로 구분한다."""
+    if ((d.get("model"), d.get("mode")) == (getattr(reader, "model", ""), getattr(args, "mode", ""))
+            and _pass1_without_memory(list(d.get("pass1_cfg") or PASS1_CFG0)) ==
+            _pass1_without_memory(_pass1_cfg(args))):
         return True
     previous = _record_provider(d)
     return (previous in PROVIDERS and previous != getattr(reader, "name", "") and previous != "mock"
@@ -1023,7 +1084,8 @@ def _reusable_pass1(work: Work, n: int, reader, args, old: dict | None = None) -
         return part if part and _same_pass1(part, reader, args) else None
     old = old if old is not None else work.load_record(n)
     if old and old.get("pass2_failed") and old.get("pass1_raw") and _can_resume_pass1(old, reader, args) and (part is None or part["pass1"] == old["pass1_raw"]):
-        return {"pass1": old["pass1_raw"], "reader": _record_provider(old), "model": old.get("model", ""),
+        from .text_policy import record_text_policy
+        return {"pass1": old["pass1_raw"], "text_policy": record_text_policy(old), "reader": _record_provider(old), "model": old.get("model", ""),
                 "pass1_cfg": old.get("pass1_cfg") or PASS1_CFG0, "provenance": old.get("provenance") or {},
                 "image_source": old.get("image_source"), "upscale": old.get("upscale"),
                 "usage": (part or old).get("usage") or {}, "saved_at": old.get("read_at", ""), "record": old}   # 그 기록의 사용량(1차·실패한 2차·3차)은 새 기록이 이어받는다
@@ -1032,23 +1094,27 @@ def _reusable_pass1(work: Work, n: int, reader, args, old: dict | None = None) -
 
 def _keep_finished(old: dict, merged: PageReading, p1: PageReading, redo: set) -> tuple[PageReading, list[str]]:
     """덜 된 영역(redo)의 2차만 다시 물은 쪽의 merged: 이전 기록의 merged(손 고침·3차 확정·합의 의심 항목 포함)에서 다시 물은 영역만 새 비교로 바꾼다.
-    돌려주는 값은 (merged, 새 비교로 바뀐 글에 손 고침·3차 확정이 있던 영역 id). 영역 차례·id 가 1차와 달라졌으면(영역을 손으로 고침) 새 비교 전체에
-    이전 3차 확정·합의 의심 항목을 다시 얹고 모든 영역을 바뀐 것으로 센다."""
+    돌려주는 값은 (merged, 새 비교 대신 기존 교정을 보존한 영역 id). 구조가 달라 안전하게 대응하지 못하면 이전 교정문 전체를 유지한다."""
     from .adjudicate import apply_adjudications, suspect_notices
-    from .schema import region_text
     om = PageReading.model_validate(old["merged"]); adj = old.get("adjudications") or []
-    base, _ = merge_passes(p1, {k: RegionReread.model_validate(v) for k, v in (old.get("pass2") or {}).items()})     # 이전 기록의 손대기 전 비교
+    from .text_policy import record_fold_zh, record_text_policy
+    from .record_preservation import preserve_manual_regions
+    base, _ = merge_passes(PageReading.model_validate(old.get("pass1") or p1.model_dump()),
+                          {k: RegionReread.model_validate(v) for k, v in (old.get("pass2") or {}).items()},
+                          text_policy=record_text_policy(old), fold_zh=record_fold_zh(old))
+    fill_page_marks(base)
+    apply_adjudications(base, adj)
     ids = [r.id for r in om.regions]
     if ids != [r.id for r in merged.regions] or ids != [r.id for r in base.regions]:
         apply_adjudications(merged, adj)
         merged.uncertain.extend(u for u in suspect_notices(old) if u not in merged.uncertain)
-        return merged, sorted(set(ids))
-    text = lambda r: (r.title_text, region_text(r))
-    changed = sorted({o.id for o, b in zip(om.regions, base.regions) if o.id in redo and text(o) != text(b)})
+        return preserve_manual_regions(old, base, merged)
     om.regions = [nr if nr.id in redo else r for r, nr in zip(om.regions, merged.regions)]
     om.uncertain = [u for u in om.uncertain if u.region_id not in redo] + [u for u in merged.uncertain if u.region_id in redo]
     apply_adjudications(om, [a for a in adj if a.get("region_id") in redo])      # 다시 물은 영역에 같은 〔a/b〕 가 다시 나왔으면 이전 3차 확정을 그대로
-    return om, changed
+    result, preserved = preserve_manual_regions(old, base, om)
+    # 완료 영역은 처음부터 이전 글을 사용하므로 새 비교를 보류했다는 경고에 넣지 않는다.
+    return result, [rid for rid in preserved if rid in redo or not rid]
 
 
 def _usage_add(usage: dict, extra: dict) -> None:
@@ -1091,16 +1157,30 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     # 이전 실행이 2차 도중(또는 일부 영역에서) 실패해 남긴 1차 결과는 다시 사지 않는다(1차 pro 호출이 쪽 비용의 대부분)
     old = None if getattr(args, "force", False) else work.load_record(n)       # 덮어쓸 기록(2차가 덜 된 채 저장된 쪽) — 바꾸기 전에 prev/ 에 남긴다
     pp = partial_path(work, n); partial = _reusable_pass1(work, n, reader, args, old)
+    from .text_policy import SOURCE_TEXT_POLICY, record_text_policy
+    text_policy = record_text_policy(partial) if partial else SOURCE_TEXT_POLICY
     origin = _pass1_origin(partial) if partial else {"provider": reader.name, "model": getattr(reader, "model", ""), "config": _pass1_cfg(args)}
+    if not partial:
+        memory_used = _manual_correction_provenance(args)
+        if memory_used:
+            origin["manual_corrections"] = memory_used
     keep = None if args.no_second_pass else (partial or {}).get("record")      # ② 그 기록의 1차: 2차가 된 영역은 그 기록의 2차·글을 그대로, 덜 된 영역만 다시 묻는다
     redo = set(_p2_failed_ids(keep)) if keep else set()
     if partial:
         p1 = PageReading.model_validate(partial["pass1"]); src = partial.get("image_source") or src; up = partial.get("upscale") or up
         log(f"  {n}쪽: 이전 실행의 1차 판독을 재사용(2차만 다시)")
+        if ((origin.get("manual_corrections") or {}).get("digest", "") !=
+                _manual_correction_provenance(args).get("digest", "")):
+            log(f"  {n}쪽: 사람 수정 사례가 달라졌지만 이미 읽은 1차는 보존합니다. 새 사례는 이 쪽의 기존 1차에 적용하지 않았습니다.")
     else:
         stage_start = time.perf_counter()
         model_img = upscale(img, up) if up != 1 else img
-        p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total))
+        memory = getattr(args, "_correction_memory", None)
+        extra = memory.prompt if memory and memory.count and memory.prompt else ""
+        # The hint is request-local: shared reader/system caches and independent
+        # second/third passes never receive corrected text.
+        p1 = nfc_reading(reader.read_page(model_img, Path(args.pdf).name, n, total, extra=extra)
+                         if extra else reader.read_page(model_img, Path(args.pdf).name, n, total), text_policy=text_policy)
         timings["pass1"] = time.perf_counter() - stage_start
     stage_start = time.perf_counter()
     p1_raw = p1.model_dump()                                  # 좌표 보정·덮개 검사 전의 모델 답 — 부분 기록은 이것을 남긴다(재사용 때 보정을 다시 하므로 중복되지 않게)
@@ -1118,7 +1198,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
         stage_start = time.perf_counter()
         try:
             sub = p1.model_copy(update={"regions": [r for r in p1.regions if r.id in redo]}) if keep else p1
-            rereads, meta = _second_pass(reader2, img, sub, n, args)
+            rereads, meta = _second_pass(reader2, img, sub, n, args, text_policy=text_policy)
             texts = [r.id for r in p1.regions if r.kind in TEXT_KINDS]
             bad = [rid for rid in texts if meta.get(rid, {}).get("pass2_failed") and rid not in rereads]
             if texts and len(bad) == len(texts):           # 문자 영역 모두 2차 실패(서버 오류 등) — 1차만인 쪽을 '완료'로 저장하지 않고 실패로 센다(1차는 아래에서 partial/ 에)
@@ -1134,7 +1214,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
             timings["postprocess"] = time.perf_counter() - stage_start
             timings["total"] = time.perf_counter() - t0
             write_atomic(pp, json.dumps({"file": Path(args.pdf).name, "pdf_page": n, "reader": origin["provider"], "model": origin["model"], "version": __version__,
-                                         "mode": getattr(args, "mode", ""), "pass1_cfg": origin["config"], "provenance": {"pass1": origin},
+                                         "mode": getattr(args, "mode", ""), "text_policy": text_policy, "pass1_cfg": origin["config"], "provenance": {"pass1": origin},
                                          "image_source": src, "upscale": up, "pass1": p1_raw, "bbox_fix": bbox_fix,
                                          "coverage_notes": coverage_notes, "usage": usage0, "timings": timings, "pass1_reused": bool(partial), "error": f"{type(e).__name__}: {str(e)[:200]}",
                                          "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=1))
@@ -1145,7 +1225,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
     kept2 = {k: v for k, v in ((keep or {}).get("pass2") or {}).items() if k not in redo}       # 다시 묻지 않은 영역의 이전 2차(조각 정보 포함 그대로)
     for k, v in kept2.items():
         rereads.setdefault(k, RegionReread.model_validate(v))
-    merged, mstats = merge_passes(p1, rereads)
+    merged, mstats = merge_passes(p1, rereads, text_policy=text_policy)
     fill_page_marks(merged)
     for rid, m in meta.items():
         if m.get("pass2_failed"):
@@ -1177,7 +1257,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
         if k in kept2:
             pass2[k] = kept2[k]; continue
         d = v.model_dump(); d.update(meta.get(k, {})); d["provider"] = reader2.name; d["model"] = getattr(reader2, "model", ""); pass2[k] = d
-    rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": origin["provider"], "model": origin["model"], "version": __version__, "mode": getattr(args, "mode", ""),
+    rec = {"file": Path(args.pdf).name, "pdf_page": n, "reader": origin["provider"], "model": origin["model"], "version": __version__, "mode": getattr(args, "mode", ""), "text_policy": text_policy,
            "pass1_cfg": origin["config"], "active_reader": reader.name, "active_model": getattr(reader, "model", ""),
            "provenance": {"pass1": origin, "pass2": {k: {"provider": v.get("provider", _record_provider(keep or {})),
                          "model": v.get("model", (keep or {}).get("second_model") or (keep or {}).get("model", ""))} for k, v in pass2.items()}},
@@ -1204,7 +1284,7 @@ def read_one(work: Work, doc, reader, reader2, n: int, args) -> dict:
         if keep:
             log(f"  {n}쪽: 2차가 덜 된 영역 {', '.join(sorted(redo))} 만 다시 물음 — 다른 영역의 글(손 고침·3차 확정)은 이전 기록 그대로")
             if changed:
-                log(f"주의: {n}쪽 영역 {', '.join(changed)} 의 이전 글(손 고침·3차 확정)은 2차를 다시 물어 새 비교로 바뀌었습니다 — 이전 기록은 {where}")
+                log(f"주의: {n}쪽 영역 {', '.join(rid or '쪽 정보' for rid in changed)} 의 기존 교정은 새 비교로 덮지 않고 보존했습니다 — 이전 기록은 {where}")
         else:
             log(f"주의: {n}쪽의 이전 기록을 1차부터 새로 읽은 기록으로 바꿨습니다(손 고침·3차 확정은 이어지지 않음) — 이전 기록은 {where}")
     timings["postprocess"] = time.perf_counter() - stage_start
@@ -1229,6 +1309,13 @@ def cmd_read(args, work: Work | None = None, doc=None, checkpoint_fn=None):
     doc = doc or open_pdf(args.pdf)
     work = work or Work(args.pdf, args.work)
     work.ensure_source(getattr(args, "dpi", 300))
+    args = argparse.Namespace(**vars(args))
+    if not hasattr(args, "_correction_memory"):
+        try:
+            args._correction_memory = _load_manual_corrections(args)
+        except (OSError, ValueError) as exc:
+            log(f"오류: 사람 수정 기록을 확인하지 못했습니다. 기록과 교정본을 확인한 뒤 다시 실행하십시오 — {exc}")
+            return 1
     pages = parse_pages(args.pages, len(doc))
     existing = {n: work.load_record(n) for n in pages}
     if not args.force and all(existing[n] is not None and
@@ -2511,10 +2598,15 @@ def build_parser():
     local.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
     local.add_argument("--dpi", type=int, default=300)
     local.add_argument("--engine-root", help="tools 폴더를 포함하는 로컬 엔진 설치 루트")
+    from ab_ocr.engine_registry import ENGINES as comparison_engines
     engine_mode = local.add_mutually_exclusive_group()
     engine_mode.add_argument("--auto-engine", action="store_true", help="설치된 엔진을 비교해 쪽별 결과 자동 선택(기본)")
-    engine_mode.add_argument("--engines", nargs="+", choices=("tesseract", "rapidocr", "easyocr", "ppocrv6"),
+    engine_mode.add_argument("--engines", nargs="+", choices=comparison_engines,
                             help="자동 선택을 끄고 비교할 엔진을 직접 지정")
+    local.add_argument("--engine-set", choices=("recommended", "legacy", "all", "primary"), default=None,
+                       help="판독 모델 묶음: 권장 조합/기존 세 엔진/전체/주력만 (기본 legacy)")
+    local.add_argument("--primary-engine", choices=comparison_engines,
+                       help="이번 묶음 안에서 명시적으로 기준 선택; 생략 시 기존 프로젝트 기준 보존")
     local.add_argument("--force", action="store_true", help="완료 엔진도 다시 읽고 이전 원시 결과를 이력에 보존")
     from .comparison_cli import command as comparison_command
     local.set_defaults(fn=comparison_command)
@@ -2541,6 +2633,7 @@ def build_parser():
         p.add_argument("--second-model", default="auto", help="같은 제공사의 2차 모델. auto=Gemini 는 flash 자동 선택, OpenAI·Anthropic 은 1차와 같은 모델")
         p.add_argument("--second-thinking", choices=["low", "full"], default="low", help="2차 판독(전사)의 생각 수준. low(기본)=줄여서 빠르게")
         p.add_argument("--no-cache", action="store_true", help="지침 컨텍스트 캐시를 쓰지 않음")
+        p.add_argument("--manual-corrections", help="사람 수정 사례를 참고할 교정 HWPX(같은 PDF만). 책갈피 OCR은 기존 교정본을 자동 사용하며, 새 1차 판독에만 참고")
         p.add_argument("--chunk-lines", type=int, default=8, help="2차 조각 한 장에 넣을 글줄(세로쓰기는 열) 수. 넘으면 나눠 보낸다(0=안 나눔). 글자당 픽셀을 늘려 획 하나 차이를 가린다")
         p.add_argument("--media-resolution", choices=["auto", "default", "low", "medium", "high", "ultra_high"], default="auto",
                        help="2차 조각 이미지의 토큰 예산(Gemini media_resolution). auto(기본)=high. ultra_high 는 Gemini 3 에서 조각마다 2,240 토큰(두 배). 모델이 거부하면 자동으로 한 단계 아래로")
@@ -2634,6 +2727,16 @@ def build_parser():
     p = sub.add_parser("remerge", help="저장된 1차·2차 판독으로 비교·표시를 다시 계산(모델 호출 없음)"); common(p)
     p.add_argument("--mode", choices=["auto", "vertical", "horizontal_zh"], default="auto", help="읽기 모드(auto=결과 폴더에 적힌 값·글자층 판정)")
     p.set_defaults(fn=cmd_remerge)
+    p = sub.add_parser("annotations", help="쌍행소주 후보 검출·별도 재판독(본문은 위치를 지정하여 수동 반영)"); common(p)
+    p.add_argument("--direction", choices=["auto", "vertical", "horizontal"], default="auto",
+                   help="소주 방향(auto=기존 판독 방향, 기록이 없으면 vertical)")
+    p.add_argument("--reread", action="store_true", help="검출을 마친 후보의 두 소열을 각각 재판독(모델 호출)")
+    p.add_argument("--candidate", action="append", help="재판독할 후보 ID(여러 번 지정 가능, 생략 시 전체)")
+    p.add_argument("--reader", choices=PROVIDERS, default="gemini")
+    p.add_argument("--model", help="재판독 모델(비우면 제공사 기본값)")
+    p.add_argument("--max-calls", type=int, default=12, help="재시도 포함 호출 상한(기본 12, 1 이상)")
+    from .small_annotations import command as annotations_command
+    p.set_defaults(fn=annotations_command)
     p = sub.add_parser("adjudicate", help="3차 글자 판별: 1차·2차가 갈린 〔a/b〕 자리를 글자 하나씩 크게 잘라 모델에 자형만으로 묻는다"); common(p)
     p.add_argument("--reader", choices=PROVIDERS, default="gemini")
     p.add_argument("--model", help="선택한 제공사의 이미지 판별 모델(비우면 제공사 기본 모델)")
@@ -2678,15 +2781,17 @@ def build_parser():
     p.add_argument("--section", help="교정할 책갈피·제목 이름(정확히, 또는 일부)")
     p.add_argument("--nth", type=int, help="같은 이름이 여럿일 때 몇 번째인지(1부터)")
     p.add_argument("--anchor-index", type=int, help="--list 번호로 구획을 바로 지정(1부터). 화면에서 쓴다")
+    p.add_argument("--anchor-para", type=int, help="화면에서 선택한 구획의 시작 문단(0부터). 실행 전 위치를 확인한다")
+    p.add_argument("--anchor-name", help="화면에서 선택한 구획 이름. 문단 위치와 함께 선택을 확인한다")
     p.add_argument("--heading-styles", help="책갈피처럼 쓸 HWPX 스타일 이름(쉼표로 여러 개, 앞이 큰 단위). 예 \"제목-본초명,제목-본초명(소)\". 비우면 이름에 '제목'이 든 스타일 전부")
     p.add_argument("--anchor-source", choices=["auto", "hwpx", "pdf"], default="auto",
                    help="구획 기준: auto(기본)=HWPX 책갈피·제목 스타일, 없으면 PDF 책갈피 이름으로 본문 검색 / hwpx / pdf")
     p.add_argument("--pdf-pages", help="PDF 책갈피 짝이 없을 때 쪽 범위를 직접(예 120-123)")
-    p.add_argument("--policy", choices=["all", "sure", "memo"], default="sure", help="all=A·B2 자동, C 는 표시만 / sure=A 만(기본) / memo=메모만")
+    p.add_argument("--policy", choices=["all", "sure", "memo"], default="sure", help="all=A·B2 자동, C 는 표시만 / sure=A 만(기본) / memo=표시만(글자 안 바꿈)")
     p.add_argument("--apply", action="store_true", help="대조 결과를 HWPX 에 반영해 사본(<이름>_교정.hwpx)으로 저장. 없으면 보고만")
     p.add_argument("--out", help="저장할 HWPX 경로(기본 <이름>_교정.hwpx)")
-    p.add_argument("--memo", choices=["notice", "all", "inline"], default=None,
-                   help="한컴 메모: notice=고지 사항만(지운 글자·구조 차이·반영하지 않은 제안 등, 기본) / all=모든 항목에 근거(0.6.3 방식) / inline=메모 없이 고지만 글 뒤 〔…〕")
+    p.add_argument("--memo", choices=["none", "notice", "all", "inline"], default=None,
+                   help="교정 표시: none=색상만(기본, 메모·글 속 고지 없음; 상세 근거는 보고서) / notice=고지 사항만 메모 / all=모든 항목에 메모 / inline=글 뒤 〔…〕(이전 방식)")
     p.add_argument("--no-memo", action="store_true", help="(예전 이름) --memo inline 과 같음")
     p.add_argument("--all", action="store_true", help="구획 전체를 차례로 대조(--apply 면 교정본 하나에 쌓음). PDF 쪽을 못 찾는 구획은 건너뛰고 요약에 적음")
     p.add_argument("--no-glyph-check", action="store_true", help="대조 뒤 자형 편향·혼동 자리(入/人 등)를 글자 조각으로 모델에 묻는 3차 판별을 하지 않음")

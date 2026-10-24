@@ -16,7 +16,7 @@ def review_record(project, text=None, proposals=None, status="completed"):
     page = project.page(1)
     snapshot = project.text(1) if text is None else text
     runs = latest_runs(page)
-    return {"provider": "openai", "model": "synthetic-model", "policy": {"traditional": "propose", "punctuation": True},
+    return {"provider": "openai", "model": "synthetic-model", "policy": {"traditional": True, "punctuation": True},
         "status": status, "response_text": '{"result":"原文，한글。"}\n', "metadata": {"phase": "visual"},
         "request": {"source_sha256": project.source_sha256, "page_number": 1, "snapshot_text": snapshot,
             "snapshot_sha256": hashlib.sha256(snapshot.encode("utf-8")).hexdigest(), "baseline_run_id": page["baseline_run_id"],
@@ -28,7 +28,7 @@ def review_record(project, text=None, proposals=None, status="completed"):
         "proposals": copy.deepcopy(proposals or [])}
 
 
-def proposal(start=1, end=2, before="乙", after="仁", kind="recognition", uncertain=False):
+def proposal(start=5, end=6, before="乙", after="仁", kind="recognition", uncertain=False):
     return {"start": start, "end": end, "before": before, "after": after,
             "kind": kind, "uncertain": uncertain, "reason": "synthetic image evidence"}
 
@@ -42,12 +42,24 @@ class AIState(unittest.TestCase):
         Image.new("RGB", (200, 100), "white").save(self.source)
         self.original_bytes = self.source.read_bytes()
         self.project = ComparisonProject.open(self.source)
-        self.add_raw("甲乙丙丁戊己庚")
+        self.add_raw("天地玄黄甲乙丙丁戊己庚宇宙洪荒")
+        for engine in ("easyocr", "glmocr"):
+            self.add_raw("天地玄黄甲仁丙丁戊己庚宇宙洪荒", engine=engine)
+        for engine in ("surya", "paddle_server"):
+            self.add_raw("天地玄黄甲乙丙丁戊義庚宇宙洪荒", engine=engine)
+        self.project.compare_page(1, baseline="tesseract")
 
     def add_raw(self, text, engine="tesseract", activate=True):
         raw = RecognitionResult(text, [{"text": text, "bbox": [0, 0, 200, 100], "confidence": 80.0}],
             str(self.source), self.project.source_sha256, 1, 200, 100, "synthetic", "chi_tra", 6, 0, engine=engine)
         return self.project.add_result(raw, activate=activate)
+
+    def punctuation_readings(self):
+        self.add_raw("天地玄黄甲,丙丁戊己庚宇宙洪荒")
+        # These cases exercise review lineage, with no conflicting OCR witness.
+        for engine in ("easyocr", "glmocr", "surya", "paddle_server"):
+            self.add_raw("天地玄黄甲。丙丁戊己庚宇宙洪荒", engine=engine)
+        self.project.compare_page(1, baseline="tesseract")
 
     def add_review(self, proposals=None, **changes):
         record = review_record(self.project, proposals=proposals if proposals is not None else [proposal()])
@@ -82,7 +94,7 @@ class AIState(unittest.TestCase):
         loaded = ComparisonProject.load(path)
         self.assertEqual(loaded.page(1)["ai_reviews"], [])
         self.assertEqual(loaded.page(1)["ai_decisions"], [])
-        self.assertEqual(loaded.text(1), "甲乙丙丁戊己庚")
+        self.assertEqual(loaded.text(1), "天地玄黄甲乙丙丁戊己庚宇宙洪荒")
         self.assertFalse(loaded.dirty)
 
     def test_response_request_and_proposals_are_immutable_snapshots(self):
@@ -105,7 +117,7 @@ class AIState(unittest.TestCase):
         before_runs = self.project.page(1)["runs"]
         self.project.set_reviewed(1)
         text = self.project.accept_ai_proposal(1, identifier, review["proposals"][0]["id"])
-        self.assertEqual(text, "甲仁丙丁戊己庚")
+        self.assertEqual(text, "天地玄黄甲仁丙丁戊己庚宇宙洪荒")
         page = self.project.page(1)
         self.assertEqual(page["runs"], before_runs)
         self.assertEqual(page["ai_reviews"], [review])
@@ -115,25 +127,25 @@ class AIState(unittest.TestCase):
         self.assertEqual(self.save_load().text(1), text)
 
     def test_multiple_candidates_map_through_independent_manual_changes(self):
-        identifier, review = self.add_review([proposal(), proposal(5, 6, "己", "義")])
+        identifier, review = self.add_review([proposal(), proposal(9, 10, "己", "義")])
         self.project.set_text(1, self.project.text(1) + "。")
         for candidate in review["proposals"]:
             self.project.accept_ai_proposal(1, identifier, candidate["id"])
-        self.assertEqual(self.project.text(1), "甲仁丙丁戊義庚。")
+        self.assertEqual(self.project.text(1), "天地玄黄甲仁丙丁戊義庚宇宙洪荒。")
         self.save_load()
 
     def test_overlapping_manual_edit_blocks_stale_candidate(self):
         identifier, review = self.add_review()
-        self.project.set_text(1, "甲人丙丁戊己庚")
+        self.project.set_text(1, "天地玄黄甲人丙丁戊己庚宇宙洪荒")
         with self.assertRaises(ComparisonError):
             self.project.accept_ai_proposal(1, identifier, review["proposals"][0]["id"])
-        self.assertEqual(self.project.text(1), "甲人丙丁戊己庚")
+        self.assertEqual(self.project.text(1), "天地玄黄甲人丙丁戊己庚宇宙洪荒")
         self.assertFalse(self.project.ai_proposals(1)[0]["applicable"])
         self.assertEqual(self.project.page(1)["ai_decisions"], [])
 
     def test_rerecognition_invalidates_evidence_without_deleting_ai_history(self):
         identifier, review = self.add_review()
-        self.add_raw("甲仁丙丁戊己庚")
+        self.add_raw("天地玄黄甲仁丙丁戊己庚宇宙洪荒")
         self.assertTrue(self.project.ai_proposals(1)[0]["stale"])
         with self.assertRaises(ComparisonError):
             self.project.accept_ai_proposal(1, identifier, review["proposals"][0]["id"])
@@ -142,7 +154,7 @@ class AIState(unittest.TestCase):
 
     def test_inflight_old_evidence_response_is_preserved_as_stale_history(self):
         record = review_record(self.project, proposals=[proposal()])
-        self.add_raw("甲仁丙丁戊己庚")
+        self.add_raw("天地玄黄甲仁丙丁戊己庚宇宙洪荒")
         identifier = self.project.record_ai_review(1, record)
         stored = self.project.page(1)["ai_reviews"][-1]
         self.assertEqual(stored["status"], "completed")
@@ -176,7 +188,7 @@ class AIState(unittest.TestCase):
         candidate = review["proposals"][0]
         self.project.accept_ai_proposal(1, identifier, candidate["id"])
         self.project.undo_edit(1)
-        self.assertEqual(self.project.text(1), "甲乙丙丁戊己庚")
+        self.assertEqual(self.project.text(1), "天地玄黄甲乙丙丁戊己庚宇宙洪荒")
         self.assertEqual(self.project.page(1)["ai_reviews"], [review])
         self.assertEqual([d["decision"] for d in self.project.page(1)["ai_decisions"]], ["accepted", "undone"])
         self.assertTrue(self.project.ai_proposals(1)[0]["applicable"])
@@ -224,13 +236,19 @@ class AIState(unittest.TestCase):
         self.assertEqual(len(loaded.page(1)["ai_reviews"]), 1)
 
     def test_unicode_variants_and_punctuation_are_not_normalized(self):
-        self.add_raw("神 神 漢 汉,。")
+        self.add_raw("天地玄黃神 神 漢 汉,。宇宙洪荒")
+        for engine in ("easyocr", "glmocr"):
+            self.add_raw("天地玄黃神 神 漢 汉，。宇宙洪荒", engine=engine)
+        self.project.compare_page(1, baseline="tesseract")
         before = self.project.text(1)
         offset = before.index(",")
-        identifier, review = self.add_review([proposal(offset, offset + 1, ",", "，", "punctuation")])
+        identifier, review = self.add_review([proposal(offset, offset + 1, ",", "，", "punctuation")],
+                                             metadata={"phase": "editorial"})
         self.project.accept_ai_proposal(1, identifier, review["proposals"][0]["id"])
-        self.assertEqual(self.project.text(1), "神 神 漢 汉，。")
-        self.assertEqual(self.project.page(1)["runs"][-1]["raw"]["text"], before)
+        self.assertEqual(self.project.text(1), "天地玄黃神 神 漢 汉，。宇宙洪荒")
+        page = self.project.page(1)
+        baseline = next(run for run in page["runs"] if run["id"] == page["baseline_run_id"])
+        self.assertEqual(baseline["raw"]["text"], before)
         self.assertEqual(self.save_load().page(1)["ai_reviews"][0]["request"]["snapshot_text"], before)
 
     def test_tampered_raw_response_hash_is_rejected_on_reopen(self):
@@ -300,8 +318,9 @@ class AIState(unittest.TestCase):
                 ComparisonProject.load(path)
 
     def test_editorial_supersedes_visual_without_mutating_either_record(self):
-        visual_id, visual = self.add_review()
-        record = review_record(self.project, proposals=[proposal(after="義", kind="traditional")])
+        self.punctuation_readings()
+        visual_id, visual = self.add_review([proposal(before=",", after="。")])
+        record = review_record(self.project, proposals=[proposal(before=",", after="。", kind="punctuation")])
         record["metadata"] = {"phase": "editorial", "superseded_proposal_ids": [visual["proposals"][0]["id"]]}
         editorial_id = self.project.record_ai_review(1, record)
         self.assertEqual(len(self.project.ai_proposals(1)), 1)
@@ -312,13 +331,13 @@ class AIState(unittest.TestCase):
             self.project.accept_ai_proposal(1, visual_id, visual["proposals"][0]["id"])
         final = self.project.ai_proposals(1)[0]
         self.project.accept_ai_proposal(1, editorial_id, final["id"])
-        self.assertEqual(self.project.text(1), "甲義丙丁戊己庚")
+        self.assertEqual(self.project.text(1), "天地玄黄甲。丙丁戊己庚宇宙洪荒")
         self.assertEqual(self.project.page(1)["ai_reviews"][0], visual)
         self.save_load()
 
     def test_superseding_unrelated_scope_is_rejected(self):
         _, visual = self.add_review()
-        record = review_record(self.project, proposals=[proposal(5, 6, "己", "義", "traditional")])
+        record = review_record(self.project, proposals=[proposal(9, 10, "己", "義", "traditional")])
         record["metadata"]["superseded_proposal_ids"] = [visual["proposals"][0]["id"]]
         with self.assertRaises(ComparisonError):
             self.project.record_ai_review(1, record)
@@ -338,9 +357,10 @@ class AIState(unittest.TestCase):
         self.save_load()
 
     def test_rejected_visual_basis_invalidates_existing_editorial_proposal(self):
-        visual_id, visual = self.scoped_review(proposals=[proposal()])
+        self.punctuation_readings()
+        visual_id, visual = self.scoped_review(proposals=[proposal(before=",", after="。")])
         basis = [visual["proposals"][0]["id"]]
-        editorial_id, editorial = self.scoped_review("editorial", [proposal(after="義", kind="traditional")],
+        editorial_id, editorial = self.scoped_review("editorial", [proposal(before=",", after="。", kind="punctuation")],
                                                     lineage=basis, supersedes=basis)
         self.assertTrue(next(p for p in self.project.ai_proposals(1, True) if p["review_id"] == editorial_id)["applicable"])
         self.project.reject_ai_proposal(1, visual_id, basis[0])
@@ -357,11 +377,11 @@ class AIState(unittest.TestCase):
         basis = [visual["proposals"][0]["id"]]
         editorial_id, _ = self.scoped_review("editorial", [proposal(after="義", kind="traditional")],
                                            lineage=basis, supersedes=basis)
-        latest_id, _ = self.scoped_review(proposals=[proposal(after="人")])
+        latest_id, _ = self.scoped_review(proposals=[proposal(after="仁")])
         views = self.project.ai_proposals(1, True)
         self.assertTrue(next(p for p in views if p["review_id"] == editorial_id)["lineage_stale"])
         self.assertTrue(next(p for p in views if p["review_id"] == latest_id)["applicable"])
-        self.assertEqual(self.project.text(1), "甲乙丙丁戊己庚")
+        self.assertEqual(self.project.text(1), "天地玄黄甲乙丙丁戊己庚宇宙洪荒")
         self.save_load()
 
     def test_generation_changes_never_rewrite_human_accepted_decisions(self):
@@ -371,7 +391,7 @@ class AIState(unittest.TestCase):
         self.project.accept_ai_proposal(1, identifier, review["proposals"][0]["id"])
         edits, decisions = self.project.page(1)["edits"], self.project.page(1)["ai_decisions"]
         self.project.record_ai_review(1, inflight)
-        self.assertEqual(self.project.text(1), "甲仁丙丁戊己庚")
+        self.assertEqual(self.project.text(1), "天地玄黄甲仁丙丁戊己庚宇宙洪荒")
         self.assertEqual(self.project.page(1)["edits"], edits)
         self.assertEqual(self.project.page(1)["ai_decisions"], decisions)
         self.save_load()

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "engine": "paddle_server",
+  "recognition_profile": "server",
+  "base_lock": "rapidocr-lock.json",
+  "model_lock": "paddle-server-lock.json",
+  "packages": {
+    "onnxruntime-gpu": "1.25.1",
+    "nvidia-cuda-runtime-cu12": "12.8.90",
+    "nvidia-cuda-nvrtc-cu12": "12.8.93",
+    "nvidia-cublas-cu12": "12.8.4.1",
+    "nvidia-cufft-cu12": "11.3.3.83",
+    "nvidia-nvjitlink-cu12": "12.9.86",
+    "nvidia-cudnn-cu12": "9.10.2.21"
+  },
+  "provider": "CUDAExecutionProvider",
+  "use_tf32": false,
+  "precision": "float32",
+  "requirements": "NVIDIA CUDA 12.8-compatible driver and cuDNN 9; no system CUDA installation is changed",
+  "official_requirements": "https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html"
+}

@@ -4,11 +4,13 @@ import io
 import json
 from pathlib import Path
 import struct
+import subprocess
 import zipfile
 
 import pytest
 
 from tools import prepare_windows_release as release
+from tools import verify_release_bundle as bundle
 
 
 def pe_bytes(machine=0x8664):
@@ -108,9 +110,11 @@ def test_source_archive_refuses_version_mismatch(tmp_path, monkeypatch):
 
 def test_source_allowlist_preserves_all_current_local_engine_resources():
     root = Path(__file__).resolve().parents[1]
-    required = set(release.SOURCE_DATA | release.SOURCE_ENGINE_LOCKS | release.SOURCE_JSON_DOCS | release.SOURCE_PACKAGING)
+    required = set(release.SOURCE_DATA | release.SOURCE_ENGINE_LOCKS | release.SOURCE_ENGINE_REQUIREMENTS
+                   | release.SOURCE_JSON_DOCS | release.SOURCE_PACKAGING)
     required.update(path.relative_to(root).as_posix() for path in (root / "ab_ocr").glob("*.py"))
-    required.update(f"scripts/install_{engine}.py" for engine in ("tesseract", "rapidocr", "easyocr"))
+    from yeone_ocr.frozen_smoke import COMPARISON_INSTALLER_RESOURCES
+    required.update("scripts/" + name for name in COMPARISON_INSTALLER_RESOURCES)
     assert required
     for name in required:
         assert (root / name).is_file(), name
@@ -118,6 +122,36 @@ def test_source_allowlist_preserves_all_current_local_engine_resources():
     # Presets must stay synchronized with the real built-in registry/data files.
     from yeone_ocr.presets import BUILTIN
     assert {f"yeone_ocr/data/preset_{key}.json" for key in BUILTIN} <= release.SOURCE_DATA
+
+
+def test_windows_checkout_preserves_pinned_dictionary_bytes(tmp_path):
+    """A Windows Git checkout must not invalidate the dictionary's byte hash."""
+    from yeone_ocr import comparison_unihan as unihan
+
+    root = Path(__file__).resolve().parents[1]
+    name = unihan.DATA.relative_to(root).as_posix()
+    expected = unihan.DATA.read_bytes()
+    assert hashlib.sha256(expected).hexdigest() == unihan.DATA_SHA256
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".gitattributes").write_bytes((root / ".gitattributes").read_bytes())
+    data = checkout / name
+    data.parent.mkdir(parents=True)
+    data.write_bytes(expected)
+    # No commit, network access or changes to the real repository are required.
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "core.autocrlf=true", "-c", "core.safecrlf=false",
+             "-C", str(checkout), *args],
+            check=True, capture_output=True, timeout=30,
+        )
+
+    git("init", "--quiet")
+    git("add", "--", ".gitattributes", name)
+    exported = tmp_path / "exported"
+    exported.mkdir()
+    git("checkout-index", "--all", "--prefix=" + exported.as_posix() + "/")
+    assert (exported / name).read_bytes() == expected
 
 
 def test_source_allowlist_rejects_private_inputs_models_and_runtime_homes():
@@ -128,9 +162,13 @@ def test_source_allowlist_rejects_private_inputs_models_and_runtime_homes():
         "ab_ocr/model.onnx", "ab_ocr/model.pth", "ab_ocr/model.traineddata", "ab_ocr/model.safetensors",
         "resources/model.onnx", "resources/licenses/model.pth", "packaging/third_party_licenses/model.traineddata",
         "resources/source.png", "packaging/source.png", "packaging/private-record.json",
-        "scripts/private-settings.json", "scripts/unknown-lock.json", "docs/private-record.json",
+        "scripts/private-settings.json", "scripts/unknown-lock.json", "scripts/private-requirements.txt", "docs/private-record.json",
         "yeone_ocr/data/private-record.json", "yeone_ocr/data/preset_private.json",
         "tools/easyocr/credentials.py", "tools/rapidocr/cache.py", "tools/tesseract/installation.py",
+        "tools/paddle_server/credentials.py", "tools/paddle_server_gpu/cache.py",
+        "tools/glmocr/runtime/private.py", "tools/surya/python/site-packages/private.py",
+        "tools/PADDLE_SERVER/venv/Lib/site-packages/cached.py",
+        "resources/licenses/model.gguf", "packaging/third_party_licenses/model.ggml",
         "scripts/downloads/private.py", "tests/private.hwpx", "docs/private.pdf", "packaging/.env.production",
         "ab_ocr/../private.py", "/ab_ocr/ocr.py", "C:/Users/private/credentials.json",
     ]
@@ -144,12 +182,25 @@ def test_source_archive_keeps_integration_resources_as_committed_bytes(tmp_path,
         "ab_ocr/runtime.py": "# independent runtime resource selection\n",
         "ab_ocr/rapidocr_worker.py": "# isolated RapidOCR worker\n",
         "ab_ocr/easyocr_worker.py": "# isolated EasyOCR worker\n",
+        "ab_ocr/glmocr_worker.py": "# isolated GLM-OCR worker\n",
+        "ab_ocr/surya_worker.py": "# isolated Surya worker\n",
         "scripts/install_tesseract.py": "# pinned installer\n",
         "scripts/install_rapidocr.py": "# pinned installer\n",
         "scripts/install_easyocr.py": "# pinned installer\n",
+        "scripts/install_paddle_server.py": "# pinned installer\n",
+        "scripts/install_paddle_server_gpu.py": "# pinned optional GPU installer\n",
+        "scripts/install_glmocr.py": "# pinned installer\n",
+        "scripts/install_surya.py": "# pinned installer\n",
+        "scripts/install_surya_cuda.py": "# pinned optional GPU installer\n",
         "scripts/tesseract-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
         "scripts/rapidocr-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
         "scripts/easyocr-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/paddle-server-lock.json": '{"models":["pinned"]}\n',
+        "scripts/paddle-server-gpu-lock.json": '{"packages":{"onnxruntime-gpu":"pinned"}}\n',
+        "scripts/glmocr-models.lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/surya-lock.json": '{"models":[{"sha256":"pinned"}]}\n',
+        "scripts/surya-requirements.txt": "surya-ocr==0.22.1\npillow==10.4.0\n",
+        "docs/PADDLE_SERVER.md": "# Local server recognition\n",
         "docs/AB_OCR_PROVENANCE.json": '{"source_project":"AB_OCR"}\n',
         "yeone_ocr/data/preset_basic.json": '{"id":"basic"}\n',
         "yeone_ocr/data/preset_kaibao.json": '{"id":"kaibao"}\n',
@@ -157,7 +208,11 @@ def test_source_archive_keeps_integration_resources_as_committed_bytes(tmp_path,
     }
     private = {"ab_ocr/source.png": "private synthetic image", "ab_ocr/model.pth": "private synthetic weights",
                "scripts/private-settings.json": "private synthetic configuration",
-               "resources/licenses/model.onnx": "private synthetic weights"}
+               "resources/licenses/model.onnx": "private synthetic weights",
+               "tools/paddle_server/venv/site-packages/private.py": "private synthetic runtime payload",
+               "tools/paddle_server_gpu/venv/site-packages/private.py": "private synthetic runtime payload",
+               "tools/glmocr/runtime/model.gguf": "private synthetic weights",
+               "tools/surya/python/site-packages/private.py": "private synthetic runtime payload"}
     committed_tree(monkeypatch, extra_files={**required, **private})
     output = tmp_path / "source.zip"
     result = release.create_source_archive(tmp_path, output, "0.7.1")
@@ -285,6 +340,120 @@ def test_prepare_covers_every_published_payload_with_checksums(tmp_path, monkeyp
     with zipfile.ZipFile(output / "YeonE_OCR-0.7.1-licenses.zip") as archive:
         assert "THIRD_PARTY_LICENSES/dependency/LICENSE" in archive.namelist()
         assert archive.read("DISTRIBUTION_NOTICE.txt") == b"distribution notice"
+
+
+def prepared_bundle(tmp_path, monkeypatch):
+    committed_tree(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / "yeone_ocr").mkdir(parents=True)
+    (repo / "yeone_ocr/__init__.py").write_text('__version__ = "0.7.1"\n', encoding="utf-8")
+    license_tree(repo)
+    output = tmp_path / "dist"
+    output.mkdir()
+    (output / release.PORTABLE_NAME).write_bytes(pe_bytes())
+    (output / "YeonE_OCR-0.7.1-Setup-x64.exe").write_bytes(pe_bytes(0x014C))
+    release.prepare(output, repo)
+    return output
+
+
+def test_release_bundle_seals_all_six_assets_and_verifies_without_changes(tmp_path, monkeypatch):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    original = {path.name: path.read_bytes() for path in output.iterdir()}
+    sealed = bundle.seal(output, "0.7.1", "a" * 40)
+    assert set(original) == bundle.artifact_names("0.7.1")
+    receipt = json.loads((output / bundle.RECEIPT).read_text(encoding="utf-8"))
+    assert set(receipt["artifacts"]) == set(original)
+    before_verify = {path.name: path.read_bytes() for path in output.iterdir()}
+    result = bundle.verify(output, "0.7.1", "a" * 40, sealed["receipt_sha256"])
+    assert result == {"ok": True, "version": "0.7.1", "commit": "a" * 40, "artifacts": sorted(original)}
+    assert {name: (output / name).read_bytes() for name in original} == original
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before_verify
+
+
+@pytest.mark.parametrize("name", sorted(bundle.artifact_names("0.7.1")))
+def test_release_bundle_rejects_changed_asset_bytes(tmp_path, monkeypatch, name):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    sealed = bundle.seal(output, "0.7.1", "a" * 40)
+    with (output / name).open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(ValueError):
+        bundle.verify(output, "0.7.1", "a" * 40, sealed["receipt_sha256"])
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "directory", "receipt", "wrong-receipt-hash",
+                                    "wrong-version", "wrong-commit", "self-consistent-replacement"])
+def test_release_bundle_rejects_wrong_inventory_or_build_identity(tmp_path, monkeypatch, change):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    sealed = bundle.seal(output, "0.7.1", "a" * 40)
+    version, commit, receipt_hash = "0.7.1", "a" * 40, sealed["receipt_sha256"]
+    if change == "missing":
+        (output / release.PORTABLE_NAME).unlink()
+    elif change == "extra":
+        (output / "unverified.exe").write_bytes(pe_bytes())
+    elif change == "directory":
+        (output / "update.json").unlink()
+        (output / "update.json").mkdir()
+    elif change == "receipt":
+        (output / bundle.RECEIPT).write_text("{}", encoding="utf-8")
+    elif change == "wrong-receipt-hash":
+        receipt_hash = "0" * 64
+    elif change == "wrong-version":
+        version = "0.7.2"
+    elif change == "wrong-commit":
+        commit = "b" * 40
+    else:
+        # Checksums and updater metadata alone are insufficient: all release
+        # bytes must still match the independently bound build-job receipt.
+        with (output / release.PORTABLE_NAME).open("ab") as stream:
+            stream.write(b"replacement")
+        release.make_update_manifest(output, version)
+        release.write_checksums(output, [output / name for name in bundle.artifact_names(version)
+                                         if name != "SHA256SUMS.txt"])
+    with pytest.raises(ValueError):
+        bundle.verify(output, version, commit, receipt_hash)
+
+
+def test_release_bundle_seal_rejects_source_archive_from_another_commit(tmp_path, monkeypatch):
+    output = prepared_bundle(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="commit"):
+        bundle.seal(output, "0.7.1", "b" * 40)
+    assert not (output / bundle.RECEIPT).exists()
+
+
+def test_release_workflow_runs_complete_tests_and_one_build_before_verified_publication():
+    import re
+    root = Path(__file__).resolve().parents[1]
+    text = (root / ".github/workflows/windows-release.yml").read_text(encoding="utf-8")
+    jobs = dict(re.findall(r"^  (\w+):\n(.*?)(?=^  \w+:\n|\Z)",
+                           text.split("\njobs:\n", 1)[1], flags=re.MULTILINE | re.DOTALL))
+    assert set(jobs) == {"regression", "build", "publish"}
+    regression, build, publish = (jobs[name] for name in ("regression", "build", "publish"))
+    assert "needs:" not in regression and "needs:" not in build
+    command = next(line for line in regression.splitlines() if "tools/check_regression.py" in line)
+    assert "--workers 2" in command and "--fail-fast" in command and "--prioritize" in command
+    assert "--module " not in command  # Priorities cannot narrow full coverage.
+    assert "if: always()" in regression and "windows-release-regression" in regression
+    assert "needs: [regression, build]" in publish
+    assert "needs.regression.result == 'success'" in publish
+    assert "needs.build.result == 'success'" in publish
+    assert text.count("./tools/build_windows.ps1") == 1
+    assert "./tools/test_windows_installer.ps1" in build and "-PreviousInstaller" in build
+    previous = re.findall(r"gh release download v([0-9]+\.[0-9]+\.[0-9]+)\s", build)
+    assert len(previous) == 1
+    current = re.search(r'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"',
+                        (root / "yeone_ocr/__init__.py").read_text(encoding="utf-8"), re.MULTILINE)[1]
+    assert tuple(map(int, previous[0].split("."))) < tuple(map(int, current.split(".")))
+    previous_asset = f"YeonE_OCR-{previous[0]}-Setup-x64.exe"
+    assert f"--pattern '{previous_asset}'" in build
+    assert f'-PreviousInstaller "$previousDirectory/{previous_asset}"' in build
+    assert "verify_release_bundle.py seal dist --commit $env:GITHUB_SHA" in build
+    assert "compression-level: 0" in build and "if-no-files-found: error" in build
+    assert "artifact-ids: ${{ needs.build.outputs.artifact_id }}" in publish
+    assert "${{ needs.build.outputs.receipt_sha256 }}" in publish
+    assert "verify_release_bundle.py verify dist --commit $env:GITHUB_SHA --receipt-sha256" in publish
+    assert publish.index("verify_release_bundle.py verify") < publish.index("gh release create")
+    assert "contents: write" not in build and "contents: write" not in regression
+    assert "contents: write" in publish
 
 
 import unittest  # noqa: E402  (unittest discover 도 거두게 — 위의 시험은 pytest 꼴)

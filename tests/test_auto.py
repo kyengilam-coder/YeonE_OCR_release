@@ -90,7 +90,10 @@ class AutoMode(unittest.TestCase):
             self.assertEqual(refresh_stale_records(work, None, [4]), 1)
             r = work.load_record(4)
             self.assertEqual(r["version"], __version__); self.assertIn("remerged_at", r)
-            self.assertIn("〔冲/沖〕", region_text(PageReading.model_validate(r["merged"]).regions[0]))
+            # 이전 merged 가 재현한 기계 결과와 다르면 교정 여부를 단정하지 않고 보존한다.
+            self.assertEqual(region_text(PageReading.model_validate(r["merged"]).regions[0]), region_text(p1.regions[0]))
+            self.assertEqual(r["merge_stats"]["manual_preserved_regions"], ["b"])
+            self.assertTrue(r["merged"]["uncertain"], "새 비교에서 발견한 확인 항목도 남겨야 한다")
             self.assertEqual(refresh_stale_records(work, None, [4]), 0)          # 이미 지금 판이면 손대지 않음
 
 
@@ -686,7 +689,7 @@ class AdjudicateCommand(unittest.TestCase):
                 for sid, crop, ask in crops:
                     self.assertTrue(crop.width > 4 and crop.height > 4)
                     c = next(x for x in ask.candidates if x in "黃日")              # 인쇄 글자(정자). 후보 차례는 섞여 오니 글자로 고른다
-                    out[sid] = GlyphChoice(choice=c, evidence="획", window="")       # 창이 비면 자리 검사는 통과(검사 불가)
+                    out[sid] = GlyphChoice(choice=c, evidence="획", window="玄" + c + "宇" if c in "黃黄" else "荒" + c + "月")
                 return out
             def adjudicate(self, *a, **k):
                 raise AssertionError("묶음으로 다 답했으니 낱개 호출이 없어야 한다")
@@ -740,7 +743,9 @@ class AdjudicateCommand(unittest.TestCase):
             model = "pro"
             def adjudicate_many(self, crops, h, p):
                 self._tls.u["calls"] += 1
-                return {sid: GlyphChoice(choice=a.candidates[0], evidence="획", window="") for sid, _, a in crops}
+                return {sid: GlyphChoice(choice=a.candidates[0], evidence="획",
+                        window=("玄" + a.candidates[0] + "宇" if "黃" in a.candidates else "荒" + a.candidates[0] + "月"))
+                        for sid, _, a in crops}
         old = cli.make_glyph_readers; cli.make_glyph_readers = lambda args: (Flash(), Pro())
         try:
             with tempfile.TemporaryDirectory() as td, contextlib.ExitStack() as handles:
@@ -1783,7 +1788,7 @@ class PrevBackup(unittest.TestCase):
                 self.assertEqual(refresh_stale_records(work, None, [4]), 1)
             self.assertEqual((work.readings_dir / "prev" / "p004.json").read_bytes(), before)
             self.assertIn("readings/prev/", buf.getvalue()); self.assertIn("1쪽 복사", buf.getvalue())
-            self.assertNotEqual(work.load_record(4)["merged"].get("page_note"), "손으로 고침")   # merged 는 다시 계산된다(그래서 사본이 필요)
+            self.assertEqual(work.load_record(4)["merged"].get("page_note"), "손으로 고침")   # 사본뿐 아니라 현재 기록에도 교정을 보존
 
 
 class PartialRecord(unittest.TestCase):
@@ -2266,8 +2271,8 @@ class Pass2Retry068(unittest.TestCase):
             finally:
                 d.close()
 
-    def test_hand_edit_in_retried_region_is_backed_up_and_announced(self):
-        """다시 물은 영역(2차 실패했던 영역) 자체를 손으로 고쳤으면 그 글은 새 비교로 바뀐다 — prev/ 사본을 남기고 '주의:' 로 그 경로를 알린다."""
+    def test_hand_edit_in_retried_region_is_preserved_backed_up_and_announced(self):
+        """실패 영역을 다시 읽어도 사람이 고친 merged는 유지하고 이전 기록 사본과 안내를 남긴다."""
         from yeone_ocr import cli
         with tempfile.TemporaryDirectory() as td:
             doc = vertical_pdf(1); pdf = os.path.join(td, "v.pdf"); doc.save(pdf); doc.close(); w = os.path.join(td, "w")
@@ -2283,7 +2288,8 @@ class Pass2Retry068(unittest.TestCase):
             warn = [l for l in buf.getvalue().splitlines() if l.startswith("주의:")]
             self.assertEqual(len(warn), 1, buf.getvalue()); self.assertIn("영역 b2", warn[0]); self.assertIn("readings/prev/p001.json", warn[0])
             self.assertIn("(손)", (work.readings_dir / "prev" / "p001.json").read_text(encoding="utf-8"))
-            self.assertNotIn("(손)", work.record_path(1).read_text(encoding="utf-8"))
+            self.assertIn("(손)", work.load_record(1)["merged"]["regions"][1]["paragraphs"][0]["columns"][0]["text"])
+            self.assertIn("덮지 않고 보존", warn[0])
 
     def test_changed_model_or_pass1_settings_reread_pass1_and_say_so(self):
         """검토 재현(INT-4·ops-3): 모델이 바뀐 쪽도 '1차를 다시 사지 않고 2차만' 이라 알리고 1차를 다시 샀다. 2차 도중 멈춘 쪽의 1차(partial/)는

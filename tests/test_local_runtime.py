@@ -94,7 +94,7 @@ class LocalRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source=Path(folder)/'source.png'
             source.write_bytes(b'not rendered when required model is missing')
-            info={'available':True,'languages':['chi_tra'],'models':{},
+            info={'available':True,'engine':'easyocr','languages':['chi_tra'],'models':{},'installation':{},
                   'language_models':{'chi_tra':[]}}
             with patch.object(local_engines,'inspect_engine',return_value=info), \
                  patch.object(ocr,'_run') as run, self.assertRaisesRegex(ocr.OCRError,'보조 인식 모델'):

@@ -1,0 +1,1245 @@
+"""Direct bookmark editing: drafts, review, conflicts, closing and PDF scope."""
+from concurrent.futures import Future
+import contextlib
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import ModuleType, SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+
+import pymupdf
+from PIL import Image
+
+from yeone_ocr.collate.section_editor import (BookmarkSectionEditor, ChangeReviewDialog, BodyExportScopeDialog,
+    CorrectionHistoryDialog, FindReplaceDialog, _copy_control_key, join_paragraph_lines, render_pdf_page, validate_pdf_range)
+from test_ops import _real_tk
+
+
+class FakeSession:
+    def __init__(self, original, corrected=None):
+        self.source_path = original
+        self.corrected_path = corrected or original.with_name(original.stem + "_교정.hwpx")
+        self.paragraphs = [
+            SimpleNamespace(index=10, original_text="瀉白散", corrected_text="瀉白散", editable=False, readonly_reason="제목 문단은 보기만 가능합니다."),
+            SimpleNamespace(index=11, original_text="上藥人梗米", corrected_text="上藥入粳米", editable=True, readonly_reason=""),
+            SimpleNamespace(index=12, original_text="氣喘咳嗽", corrected_text="氣喘咳嗽", editable=True, readonly_reason=""),
+        ]
+        self.calls = []
+        self.failure = None
+        self.external_text = "他段皰疹"
+
+    def save(self, changes, *, replacement_plan=None):
+        if self.failure:
+            raise self.failure
+        self.calls.append(dict(changes))
+        for paragraph in self.paragraphs:
+            if paragraph.index in changes:
+                paragraph.corrected_text = changes[paragraph.index]
+        return SimpleNamespace(path=self.corrected_path, saved_count=len(changes),
+                               backup_path=self.corrected_path.with_suffix(".bak.hwpx"), reports_stale=True)
+
+    def export_text(self, changes, *, scope="section"):
+        texts = {p.index: p.corrected_text for p in self.paragraphs}
+        if scope == "document":
+            texts.update({0: "문서 앞부분", 99: self.external_text, 100: "문서 뒷부분"})
+        elif scope != "section":
+            raise ValueError("Unknown export scope")
+        return "\n\n".join(changes.get(index, texts[index]) for index in sorted(texts))
+
+    def preview_replace(self, find, replacement, *, scope, paragraph_index, changes, previous_plan=None, match=None):
+        if not find:
+            raise ValueError("찾을 글자를 입력하세요.")
+        baseline = {p.index: p.corrected_text for p in self.paragraphs}
+        baseline[99] = self.external_text
+        wanted = ([paragraph_index] if scope == "paragraph" else
+                  list(baseline) if scope == "document" else [p.index for p in self.paragraphs])
+        result = dict(changes)
+        entries, skipped = [], []
+        for index in wanted:
+            before = changes.get(index, baseline[index])
+            count = before.count(find)
+            if not count:
+                continue
+            if index == 10:
+                skipped.append(SimpleNamespace(index=index, reason="제목 읽기 전용", count=count))
+                continue
+            if match is not None:
+                if index != match[0]:
+                    continue
+                offset = match[1]
+                after = before[:offset] + replacement + before[offset + len(find):]
+                count = 1
+            else:
+                after = before.replace(find, replacement)
+            entries.append(SimpleNamespace(index=index, before=before, after=after, count=count))
+            if after != baseline[index]:
+                result[index] = after
+            else:
+                result.pop(index, None)
+        return SimpleNamespace(changes=result, baseline=baseline, entries=tuple(entries), skipped=tuple(skipped),
+                               matches=sum(entry.count for entry in entries), paragraph_count=len(entries))
+
+
+class PdfRendering(unittest.TestCase):
+    def test_image_and_folder_sources_render_the_original_pages_without_writing_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            images = Path(folder) / "images"
+            images.mkdir()
+            first, second = images / "1.png", images / "2.png"
+            Image.new("RGB", (200, 300), "red").save(first)
+            Image.new("RGB", (200, 300), "blue").save(second)
+            before = {path: path.read_bytes() for path in images.iterdir()}
+            for source, page, color in ((first, 1, (255, 0, 0)), (images, 2, (0, 0, 255))):
+                with self.subTest(source=source, page=page):
+                    self.assertEqual(validate_pdf_range(source, (page, page)), (page, page))
+                    picture = render_pdf_page(str(source), page, 432, None)
+                    self.assertEqual(picture.getpixel((20, 20)), color)
+                    picture.close()
+            self.assertEqual({path: path.read_bytes() for path in images.iterdir()}, before)
+
+    def test_page_numbers_are_one_based_and_renders_do_not_modify_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "source.pdf"
+            with pymupdf.open() as document:
+                page = document.new_page(width=200, height=300)
+                page.draw_rect(page.rect, color=(1, 0, 0), fill=(1, 0, 0))
+                page = document.new_page(width=200, height=300)
+                page.draw_rect(page.rect, color=(0, 0, 1), fill=(0, 0, 1))
+                document.save(path)
+            before = path.read_bytes()
+            first = render_pdf_page(str(path), 1, 432, None)
+            second = render_pdf_page(str(path), 2, 432, .5)
+            self.assertEqual(first.size, (400, 600))
+            self.assertEqual(second.size, (100, 150))
+            self.assertEqual(first.getpixel((20, 20)), (255, 0, 0))
+            self.assertEqual(second.getpixel((20, 20)), (0, 0, 255))
+            first.close(); second.close()
+            with self.assertRaises(ValueError):
+                render_pdf_page(str(path), 0, 432, None)
+            self.assertEqual(path.read_bytes(), before)
+
+
+class SectionEditorTk(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _real_tk()
+        cls.root.withdraw()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        # Exercise real Tk clipboard bindings without reading or overwriting the
+        # user's system clipboard. Native Text class handlers use this command too.
+        self.clipboard = {"text": "", "clears": 0}
+        self.root.tk.call("rename", "clipboard", "__section_editor_native_clipboard")
+        def clipboard_command(operation, *args):
+            if operation == "clear":
+                self.clipboard["text"] = ""
+                self.clipboard["clears"] += 1
+            elif operation == "append":
+                self.clipboard["text"] += args[-1]
+            elif operation == "get":
+                return self.clipboard["text"]
+            return ""
+        self.root.tk.createcommand("clipboard", clipboard_command)
+        def restore_clipboard():
+            self.root.tk.deletecommand("clipboard")
+            self.root.tk.call("rename", "__section_editor_native_clipboard", "clipboard")
+        self.addCleanup(restore_clipboard)
+        self.folder = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.pdf = self.folder / "book.pdf"
+        with pymupdf.open() as document:
+            for _ in range(4):
+                document.new_page(width=300, height=400)
+            document.save(self.pdf)
+        self.hwpx = self.folder / "book.hwpx"
+        self.hwpx.write_bytes(b"original fixture; GUI must never overwrite")
+        self.session = FakeSession(self.hwpx)
+        backend = ModuleType("yeone_ocr.collate.section_edit")
+        self.factory = Mock(return_value=self.session)
+        backend.SectionEditSession = SimpleNamespace(open=self.factory)
+        self.stack.enter_context(patch.dict(sys.modules, {"yeone_ocr.collate.section_edit": backend}))
+        self.error = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.showerror"))
+        self.info = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.showinfo"))
+        self.choice = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.askyesnocancel"))
+        self.yes = self.stack.enter_context(patch("yeone_ocr.collate.section_editor.messagebox.askyesno", return_value=True))
+        self.confirm = self.stack.enter_context(patch.object(BookmarkSectionEditor, "_confirm_changes", return_value=True))
+        self.can_write = Mock(return_value=True)
+        self.saved = Mock()
+        self.editor = BookmarkSectionEditor(self.root, pdf_path=self.pdf, hwpx_path=self.hwpx, section_name="瀉白散",
+                                             section_start=10, section_end=13, pdf_pages=(2, 3), can_write=self.can_write,
+                                             on_saved=self.saved, heading_styles=["제목-처방명"], anchor_source="hwpx")
+        self.editor.withdraw()
+        self.addCleanup(lambda: self.editor.destroy() if not self.editor._closed else None)
+        self.root.update()
+
+    def edit(self, index, value):
+        widget = self.editor._editors[index]
+        widget.delete("1.0", "end")
+        widget.insert("1.0", value)
+        widget.edit_modified(False)
+        self.editor._update_status()
+
+    @staticmethod
+    def style(start, end, foreground="", background="", *, bold=False, underline=False, kind=""):
+        return SimpleNamespace(start=start, end=end, foreground=foreground, background=background,
+                               bold=bold, underline=underline, kind=kind)
+
+    def saved_styles(self, value, spans, *, original=None, index=11):
+        paragraph = self.editor._paragraphs[index]
+        paragraph.corrected_text = value
+        paragraph.original_text = value if original is None else original
+        paragraph.corrected_styles = tuple(spans)
+        self.editor._baseline[index] = value
+        self.edit(index, value)
+        self.editor._editors[index].edit_reset()
+        self.editor._highlight(index)
+
+    def paint_at(self, offset, *, index=11):
+        widget = self.editor._editors[index]
+        result = {key: str(widget.cget(key)) for key in ("foreground", "background", "font")}
+        result["underline"] = "0"
+        for tag in widget.tag_names(f"1.0+{offset}c"):
+            for key in result:
+                value = str(widget.tag_cget(tag, key))
+                if value:
+                    result[key] = value
+        return result
+
+    def generated_editor(self):
+        self.editor.destroy()
+        sessions = {}
+        for page, first in ((2, 10), (4, 30)):
+            session = FakeSession(self.hwpx)
+            for offset, paragraph in enumerate(session.paragraphs):
+                paragraph.index = first + offset
+            session.page = page
+            session.generated_pages = (2, 4)
+            session.pdf_pages = (page, page)
+            session.start, session.end = first, first + 3
+            session.section_name = f"원본 {page}쪽"
+            sessions[page] = session
+        factory = Mock(side_effect=lambda _source, _hwpx, page=None, **_options: sessions[page or 2])
+        sys.modules["yeone_ocr.collate.section_edit"].SectionEditSession.open_generated = factory
+        self.stack.enter_context(patch.object(BookmarkSectionEditor, "_start_cursor_map"))
+        self.editor = BookmarkSectionEditor(self.root, pdf_path=self.pdf, hwpx_path=self.hwpx, generated=True,
+                                             work_dir=self.folder / "work", can_write=self.can_write)
+        self.editor.withdraw()
+        self.root.update()
+        return sessions, factory
+
+    def test_generated_editor_opens_only_one_result_scope_and_pins_work_source_and_output(self):
+        sessions, factory = self.generated_editor()
+        factory.assert_called_once_with(str(self.pdf), str(self.hwpx), None, work_dir=self.folder / "work")
+        self.assertEqual(self.editor.pdf_pages, (2, 2))
+        self.assertEqual(set(self.editor._editors), {10, 11, 12})
+        self.assertEqual(tuple(self.editor.scope_choice.cget("values")), ("2", "4"))
+        self.assertEqual(self.editor._work_dir, str((self.folder / "work").resolve()))
+        self.assertEqual(self.editor._source_title, "원본 PDF")
+        self.assertEqual(self.editor.copy_section_button.cget("text"), "범위 전체 복사")
+        self.assertIn("인식 결과 HWPX", self.editor.v_compare.get())
+        self.assertFalse(self.editor.dirty)
+
+    def test_generated_scope_navigation_keeps_drafts_on_cancel_and_accumulates_after_save(self):
+        sessions, factory = self.generated_editor()
+        old = self.editor._editors[11]
+        self.edit(11, "수정한 2쪽")
+        self.choice.return_value = None
+        self.assertFalse(self.editor.switch_generated_page(4))
+        self.assertEqual(factory.call_count, 1)
+        self.assertEqual(self.editor.v_generated_page.get(), "2")
+        self.assertIs(self.editor._editors[11], old)
+        self.assertTrue(self.editor.dirty)
+        self.choice.return_value = True
+        self.assertTrue(self.editor.switch_generated_page(4))
+        self.assertEqual(sessions[2].calls, [{11: "수정한 2쪽"}])
+        self.assertEqual(set(self.editor._editors), {30, 31, 32})
+        self.assertFalse(old.winfo_exists())
+        self.assertFalse(self.editor.dirty)
+        self.edit(31, "수정한 4쪽")
+        self.assertTrue(self.editor.switch_generated_page(2))
+        self.assertEqual(sessions[4].calls, [{31: "수정한 4쪽"}])
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "수정한 2쪽")
+        self.assertEqual(self.editor.pdf_pages, (2, 2))
+        self.assertEqual(self.hwpx.read_bytes(), b"original fixture; GUI must never overwrite")
+
+    def test_generated_failed_load_or_save_preserves_existing_scope_and_drafts(self):
+        sessions, factory = self.generated_editor()
+        self.edit(11, "보관할 수정")
+        self.choice.return_value = True
+        self.confirm.return_value = False
+        self.assertFalse(self.editor.switch_generated_page(4))
+        self.assertEqual(factory.call_count, 1)
+        self.choice.return_value = False
+        factory.side_effect = ValueError("생성본이 바뀌었습니다")
+        self.assertFalse(self.editor.switch_generated_page(4))
+        self.assertEqual(self.editor.session.page, 2)
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "보관할 수정")
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.editor.v_generated_page.get(), "2")
+        self.assertEqual(sessions[2].calls, [])
+
+    def test_generated_shared_paragraph_can_show_every_original_page_without_reloading_drafts(self):
+        sessions, factory = self.generated_editor()
+        sessions[4].pdf_pages = (2, 4)
+        self.assertTrue(self.editor.switch_generated_page(4))
+        self.assertEqual(tuple(self.editor.page_choice.cget("values")), ("2", "3", "4"))
+        self.assertEqual(self.editor._pdf_page, 4)
+        count = factory.call_count
+        self.edit(31, "여러 쪽에 이어진 수정")
+        self.editor.set_page(2)
+        self.assertEqual(self.editor._pdf_page, 2)
+        self.assertEqual(factory.call_count, count)
+        self.assertEqual(self.editor.session.page, 4)
+        self.assertEqual(self.editor._editors[31].get("1.0", "end-1c"), "여러 쪽에 이어진 수정")
+        self.assertTrue(self.editor.dirty)
+
+    def test_generated_controls_fit_900px_and_block_reloading_during_ocr(self):
+        self.generated_editor()
+        self.editor.geometry("900x640")
+        self.editor.deiconify()
+        self.root.update()
+        for widget in (self.editor.scope_choice, self.editor.scope_previous, self.editor.scope_next,
+                       self.editor.find_button, self.editor.copy_section_button, *self.editor.mark_legend):
+            with self.subTest(widget=widget):
+                self.assertTrue(widget.winfo_ismapped())
+                self.assertGreater(widget.winfo_width(), 20)
+                self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(),
+                                     self.editor.doc_panel.winfo_rootx() + self.editor.doc_panel.winfo_width())
+        self.can_write.return_value = False
+        self.assertFalse(self.editor.switch_generated_page(4))
+        self.assertEqual(self.editor.session.page, 2)
+        self.assertIn("OCR 작업이 끝난 뒤", self.info.call_args.args[1])
+
+    def test_section_scope_and_custom_index_settings_are_passed_to_backend(self):
+        self.factory.assert_called_once_with(str(self.pdf), str(self.hwpx), "瀉白散", 10, 13,
+                                             heading_styles=["제목-처방명"], anchor_source="hwpx")
+        self.assertEqual(str(self.editor._editors[10].cget("state")), "disabled")
+
+    def test_pdf_paging_is_bounded_and_does_not_change_selected_paragraph(self):
+        self.editor.select_paragraph(12)
+        self.editor.set_page(99)
+        self.assertEqual(self.editor._pdf_page, 3)
+        self.assertEqual(self.editor._active, 12)
+        self.assertEqual(str(self.editor.next_button.cget("state")), "disabled")
+        self.editor.change_page(-20)
+        self.assertEqual(self.editor._pdf_page, 2)
+        self.assertEqual(str(self.editor.previous_button.cget("state")), "disabled")
+
+    def test_switching_paragraph_preserves_drafts_and_save_reviews_only_changes(self):
+        self.edit(11, "上藥入粳米一撮")
+        self.editor.select_paragraph(12)
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "上藥入粳米一撮")
+        self.assertTrue(self.editor.dirty)
+        self.assertTrue(self.editor.save())
+        self.confirm.assert_called_once_with({11: "上藥入粳米一撮"})
+        self.assertEqual(self.session.calls, [{11: "上藥入粳米一撮"}])
+        self.assertFalse(self.editor.dirty)
+        self.assertIn("수정 전 사본", self.editor.v_status.get())
+        self.saved.assert_called_once_with(self.session.corrected_path)
+        self.assertEqual(self.hwpx.read_bytes(), b"original fixture; GUI must never overwrite")
+
+    def test_correction_history_shows_saved_records_without_saving_current_draft(self):
+        records = [{"time": "2026-10-20 12:00:00", "section": "瀉白散", "paragraph": 11,
+                    "before": "사火之劑", "after": "瀉火之劑"}]
+        self.session.correction_records = Mock(return_value=records)
+        self.edit(11, "아직 저장하지 않은 수정")
+        with patch("yeone_ocr.collate.section_editor.CorrectionHistoryDialog") as dialog:
+            self.editor.history_button.invoke()
+        dialog.assert_called_once_with(self.editor, records)
+        self.assertEqual(self.session.calls, [])
+        self.assertTrue(self.editor.dirty)
+        display = CorrectionHistoryDialog(self.editor, records)
+        self.addCleanup(display.destroy)
+        text = display.text.get("1.0", "end-1c")
+        self.assertIn("문단 12", text)
+        self.assertIn("사火之劑", text)
+        self.assertIn("瀉火之劑", text)
+        self.assertNotIn("아직 저장하지 않은 수정", text)
+        self.assertEqual(str(display.text.cget("state")), "disabled")
+        selected = display.text.tag_ranges("changed")
+        self.assertEqual(display.text.get(selected[0], selected[1]), "瀉")
+
+    def test_legacy_history_explains_that_only_new_saves_record_before_and_after(self):
+        display = CorrectionHistoryDialog(self.editor, [])
+        self.addCleanup(display.destroy)
+        self.assertIn("이 버전부터", display.text.get("1.0", "end-1c"))
+        self.assertIn("기존 판독 기록은 유지", display.note.cget("text"))
+        self.assertEqual(self.session.calls, [])
+
+    def test_save_status_reports_correction_memory_or_its_warning(self):
+        original_save = self.session.save
+        def save(changes):
+            result = original_save(changes)
+            result.learning_path = self.session.corrected_path.with_suffix(".manual.json")
+            result.learning_count = 1
+            result.learning_warning = ""
+            return result
+        self.session.save = save
+        self.edit(11, "瀉火之劑")
+        self.assertTrue(self.editor.save())
+        self.assertIn("다음 새 판독 참고 1건", self.editor.v_status.get())
+        def warning_save(changes):
+            result = save(changes)
+            result.learning_warning = "수정 기록 확인 필요"
+            return result
+        self.session.save = warning_save
+        self.edit(11, "瀉火之劑。")
+        self.assertTrue(self.editor.save())
+        self.assertIn("수정 사례 참고 보류", self.editor.v_status.get())
+        self.assertNotIn("다음 새 판독 참고", self.editor.v_status.get())
+
+    def test_cancel_review_never_saves_or_discards_drafts(self):
+        self.edit(12, "氣喘咳嗽。")
+        self.confirm.return_value = False
+        self.assertFalse(self.editor.save())
+        self.assertEqual(self.session.calls, [])
+        self.assertTrue(self.editor.dirty)
+        self.assertFalse(self.editor.busy)
+
+    def test_save_conflict_keeps_drafts_and_does_not_notify_success(self):
+        self.edit(12, "修改文字")
+        self.session.failure = ValueError("교정본이 외부에서 변경되었습니다. 다시 불러오십시오.")
+        self.assertFalse(self.editor.save())
+        self.assertTrue(self.editor.dirty)
+        self.assertFalse(self.editor.busy)
+        self.assertIn("외부에서 변경", self.error.call_args.args[1])
+        self.assertNotIn("읽기 전용", self.error.call_args.args[1])
+        self.saved.assert_not_called()
+
+    def test_save_access_failure_preserves_drafts_caret_undo_export_and_same_window_retry(self):
+        self.edit(11, "手動修改𠀀")
+        self.edit(12, "另一段修改")
+        self.editor._external_changes[99] = "他段手動修改"
+        widget = self.editor._editors[11]
+        widget.edit_separator()
+        widget.insert("end-1c", "疱")
+        widget.edit_separator()
+        widget.mark_set("insert", "1.2")
+        widget.tag_add("sel", "1.1", "1.3")
+        drafts = self.editor._changes()
+        baseline = dict(self.editor._baseline)
+        caret, selection = widget.index("insert"), tuple(map(str, widget.tag_ranges("sel")))
+        error = PermissionError(13, "synthetic temporary-file access failure", str(self.folder / "unsafe-looking.tmp"))
+        error.path, error.winerror = self.session.corrected_path, 5
+        self.session.failure = error
+        self.assertFalse(self.editor.save())
+        message = self.error.call_args.args[1]
+        for text in (str(self.session.corrected_path.resolve()), "한글", "변경 확인·저장", "본문 내보내기", "오류 코드: 5"):
+            self.assertIn(text, message)
+        self.assertNotIn("unsafe-looking.tmp", message)
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertEqual(self.editor._baseline, baseline)
+        self.assertEqual(widget.index("insert"), caret)
+        self.assertEqual(tuple(map(str, widget.tag_ranges("sel"))), selection)
+        self.assertTrue(self.editor.dirty)
+        self.assertFalse(self.editor.busy)
+        self.assertFalse(self.editor.save_button.instate(["disabled"]))
+        self.assertFalse(self.editor.export_button.instate(["disabled"]))
+        self.assertIn("저장되지 않음", self.editor.v_status.get())
+        self.assertEqual(self.session.calls, [])
+        self.saved.assert_not_called()
+        widget.edit_undo()
+        self.assertNotEqual(widget.get("1.0", "end-1c"), drafts[11])
+        widget.edit_redo()
+        self.assertEqual(self.editor._changes(), drafts)
+        output = self.folder / "after-access-failure.txt"
+        self.assertTrue(self.editor.export_changes(output, scope="document"))
+        self.assertIn(drafts[11], output.read_text("utf-8-sig"))
+        self.assertIn(drafts[99], output.read_text("utf-8-sig"))
+        self.assertEqual(self.editor._changes(), drafts)
+        self.session.failure = None
+        self.assertTrue(self.editor.save())
+        self.assertEqual(self.session.calls, [drafts])
+        self.assertFalse(self.editor.dirty)
+        self.saved.assert_called_once_with(self.session.corrected_path)
+
+    def test_save_access_message_identifies_blocked_history_or_windows_sharing_target(self):
+        self.edit(11, "修改")
+        for code in (5, 32, 33):
+            with self.subTest(winerror=code):
+                error = OSError("temporary -> target raw details")
+                error.winerror = code
+                error.path = self.folder / "book_교정.manual-edits.json"
+                self.session.failure = error
+                self.assertFalse(self.editor.save())
+                message = self.error.call_args.args[1]
+                self.assertIn(str(self.session.corrected_path.resolve()), message)
+                self.assertIn(str(error.path.resolve()), message)
+                self.assertIn(f"오류 코드: {code}", message)
+                self.assertNotIn("raw details", message)
+                self.assertTrue(self.editor.dirty)
+                self.assertFalse(self.editor.busy)
+
+    def test_busy_parent_blocks_before_review_and_rechecks_after_review(self):
+        self.edit(11, "修改")
+        self.can_write.return_value = False
+        self.assertFalse(self.editor.save())
+        self.confirm.assert_not_called()
+        self.can_write.side_effect = [True, False]
+        self.assertFalse(self.editor.save())
+        self.assertEqual(self.session.calls, [])
+        self.assertTrue(self.editor.dirty)
+
+    def test_close_cancel_or_failed_save_keeps_window_and_discard_closes(self):
+        self.edit(11, "修改")
+        self.choice.return_value = None
+        self.assertFalse(self.editor.close())
+        self.assertTrue(self.editor.winfo_exists())
+        self.choice.return_value = True
+        self.confirm.return_value = False
+        self.assertFalse(self.editor.close())
+        self.assertTrue(self.editor.dirty)
+        self.choice.return_value = False
+        self.assertTrue(self.editor.close())
+        self.assertTrue(self.editor._closed)
+        self.assertEqual(self.session.calls, [])
+
+    def test_reload_cancel_or_failure_preserves_draft_and_discard_loads_new_snapshot(self):
+        self.edit(11, "입력한 수정")
+        self.choice.return_value = None
+        self.assertFalse(self.editor.reload())
+        self.assertEqual(self.factory.call_count, 1)
+        self.choice.return_value = False
+        self.factory.side_effect = ValueError("문서 구조가 바뀌었습니다")
+        self.assertFalse(self.editor.reload())
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "입력한 수정")
+        replacement = FakeSession(self.hwpx)
+        replacement.paragraphs[1].corrected_text = "外部修改"
+        self.factory.side_effect = None; self.factory.return_value = replacement
+        self.assertTrue(self.editor.reload())
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "外部修改")
+        self.assertFalse(self.editor.dirty)
+
+    def test_saved_colors_include_unchanged_review_text_and_author_format_not_string_differences(self):
+        self.saved_styles("甲𠀀乙丙丁", (
+            self.style(0, 1, "#008000", kind="green"),
+            self.style(1, 2, "#0000FF", kind="blue"),
+            self.style(2, 3, "#C00000", "#FFFF00", kind="red"),
+            self.style(3, 4, "#7A238F", "#F0EEDD", bold=True, underline=True),
+        ), original="甲𠀀乙丙誤")
+        widget = self.editor._editors[11]
+        self.assertEqual([self.paint_at(i)["foreground"] for i in range(5)],
+                         ["#008000", "#0000FF", "#C00000", "#7A238F", self.editor.colors["INK"]])
+        self.assertEqual(self.paint_at(2)["background"], "#FFFF00")
+        self.assertEqual(widget.get(*widget.tag_ranges("saved_style_1")), "𠀀")
+        author = self.paint_at(3)
+        self.assertEqual(author["underline"], "1")
+        self.assertEqual(self.root.tk.call("font", "actual", author["font"], "-weight"), "bold")
+        self.assertFalse(widget.edit_modified())
+        self.assertFalse(self.editor.dirty)
+        self.editor.toggle_marks()
+        self.assertEqual(self.editor.marks_button.cget("text"), "교정 표시 꺼짐")
+        self.assertEqual(self.paint_at(2)["foreground"], self.editor.colors["INK"])
+        self.assertEqual(self.paint_at(2)["background"], self.editor.colors["PANEL"])
+        self.assertEqual(self.paint_at(3), author)
+        self.editor.toggle_marks()
+        self.assertEqual(self.paint_at(2)["foreground"], "#C00000")
+        self.assertFalse(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_draft_styles_shift_around_insert_delete_replace_and_return_with_undo(self):
+        value = "甲𠀀乙丙丁"
+        self.saved_styles(value, (self.style(0, 2, "#008000", kind="green"),
+                                  self.style(2, 3, "#C00000", "#FFFF00", kind="red"),
+                                  self.style(3, 4, "#0000FF", kind="blue")))
+        widget = self.editor._editors[11]
+        self.editor._set_draft_text(11, "新甲𠀀改丙丁")
+        self.assertEqual([self.paint_at(i)["foreground"] for i in range(6)],
+                         [self.editor.colors["INK"], "#008000", "#008000", self.editor.colors["INK"],
+                          "#0000FF", self.editor.colors["INK"]])
+        self.assertEqual(self.paint_at(3)["background"], self.editor.colors["PANEL"])
+        self.editor._set_draft_text(11, "𠀀改丙丁")
+        self.assertEqual([self.paint_at(i)["foreground"] for i in range(3)],
+                         ["#008000", self.editor.colors["INK"], "#0000FF"])
+        widget.edit_undo()
+        self.editor._highlight(11)
+        self.assertEqual(widget.get("1.0", "end-1c"), "新甲𠀀改丙丁")
+        widget.edit_undo()
+        self.editor._highlight(11)
+        self.assertEqual(widget.get("1.0", "end-1c"), value)
+        self.assertEqual(self.paint_at(2)["foreground"], "#C00000")
+        self.assertFalse(self.editor.dirty)
+
+    def test_save_reload_and_revert_refresh_stored_styles_without_recoloring_human_corrections(self):
+        self.saved_styles("甲乙丙", (self.style(0, 1, "#C00000", "#FFFF00", kind="red"),
+                                    self.style(1, 2, "#0000FF", kind="blue"),
+                                    self.style(2, 3, "#008000", kind="green")), original="誤乙丙")
+        self.editor._set_draft_text(11, "改乙丙")
+        self.assertEqual(self.paint_at(0)["foreground"], self.editor.colors["INK"])
+        self.editor.revert_changes()
+        self.assertEqual(self.paint_at(0)["foreground"], "#C00000")
+        self.editor._set_draft_text(11, "改乙丙")
+        original_save = self.session.save
+        def save_with_fresh_styles(changes):
+            result = original_save(changes)
+            self.session.paragraphs[1].corrected_styles = (
+                self.style(0, 1, "#000000"), self.style(1, 2, "#0000FF", kind="blue"),
+                self.style(2, 3, "#008000", kind="green"))
+            return result
+        self.session.save = save_with_fresh_styles
+        self.assertTrue(self.editor.save())
+        self.assertEqual([self.paint_at(i)["foreground"] for i in range(3)],
+                         ["#000000", "#0000FF", "#008000"])
+        self.assertEqual(self.paint_at(0)["background"], self.editor.colors["PANEL"])
+        self.assertFalse(self.editor.dirty)
+        self.assertTrue(self.editor.reload())
+        self.assertEqual([self.paint_at(i)["foreground"] for i in range(3)],
+                         ["#000000", "#0000FF", "#008000"])
+        self.assertFalse(self.editor.dirty)
+
+    def test_find_input_and_selection_tags_stay_above_file_styles(self):
+        self.saved_styles("甲乙丙", (self.style(0, 3, "#C00000", "#FFFF00", kind="red"),))
+        widget = self.editor._editors[11]
+        self.editor._reveal_text(11, 1, focus=False)
+        widget.tag_add("input_issue", "1.1", "1.2")
+        widget.tag_add("sel", "1.1", "1.2")
+        self.editor._highlight(11)
+        names = widget.tag_names()
+        self.assertLess(names.index("saved_style_0"), names.index("search_match"))
+        self.assertLess(names.index("search_match"), names.index("input_issue"))
+        self.assertLess(names.index("input_issue"), names.index("sel"))
+        self.assertEqual(widget.get("sel.first", "sel.last"), "乙")
+        self.assertEqual(widget.get(*widget.tag_ranges("search_match")), "乙")
+        self.assertFalse(self.editor.dirty)
+
+    def test_bold_font_tracks_manual_and_pdf_size_without_allocating_per_span_fonts(self):
+        self.saved_styles("甲乙丙", (self.style(0, 1, bold=True), self.style(1, 3, bold=True, underline=True)))
+        font_name = str(self.editor._editor_bold_font)
+        self.editor.change_text_size(1)
+        self.assertEqual(self.editor._editor_bold_font.cget("size"), self.editor._editor_font.cget("size"))
+        self.editor._cursor_map = SimpleNamespace(page_font_width=lambda _: .04, page_font_height=lambda _: None)
+        self.editor._image_size = (800, 1200)
+        self.editor._displayed_page = 2
+        self.editor.v_match_pdf_font.set(True)
+        self.editor._sync_text_size()
+        self.assertEqual(self.editor._editor_bold_font.cget("size"), self.editor._editor_font.cget("size"))
+        self.assertLessEqual(abs(self.editor._editor_font.measure("漢") - 32), 1)
+        self.editor._highlight(11)
+        self.assertEqual(self.paint_at(0)["font"], font_name)
+        self.assertEqual(self.paint_at(2)["font"], font_name)
+        self.assertFalse(self.editor.dirty)
+        self.editor._cursor_map = None
+
+    def test_path_view_uses_exact_current_corrected_target_even_when_basenames_match(self):
+        self.session.corrected_path = self.folder / "다른 폴더" / self.hwpx.name
+        self.editor.path_button.invoke()
+        self.info.assert_called_once_with("교정본 전체 경로", str(self.session.corrected_path.resolve()), parent=self.editor)
+        self.assertFalse(self.editor.dirty)
+        self.assertEqual(self.clipboard["clears"], 0)
+
+    def test_stale_pdf_render_cannot_replace_new_page(self):
+        if self.editor._poll_job:
+            self.editor.after_cancel(self.editor._poll_job)
+            self.editor._poll_job = None
+        future = Future()
+        picture = Image.new("RGB", (3, 3), "white")
+        future.set_result(picture)
+        self.editor._render_generation = 5
+        self.editor._render_future = (4, future)
+        with patch.object(self.editor, "_display_pdf") as display:
+            self.editor._poll_render()
+        display.assert_not_called()
+        picture.close()
+
+    def test_ctrl_s_runs_review_and_review_dialog_is_read_only(self):
+        self.edit(12, "修改")
+        self.assertEqual(self.editor._save_shortcut(), "break")
+        self.confirm.assert_called_once()
+        dialog = ChangeReviewDialog(self.editor, {11: "修改後"}, {11: "修改前"}, self.session.corrected_path)
+        try:
+            texts = []
+            def inspect(widget):
+                for child in widget.winfo_children():
+                    if child.winfo_class() == "Text":
+                        texts.append(child)
+                    inspect(child)
+            inspect(dialog)
+            self.assertEqual(len(texts), 1)
+            self.assertEqual(str(texts[0].cget("state")), "disabled")
+            self.assertIn("修改前", texts[0].get("1.0", "end"))
+            self.assertIn("修改後", texts[0].get("1.0", "end"))
+            self.assertFalse(dialog.accepted)
+            dialog._accept()
+            self.assertTrue(dialog.accepted)
+        finally:
+            if dialog.winfo_exists():
+                dialog.destroy()
+
+    def test_newline_repair_retains_other_drafts_and_can_be_undone(self):
+        self.edit(11, "上藥\r\n入粳米\t𠀀")
+        self.edit(12, "氣喘咳嗽。")
+        self.yes.return_value = False
+        self.assertFalse(self.editor.save())
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(self.editor._changes()[11], "上藥\r\n入粳米\t𠀀")
+        self.assertEqual(self.editor._active, 11)
+        self.yes.return_value = True
+        self.confirm.return_value = False
+        self.assertFalse(self.editor.save())
+        self.assertEqual(self.editor._changes(), {11: "上藥 入粳米 𠀀", 12: "氣喘咳嗽。"})
+        self.editor._editors[11].edit_undo()
+        self.assertEqual(self.editor._editors[11].get("1.0", "end-1c"), "上藥\r\n入粳米\t𠀀")
+        self.assertEqual(join_paragraph_lines(" 甲\r\n乙\t丙\u2028丁\u2029戊 "), " 甲 乙 丙 丁 戊 ")
+
+    def test_unhandled_control_is_located_without_discarding_drafts(self):
+        self.edit(11, "甲\x01乙")
+        self.edit(12, "修改")
+        self.assertFalse(self.editor.save())
+        self.assertIn("문단 12", self.error.call_args.args[1])
+        self.assertIn("U+0001", self.error.call_args.args[1])
+        self.assertEqual(self.editor._changes(), {11: "甲\x01乙", 12: "修改"})
+        self.yes.assert_not_called()
+
+    def test_enter_is_blocked_tab_moves_and_paste_has_reversible_space_join(self):
+        self.editor.deiconify()
+        self.root.update()
+        widget = self.editor._editors[11]
+        widget.focus_force()
+        widget.mark_set("insert", "end-1c")
+        before = widget.get("1.0", "end-1c")
+        widget.event_generate("<Return>")
+        self.root.update()
+        self.assertEqual(widget.get("1.0", "end-1c"), before)
+        widget.event_generate("<Tab>")
+        self.root.update()
+        self.assertEqual(self.editor._active, 12)
+        self.editor.clipboard_clear()
+        self.editor.clipboard_append("皰\r\n液\t𠀀")
+        self.editor._paste_paragraph(12)
+        self.assertIn("皰 液 𠀀", self.editor._editors[12].get("1.0", "end-1c"))
+        self.editor._editors[12].edit_undo()
+        self.assertEqual(self.editor._editors[12].get("1.0", "end-1c"), "氣喘咳嗽")
+
+    def replacement_dialog(self):
+        self.edit(11, "皰疹，皰液。手改")
+        self.edit(12, "原有手改")
+        self.editor.open_find_replace()
+        dialog = self.editor._find_dialog
+        dialog.v_find.set("皰")
+        dialog.v_replace.set("疱")
+        return dialog
+
+    def test_literal_replace_preview_stages_full_document_and_preserves_drafts(self):
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        self.assertTrue(dialog.preview())
+        self.assertEqual(dialog.plan.matches, 3)
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(self.editor._changes()[11], "皰疹，皰液。手改")
+        self.assertTrue(dialog.replace_all())
+        self.assertEqual(self.editor._changes(), {11: "疱疹，疱液。手改", 12: "原有手改", 99: "他段疱疹"})
+        self.assertIn("현재 구획 밖 1개", self.editor.v_status.get())
+        self.assertEqual(len(self.editor._editors), 3)
+        self.assertEqual(self.session.calls, [])
+        self.assertTrue(self.editor.save())
+        self.assertEqual(self.session.calls, [{11: "疱疹，疱液。手改", 12: "原有手改", 99: "他段疱疹"}])
+        self.assertFalse(self.editor.dirty)
+        self.assertEqual(self.editor._replace_undo, [])
+
+    def test_replace_all_undo_retains_drafts_from_before_replacement(self):
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        dialog.preview()
+        dialog.replace_all()
+        self.assertTrue(self.editor._undo_replacement())
+        self.assertEqual(self.editor._changes(), {11: "皰疹，皰液。手改", 12: "原有手改"})
+        self.assertEqual(self.editor._external_changes, {})
+        self.assertEqual(self.session.calls, [])
+
+    def test_replace_preview_stales_if_drafts_change_and_undo_protects_later_edits(self):
+        dialog = self.replacement_dialog()
+        dialog.preview()
+        self.edit(12, "後來修正")
+        self.assertFalse(dialog.replace_all())
+        self.assertEqual(self.editor._changes()[11], "皰疹，皰液。手改")
+        dialog.preview()
+        dialog.replace_all()
+        self.edit(12, "另外修正")
+        self.assertFalse(self.editor._undo_replacement())
+        self.assertEqual(self.editor._changes()[12], "另外修正")
+
+    def test_replace_single_uses_current_match_and_scope_keeps_other_sections(self):
+        dialog = self.replacement_dialog()
+        self.assertTrue(dialog.preview())
+        dialog.find_next()
+        dialog.find_next()
+        self.assertEqual(dialog._occurrence, 1)
+        self.assertTrue(dialog.replace_one())
+        self.assertEqual(self.editor._changes()[11], "皰疹，疱液。手改")
+        self.assertNotIn(99, self.editor._changes())
+        self.assertEqual(self.session.calls, [])
+
+    def test_full_document_drafts_are_reverted_or_retained_on_reload_failure(self):
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        dialog.preview()
+        dialog.replace_all()
+        self.choice.return_value = False
+        self.factory.side_effect = ValueError("外部修改")
+        self.assertFalse(self.editor.reload())
+        self.assertEqual(self.editor._changes()[99], "他段疱疹")
+        self.editor.revert_changes()
+        self.assertFalse(self.editor.dirty)
+        self.assertIsNone(self.editor._replacement_plan)
+        self.assertEqual(self.session.calls, [])
+
+    def test_ctrl_h_does_not_delete_a_character_and_toolbar_fits_minimum_width(self):
+        self.editor.deiconify()
+        self.editor.geometry("900x640")
+        self.root.update()
+        self.editor._initial_split()
+        widget = self.editor._editors[11]
+        widget.focus_force()
+        widget.mark_set("insert", "end-1c")
+        before = widget.get("1.0", "end-1c")
+        widget.event_generate("<Control-h>")
+        self.root.update()
+        self.assertEqual(widget.get("1.0", "end-1c"), before)
+        self.assertTrue(self.editor._find_dialog.winfo_exists())
+        button = self.editor.find_button
+        self.assertGreater(button.winfo_width(), 80)
+        self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                             self.editor.doc_panel.winfo_rootx() + self.editor.doc_panel.winfo_width())
+
+    def test_existing_line_breaks_outside_section_remain_valid_after_replacement(self):
+        self.session.external_text = "他段皰\n疹"
+        dialog = self.replacement_dialog()
+        dialog.v_scope.set("교정본 전체")
+        dialog.preview()
+        dialog.replace_all()
+        self.assertTrue(self.editor.save())
+        self.assertEqual(self.session.calls[0][99], "他段疱\n疹")
+        self.yes.assert_not_called()
+
+    def test_repair_preserves_preexisting_separator_while_joining_added_tab(self):
+        self.editor._baseline[11] = "甲\n皰"
+        self.edit(11, "甲\n疱\t液")
+        self.assertTrue(self.editor._prepare_paragraph_input())
+        self.assertEqual(self.editor._changes()[11], "甲\n疱 液")
+
+    def test_an_independent_preview_cannot_apply_after_document_reload(self):
+        self.edit(11, "皰疹")
+        self.session.paragraphs[1].corrected_text = "皰疹"
+        self.editor._baseline[11] = "皰疹"
+        dialog = FindReplaceDialog(self.editor)
+        self.addCleanup(lambda: dialog.destroy() if dialog.winfo_exists() else None)
+        dialog.v_find.set("皰")
+        dialog.v_replace.set("疱")
+        self.assertTrue(dialog.preview())
+        self.assertTrue(self.editor.reload())
+        self.assertFalse(dialog.replace_all())
+        self.assertFalse(self.editor.dirty)
+
+    def test_copy_shortcuts_copy_unsaved_unicode_selection_without_changing_draft(self):
+        self.editor.deiconify()
+        self.edit(11, "單純疱疹𠀀")
+        widget = self.editor._editors[11]
+        widget.focus_force()
+        self.root.update()
+        widget.tag_add("sel", "1.2", "end-1c")
+        expected = widget.get("sel.first", "sel.last")
+        drafts = self.editor._changes()
+        for sequence in ("<Control-c>", "<Control-C>", "<Control-Insert>", "<<Copy>>"):
+            with self.subTest(sequence=sequence):
+                self.clipboard["text"] = "unchanged sentinel"
+                widget.event_generate(sequence)
+                self.root.update()
+                self.assertEqual(self.clipboard["text"], expected)
+                self.assertEqual(widget.get("sel.first", "sel.last"), expected)
+                self.assertEqual(self.editor._changes(), drafts)
+        self.assertEqual(expected, "疱疹𠀀")
+        self.assertEqual(self.session.calls, [])
+
+    def test_ime_copy_uses_physical_c_key_and_does_not_intercept_alt_shortcuts(self):
+        self.edit(11, "單純疱疹")
+        widget = self.editor._editors[11]
+        widget.tag_add("sel", "1.2", "1.3")
+        with patch("yeone_ocr.collate.section_editor.sys.platform", "win32"):
+            self.assertEqual(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4, keysym="ㅊ")), "break")
+            self.assertEqual(self.clipboard["text"], "疱")
+            self.clipboard["text"] = "sentinel"
+            self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4 | 0x20000, keysym="ㅊ")))
+            self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=88, state=4, keysym="ㅌ")))
+            self.assertEqual(self.clipboard["text"], "sentinel")
+
+    def test_ime_select_all_then_copy_keeps_unsaved_unicode_and_alt_shortcuts(self):
+        self.edit(11, "수정 疱𠀀漢\ufe00")
+        widget = self.editor._editors[11]
+        drafts = self.editor._changes()
+        with patch("yeone_ocr.collate.section_editor.sys.platform", "win32"):
+            self.assertEqual(_copy_control_key(widget, SimpleNamespace(keycode=65, state=4, keysym="ㅁ")), "break")
+            self.assertEqual(widget.get("sel.first", "sel.last"), drafts[11])
+            self.assertEqual(_copy_control_key(widget, SimpleNamespace(keycode=67, state=4, keysym="ㅊ")), "break")
+            self.assertEqual(self.clipboard["text"], drafts[11])
+            widget.tag_remove("sel", "1.0", "end")
+            self.assertIsNone(_copy_control_key(widget, SimpleNamespace(keycode=65, state=4 | 0x20000)))
+            self.assertFalse(widget.tag_ranges("sel"))
+        widget.event_generate("<<SelectAll>>")
+        self.assertEqual(widget.get("sel.first", "sel.last"), drafts[11])
+        self.assertEqual(self.editor._changes(), drafts)
+
+    def test_whole_section_copy_includes_all_paragraphs_after_save_error(self):
+        self.edit(11, "수정한 疱𠀀")
+        self.edit(12, "다른 문단의 수정")
+        self.session.failure = ValueError("synthetic save error")
+        self.assertFalse(self.editor.save())
+        widget = self.editor._editors[11]
+        widget.tag_add("sel", "1.0", "1.2")
+        selection = tuple(widget.tag_ranges("sel"))
+        caret = widget.index("insert")
+        drafts = self.editor._changes()
+        self.assertTrue(self.editor.copy_section_text())
+        self.assertEqual(self.clipboard["text"], "瀉白散\n\n수정한 疱𠀀\n\n다른 문단의 수정")
+        self.assertEqual(tuple(widget.tag_ranges("sel")), selection)
+        self.assertEqual(widget.index("insert"), caret)
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_export_body_has_all_paragraphs_and_drafts_without_before_after_labels(self):
+        self.edit(11, "수정 疱𠀀漢\ufe00\r\n보관\t내용")
+        self.editor._external_changes[99] = "구획 밖 수정𠀀"
+        self.editor._baseline[99] = "구획 밖 수정 전"
+        drafts = self.editor._changes()
+        corrected = self.session.corrected_path
+        corrected.write_bytes(b"existing corrected snapshot")
+        history = corrected.with_suffix(".manual.json")
+        history.write_bytes(b"existing history")
+        path = self.folder / "draft.txt"
+        self.assertTrue(self.editor.export_changes(path))
+        self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
+        exported = path.read_bytes().decode("utf-8-sig")
+        self.assertEqual(exported, "瀉白散\n\n" + drafts[11] + "\n\n氣喘咳嗽")
+        document_path = self.folder / "whole-document.txt"
+        self.assertTrue(self.editor.export_changes(document_path, scope="document"))
+        self.assertEqual(document_path.read_bytes().decode("utf-8-sig"),
+                         "문서 앞부분\n\n瀉白散\n\n" + drafts[11] + "\n\n氣喘咳嗽\n\n"
+                         + drafts[99] + "\n\n문서 뒷부분")
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(corrected.read_bytes(), b"existing corrected snapshot")
+        self.assertEqual(history.read_bytes(), b"existing history")
+        self.assertEqual(self.hwpx.read_bytes(), b"original fixture; GUI must never overwrite")
+        self.assertEqual(self.session.calls, [])
+        self.assertEqual(list(self.folder.glob(".*.tmp")), [])
+
+    def test_export_cancel_and_write_failure_leave_drafts_and_previous_text_untouched(self):
+        self.edit(11, "보관할 수정")
+        drafts = self.editor._changes()
+        with patch.object(self.editor, "_choose_export_scope", return_value="section"), \
+                patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=""):
+            self.assertFalse(self.editor.export_changes())
+        with patch.object(self.editor, "_choose_export_scope", return_value=None), \
+                patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename") as choose_file:
+            self.assertFalse(self.editor.export_changes())
+            choose_file.assert_not_called()
+        path = self.folder / "draft.txt"
+        path.write_bytes(b"previous export")
+        with patch("yeone_ocr.collate.section_editor.os.replace", side_effect=PermissionError("synthetic locked file")):
+            self.assertFalse(self.editor.export_changes(path))
+        self.assertEqual(path.read_bytes(), b"previous export")
+        self.assertEqual(list(self.folder.glob(".*.tmp")), [])
+        self.assertEqual(self.editor._changes(), drafts)
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_export_rejects_document_paths_and_txt_hardlink_to_original(self):
+        self.edit(11, "보관할 수정")
+        original = self.hwpx.read_bytes()
+        linked = self.folder / "original-alias.txt"
+        os.link(self.hwpx, linked)
+        for path in (self.hwpx, self.pdf, self.session.corrected_path,
+                     self.session.corrected_path.with_suffix(".manual.json"), linked):
+            with self.subTest(path=path.name):
+                self.assertFalse(self.editor.export_changes(path))
+        self.assertEqual(self.hwpx.read_bytes(), original)
+        self.assertEqual(linked.read_bytes(), original)
+        self.assertEqual(self.editor._changes(), {11: "보관할 수정"})
+        self.assertEqual(self.session.calls, [])
+
+    def test_change_review_can_export_without_accepting_or_closing(self):
+        self.edit(11, "수정 후 疱")
+        dialog = ChangeReviewDialog(self.editor, self.editor._changes(), self.editor._baseline,
+                                    self.session.corrected_path)
+        self.addCleanup(lambda: dialog.destroy() if dialog.winfo_exists() else None)
+        path = self.folder / "review.txt"
+        with patch.object(self.editor, "_choose_export_scope", return_value="section"), \
+                patch("yeone_ocr.collate.section_editor.filedialog.asksaveasfilename", return_value=str(path)):
+            dialog.export_button.invoke()
+        self.assertTrue(dialog.winfo_exists())
+        self.assertFalse(dialog.accepted)
+        self.assertEqual(path.read_text(encoding="utf-8-sig"), "瀉白散\n\n수정 후 疱\n\n氣喘咳嗽")
+        self.assertTrue(self.editor.dirty)
+        self.assertEqual(self.session.calls, [])
+
+    def test_unchanged_body_can_be_exported_and_scope_dialog_restores_review_grab(self):
+        self.assertEqual(str(self.editor.export_button.cget("state")), "normal")
+        path = self.folder / "unchanged.txt"
+        self.assertTrue(self.editor.export_changes(path))
+        self.assertEqual(path.read_text(encoding="utf-8-sig"), "瀉白散\n\n上藥入粳米\n\n氣喘咳嗽")
+        self.assertFalse(self.editor.dirty)
+        review = ChangeReviewDialog(self.editor, {}, self.editor._baseline, self.session.corrected_path)
+        self.addCleanup(lambda: review.destroy() if review.winfo_exists() else None)
+        def select_document():
+            dialog = next(child for child in review.winfo_children() if isinstance(child, BodyExportScopeDialog))
+            self.assertEqual(dialog.v_scope.get(), "section")
+            dialog.v_scope.set("document")
+            dialog.accept_button.invoke()
+        self.root.after_idle(select_document)
+        self.assertEqual(self.editor._choose_export_scope(review, "section"), "document")
+        self.assertIs(self.editor.grab_current(), review)
+        self.assertFalse(review.accepted)
+        self.assertEqual(self.session.calls, [])
+
+    def test_copy_and_export_controls_fit_minimum_window_width(self):
+        self.editor.geometry("900x640")
+        self.editor.deiconify()
+        self.root.update()
+        buttons = (self.editor.copy_section_button, self.editor.find_button, self.editor.export_button,
+                   self.editor.save_button, self.editor.history_button, self.editor.revert_button,
+                   self.editor.path_button, self.editor.marks_button, *self.editor.mark_legend)
+        for button in buttons:
+            with self.subTest(button=button.cget("text")):
+                self.assertTrue(button.winfo_ismapped())
+                self.assertGreater(button.winfo_width(), 20)
+                self.assertGreaterEqual(button.winfo_rootx(), self.editor.winfo_rootx())
+                self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                     self.editor.winfo_rootx() + self.editor.winfo_width())
+        self.assertLessEqual(self.editor.find_button.winfo_rootx() + self.editor.find_button.winfo_width(),
+                             self.editor.copy_section_button.winfo_rootx())
+
+    def test_context_copy_preserves_selection_after_focus_moves_and_has_clear_empty_state(self):
+        self.edit(11, "單純疱疹𠀀")
+        widget = self.editor._editors[11]
+        widget.tag_add("sel", "1.2", "1.3")
+        # Selecting in another widget must not remove the correction selection.
+        other = self.editor._editors[12]
+        other.tag_add("sel", "1.0", "1.1")
+        self.editor._highlight(11)
+        self.assertEqual(widget.get("sel.first", "sel.last"), "疱")
+        self.assertGreater(widget.tag_names().index("sel"), widget.tag_names().index("search_match"))
+        menu = widget._copy_menu
+        with patch.object(menu, "tk_popup") as popup:
+            widget._copy_popup(SimpleNamespace(x_root=10, y_root=20))
+        popup.assert_called_once_with(10, 20)
+        self.assertEqual(str(menu.entrycget(0, "state")), "normal")
+        menu.invoke(0)
+        self.assertEqual(self.clipboard["text"], "疱")
+        widget.tag_remove("sel", "1.0", "end")
+        self.clipboard["text"] = "keep clipboard"
+        with patch.object(menu, "tk_popup"):
+            widget._copy_popup(SimpleNamespace(x_root=10, y_root=20))
+        self.assertEqual(str(menu.entrycget(0, "state")), "disabled")
+        widget.event_generate("<<Copy>>")
+        self.assertEqual(self.clipboard["text"], "keep clipboard")
+        self.assertIn("드래그", self.editor.v_status.get())
+
+    def test_readonly_original_and_replacement_preview_can_be_copied(self):
+        self.editor.select_paragraph(11)
+        original = self.editor.original_text
+        original.tag_add("sel", "1.0", "end-1c")
+        original.event_generate("<<Copy>>")
+        self.assertEqual(self.clipboard["text"], "上藥人梗米")
+        self.assertEqual(str(original.cget("state")), "disabled")
+        dialog = self.replacement_dialog()
+        dialog.preview()
+        preview = dialog.preview_text
+        preview._copy_menu.invoke(1)
+        preview._copy_menu.invoke(0)
+        self.assertIn("疱疹", self.clipboard["text"])
+        self.assertEqual(str(preview.cget("state")), "disabled")
+        self.assertEqual(self.session.calls, [])
+
+    def test_delayed_first_show_keeps_two_panels_after_hidden_initial_callback(self):
+        # Exercise the real 120 ms callback while the new window is withdrawn.
+        # A 1024px desktop can constrain the requested default 1280px window.
+        self.editor.geometry("1024x768")
+        finished = "section_layout_delay_finished"
+        self.root.tk.setvar(finished, False)
+        self.editor.after(180, lambda: self.root.tk.setvar(finished, True))
+        self.root.wait_variable(finished)
+        self.assertFalse(self.editor._split_initialized)
+        self.assertEqual(self.editor.panes.winfo_width(), 1)
+        with patch.object(self.editor._executor, "submit") as submit:
+            self.editor._submit_render()
+        submit.assert_not_called()
+        self.assertEqual(int(self.editor._editor_font.cget("size")), 12)
+        self.editor.deiconify()
+        self.root.update()
+        self.assertTrue(self.editor._split_initialized)
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+        self.assertLessEqual(self.editor.winfo_width(), 1024)
+        self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+
+    def test_reload_and_remap_recover_collapsed_panes_without_changing_drafts(self):
+        self.editor.deiconify()
+        self.root.update()
+        self.editor.panes.sashpos(0, 0)
+        self.assertEqual(self.editor.panes.sashpos(0), 0)
+        self.assertTrue(self.editor.reload())
+        self.root.update()
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.editor.withdraw()
+        self.editor.panes.sashpos(0, 0)
+        self.assertTrue(self.editor.reload())
+        self.edit(11, "아직 저장하지 않은 수정")
+        self.editor.deiconify()
+        self.root.update()
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+        self.assertEqual(self.editor._changes(), {11: "아직 저장하지 않은 수정"})
+        self.assertEqual(self.session.calls, [])
+
+    def test_user_divider_ratio_survives_resize_reload_and_explicit_reset_preserves_edits(self):
+        self.editor.geometry("1024x768")
+        self.editor.deiconify()
+        self.root.update()
+        panes = self.editor.panes
+        available = self.editor._split_space()
+        wanted = round(available * .45)
+        self.editor._schedule_split()  # A resize callback already queued before the drag.
+        panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
+        panes.event_generate("<B1-Motion>", x=wanted, y=20)
+        panes.event_generate("<ButtonRelease-1>", x=wanted, y=20)
+        self.root.update()
+        self.assertLessEqual(abs(panes.sashpos(0) - wanted), 1)
+        self.assertAlmostEqual(self.editor._split_ratio, .45, delta=2 / available)
+        ratio = self.editor._split_ratio
+        self.editor.geometry("1600x900")
+        self.root.update()
+        self.assertLessEqual(abs(panes.sashpos(0) / self.editor._split_space() - ratio), .002)
+        self.assertTrue(self.editor.reload())
+        self.root.update()
+        self.assertLessEqual(abs(panes.sashpos(0) / self.editor._split_space() - ratio), .002)
+        self.editor.geometry("900x640")
+        self.root.update()
+        self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+        self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+        self.edit(11, "수정 보존")
+        self.editor.set_zoom(1.8)
+        self.editor.change_text_size(1)
+        manual_font = int(self.editor._editor_font.cget("size"))
+        self.editor.reset_view_button.invoke()
+        self.root.update()
+        self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+        self.assertEqual(self.editor._changes(), {11: "수정 보존"})
+        self.assertEqual(self.editor._zoom, 1.8)
+        self.assertEqual(int(self.editor._editor_font.cget("size")), manual_font)
+        self.assertFalse(self.editor.v_match_pdf_font.get())
+        self.assertEqual(self.session.calls, [])
+
+    def test_pending_divider_capture_waits_for_visible_geometry_and_reset_can_override_it(self):
+        self.editor.geometry("1001x768")
+        self.editor.deiconify()
+        self.root.update()
+        panes = self.editor.panes
+        for target in (430, 460):
+            panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
+            panes.event_generate("<B1-Motion>", x=target, y=20)
+            panes.event_generate("<ButtonRelease-1>", x=target, y=20)
+            self.assertTrue(self.editor._split_capture_pending)
+            if target == 430:
+                self.editor.withdraw()
+                self.root.update()
+                self.assertTrue(self.editor._split_capture_pending)
+                self.editor.deiconify()
+                self.root.update()
+                self.assertFalse(self.editor._split_capture_pending)
+                self.assertLessEqual(abs(panes.sashpos(0) - target), 1)
+            else:
+                self.editor.reset_comparison_layout()
+                self.root.update()
+                self.assertFalse(self.editor._split_capture_pending)
+                self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+
+    def test_drag_capture_uses_consistent_child_geometry_before_placement_finishes(self):
+        from tkinter import ttk
+        style = ttk.Style(self.root)
+        previous = style.theme_use()
+        self.addCleanup(lambda: style.theme_use(previous))
+        self.editor.geometry("1024x768")
+        self.editor.deiconify()
+        self.root.update()
+        if self.editor._initial_job is not None:
+            self.editor.after_cancel(self.editor._initial_job)
+            self.editor._initial_job = None
+        panes = self.editor.panes
+        for theme in style.theme_names():
+            with self.subTest(theme=theme):
+                style.theme_use(theme)
+                self.editor.reset_comparison_layout()
+                self.root.update()
+                # Keep an actual complete layout snapshot while the real sash
+                # moves. Tk may expose this state even after one idle callback.
+                old_left_x = self.editor.pdf_panel.winfo_x()
+                old_left_width = self.editor.pdf_panel.winfo_width()
+                old_right_x = self.editor.doc_panel.winfo_x()
+                available = old_left_width + self.editor.doc_panel.winfo_width()
+                wanted = round(available * .45)
+                self.editor._schedule_split()
+                panes.event_generate("<ButtonPress-1>", x=panes.sashpos(0), y=20)
+                panes.event_generate("<B1-Motion>", x=wanted, y=20)
+                panes.event_generate("<ButtonRelease-1>", x=wanted, y=20)
+                self.assertTrue(self.editor._split_capture_pending)
+                if self.editor._split_job is not None:
+                    self.editor.after_cancel(self.editor._split_job)
+                    self.editor._split_job = None
+                with (patch.object(self.editor.pdf_panel, "winfo_x", return_value=old_left_x),
+                      patch.object(self.editor.pdf_panel, "winfo_width", return_value=old_left_width),
+                      patch.object(self.editor.doc_panel, "winfo_x", return_value=old_right_x)):
+                    self.editor._restore_split()
+                self.root.update()
+                # A poisoned ratio moves the sash on the *next* normal restore,
+                # although the first capture appears to leave it untouched.
+                self.editor._restore_split()
+                self.root.update()
+                self.assertLessEqual(abs(panes.sashpos(0) - wanted), 1)
+                self.assertAlmostEqual(self.editor._split_ratio, wanted / available, delta=1 / available)
+
+    def test_collapsed_panes_keep_cached_separator_during_parent_resize(self):
+        self.editor.geometry("1024x768")
+        self.editor.deiconify()
+        self.root.update()
+        panes = self.editor.panes
+        for side in ("left", "right"):
+            with self.subTest(side=side):
+                cached_separator = self.editor._split_separator
+                panes.sashpos(0, 0 if side == "left" else panes.winfo_width())
+                self.root.update_idletasks()
+                collapsed = self.editor.pdf_panel if side == "left" else self.editor.doc_panel
+                self.assertFalse(collapsed.winfo_ismapped())
+                # Parent placement can advance before its one remaining child.
+                # Its previous width must not become a new separator measure.
+                resized_width = panes.winfo_width() + 12
+                with patch.object(panes, "winfo_width", return_value=resized_width):
+                    self.assertEqual(self.editor._split_space(), resized_width - cached_separator)
+                self.assertEqual(self.editor._split_separator, cached_separator)
+                # A first layout with one collapsed pane can still measure the
+                # actual visible edge when there is no complete-layout cache.
+                self.editor._split_separator = None
+                self.assertEqual(self.editor._split_space(), panes.winfo_width() - cached_separator)
+                self.editor.reset_comparison_layout()
+                self.root.update()
+                self.assertGreaterEqual(self.editor.pdf_panel.winfo_width(), 360)
+                self.assertGreaterEqual(self.editor.doc_panel.winfo_width(), 360)
+                self.assertLessEqual(abs(self.editor.pdf_panel.winfo_width() - self.editor.doc_panel.winfo_width()), 1)
+
+    def test_closing_hidden_window_cancels_pending_layout_callback(self):
+        self.editor._split_capture_pending = True
+        self.editor._schedule_split()
+        pending = self.editor._split_job
+        self.assertIsNotNone(pending)
+        self.editor.destroy()
+        self.assertNotIn(pending, self.root.tk.call("after", "info"))
+
+
+if __name__ == "__main__":
+    unittest.main()

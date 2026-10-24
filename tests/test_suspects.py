@@ -12,6 +12,7 @@ from yeone_ocr.adjudicate import (find_suspects, suspect_page, suspects_pending,
                                   confusable_pair, variant_pair, SUSPECT_NOTE, SUSPECT_SOURCE)
 from yeone_ocr.reader_gemini import ReaderError
 from yeone_ocr.state import Work
+from glyph_test_support import mock_ink_locations
 
 FILLER = "此方治諸般虛勞之證其效甚速宜先服之後再議"
 COL1 = "能入肝經" + FILLER                 # 1차·2차 모두 入, 글자층 人
@@ -142,6 +143,11 @@ class Find(unittest.TestCase):
 
 
 class Page(unittest.TestCase):
+    def setUp(self):
+        positions = mock_ink_locations()
+        positions.__enter__()
+        self.addCleanup(positions.__exit__, None, None, None)
+
     def test_outcomes_body_unchanged_and_notice(self):
         r = rec([COL1, COL2]); before = body(r); rd = Reader(ANS)
         r = suspect_page(r, IMG, rd, False, LAYER)
@@ -269,7 +275,8 @@ class Page(unittest.TestCase):
 class Downstream(unittest.TestCase):
     """remerge 가 남기거나 다시 만들고, 등급은 쪽 고지로·글자에 메모로, 장부는 따로 세고, 검수 화면은 [합의 의심] 으로."""
     def _rec(self):
-        return suspect_page(rec([COL1, COL2]), IMG, Reader(ANS), False, LAYER)
+        with mock_ink_locations():
+            return suspect_page(rec([COL1, COL2]), IMG, Reader(ANS), False, LAYER)
 
     def test_remerge_keeps_or_rebuilds_idempotently(self):
         from yeone_ocr.cli import remerge_record

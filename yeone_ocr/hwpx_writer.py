@@ -6,7 +6,7 @@
 문단 하나를 쓰는 셈(고지 글 속 넣기, 등급·표시 조각, 책갈피 자리, 쓰임별 글자 스타일 범위, 메모, 등급 수 세기)과 그림·표·저장·검사는 여기 한곳에 있다.
 두 모양의 차이는 look 의 Para 와 몇 가지 깃발(count_pieces·styled·skip_if_empty·heading)로만 둔다 — 예전 두 작성기의 출력 그대로(tests/test_hwpx_golden)."""
 from __future__ import annotations
-import copy, re, zipfile
+import copy, json, re, zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -31,6 +31,26 @@ LARGE_FIGURES = ("원형나경도", "복잡한표", "계통도", "도식")    # 
 GRADES = ("green", "blue", "red_ctx")                            # 등급 수를 세는 모양
 # 쓰임 → 양식 스타일 이름은 짜임 규칙(presets, data/preset_*.json 의 styles)에 있다 — 규칙에 없는 쓰임은 regions 의 이름, 그것도 없으면 바탕글.
 HEADING_ROLES = {"chapter", "section", "subsection", "entry", "caption"}
+EDIT_PROVENANCE_PART = "META-INF/yeone-ocr-edit.json"
+
+
+def _remember_grade_base(look, derived, base) -> None:
+    """Record only an unambiguous style introduced by this writer.
+
+    A template may already use the same visual style for ordinary text. Never
+    claim a self-reference or choose between different original author styles.
+    """
+    derived, base = str(derived), str(base)
+    if derived == base or derived in look._ambiguous_grade_bases:
+        look._grade_bases.pop(derived, None)
+        look._ambiguous_grade_bases.add(derived)
+    elif derived in look._grade_bases and look._grade_bases[derived] != base:
+        look._grade_bases.pop(derived)
+        look._ambiguous_grade_bases.add(derived)
+    else:
+        look._grade_bases[derived] = base
+
+
 BASIC_FORMATS = {
     "chapter": (16, True, "CENTER", 14, 7),
     "section": (14, True, "LEFT", 10, 4),
@@ -187,6 +207,7 @@ class DefaultLook:
             "chk": rs(font=FONT_BODY, size=9, color=COLOR_NOTE),
         }
         self.highlight = highlight; self._grade: dict = {}; self._first_meta = True
+        self._grade_bases, self._ambiguous_grade_bases = {}, set()
         return doc
 
     def _para(self, text: str, key: str, **kw) -> Para:
@@ -235,6 +256,7 @@ class DefaultLook:
             except (TypeError, ValueError):                           # 밑줄 모양을 모르는 옛 python-hwpx
                 kw.pop("underline_shape", None); kw.pop("underline_color", None)
                 self._grade[key] = self._rs(**kw)
+        _remember_grade_base(self, self._grade[key], self.S[para.key])
         return self._grade[key]
 
     def after_para(self, doc, para: Para) -> None:
@@ -336,6 +358,8 @@ class TemplateLook:
         self.extra_stats = {"styles": {}, "missing": [], "template_dropped": dropped, "page_number_from_template": self.has_page_num}
         self.body_w, self.body_h = _body_size_mm(doc)
         self.highlight = highlight; self._brk: dict = {}; self._run: dict = {}; self._pic_ppr: list = []
+        self._grade_bases, self._ambiguous_grade_bases = {}, set()
+        self._author_char_ids = {style.get("id") for style in self.header.element.iter(HH + "charPr")}
         return doc
 
     def para_style(self, role: str) -> dict:
@@ -400,6 +424,17 @@ class TemplateLook:
             except (TypeError, ValueError):
                 kw.pop("underline_shape", None); kw.pop("underline_color", None)
                 self._run[key] = self.doc.oxml.ensure_run_style(base_char_pr_id=base_char, **kw)
+            if STYLE_ALIAS.get(kind, kind) in GRADE_STYLE:
+                derived = str(self._run[key])
+                if (derived in self._author_char_ids or
+                        derived in self._grade_bases and self._grade_bases[derived] != str(base_char)):
+                    # The library deduplicates visually identical styles. Give
+                    # OCR runs their own ID so an author's identical red text
+                    # does not acquire ownership through the package mapping.
+                    self._run[key] = str(self.header.ensure_char_property(
+                        predicate=lambda _style: False, base_char_pr_id=derived).get("id"))
+        if STYLE_ALIAS.get(kind, kind) in GRADE_STYLE:
+            _remember_grade_base(self, self._run[key], base_char)
         return self._run[key]
 
     def char(self, para: Para, kind: str, cs_kind) -> str:
@@ -538,6 +573,12 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                 stats["uncertain_items"] += len(b.items)
     look.finish(doc)
     try:
+        # Package metadata only: no private paths, OCR text or user settings.
+        # This also replaces a stale record inherited from a document template.
+        doc.package.set_part(EDIT_PROVENANCE_PART, json.dumps({
+            "schema_version": 1, "producer": "YeonE_OCR",
+            "grade_styles": getattr(look, "_grade_bases", {}),
+        }, sort_keys=True))
         doc.save_to_path(out_path)
     finally:
         doc.close()

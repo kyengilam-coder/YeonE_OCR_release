@@ -78,7 +78,8 @@ class VerticalAdapterTests(unittest.TestCase):
             info = {"available": True, "languages": ["chi_tra"], "executable": "unused",
                     "worker": "unused", "model_dir": folder,
                     "models": {"zh_sim_g2.pth": {"sha256": "test auxiliary hash"}},
-                    "language_models": {"chi_tra": []}, "installation": {}}
+                    "language_models": {"chi_tra": []}, "installation": {}, "runtime_files": {},
+                    "installation_sha256": "synthetic-install", "worker_sha256": "synthetic-worker"}
             def run(argv, **_kwargs):
                 if engine in ("easyocr", "rapidocr", "ppocrv6"):
                     self.assertEqual(argv[argv.index("--direction") + 1], direction)
@@ -89,6 +90,7 @@ class VerticalAdapterTests(unittest.TestCase):
                 for engine, direction in ((e, d) for e in ("rapidocr", "easyocr", "ppocrv6")
                                           for d in ("vertical", "horizontal")):
                     with self.subTest(engine=engine, direction=direction):
+                        info["engine"] = engine
                         result = ocr.recognize_file(source, engine=engine, languages="chi_tra", direction=direction)
                         self.assertEqual('zh_sim_g2.pth' in result.engine_metadata['model_files'],
                                          engine == 'easyocr' and direction == 'vertical')

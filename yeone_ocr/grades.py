@@ -223,6 +223,10 @@ COLLATE_LEGEND = ("[연어OCR 표시 범례 — 책갈피 교정] 초록(점선 
                   "(판독 일치·사전·글자층·반복 근거, 정밀도 미측정) · 빨강 굵게·노랑 = 확인 요청, 글자는 HWPX 그대로 · 메모 = 지운 자리·넣지 않은 자리·"
                   "구조 차이·반영하지 않은 제안 같은 고지 사항 · 원래 글자와 근거 전체는 보고(collate 폴더의 html) · "
                   "0.6.3 까지의 '파랑+연두'는 예전 자동 교정 색 · 확인한 글자는 모양 복사(Alt+C)로 색을 지움")
+COLLATE_COLOR_LEGEND = ("초록(점선 밑줄) = 3차 자형 판별 근거로 고친 글자 · 파랑(파선 밑줄) = 자동 교정, 확인 권장 · "
+                        "빨강 굵게·노랑 = 원본 확인 필요 · 지운 자리·삽입 제안은 인접 글자에 표시 · "
+                        "색을 표시할 글자가 없는 항목은 보고에서 확인 · 원래 글자·제안·근거 전체는 이 보고에 보관 · "
+                        "메모와 본문 설명을 추가하지 않음")
 CONFLICT_MEMO_MAX = 3          # 쪽마다 글자에 다는 '자형·문맥 어긋남' 메모 수(나머지는 쪽 고지에 셈)
 
 
@@ -386,6 +390,8 @@ def collate_grade(it) -> str | None:
 def needs_memo(it, mode: str) -> bool:
     """책갈피 교정 항목에 메모(또는 inline 짧은 표기)를 달지. all 은 모두, notice·inline 은 색으로 전할 수 없는 고지 사항만:
     지운 글자, 폭 없는 표시, 구조 차이(C), 구조 규칙이 붙인 고지, 반영하지 않은 제안."""
+    if mode == "none":
+        return False
     if mode == "all":
         return True
     return (it.action == "delete" or (it.end == it.start and not it.auto) or it.kind == "C" or bool(getattr(it, "notice", False))

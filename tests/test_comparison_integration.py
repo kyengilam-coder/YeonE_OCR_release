@@ -52,10 +52,23 @@ class ComparisonHostTests(unittest.TestCase):
         app.v_key = SimpleNamespace(get=lambda: " fixture-key ")
         app.cfg = {"provider_settings": {"anthropic": {"api_key": "other-profile"}}}
         self.assertEqual(App._comparison_ai_settings(app), {
-            "provider": "openai", "model": "chosen-vision-model", "api_key": "fixture-key"})
+            "provider": "openai", "model": "chosen-vision-model", "api_key": "fixture-key", "key_count": 1})
         with patch("yeone_ocr.comparison_editor.ComparisonEditor") as editor:
             App.open_local_comparison(app)
         self.assertEqual(editor.call_args.kwargs["on_ai_settings"](), App._comparison_ai_settings(app))
+
+    def test_comparison_uses_first_selected_gemini_key_without_changing_configuration(self):
+        from yeone_ocr.gui import App
+        app = self.app()
+        app.v_reader = SimpleNamespace(get=lambda: "gemini")
+        app.v_model = SimpleNamespace(get=lambda: "chosen-gemini-model")
+        app.v_key = SimpleNamespace(get=lambda: "AIza-fixture-first,AIza-fixture-second\nAIza-fixture-third")
+        app.cfg = {"provider_settings": {"gemini": {"api_key": "saved-config-fixture"}}}
+        with patch("yeone_ocr.readers.environment_key", side_effect=AssertionError("no environment key lookup")):
+            self.assertEqual(App._comparison_ai_settings(app), {
+                "provider": "gemini", "model": "chosen-gemini-model", "api_key": "AIza-fixture-first", "key_count": 3})
+        self.assertEqual(app.v_key.get(), "AIza-fixture-first,AIza-fixture-second\nAIza-fixture-third")
+        self.assertEqual(app.cfg, {"provider_settings": {"gemini": {"api_key": "saved-config-fixture"}}})
 
     def test_ai_settings_reject_incomplete_provider_selection(self):
         from yeone_ocr.gui import App
@@ -108,7 +121,8 @@ class ComparisonCommandTests(unittest.TestCase):
         from yeone_ocr.comparison_cli import command
         from yeone_ocr.comparison import ComparisonProject
         from yeone_ocr.comparison_bridge import default_project_path
-        def run(project, number, **kwargs):
+        def run(project, numbers, **kwargs):
+            self.assertEqual(numbers, [1])
             raw = {"kind": "recognition", "schema_version": 1, "engine": "tesseract",
                 "coordinate_system": "rendered-image pixels, xyxy", "text": "漢樂一\ufe00。",
                 "words": [], "source_path": str(self.source), "source_sha256": project.source_sha256,
@@ -117,8 +131,10 @@ class ComparisonCommandTests(unittest.TestCase):
                 "duration_seconds": 0, "engine_metadata": {}, "preprocessing": {}}
             project.add_result(raw)
             kwargs["on_result"](raw)
-            return {"completed": ["tesseract"], "errors": {"easyocr": "fixture failure"}, "cancelled": False}
-        with patch("yeone_ocr.comparison.run_page", side_effect=run):
+            outcome = {"completed": ["tesseract"], "skipped": [], "errors": {"easyocr": "fixture failure"}, "cancelled": False}
+            kwargs["on_page"](1, "tesseract", outcome)
+            return {"pages": {1: outcome}, "errors": {1: outcome["errors"]}, "cancelled": False}
+        with patch("yeone_ocr.comparison.run_pages", side_effect=run):
             self.assertEqual(command(self.args()), 3)
         project = ComparisonProject.load(default_project_path(self.source, self.root / "job"))
         self.assertEqual(project.text(1), "漢樂一\ufe00。")

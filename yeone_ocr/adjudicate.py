@@ -18,6 +18,8 @@
 - 판별기는 지침 전문 대신 자형 전용 시스템 지시(prompts.glyph_system_prompt)를 쓰고, 답은 w(보인 글) → e(자형) → c(고른 글자) 차례로 쓴다.
 - 원본 글자 크기가 문턱(min_px)보다 작으면 묻지 않고 미정으로 둔다(지침 24: 확대로 없는 획이 살아나지 않는다).
 - blind=True 면 확정한 자리를 후보 없이 한 번 더 읽게 해(identify) 객관식 답과 같을 때만 확정한다.
+- 새 답은 글자층·먹 위치와 응답의 앞뒤 글자 연결을 함께 확인한다. 빈 응답 창·균등 추정만 있는 위치는 미정으로 남긴다.
+  이미 저장한 판별 결과의 다시 적용 규칙은 바꾸지 않는다.
 
 합의 판독 의심(0.6.8, suspect_page) — 1차·2차가 같게 틀린 글자는 〔a/b〕 가 생기지 않는다. 표시 밖 글자가 PDF 글자층과 1:1 로 다르고 두 글자가
 자형 혼동 묶음이면 같은 방식(후보 [합의 글자, 글자층 글자])으로 묻고, 자형이 글자층 쪽이면 본문은 그대로 두고 확인 항목만 단다(지침 20).
@@ -564,7 +566,13 @@ def apply_adjudications(merged: PageReading, adjudications: list[dict] | None, s
     for a, run in zip(adjudications or [], adjudication_runs(adjudications)):
         if not a.get("choice"):
             continue
-        site = Site(**{k: a[k] for k in Site.__dataclass_fields__ if k in a})
+        try:
+            site = Site(**{k: a[k] for k in Site.__dataclass_fields__ if k in a})
+        except TypeError:
+            # Incomplete historical entries remain evidence, but cannot safely
+            # identify a mark to replace. Do not invent missing coordinates.
+            lost += 1
+            continue
         key = (site.region_id, site.col_index, run)
         if apply_choice(merged, site, a["choice"], done=done.get(key, [])):
             n += 1; done.setdefault(key, []).append((site.char_index, site.a, a["choice"]))
@@ -869,8 +877,48 @@ def _ask_glyphs(prepared: list, asks: dict, lowres: set, img: Image.Image, reade
     return _Quiz(results, by, asked, blind_ans, unsupported)
 
 
-def _verdict(q: _Quiz, sid: str, site: Site, stop, blind: bool, stats: dict) -> tuple[str, dict]:
-    """물은 자리 하나의 판정: ("skipped" | "failed" | "judged", 기록 칸). judged 의 choice 는 창 검사(window_ok)와
+LOCATION_POLICY = "glyph-location-v1"
+
+
+def _location_text(text: str) -> str:
+    """Use visible bases as anchors, never a selector/combining mark alone.
+
+    This is only a new-answer location key; stored text and legacy window
+    matching retain their original code points and behavior.
+    """
+    return "".join(ch for ch in text or ""
+                   if not unicodedata.category(ch).startswith("M")
+                   and unicodedata.category(ch) != "Cf")
+
+
+def _location_check(win: GlyphWindow, site: Site, window: str, choice: str) -> dict:
+    """Check the location of a new answer; historical replay keeps its old rules.
+
+    A guessed uniform crop and an empty answer window cannot verify a location.
+    Ink/layer coordinates still need the returned neighbouring text: geometry
+    alone does not establish that the model read the intended occurrence.
+    """
+    seen, before, selected, after = map(_location_text, (window, site.pre, choice, site.post))
+    w, pre, post, _ = _window_parts(seen, before, selected, after)
+    if not choice or not selected or choice not in (site.a, site.b):
+        reason = "missing-choice"
+    elif not w:
+        reason = "missing-window"
+    elif not pre and not post:
+        reason = "missing-neighbours"
+    elif not window_ok(seen, before, selected, after):
+        reason = "window-mismatch"
+    elif win.how not in ("ink", "layer"):
+        reason = "unmeasured-location"
+    else:
+        reason = ""
+    return {"policy": LOCATION_POLICY, "method": win.how,
+            "measured": win.measured, "verified": not reason, "reason": reason}
+
+
+def _verdict(q: _Quiz, sid: str, site: Site, stop, blind: bool, stats: dict,
+             win: GlyphWindow) -> tuple[str, dict]:
+    """물은 자리 하나의 판정: ("skipped" | "failed" | "judged", 기록 칸). judged 의 choice 는 새 위치 검사와
     눈가림 재확인(blind)까지 통과한 후보만(아니면 빈 글 — 근거에 까닭). 어긋남·재확인 실패·불일치·중지 수는 stats 에 센다."""
     if sid not in q.results and (stop() or sid not in q.asked):
         stats["skipped"] = stats.get("skipped", 0) + 1                     # 중지로 묻지 못한 자리: 기록을 남기지 않는다(다음 실행에서 다시)
@@ -882,8 +930,19 @@ def _verdict(q: _Quiz, sid: str, site: Site, stop, blind: bool, stats: dict) -> 
     choice = (res.choice or "").strip()
     entry = {**base, "choice": choice if choice in (site.a, site.b) else "", "evidence": (res.evidence or "")[:200],
              "window": (getattr(res, "window", "") or "")[:40]}
-    if entry["choice"] and not window_ok(entry["window"], site.pre, entry["choice"], site.post):
-        entry["choice"] = ""; entry["evidence"] = f"조각 위치가 어긋남(보인 글: {entry['window'][:12]}) — " + entry["evidence"]; stats["misplaced"] = stats.get("misplaced", 0) + 1
+    if entry["choice"]:
+        location = entry["location_check"] = _location_check(win, site, entry["window"], entry["choice"])
+        if not location["verified"]:
+            entry["unconfirmed_choice"], entry["choice"] = entry["choice"], ""
+            notes = {"missing-choice": "유효한 판별 후보가 없음",
+                     "missing-window": "조각에서 보인 글이 없어 위치를 확인할 수 없음",
+                     "missing-neighbours": "대상 글자의 앞뒤 위치 근거가 없음",
+                     "window-mismatch": f"조각 위치가 어긋남(보인 글: {entry['window'][:12]})",
+                     "unmeasured-location": "균등 추정 위치만 있어 원본 글자 위치를 확인할 수 없음"}
+            entry["evidence"] = notes[location["reason"]] + " — 확정 보류 · " + entry["evidence"]
+            stats["location_unverified"] = stats.get("location_unverified", 0) + 1
+            if location["reason"] == "window-mismatch":
+                stats["misplaced"] = stats.get("misplaced", 0) + 1
     if entry["choice"] and blind and sid not in q.unsupported:
         got_b, berr = q.blind_ans.get(sid, (None, "중지로 묻지 못함" if stop() else "응답 없음"))
         if got_b is None and stop() and not berr.startswith("묶음"):
@@ -905,6 +964,7 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
     """한 쪽의 〔a/b〕 자리를 판별한다. rec 을 고쳐 돌려준다(merged 글, adjudications, uncertain 메모).
 
     - 자리마다 창을 글자층 → 먹 실측 → 균등 분할 순으로 잡는다(기록 loc). frame 은 쪽 이미지의 PDF 좌표 틀(pdfio.page_frame).
+      새 선택은 글자층·먹 위치와 실제 응답 창의 앞뒤 연결이 있어야 한다. 균등 추정·빈 창은 미정으로 보존한다.
     - 눈가림: 판독기에는 GlyphAsk(섞은 후보·조각 안 순번)만 넘긴다. 앞뒤 글자(site.pre/post)는 답의 창(w) 검사에만 쓴다.
       ticks 면 실측한 자리의 조각 바깥에 눈금을 그린다.
     - min_px 를 주면 원본에서 잰 글자 크기가 그보다 작은 자리는 묻지 않고 미정으로 둔다(지침 24).
@@ -949,7 +1009,7 @@ def adjudicate_page(rec: dict, img: Image.Image, reader, horizontal: bool, max_s
                 if site.mark in (u.context or "") and "3차 판별" not in u.context:
                     u.context = u.context + " — 3차 판별: 저해상이라 묻지 않음(원본 확인)"
             continue
-        kind, got = _verdict(q, sid, site, stop, blind, stats)
+        kind, got = _verdict(q, sid, site, stop, blind, stats, win)
         if kind == "skipped":
             continue
         entry = {**base, **got}
@@ -1133,6 +1193,8 @@ def _asked_before(prev: list[dict], s: Site) -> int | None:
     같고 글자 번호가 4자 안에서 움직였으면 같은 자리로 본다(다시 묻고 기록·알림을 겹쳐 달지 않게)."""
     for i in range(len(prev) - 1, -1, -1):
         e = prev[i]
+        if e.get("preserves_previous_decision") and e.get("location_check", {}).get("verified") is False:
+            continue  # A held recheck is evidence, not a replacement for the earlier decision.
         if (e.get("region_id"), e.get("col"), e.get("consensus"), e.get("layer")) == (s.region_id, s.col_index, s.a, s.b) \
                 and (e.get("char_index") == s.char_index or (e.get("pre") == s.pre and e.get("post") == s.post)
                      or (e.get("post") == s.post and (e.get("pre") or "")[-1:] == s.pre[-1:] and abs(int(e.get("char_index") or 0) - s.char_index) <= 4)):
@@ -1226,7 +1288,7 @@ def suspect_page(rec: dict, img: Image.Image, reader, horizontal: bool, layer_pl
             cols.setdefault((reg.id, ci), c)
     drop: set[int] = set(); new: list[dict] = []; kept_by_fallback = 0
     for sid, site, win in pick:
-        kind, got = _verdict(q, sid, site, stop, blind, stats)
+        kind, got = _verdict(q, sid, site, stop, blind, stats, win)
         if kind == "skipped":
             continue
         choice = got.get("choice", "")
@@ -1238,6 +1300,9 @@ def suspect_page(rec: dict, img: Image.Image, reader, horizontal: bool, layer_pl
              "asked_at": time.strftime("%Y-%m-%d %H:%M:%S"), "asked": "/".join(asks[sid].candidates), "loc": win.how, "box": [round(v, 4) for v in win.box]}
         if "blind" in got:
             e["blind"] = got["blind"]
+        for key in ("location_check", "unconfirmed_choice"):
+            if key in got:
+                e[key] = got[key]
         if win.em_px:
             e["em_px"] = round(win.em_px, 1)
         stats["asked"] += 1; stats[outcome] += 1
@@ -1246,6 +1311,11 @@ def suspect_page(rec: dict, img: Image.Image, reader, horizontal: bool, layer_pl
         k = old_of.get(sid)
         if outcome == "failed" and k is not None and prev[k].get("outcome") != "failed":
             continue                                                     # 다시 물었는데 답이 없음(호출 실패): 앞 답과 그 확인 항목을 그대로 둔다
+        if k is not None and got.get("location_check", {}).get("verified") is False:
+            # A new location hold cannot erase an older decision or its notice.
+            e["preserves_previous_decision"] = True
+            new.append(e)
+            continue
         if k is not None:                                                # 다시 물은 자리: 앞 기록과 그 확인 항목을 바꾼다
             drop.add(k); old_u = suspect_uncertain(prev[k])
             if prev[k].get("outcome") == "differs" and (outcome != "differs" or old_u != suspect_uncertain(e)):

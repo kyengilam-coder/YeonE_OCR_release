@@ -129,7 +129,7 @@ class Outline(unittest.TestCase):
     def test_find_title_in_text_layer(self):
         import pymupdf
         doc = pymupdf.open()
-        for text in ["目录 大蓟 12 小蓟 13", "大蓟 本草经疏 大蓟根 陶云有毒", "续 大蓟 本草新编", "小蓟 性凉 治吐血", "人参 大补元气"]:
+        for text in ["目录 大蓟 12 小蓟 13", "大蓟\n本草经疏 大蓟根 陶云有毒", "续 大蓟 本草新编", "小蓟\n性凉 治吐血", "人参\n大补元气"]:
             pg = doc.new_page(); pg.insert_text((72, 100), text, fontname="china-s", fontsize=14)
         from yeone_ocr.collate.pdf_outline import find_title_pages
         self.assertEqual(find_title_pages(doc, "大薊", "小薊", start_page=2), (2, 4))     # 목차 쪽을 건너뛰고 본문에서, 다음 제목 쪽까지
@@ -595,12 +595,12 @@ class MemoAndMarks(unittest.TestCase):
                 R.log = logs.append; R.ensure_pages_read = lambda *a, **k: None; cli.resolve_mode = lambda *a, **k: None
                 for _ in range(2):                                     # 두 번째는 같은 교정본에 다시 — 모두 '이미 표시된 자리'
                     bk = HwpxBook(out if os.path.exists(out) else src); an = bk.anchors()
-                    R.run_section(args, pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
+                    result = R.run_section(args, pdf_doc=[None] * 7, work=work, book=bk, anchors=an, pdf_anchors=[], matches=[SimpleNamespace(pdf=None, how="none")] * len(an), idx=1)
             finally:
                 R.log, R.ensure_pages_read, cli.resolve_mode = old
             counts = [l for l in logs if l.startswith("표시:")]
             self.assertIn("메모 4건(글 속 〔〕)", counts[0]); self.assertIn("메모 0건(글 속 〔〕)", counts[1])
-            rep = Path(td, "collate", "大薊.html").read_text(encoding="utf-8")
+            rep = Path(result["report"]).read_text(encoding="utf-8")
             self.assertIn("글 속 〔〕 표기", rep); self.assertNotIn("고지 메모", rep)            # inline 에는 메모가 없다
 
     def test_report_marks_memo_by_real_mode(self):
@@ -611,11 +611,15 @@ class MemoAndMarks(unittest.TestCase):
         items = [Item("A", "replace", 1, 0, 1, "有", "无", "無", auto=True), Item("B1", "mark", 1, 3, 3, "", "胎", "")]
         with tempfile.TemporaryDirectory() as td:
             got = {}
-            for mode in ("notice", "all", "inline"):
+            for mode in ("none", "notice", "all", "inline"):
                 p = Path(td, f"{mode}.html"); report_html(sec, None, (7, 7), [], [], items, "all", None, p, mode=mode); got[mode] = p.read_text(encoding="utf-8")
             self.assertEqual(got["notice"].count("· 고지 메모</small>"), 1)                          # 폭 없는 표시만
             self.assertEqual(got["all"].count("· 메모</small>"), 2)                                   # 모든 항목
             self.assertEqual(got["inline"].count("· 글 속 〔〕 표기</small>"), 1); self.assertNotIn("고지 메모", got["inline"])
+            self.assertNotIn("· 메모</small>", got["none"])
+            self.assertNotIn("고지 메모", got["none"])
+            self.assertIn("원래 글자·제안·근거 전체는 이 보고에 보관", got["none"])
+            self.assertIn("有", got["none"]); self.assertIn("無", got["none"]); self.assertIn("胎", got["none"])
 
     def test_recolor_over_red_drops_yellow_and_bold(self):
         from yeone_ocr.collate.hwpx_edit import _slots
@@ -833,6 +837,35 @@ class NotesAndLegacy(unittest.TestCase):
         finally:
             R.log, R.ensure_pages_read, cli.resolve_mode, R.collate = old
         return logs, out
+
+    def test_color_only_run_preserves_body_and_reports_without_memos(self):
+        from yeone_ocr.collate.collate import Item
+        from yeone_ocr.hwpx_memo import count_memos
+        with tempfile.TemporaryDirectory() as td:
+            book = HwpxBook(make_book(os.path.join(td, "color.hwpx")))
+            try:
+                before = book.texts()
+                anchors = book.anchors()
+                pi = anchors[1].para + 1
+                text = before[pi]
+                items = [Item("B1", "mark", pi, 0, 1, text[0], "疑", "", note="原本 확인"),
+                         Item("C", "mark", pi, len(text), len(text), "", "漏落", "", note="삽입 제안")]
+                logs, output = self._run_section(td, book, anchors, 1, items, mode="none")
+            finally:
+                book.doc.close()
+            saved = HwpxBook(output)
+            try:
+                self.assertEqual(saved.texts(), before)
+                self.assertEqual(count_memos(p.element for p in saved.paragraphs), 0)
+            finally:
+                saved.doc.close()
+            self.assertTrue(any("메모 0건(색상만)" in line for line in logs), logs)
+            report = next(Path(td, "collate").glob("*.json"))
+            import json
+            data = json.loads(report.read_text("utf-8"))
+            self.assertEqual(data["memo_mode"], "none")
+            self.assertTrue(all(not item["memo"] for item in data["items"]))
+            self.assertIn("漏落", report.with_suffix(".html").read_text("utf-8"))
 
     def test_inline_keeps_pdf_title_anchors(self):
         """제목 스타일·책갈피가 없어 PDF 책갈피 제목으로 찾은 구획 기준 문단(--anchor-source pdf·자동 대체)에도 글 속 표기를 넣지 않는다."""
@@ -1150,8 +1183,8 @@ class Safety068(unittest.TestCase):
             work.save_record(7, rec)
             bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
             calls = []
-            def fake_remerge(r, layer, layer_d=None):
-                calls.append(r["pdf_page"]); r = dict(r); r["version"] = __version__; r["remerged"] = True; return r
+            def fake_remerge(r, layer, layer_d=None, *, mode=None):
+                calls.append(r["pdf_page"]); r = dict(r); r["version"] = __version__; r["mode"] = mode; r["remerged"] = True; return r
             logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record
             try:
                 R.log = logs.append; R.ensure_pages_read = lambda *a, **k: None; cli.resolve_mode = lambda *a, **k: None; cli.remerge_record = fake_remerge
@@ -1362,8 +1395,8 @@ class Review068(unittest.TestCase):
             merged = PageReading.model_validate({"pdf_page": 7, "regions": [{"id": "r1", "kind": "본문", "bbox": [0, 0, 1000, 1000],
                                                                              "paras": [{"cols": [{"n": 1, "t": "大蓟根陶云有毒"}]}]}]}).model_dump()
             bk = HwpxBook(make_book(os.path.join(td, "b.hwpx"))); an = bk.anchors()
-            def fake_remerge(r, layer, layer_d=None):
-                r = dict(r); r["version"] = __version__; return r
+            def fake_remerge(r, layer, layer_d=None, *, mode=None):
+                r = dict(r); r["version"] = __version__; r["mode"] = mode; return r
             logs = []; old = R.log, R.ensure_pages_read, cli.resolve_mode, cli.remerge_record
             try:
                 R.log = logs.append; R.ensure_pages_read = lambda *a, **k: False; cli.resolve_mode = lambda *a, **k: None; cli.remerge_record = fake_remerge

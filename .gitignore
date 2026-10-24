@@ -13,4 +13,8 @@ dist/
 /tools/easyocr/
 /tools/ppocrv6/
 /output/
+/tools/paddle_server/
+/tools/paddle_server_gpu/
+/tools/glmocr/
+/tools/surya/
 /downloads/

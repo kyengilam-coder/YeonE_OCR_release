@@ -10,6 +10,7 @@ from yeone_ocr.verify import verify_page, check_hwpx_file
 from yeone_ocr.layout import fit_figure_bbox, edge_ink, detect_figures, crop_frac
 from yeone_ocr.blocks import assemble_blocks
 from yeone_ocr.hwpx_builder import build_hwpx
+from glyph_test_support import mock_ink_locations
 
 
 def page_with_circle(W=900, H=1300):
@@ -738,6 +739,7 @@ class Adjudicate(unittest.TestCase):
         vbox = glyph_box([100, 50, 300, 950], sites[0], horizontal=False)
         self.assertGreater(vbox[0], 0.5); self.assertGreaterEqual(vbox[2], 0.95)                      # 세로쓰기면 첫 열은 오른쪽 셋째
 
+    @mock_ink_locations()
     def test_adjudicate_page_applies_choice_and_survives_remerge(self):
         from PIL import Image
         from yeone_ocr.adjudicate import adjudicate_page, apply_adjudications
@@ -751,9 +753,9 @@ class Adjudicate(unittest.TestCase):
                 self.calls.append((ask, crop.size))
                 n = len(self.calls)
                 if n == 1:
-                    return GlyphChoice(choice="人", evidence="왼쪽 삐침이 위에서 시작")       # 인쇄가 人인 자리
+                    return GlyphChoice(choice="人", evidence="왼쪽 삐침이 위에서 시작", window="能人阴")
                 if n == 2:
-                    return GlyphChoice(choice="入", evidence="오른쪽 삐침이 위로 솟음")
+                    return GlyphChoice(choice="入", evidence="오른쪽 삐침이 위로 솟음", window="赤入心")
                 return GlyphChoice(choice="", evidence="획이 뭉개짐")                           # 曰/日 은 못 가림
         fake = Fake()
         rec = adjudicate_page(rec, img, fake, horizontal=True)
@@ -766,8 +768,8 @@ class Adjudicate(unittest.TestCase):
         self.assertIn("能人阴分", body); self.assertIn("色赤入心", body); self.assertIn("〔曰/日〕", body)
         st = rec["adjudicate_stats"]
         self.assertEqual({k: st[k] for k in ("sites", "decided", "undecided", "a", "b", "failed")}, {"sites": 3, "decided": 2, "undecided": 1, "a": 1, "b": 1, "failed": 0})
-        self.assertEqual(st["loc"], {"uniform": 3})                                                   # 빈 쪽 이미지·글자층 없음 → 균등 분할
-        self.assertTrue(all(a["loc"] == "uniform" for a in rec["adjudications"]))
+        self.assertEqual(st["loc"], {"ink": 3})  # 위치 검출은 별도 fixture, 실제 응답 창 연결은 검사한다.
+        self.assertTrue(all(a["loc"] == "ink" for a in rec["adjudications"]))
         self.assertTrue(any("3차 판별: 「人」 확정" in u.context for u in m.uncertain))
         # 비교 다시 계산(원본 pass1 에서 다시 병합) 뒤에도 판별 결과를 다시 적용할 수 있다
         fresh = PageReading.model_validate(rec["pass1"])
@@ -793,6 +795,7 @@ class AdjudicateBatch(unittest.TestCase):
     def _rec(self):
         return Adjudicate._rec(self)
 
+    @mock_ink_locations()
     def test_batch_then_singles_and_fallback(self):
         from PIL import Image
         from yeone_ocr.adjudicate import adjudicate_page
@@ -874,6 +877,7 @@ class AdjudicateBatch(unittest.TestCase):
         self.assertEqual(apply_adjudications(fresh, [{**asdict(sites[1]), "choice": "人"}]), 1)
         self.assertEqual(region_text(fresh.regions[0]), "甲〔入/人〕乙丙人丁")
 
+    @mock_ink_locations()
     def test_same_marks_after_length_change_keep_their_choices(self):
         """한 차례에서 길이가 바뀐 선택(〔效效/先〕→先) 뒤의 같은 표시 둘(〔再/後〕〔再/後〕)이 뒤바뀌지 않는다 — 판별 때도, 다시 적용할 때도.
         기록마다 3차 차례 번호(run)를 적고, 다시 돌리면 다음 번호를 적는다(run 이 없는 예전 기록은 어림한 차례 다음)."""
@@ -888,10 +892,13 @@ class AdjudicateBatch(unittest.TestCase):
         class R:
             """눈가림 판독기: 자리 차례대로 정해 둔 답을 낸다(빈 답 = 못 가림)."""
             model = "m"
-            def __init__(self, answers): self.answers = list(answers)
+            def __init__(self, answers, current):
+                self.answers = list(answers); self.contexts = list(_site_ctx(current).values())
             def adjudicate(self, crop, ask, horizontal, pdf_page):
-                return GlyphChoice(choice=self.answers.pop(0), evidence="획")
-        rec = adjudicate_page({"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}, img, R(["先", "再", "後"]), True)
+                choice = self.answers.pop(0); pre, post = self.contexts.pop(0)
+                return GlyphChoice(choice=choice, evidence="획", window=pre[-1:] + choice + post[:1])
+        original = {"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}
+        rec = adjudicate_page(original, img, R(["先", "再", "後"], original), True)
         m = PageReading.model_validate(rec["merged"]); self.assertEqual(text(m), "先再後速此虛其")
         self.assertEqual([a["run"] for a in rec["adjudications"]], [1, 1, 1])
         found, missing = decided_positions(m, rec["adjudications"])
@@ -899,10 +906,11 @@ class AdjudicateBatch(unittest.TestCase):
         fresh = PageReading.model_validate(rec["pass1"])                                          # 비교 다시 계산 뒤 다시 적용해도 같은 글
         self.assertEqual(apply_adjudications(fresh, rec["adjudications"]), 3); self.assertEqual(text(fresh), "先再後速此虛其")
         # 다시 돌린 쪽: 앞 차례(run 없는 예전 기록)는 先 만, 다음 차례는 둘째 〔再/後〕 만 정함 → 앞 차례의 길이 차를 다음 차례에 다시 더하지 않는다
-        rec = adjudicate_page({"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}, img, R(["先", "", ""]), True)
+        original = {"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}
+        rec = adjudicate_page(original, img, R(["先", "", ""], original), True)
         for a in rec["adjudications"]:
             a.pop("run")
-        rec = adjudicate_page(rec, img, R(["", "後"]), True)
+        rec = adjudicate_page(rec, img, R(["", "後"], rec), True)
         self.assertEqual([a.get("run") for a in rec["adjudications"]], [None, None, None, 2, 2])
         m = PageReading.model_validate(rec["merged"]); self.assertEqual(text(m), "先〔再/後〕後速此虛其")
         fresh = PageReading.model_validate(rec["pass1"])
@@ -927,6 +935,7 @@ class AdjudicateBatch(unittest.TestCase):
         r = MultiGlyphChoice.model_validate_json('{"items":[{"s":"1","c":"入"},{"c":"人"}]}')         # 자리 번호가 빠진 항목은 응답을 깨지 않고 버려진다
         self.assertEqual([i.site_id for i in r.items], ["1", ""])
 
+    @mock_ink_locations()
     def test_batch_undecided_with_foreign_window_is_reasked(self):
         """묶음 응답이 c="" 이어도 보인 글(w)이 앞뒤 글자와 전혀 안 맞으면 조각 번호가 섞인 것이라 낱개로 다시 묻는다."""
         from PIL import Image
@@ -943,6 +952,7 @@ class AdjudicateBatch(unittest.TestCase):
         self.assertEqual(r.single, [{"入", "人"}])                                                  # 1번만 다시(2번은 창이 맞는 진짜 미정, 3번은 창이 비어 검사 불가)
         st = rec["adjudicate_stats"]; self.assertEqual((st["decided"], st["undecided"], st["batched"], st["batch_rechecked"]), (1, 2, 2, 1))
 
+    @mock_ink_locations()
     def test_out_of_candidate_answer_is_undecided_and_goes_to_fallback(self):
         """후보 밖 글자(八)를 답하면 미정으로 다뤄 보완 판독기에 넘긴다. 보완 호출이 실패하면 첫 판독기의 답(근거)을 남긴다."""
         from PIL import Image
@@ -1050,6 +1060,7 @@ class AdjudicateBatch(unittest.TestCase):
         bare = {**asdict(sites[1]), "pre": "", "post": "", "choice": "人"}
         self.assertEqual(apply_adjudications(other, [bare]), 1); self.assertEqual(region_text(other.regions[0]), "乙丙丁人戊")
 
+    @mock_ink_locations()
     def test_apply_choice_keeps_own_site_when_neighbours_were_just_decided(self):
         """열 끝 표시의 바로 앞 두 자리가 같은 차례에서 다른 후보로 정해지면(〔於/不〕〔於/不〕→不不, 〔效效/先〕→先) 기록한 앞 글자가 제자리 옆과
         안 맞아 보여, 같은 열의 미정 〔日/曰〕 을 바꾸고 정한 자리는 표시로 남기던 문제 — 3차 판별 때도, 다시 계산 뒤 다시 적용할 때도."""
@@ -1061,17 +1072,22 @@ class AdjudicateBatch(unittest.TestCase):
 
         class R:
             model = "m"
-            def __init__(self, answers): self.answers = list(answers)
-            def adjudicate(self, crop, ask, horizontal, pdf_page): return GlyphChoice(choice=self.answers.pop(0), evidence="획", window="")
+            def __init__(self, answers, current):
+                self.answers = list(answers); self.contexts = list(_site_ctx(current).values())
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                choice = self.answers.pop(0); pre, post = self.contexts.pop(0)
+                return GlyphChoice(choice=choice, evidence="획", window=pre[-1:] + choice + post[:1])
         for text, answers, want in (("於〔日/曰〕乙丙丁戊〔於/不〕〔於/不〕〔日/曰〕", ["", "不", "不", "曰"], "於〔日/曰〕乙丙丁戊不不曰"),
                                     ("效〔日/曰〕乙丙丁戊〔效效/先〕〔日/曰〕", ["", "先", "曰"], "效〔日/曰〕乙丙丁戊先曰")):
             pr = page(text)
-            rec = adjudicate_page({"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}, Image.new("L", (900, 1300), 255), R(answers), True, batch=1)
+            current = {"pdf_page": 1, "pass1": pr.model_dump(), "merged": pr.model_dump()}
+            rec = adjudicate_page(current, Image.new("L", (900, 1300), 255), R(answers, current), True, batch=1)
             self.assertEqual(PageReading.model_validate(rec["merged"]).regions[0].paragraphs[0].columns[0].text, want)
             fresh = page(text); st = {}
             self.assertEqual(apply_adjudications(fresh, rec["adjudications"], st), len([a for a in answers if a]))
             self.assertEqual((fresh.regions[0].paragraphs[0].columns[0].text, st["unmapped"]), (want, 0))
 
+    @mock_ink_locations()
     def test_apply_choice_random_runs_change_only_decided_sites(self):
         """무작위 열(같은 표시가 되풀이되고 열 끝에 표시가 몰림, 길이가 바뀌는 후보 〔效效/先〕): 3차를 1~3차례 돌리며 차례마다 무작위 자리만 정한다.
         판별 때 바뀐 글, 원본에 기록을 다시 적용한 글(다시 계산), 차례 안 기록 차례를 섞어 다시 적용한 글이 모두 '정한 자리(참 번호)만 고른 글자,
@@ -1091,8 +1107,11 @@ class AdjudicateBatch(unittest.TestCase):
 
         class R:
             model = "m"
-            def __init__(self, answers): self.answers = list(answers)
-            def adjudicate(self, crop, ask, horizontal, pdf_page): return GlyphChoice(choice=self.answers.pop(0), evidence="획", window="")
+            def __init__(self, answers, current):
+                self.answers = list(answers); self.contexts = list(_site_ctx(current).values())
+            def adjudicate(self, crop, ask, horizontal, pdf_page):
+                choice = self.answers.pop(0); pre, post = self.contexts.pop(0)
+                return GlyphChoice(choice=choice, evidence="획", window=pre[-1:] + choice + post[:1])
         marks = [("日", "曰"), ("於", "不"), ("效效", "先")]
         for seed in range(120):
             rng = random.Random(seed); cols = []; k = 0
@@ -1109,7 +1128,7 @@ class AdjudicateBatch(unittest.TestCase):
                     answers.append(rng.choice([a, b]) if rng.random() < 0.6 else "")
                     if answers[-1]:
                         picks[kk] = answers[-1]
-                rec = adjudicate_page(rec, img, R(answers), True, batch=1, ticks=False)
+                rec = adjudicate_page(rec, img, R(answers, rec), True, batch=1, ticks=False)
                 self.assertEqual(texts(PageReading.model_validate(rec["merged"])), render(cols, picks), (seed, orig))
             recs = rec["adjudications"]
             shuffled = [a for r in sorted({a["run"] for a in recs}) for a in rng.sample([a for a in recs if a["run"] == r], sum(a["run"] == r for a in recs))]
@@ -1341,6 +1360,7 @@ class BlindAdjudicate(unittest.TestCase):
         w = locate_glyph(im, [50, 30, 120, 300], site, True, "生于水而長于土能入肝")
         self.assertLess(w.em_px, MIN_GLYPH_PX, w)
 
+    @mock_ink_locations()
     def test_blind_recheck_confirms_only_matching_answers(self):
         from PIL import Image
         from yeone_ocr.adjudicate import adjudicate_page
@@ -1464,6 +1484,7 @@ class BlindReviewFixes(unittest.TestCase):
         j, exact = _map_index_ex("abXde", "abYZde", 2); self.assertFalse(exact)              # 글자층이 쪼갬 → 어림
         self.assertEqual(_map_index("abXde", "abYde", 2), 2)
 
+    @mock_ink_locations()
     def test_blind_recheck_goes_to_the_reader_that_answered(self):
         from PIL import Image
         from yeone_ocr.adjudicate import adjudicate_page

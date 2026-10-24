@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib, re, unicodedata
 from .schema import PageReading, RegionReread, Region, Column, Uncertain, TEXT_KINDS, region_text, duplicate_region_ids
 from .marks import MARK_RE, fold
+from .text_policy import LEGACY_TEXT_POLICY, SOURCE_TEXT_POLICY, compatibility_ideograph, touches_selector, validate_text_policy
 
 WS = re.compile(r"\s+")
 INVISIBLE = re.compile(r"[\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufe00-\ufe0f\ufeff]")   # 폭 없는 글자·이체자 선택자 등
@@ -37,16 +38,17 @@ _PUNCT_FOLD = {ord(a): b for a, b in {"，": ",", "。": ".", "：": ":", "；":
                                         "［": "[", "］": "]", "｛": "{", "｝": "}", "〈": "<", "〉": ">", "《": "<", "》": ">", "「": "'", "」": "'", "『": '"', "』": '"'}.items()}
 
 
-def _fold(s: str) -> str:
+def _fold(s: str, *, fold_zh: bool | None = None) -> str:
     """비교 전용 접기 — 글자 수를 바꾸지 않는다. 전각 부호는 반각으로(，↔, 같은 모델 표기 차이는 판독 차이가 아니다),
     저장 글에 남겨 둔 이체자 호환 한자(塚 U+FA10)는 표준 글자(U+585A)로, FOLD_ZH 면 한자를 간체·이체자 대표 글자로. 〔〕 표시 토큰(짝 없는 대리 부호값, _tokenize)은 그대로 둔다."""
     out = []
+    fold_zh = FOLD_ZH if fold_zh is None else fold_zh
     for ch in s:
         o = ord(ch)
         if _TOK <= o < _TOK + _TOK_N:          # 표시 토큰. 판독 글의 사용자 영역 글자(U+E000~F8FF)는 토큰이 아니라 글자로 접는다(접어도 그대로다)
             out.append(ch); continue
         ch = unicodedata.normalize("NFC", ch) if _is_variant_compat(o) else ch.translate(_PUNCT_FOLD)
-        if FOLD_ZH and _is_ideo(o):
+        if fold_zh and _is_ideo(o):
             k = _ZH_KEY.get(ch)
             if k is None:
                 from .collate import zh
@@ -55,6 +57,11 @@ def _fold(s: str) -> str:
                 ch = k
         out.append(ch)
     return "".join(out)
+
+
+def _source_fold(s: str, *, fold_zh: bool | None = None) -> str:
+    """Only the comparison key folds CJK compatibility codes; stored text is untouched."""
+    return _fold("".join(unicodedata.normalize("NFC", c) if compatibility_ideograph(c) else c for c in s), fold_zh=fold_zh)
 
 
 _ZH_KEY: dict[str, str] = {}      # 글자별 간체·이체자 대표 글자 캐시(열 짝짓기 _sim 이 열마다 접으므로)
@@ -125,15 +132,16 @@ def _shown(s: str, table: dict[str, str]) -> str:
     return "「" + "".join(f"({table[c][1:-1]})" if c in table else c for c in s) + "」"
 
 
-def _merge_marked(sa: str, sb: str, table: dict[str, str]) -> tuple[list[str], list[tuple[int, str, bool]]]:
+def _merge_marked(sa: str, sb: str, table: dict[str, str], *, fold_key=None) -> tuple[list[str], list[tuple[int, str, bool]]]:
     """〔…〕 표시 토큰이 든 차이 구간의 병합. 표시는 그대로 두고(1차 우선) 그 알맹이 자리를 상대 글과 맞춘 뒤, 표시 밖 글자의 차이만 〔a/b〕·〔疑: x〕 로 적는다.
     (0.6.7 까지는 구간 전체를 1차 글로 덮어 '能入〔疑: 肝〕' ↔ '能人肝' 의 入/人 차이가 사라졌다.)
     돌려주는 것: (토큰 상태의 조각 목록 — 글자·토큰·새 표시가 조각 하나, [(표시한 조각 번호, 덧붙일 설명, 새 표시인가)]).
     1차 표시의 알맹이와 2차 글이 다르면 표시는 두고 2차 글을 설명에 남긴다. 1차 맨글자 자리에 2차 표시가 오면 2차 표시를 살리고 밀려난 1차 글을 설명에 남긴다(기존 동작).
     1차 표시와 한 자리에 걸친 2차 표시는 버리고 그 알맹이를 2차 글자로 본다. 표시가 여러 맞춤 조각에 걸치면 그 사이 글도 표시의 몫이고, 설명은 표시마다 한 번(상대 글 전체)."""
+    fold_key = fold_key or _fold
     xa, oa = _expand(sa, table); xb, ob = _expand(sb, table)
     ops: list[tuple[list[int], list[int], bool]] = []          # (1차 위치들, 2차 위치들, 같음) — 같은 글자는 한 글자씩
-    for op, p1, p2, q1, q2 in difflib.SequenceMatcher(None, _fold(xa), _fold(xb), autojunk=False).get_opcodes():
+    for op, p1, p2, q1, q2 in difflib.SequenceMatcher(None, fold_key(xa), fold_key(xb), autojunk=False).get_opcodes():
         if op == "equal":
             ops.extend(([p], [q], True) for p, q in zip(range(p1, p2), range(q1, q2)))
         else:
@@ -195,7 +203,7 @@ def _merge_marked(sa: str, sb: str, table: dict[str, str]) -> tuple[list[str], l
     for (side, i), ix in where.items():
         part = WS.sub("", "".join(other[(side, i)]))
         if side == "a":
-            if not part or _fold(part) != _fold(_mark_content(table[sa[i]]) or sa[i]):
+            if not part or fold_key(part) != fold_key(_mark_content(table[sa[i]]) or sa[i]):
                 marked.append((ix, f" ↔ 2차 {_shown(part, table)}" if part else " ↔ 2차 없음", False))
         else:                                        # 1차 꼴 그대로 남긴다(접어서만 같아도 적는다)
             marked.append((ix, f" ← 1차 「{part}」" if part and part != _mark_content(table[sb[i]]) else "" if part else " ← 1차 없음", True))
@@ -244,17 +252,18 @@ def columns_in_reading_order(r: Region) -> list[Column]:
     return out
 
 
-def _sim(a: str, b: str) -> float:
-    a, b = _fold(WS.sub("", a)), _fold(WS.sub("", b))      # 부호·이체자 호환 한자 표기 차이는 닮음에 영향을 주지 않는다
+def _sim(a: str, b: str, *, fold_key=None) -> float:
+    fold_key = fold_key or _fold
+    a, b = fold_key(WS.sub("", a)), fold_key(WS.sub("", b))
     if not a or not b:
         return 0.0
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
-def align_columns(c1: list[Column], c2: list[Column], min_sim: float = 0.55) -> list[tuple[int | None, int | None]]:
+def align_columns(c1: list[Column], c2: list[Column], min_sim: float = 0.55, *, fold_key=None) -> list[tuple[int | None, int | None]]:
     """두 판독의 열을 글 유사도로 짝짓는다(순서 보존, 빈칸 허용). 번호가 어긋나거나 열이 빠져도 같은 열끼리 비교하게 한다."""
     n, m = len(c1), len(c2)
-    S = [[_sim(c1[i].text, c2[j].text) for j in range(m)] for i in range(n)]
+    S = [[_sim(c1[i].text, c2[j].text, fold_key=fold_key) for j in range(m)] for i in range(n)]
     dp = [[0.0] * (m + 1) for _ in range(n + 1)]
     bt = [[""] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
@@ -291,13 +300,14 @@ LONG_SEG_DIFFER = "1차·2차 판독이 크게 달라 1차를 따름"           
 NOTATION_DIFF = "1차·2차 표기 차이(간체·번체·이체)"   # 접어서 비교하면 같은데 글자가 다른 자리(後↔后·塚 U+FA10↔U+585A): 글은 1차 그대로, 확인 항목 한 건으로만 알린다
 
 
-def _strip_map(cols: list[Column]) -> tuple[str, list[tuple[int, int]], dict[str, str]]:
+def _strip_map(cols: list[Column], *, preserve_source: bool = False) -> tuple[str, list[tuple[int, int]], dict[str, str]]:
     """열들의 글을 공백 없이 이어 붙인 문자열과, 그 글자마다 (열 번호, 열 안 위치) 대응표. 〔…〕 표시는 한 글자 토큰."""
     table: dict[str, str] = {}
     out, pos = [], []
     for ci, c in enumerate(cols):
-        t = _tokenize(_norm(c.text), table)
-        c.text = _detok(t, table)              # 정규화된 글로 바꿔 둔다(공백 하나로)
+        t = _tokenize(c.text if preserve_source else _norm(c.text), table)
+        if not preserve_source:
+            c.text = _detok(t, table)          # 과거 기록 재현에서만 정규화된 글로 바꾼다.
         for k, ch in enumerate(t):
             if ch.isspace():
                 continue
@@ -314,9 +324,12 @@ def _notation_item(rid: str, a: str, b: str, idx: list[tuple[int, int]], pos: li
                      context=f"{NOTATION_DIFF} {len(idx)}자: " + ", ".join(f"{cp(x)}→{cp(y)}" for x, y in pairs[:5]) + (" …" if len(pairs) > 5 else "") + " — 인쇄된 꼴 그대로인지 원본 확인")
 
 
-def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[PageReading, dict]:
+def merge_passes(p1: PageReading, rereads: dict[str, RegionReread], *, text_policy: str = LEGACY_TEXT_POLICY, fold_zh: bool | None = None) -> tuple[PageReading, dict]:
     """2차 판독이 있는 문자 영역마다 글 전체(열 경계 무시, 공백 무시)를 비교해 다른 자리를 표시한다.
     열 경계가 달라도 글이 같으면 표시하지 않는다. 열 번호는 영역 전체 기준으로 다시 매긴다."""
+    preserve_source = validate_text_policy(text_policy) == SOURCE_TEXT_POLICY
+    def key(text):
+        return (_source_fold if preserve_source else _fold)(text, fold_zh=fold_zh)
     merged = p1.model_copy(deep=True)
     stats = {"regions_compared": 0, "columns_compared": 0, "columns_differ": 0, "marks": 0,
              "long_segments": 0, "notation_diffs": 0, "column_count_mismatch": []}
@@ -346,11 +359,11 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
         cols2 = sorted(rr.columns, key=lambda c: c.col_from_right)
         if len(cols) != len(cols2):
             stats["column_count_mismatch"].append((r.id, len(cols), len(cols2)))
-        pairs = align_columns(cols, cols2)
+        pairs = align_columns(cols, cols2, fold_key=key)
         stats["columns_compared"] += sum(1 for i, j in pairs if i is not None and j is not None)
-        a, pos, table = _strip_map(cols)
-        b = "".join(ch for ch in _tokenize("".join(_norm(c.text) for c in cols2), table) if not ch.isspace())
-        fa, fb = _fold(a), _fold(b)                # 부호 표기·(간체 모드) 자형 차이는 접고 비교한다. 위치는 a·b 와 1:1
+        a, pos, table = _strip_map(cols, preserve_source=preserve_source)
+        b = "".join(ch for ch in _tokenize("".join(c.text if preserve_source else _norm(c.text) for c in cols2), table) if not ch.isspace())
+        fa, fb = key(a), key(b)                    # 비교 키만 접는다. 위치는 a·b 와 1:1
         sm = None if fa == fb else difflib.SequenceMatcher(None, fa, fb, autojunk=False)
         same = [(0, 0, len(a))] if sm is None else [(i1, j1, i2 - i1) for op, i1, i2, j1, j2 in sm.get_opcodes() if op == "equal"]
         idx = [(i, j) for i0, j0, n in same for i, j in zip(range(i0, i0 + n), range(j0, j0 + n))
@@ -371,6 +384,19 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
             sa_t, sb_t = _detok(sa, table), _detok(sb, table)
             ci, k = pos[i1] if i1 < len(pos) else (pos[-1][0], len(cols[pos[-1][0]].text)) if pos else (0, 0)    # 1차 열이 모두 비었으면 첫 열 앞
             ctx_col = cols[ci].text
+            protected_form = (any(compatibility_ideograph(c) for c in sa_t + sb_t)
+                              and unicodedata.normalize("NFC", sa_t) == unicodedata.normalize("NFC", sb_t))
+            if preserve_source and (touches_selector(a, i1, i2) or touches_selector(b, j1, j2)
+                                    or touches_selector(sa_t, 0, len(sa_t)) or touches_selector(sb_t, 0, len(sb_t))
+                                    or protected_form):
+                # A selector belongs to its base character. Never insert a doubt
+                # marker between them, or move a selector onto another base.
+                stats["source_identity_holds"] = stats.get("source_identity_holds", 0) + 1
+                merged.uncertain.append(Uncertain(region_id=r.id, col_from_right=ci + 1,
+                    position=_pos(k, len(ctx_col)), context="호환 한자·이체자 선택자 또는 결합 글자 차이 — 1차 원형 보존, 원본 확인: "
+                    + _detok(a[max(0, i1 - 2):min(len(a), i2 + 2)], table)
+                    + " ↔ 2차 " + _detok(b[max(0, j1 - 2):min(len(b), j2 + 2)], table)))
+                continue
             if (len(sa_t) >= LONG_SEGMENT and not sb_t) or (len(sb_t) >= LONG_SEGMENT and not sa_t) or (len(sa_t) >= LONG_SEGMENT and len(sb_t) >= LONG_SEGMENT):
                 stats["long_segments"] += 1
                 who = (LONG_SEG_NO_P2 if not sb_t else ("1차 판독에 없고 2차에만 있어 본문에 넣지 않음" if not sa_t else LONG_SEG_DIFFER))
@@ -379,7 +405,7 @@ def merge_passes(p1: PageReading, rereads: dict[str, RegionReread]) -> tuple[Pag
                     context=f"{who}({len(shown)}자): 「{shown[:40]}{'…' if len(shown) > 40 else ''}」" + (f" ↔ 2차 「{sb_t[:40]}」" if sa_t and sb_t else "") + " — 열이 빠졌거나 열 경계가 어긋났는지 원본 확인"))
                 continue
             if ma or mb:                            # 표시가 든 구간: 표시는 그대로 두고 표시 밖 글자의 차이만 적는다(토큰 상태로 고친다)
-                pieces, marked = _merge_marked(sa, sb, table)
+                pieces, marked = _merge_marked(sa, sb, table, fold_key=key)
                 seg = "".join(pieces)
                 if seg == sa and not marked:        # 2차가 1차 표시의 알맹이대로 읽었다: 달라진 것 없음
                     continue
@@ -425,14 +451,14 @@ def strip_marks_for_compare(s: str) -> str:
     return fold(s, work_notes=True)
 
 
-def compare_textlayer(reading: PageReading, layer_plain: str, max_items: int = 60) -> dict:
+def compare_textlayer(reading: PageReading, layer_plain: str, max_items: int = 60, *, fold_zh: bool | None = None) -> dict:
     """판독문과 기존 텍스트 레이어를 공백 없이 이어 붙여 대조한다. 다른 곳은 검수 참고용이며 자동 반영하지 않는다.
     전각·반각 부호(，↔,)와 (간체 모드) 자형 차이는 접고 비교한다 — 중의역대약론선 실측에서 글자층 차이의 60%가 부호 표기였다."""
     body = "".join(region_text(r) for r in reading.regions if r.kind in TEXT_KINDS).replace("\n", "")
     a = WS.sub("", strip_marks_for_compare(body)); b = WS.sub("", layer_plain or "")
     if not a and not b:
         return {"ratio": 1.0, "items": [], "reading_chars": 0, "layer_chars": 0}
-    fa, fb = _fold(a), _fold(b)                     # 위치는 a·b 와 1:1 (접기는 글자 수를 바꾸지 않는다)
+    fa, fb = _fold(a, fold_zh=fold_zh), _fold(b, fold_zh=fold_zh)
     sm = difflib.SequenceMatcher(None, fa, fb, autojunk=False)
     items = []
     for op, i1, i2, j1, j2 in sm.get_opcodes():

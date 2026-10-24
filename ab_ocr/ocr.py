@@ -1,19 +1,19 @@
 """Local OCR adapters. No network access or automatic language fallback."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import csv
 import hashlib
 import io
 import json
 import math
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 LANGUAGE = re.compile(r"[A-Za-z][A-Za-z0-9_/-]*")
 MAX_PIXELS = 40_000_000
@@ -92,11 +92,13 @@ def _cancelled(should_stop):
 
 
 def _run(argv: list[str], *, timeout=30.0, should_stop=None, engine_name="Tesseract", include_stderr=True, env=None) -> str:
-    from .runtime import external_process_search, subprocess_environment
+    from .runtime import external_process_search, process_tree, subprocess_environment
     _cancelled(should_stop)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("실행 제한 시간은 양수여야 합니다.")
-    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    # CREATE_SUSPENDED (documented Win32 flag 0x4) closes the startup race:
+    # no worker code can spawn a server before process_tree attaches its job.
+    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW | 0x00000004} if os.name == "nt" else {}
     try:
         with external_process_search():
             process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -106,21 +108,22 @@ def _run(argv: list[str], *, timeout=30.0, should_stop=None, engine_name="Tesser
         raise OCRError(f"{engine_name}를 실행하지 못했습니다: {exc}") from exc
     deadline = time.monotonic() + timeout
     try:
-        while True:
+        with process_tree(process, suspended=os.name == "nt"):
+            while True:
+                _cancelled(should_stop)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OCRError("OCR 실행 제한 시간을 초과했습니다.")
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if process.returncode:
+                detail = stderr.decode("utf-8", errors="replace").strip()[-1500:] if include_stderr else "로컬 엔진 환경과 모델 설치 상태를 확인하세요."
+                raise OCRError(f"{engine_name} 실행 실패 ({process.returncode}): {detail}")
             _cancelled(should_stop)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise OCRError("OCR 실행 제한 시간을 초과했습니다.")
-            try:
-                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        if process.returncode:
-            detail = stderr.decode("utf-8", errors="replace").strip()[-1500:] if include_stderr else "로컬 엔진 환경과 모델 설치 상태를 확인하세요."
-            raise OCRError(f"{engine_name} 실행 실패 ({process.returncode}): {detail}")
-        _cancelled(should_stop)
-        return stdout.decode("utf-8", errors="replace")
+            return stdout.decode("utf-8", errors="replace")
     finally:
         if process.poll() is None:
             process.kill()
@@ -232,7 +235,7 @@ def _cached_file_sha256(path: Path) -> str:
     stat = path.stat()
     key = (str(path), stat.st_size, stat.st_mtime_ns)
     if key not in _HASH_CACHE:
-        if len(_HASH_CACHE) > 64:
+        if len(_HASH_CACHE) > 8192:
             _HASH_CACHE.clear()
         _HASH_CACHE[key] = file_sha256(path)
     return _HASH_CACHE[key]

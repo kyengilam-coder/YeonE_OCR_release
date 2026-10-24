@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "engine": "paddle_server",
+  "model_family": "PP-OCRv5",
+  "recognition_profile": "server",
+  "runtime_lock": "rapidocr-lock.json",
+  "rapidocr_version": "3.9.2",
+  "onnxruntime_version": "1.25.1",
+  "models": [
+    "ch_PP-OCRv5_det_server.onnx",
+    "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+    "ch_PP-OCRv5_rec_server.onnx"
+  ],
+  "languages": ["chi_sim", "chi_tra", "chi_sim+eng", "chi_tra+eng"],
+  "supported_scripts": ["Han", "Latin", "Japanese", "digits"],
+  "unsupported_scripts": ["Hangul"],
+  "text_policy": "No normalization, script conversion, dictionary correction, or language fallback",
+  "model_provenance": "https://github.com/RapidAI/RapidOCR/blob/v3.9.2/python/rapidocr/default_models.yaml",
+  "upstream_model": "https://huggingface.co/PaddlePaddle/PP-OCRv5_server_rec",
+  "upstream_documentation": "https://www.paddleocr.ai/latest/en/version3.x/module_usage/text_recognition.html"
+}

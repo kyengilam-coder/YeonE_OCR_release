@@ -114,7 +114,8 @@ class MergeAndAdjudication(unittest.TestCase):
             def adjudicate(self, *args):
                 return GlyphChoice(choice="人", window="甲人乙", evidence="획 확인")
         rec = record(PageReading(pdf_page=1, regions=[region("甲〔入/人〕乙")]))
-        with patch("yeone_ocr.adjudicate.apply_choice", return_value=False):
+        from glyph_test_support import mock_ink_locations
+        with patch("yeone_ocr.adjudicate.apply_choice", return_value=False), mock_ink_locations():
             adjudicate_page(rec, Image.new("L", (100, 100), 255), Reader(), True)
         self.assertEqual(rec["adjudicate_stats"]["decided"], 0)
         self.assertEqual(rec["adjudicate_stats"]["unmapped"], 1)

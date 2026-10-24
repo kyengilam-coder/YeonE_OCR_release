@@ -28,10 +28,15 @@ SOURCE_TOP_DIRS = {"yeone_ocr", "ab_ocr", "tests", "docs", "tools", "scripts", "
 SENSITIVE_NAMES = {"config.json", "credentials.json", "token.json", "secrets.json", "id_rsa", "id_ed25519"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".pdf", ".hwpx", ".hwp", ".docx", ".doc", ".msr"}
 MODEL_SUFFIXES = {".onnx", ".ort", ".pth", ".pt", ".ckpt", ".safetensors", ".traineddata", ".tflite",
-                  ".h5", ".hdf5", ".pkl", ".pickle", ".bin", ".model", ".pdmodel", ".pdiparams"}
+                  ".h5", ".hdf5", ".pkl", ".pickle", ".bin", ".model", ".pdmodel", ".pdiparams", ".gguf", ".ggml"}
 SOURCE_DATA = {"yeone_ocr/data/normalization_260929.json", "yeone_ocr/data/preset_basic.json",
-               "yeone_ocr/data/preset_kaibao.json", "yeone_ocr/data/preset_regions.json"}
-SOURCE_ENGINE_LOCKS = {"scripts/tesseract-lock.json", "scripts/rapidocr-lock.json", "scripts/easyocr-lock.json", "scripts/ppocrv6-lock.json"}
+               "yeone_ocr/data/preset_kaibao.json", "yeone_ocr/data/preset_regions.json",
+               "yeone_ocr/data/unihan_source_protection_17_0_0.json"}
+SOURCE_ENGINE_LOCKS = {"scripts/tesseract-lock.json", "scripts/rapidocr-lock.json", "scripts/easyocr-lock.json", "scripts/ppocrv6-lock.json",
+                       "scripts/paddle-server-lock.json", "scripts/paddle-server-gpu-lock.json",
+                       "scripts/glmocr-models.lock.json", "scripts/surya-lock.json"}
+SOURCE_ENGINE_REQUIREMENTS = {"scripts/surya-requirements.txt"}
+ENGINE_RUNTIME_HOMES = {"tesseract", "rapidocr", "easyocr", "ppocrv6", "paddle_server", "paddle_server_gpu", "glmocr", "surya"}
 SOURCE_JSON_DOCS = {"docs/AB_OCR_PROVENANCE.json"}
 SOURCE_TEST_FIXTURES = {f"tests/golden/{name}.json" for name in (
     "flow_default", "flow_records_template3", "flow_template", "flow_template2_pagenum", "flow_template_plain",
@@ -95,9 +100,9 @@ def source_allowed(name: str) -> bool:
                 or name in SOURCE_DATA
                 or (path.parts[1] == "assets" and path.suffix.lower() in {".ico", ".png", ".svg"}))
     if path.parts[0] in {"tools", "scripts", "tests"}:
-        if path.parts[0] == "tools" and path.parts[1].lower() in {"tesseract", "rapidocr", "easyocr", "ppocrv6"}:
+        if path.parts[0] == "tools" and path.parts[1].lower() in ENGINE_RUNTIME_HOMES:
             return False
-        return path.suffix.lower() in {".py", ".ps1"} or name in SOURCE_ENGINE_LOCKS | SOURCE_TEST_FIXTURES
+        return path.suffix.lower() in {".py", ".ps1"} or name in SOURCE_ENGINE_LOCKS | SOURCE_ENGINE_REQUIREMENTS | SOURCE_TEST_FIXTURES
     if path.parts[0] == "docs":
         return path.suffix.lower() in {".md", ".txt"} or name in SOURCE_JSON_DOCS
     if path.parts[0] == ".github":

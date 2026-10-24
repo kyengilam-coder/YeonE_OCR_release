@@ -2,7 +2,7 @@
 from __future__ import annotations
 import difflib
 from dataclasses import dataclass
-from .sections import Anchor, normalize_name
+from .sections import Anchor, Section, normalize_name
 from . import zh
 
 def _is_cjk_or_hangul(ch: str) -> bool:
@@ -73,6 +73,20 @@ class Match:
     how: str                 # exact | fuzzy | none
 
 
+def section_page_range(section: Section, matches: list[Match], n_pages: int) -> tuple[int, int] | None:
+    """HWPX에서 선택한 범위와 같은 PDF 범위. 장·절 선택은 하위 제목을 모두 포함한다."""
+    by_para = {m.anchor.para: m.pdf for m in matches if getattr(m, "anchor", None) is not None and m.pdf}
+    first = by_para.get(section.start)
+    if first is None:
+        return None
+    if section.next_anchor is None:
+        return first.page, n_pages
+    following = by_para.get(section.next_anchor.para)
+    if following is None or following.page < first.page:
+        return None
+    return first.page, min(n_pages, following.page)
+
+
 def _fuzzy_key(s: str, other_has_hangul: bool) -> str:
     """비슷함 비교용 글자열. 두 이름이 모두 한자면 간체 글자열(음이 같은 다른 글자는 다르게), 한쪽이 한글이면 독음."""
     from . import reading as rd
@@ -91,7 +105,7 @@ def match_anchors(anchors: list[Anchor], pdf_anchors: list[PdfAnchor], min_ratio
     from . import reading as rd
     psyl = [rd.syllables(p.title) for p in pdf_anchors]
     phangul = [any(rd.is_hangul(ch) for ch in sy) for sy in psyl]
-    asyl = [rd.syllables(a.name) for a in anchors]
+    variants = [[rd.syllables(n) for n in a.names] for a in anchors]
     chosen: dict[int, tuple[float, int, str]] = {}
     taken: set[int] = set()
 
@@ -100,38 +114,41 @@ def match_anchors(anchors: list[Anchor], pdf_anchors: list[PdfAnchor], min_ratio
 
     # ① 정확 일치
     for i, a in enumerate(anchors):
-        if not asyl[i]:
+        if not any(variants[i]):
             continue
         for j in range(len(pdf_anchors)):
-            if free(j) and psyl[j] and rd.seq_equal(asyl[i], psyl[j]):
+            if free(j) and psyl[j] and any(rd.seq_equal(sy, psyl[j]) for sy in variants[i] if sy):
                 chosen[i] = (1.0, j, "exact"); taken.add(j); break
     # ② 품음
     for i, a in enumerate(anchors):
-        if i in chosen or len(asyl[i]) < 2:
+        if i in chosen or not any(len(sy) >= 2 for sy in variants[i]):
             continue
         cands = []
         for j in range(len(pdf_anchors)):
             pj = psyl[j]
             if not free(j) or len(pj) < 2:
                 continue
-            if (len(pj) >= len(asyl[i]) and rd.seq_find(pj, asyl[i]) >= 0) or (len(asyl[i]) > len(pj) and rd.seq_find(asyl[i], pj) >= 0):
-                cands.append((0.9 - min(0.2, abs(len(pj) - len(asyl[i])) * 0.01), j))
+            for sy in variants[i]:
+                if len(sy) >= 2 and ((len(pj) >= len(sy) and rd.seq_find(pj, sy) >= 0) or (len(sy) > len(pj) and rd.seq_find(sy, pj) >= 0)):
+                    cands.append((0.9 - min(0.2, abs(len(pj) - len(sy)) * 0.01), j))
         if cands:
             r, j = max(cands); chosen[i] = (round(r, 3), j, "contains"); taken.add(j)
     # ③ 비슷한 글자열
     for i, a in enumerate(anchors):
-        if i in chosen or not asyl[i]:
+        if i in chosen or not any(variants[i]):
             continue
         cands = []
         for j in range(len(pdf_anchors)):
             if not free(j) or not psyl[j]:
                 continue
-            ka = _fuzzy_key(a.name, phangul[j]); kp = _fuzzy_key(pdf_anchors[j].title, any(rd.is_hangul(ch) for ch in asyl[i]))
-            if not ka or not kp:
-                continue
-            r = difflib.SequenceMatcher(None, ka, kp, autojunk=False).ratio()
-            if r >= min_ratio:
-                cands.append((r, j))
+            for name, sy in zip(a.names, variants[i]):
+                ka = _fuzzy_key(name, phangul[j])
+                kp = _fuzzy_key(pdf_anchors[j].title, any(rd.is_hangul(ch) for ch in sy))
+                if not ka or not kp:
+                    continue
+                r = difflib.SequenceMatcher(None, ka, kp, autojunk=False).ratio()
+                if r >= min_ratio:
+                    cands.append((r, j))
         if cands:
             r, j = max(cands); chosen[i] = (round(r, 3), j, "fuzzy"); taken.add(j)
     out: list[Match] = []
@@ -144,41 +161,69 @@ def match_anchors(anchors: list[Anchor], pdf_anchors: list[PdfAnchor], min_ratio
 
 
 # ---------- PDF 글자층에서 제목 찾기(책갈피에 없을 때) ----------
-_PAGE_KEYS: dict[int, list[str]] = {}
+def fallback_page_bounds(matches: list[Match], idx: int, n_pages: int) -> tuple[int, int]:
+    """이웃의 확정된 책갈피 안에서만 찾는다. 역전된 짝은 빈 범위로 실패한다."""
+    before = next((m.pdf.page for m in reversed(matches[:idx]) if m.pdf), 1)
+    after = next((m.pdf.page for m in matches[idx + 1:] if m.pdf), n_pages)
+    return max(1, before), min(n_pages, after)
 
 
-def page_keys(doc) -> list[str]:
-    """쪽마다 글자층 텍스트의 비교 키(간체·부호 제거). 문서마다 한 번만 만든다. 글자층이 없는 쪽은 빈 문자열."""
-    k = id(doc)
-    if k not in _PAGE_KEYS:
-        keys = []
-        for i in range(len(doc)):
-            try:
-                keys.append(match_key(doc[i].get_text("text") or ""))
-            except Exception:
-                keys.append("")
-        _PAGE_KEYS[k] = keys
-    return _PAGE_KEYS[k]
+def _heading_positions(text: str, title: str) -> list[int]:
+    """독립된 제목 행만 인정한다. '泻\\n白\\n散' 같은 한 글자씩의 제목도 받는다.
+
+    본문 언급·목차의 제목+쪽수는 제목으로 삼지 않는다. 줄 전체가 제목이어야 하므로
+    서술 중 사백산을 처음 언급한 36쪽으로 이동하지 않는다.
+    """
+    key = match_key(title)
+    if len(key) < 2:
+        return []
+    lines = (text or "").splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        if any(c.isdigit() for c in line):
+            continue
+        if match_key(line) == key:
+            out.append(i)
+            continue
+        # PDF 글자층에서 자간이 큰 제목이 여러 행으로 분리되는 경우.
+        parts = []
+        for piece in lines[i:i + len(key)]:
+            part = match_key(piece)
+            if len(part) != 1 or any(c.isdigit() for c in piece):
+                break
+            parts.append(part)
+        if "".join(parts) == key:
+            out.append(i)
+    return out
 
 
-def find_title_pages(doc, title: str, next_title: str | None = None, start_page: int = 1, max_span: int = 6) -> tuple[int, int] | None:
-    """PDF 글자층에서 title 이 처음 나오는 쪽부터 next_title 이 나오는 쪽까지를 돌려준다(둘 다 1부터, 끝 포함).
-    next_title 을 못 찾으면 시작 쪽부터 max_span 쪽까지. title 자체를 못 찾으면 None."""
-    keys = page_keys(doc)
-    kt = match_key(title)
-    if not kt or len(kt) < 2:
+def find_title_pages(doc, title: str, next_title: str | None = None, start_page: int = 1,
+                     max_span: int = 6, end_page: int | None = None) -> tuple[int, int] | None:
+    """범위 안의 독립된 제목을 검증한다. 제목이 여럿이면 추측하지 않고 None.
+
+    다음 제목이 주어졌는데 검증할 수 없을 때도 자동 범위를 만들지 않는다.
+    마지막 구획처럼 다음 제목이 없으면 max_span 쪽까지만 제안한다.
+    """
+    lo, hi = max(1, start_page), min(len(doc), end_page if end_page is not None else len(doc))
+    if lo > hi or len(match_key(title)) < 2:
         return None
-    p0 = None
-    for i in range(max(0, start_page - 1), len(keys)):
-        if kt in keys[i]:
-            p0 = i + 1; break
-    if p0 is None:
+    found: list[tuple[int, int]] = []
+    texts = {}
+    for page in range(lo, hi + 1):
+        try:
+            text = doc[page - 1].get_text("text") or ""
+        except Exception:
+            continue
+        texts[page] = text
+        found.extend((page, pos) for pos in _heading_positions(text, title))
+        if len(found) > 1:
+            return None
+    if len(found) != 1:
         return None
-    p1 = min(len(keys), p0 + max_span - 1)
-    kn = match_key(next_title) if next_title else ""
-    if kn and len(kn) >= 2:
-        for i in range(p0 - 1, min(len(keys), p0 - 1 + 60)):
-            # 다음 제목이 같은 쪽에 있어도 그 쪽은 포함(쪽 안 자르기는 판독 글로 한다)
-            if kn in keys[i] and (i + 1 > p0 or keys[i].find(kn) > keys[i].find(kt)):
-                p1 = i + 1; break
-    return p0, p1
+    first, start_pos = found[0]
+    if next_title:
+        for page in range(first, min(hi, first + 59) + 1):
+            if any(page > first or pos > start_pos for pos in _heading_positions(texts.get(page, ""), next_title)):
+                return first, page
+        return None
+    return first, min(hi, first + max(1, max_span) - 1)

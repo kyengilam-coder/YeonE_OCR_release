@@ -28,11 +28,23 @@ if (Test-Path -LiteralPath $RegistryKey) {
     throw 'An installation with this AppId already exists. The test will not touch it.'
 }
 if (Test-Path -LiteralPath $AppPath) { throw 'Use a new installer test directory.' }
+$ExpectedPreviousVersion = ''
+if ($PreviousInstaller) {
+    $PreviousInstaller = (Resolve-Path -LiteralPath $PreviousInstaller).Path
+    $PreviousFileVersion = (Get-Item -LiteralPath $PreviousInstaller).VersionInfo.FileVersionRaw
+    if ($null -eq $PreviousFileVersion -or $PreviousFileVersion -eq [version]'0.0.0.0') {
+        throw 'Previous installer has no usable Windows file version.'
+    }
+    $ExpectedPreviousVersion = $PreviousFileVersion.ToString(3)
+    if ([version]$ExpectedPreviousVersion -ge [version]$ExpectedVersion) {
+        throw 'Previous installer must have an older version than the target installer.'
+    }
+}
 New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
 $UserData = Join-Path $TestRoot 'preserved-user-data.txt'
 [IO.File]::WriteAllText($UserData, 'synthetic OCR record - preserve through install and uninstall')
 $DataHash = (Get-FileHash -LiteralPath $UserData -Algorithm SHA256).Hash
-$Checks = [ordered]@{}
+$Checks = [ordered]@{ previous_version = $null; upgrade = $false }
 function Invoke-TestProcess([string]$File, [string[]]$ProcessArguments) {
     $Process = Start-Process -FilePath $File -ArgumentList $ProcessArguments -WindowStyle Hidden -PassThru
     try {
@@ -49,9 +61,17 @@ try {
     if ($PreviousInstaller) {
         $PreviousInstaller = (Resolve-Path -LiteralPath $PreviousInstaller).Path
         Invoke-TestProcess $PreviousInstaller ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'previous-install.log') + '"'))
-        $Previous = Get-ItemProperty -LiteralPath $RegistryKey
-        if ([IO.Path]::GetFullPath($Previous.InstallLocation).TrimEnd('\') -ne $AppPath) { throw 'Unexpected previous installation directory.' }
-        $Checks.upgrade_from = $Previous.DisplayVersion
+        $PreviousRegistered = Get-ItemProperty -LiteralPath $RegistryKey
+        if ([IO.Path]::GetFullPath($PreviousRegistered.InstallLocation).TrimEnd('\') -ne $AppPath) {
+            throw 'Unexpected previous installation directory.'
+        }
+        if ($PreviousRegistered.DisplayVersion -ne $ExpectedPreviousVersion) {
+            throw 'Previous installed version does not match the installer file version.'
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $AppPath 'YeonE_OCR.exe') -PathType Leaf)) {
+            throw 'Previous installation did not produce the application executable.'
+        }
+        $Checks.previous_version = $PreviousRegistered.DisplayVersion
     }
     Invoke-TestProcess $Installer ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'install.log') + '"'))
     $Executable = Join-Path $AppPath 'YeonE_OCR.exe'
@@ -59,6 +79,7 @@ try {
     if ([IO.Path]::GetFullPath($Registered.InstallLocation).TrimEnd('\') -ne $AppPath) { throw 'Unexpected registered installation directory.' }
     if ($Registered.DisplayVersion -ne $ExpectedVersion) { throw 'Installed version mismatch.' }
     $Checks.install = $true
+    $Checks.upgrade = [bool]$PreviousInstaller
     $InstalledHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
     $SmokeReport = Join-Path $TestRoot 'installed-smoke.json'
     Invoke-TestProcess $Executable @('--smoke-test', ('"' + $SmokeReport + '"'))
@@ -66,6 +87,9 @@ try {
     if (-not $Smoke.ok -or -not $Smoke.frozen) { throw 'Installed application smoke test failed.' }
     $Checks.installed_smoke = $Smoke.checks.Count
     Invoke-TestProcess $Installer ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'reinstall.log') + '"'))
+    $Reinstalled = Get-ItemProperty -LiteralPath $RegistryKey
+    if ([IO.Path]::GetFullPath($Reinstalled.InstallLocation).TrimEnd('\') -ne $AppPath -or
+        $Reinstalled.DisplayVersion -ne $ExpectedVersion) { throw 'Reinstalled registration mismatch.' }
     if ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash -ne $InstalledHash) { throw 'Reinstall changed the executable unexpectedly.' }
     $Checks.reinstall = $true
     if ($TestPython) {

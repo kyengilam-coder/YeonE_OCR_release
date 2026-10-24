@@ -26,13 +26,20 @@ datas += [(str(ROOT / "README.md"), ".")]
 # Isolated engine Python processes need real script files rather than modules
 # inside the executable's PYZ. Keep this explicit resource allowlist; never
 # collect engine environments, models, work records or private source documents.
-for name in ("rapidocr_worker.py", "easyocr_worker.py", "ppocrv6_worker.py", "reading_order.py", "glyph_verifier.py"):
+for name in ("rapidocr_worker.py", "easyocr_worker.py", "ppocrv6_worker.py", "reading_order.py", "glyph_verifier.py",
+             "glmocr_worker.py", "surya_worker.py", "worker_sessions.py"):
     datas.append((str(ROOT / "ab_ocr" / name), "ab_ocr"))
 for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py", "rapidocr-lock.json",
              "install_easyocr.py", "easyocr-lock.json", "install_ppocrv6.py", "ppocrv6-lock.json",
-             "create_chinese_ocr_fixture.py"):
+             "create_chinese_ocr_fixture.py",
+             "install_paddle_server.py", "paddle-server-lock.json",
+             "install_paddle_server_gpu.py", "paddle-server-gpu-lock.json",
+             "install_glmocr.py", "glmocr-models.lock.json",
+             "install_surya.py", "install_surya_cuda.py", "surya-lock.json", "surya-requirements.txt"):
     datas.append((str(ROOT / "scripts" / name), "scripts"))
-for name in ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
+for name in ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md",
+             "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "PADDLE_SERVER.md",
+             "GLM_OCR.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
     datas.append((str(ROOT / "docs" / name), "docs"))
 for name in ("THIRD_PARTY_NOTICES.txt", "requirements-windows.lock.txt"):
     resource = ROOT / "packaging" / name
@@ -53,7 +60,7 @@ if python_license.is_file():
 binaries = []
 hiddenimports = ["tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox", "tkinter.simpledialog",
                  "PIL.ImageTk", "PIL.ImageGrab", "PIL.IcoImagePlugin", "fitz", "pymupdf", "cv2", "numpy", "lxml.etree",
-                 "pydantic_core", "jiter", "yeone_ocr.launcher", "yeone_ocr.frozen_smoke"]
+                 "pydantic_core", "jiter", "sqlite3", "_sqlite3", "yeone_ocr.launcher", "yeone_ocr.frozen_smoke"]
 
 def runtime_module(name):
     return name != "google.genai._test_api_client" and not any(

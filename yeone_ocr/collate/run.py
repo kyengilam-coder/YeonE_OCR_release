@@ -4,14 +4,14 @@
          yeone-ocr collate <pdf> --hwpx <hwpx> --section "大薊" [--apply] [--policy all|sure|memo] [--out 파일]
 """
 from __future__ import annotations
-import html, json, os, re, time, unicodedata
+import hashlib, html, json, os, re, time, unicodedata
 from argparse import Namespace
 from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from . import zh
-from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name
-from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages
+from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name, resolve_anchor_index
+from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages, fallback_page_bounds, section_page_range
 from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter, book_titles, promote_repeated, REPEAT_MIN
 from .hwpx_edit import Editor
 from .labels import POLICIES, ANCHOR_SOURCES
@@ -53,7 +53,7 @@ def list_text(anchors, pdf_anchors, matches, limit: int = 0) -> str:
         a = m.anchor
         pdf = f"PDF 「{m.pdf.title}」 {m.pdf.page}쪽" if m.pdf else "PDF 짝 없음"
         from . import reading
-        lines.append(f"{i + 1:4d}. {'  ' * (a.level - 1)}{a.name[:30]:<32} [{reading.reading(a.name)[:16]}] 문단 {a.para:>5}  {pdf}  ({m.how}{'' if m.how != 'fuzzy' else f' {m.score:.2f}'})")
+        lines.append(f"{i + 1:4d}. {'  ' * (a.level - 1)}{a.name[:30]:<32} [{reading.reading(a.name)[:16]}] 문단 {a.para + 1:>5}  {pdf}  ({m.how}{'' if m.how != 'fuzzy' else f' {m.score:.2f}'})")
     return "\n".join(lines)
 
 
@@ -146,8 +146,8 @@ def trim_to_section(paras: list[tuple], title: str, next_title: str | None) -> t
 
 # ---------- 보고 ----------
 def memo_mode(args) -> str:
-    """책갈피 교정의 메모 방식: --memo 가 있으면 그것, --no-memo 면 inline, 아니면 notice(고지 사항만)."""
-    return getattr(args, "memo", None) or ("inline" if getattr(args, "no_memo", False) else "notice")
+    """책갈피 기본은 색상만. 명시적 --memo와 예전 --no-memo(inline)는 유지한다."""
+    return getattr(args, "memo", None) or ("inline" if getattr(args, "no_memo", False) else "none")
 
 
 def _item_json(it: Item, mode: str) -> dict:
@@ -157,11 +157,12 @@ def _item_json(it: Item, mode: str) -> dict:
 
 
 def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int, int], hw_paras: list[str], oc_paras: list[tuple],
-                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "", mode: str = "notice") -> str:
+                items: list[Item], policy: str, applied: list | None, out_path: Path, note: str = "", hwpx_file: str = "", mode: str = "none") -> str:
     """mode: 실제 메모 방식(memo_mode) — 항목마다 '메모를 다는지' 를 그 방식으로 보인다(json 의 memo 와 같게)."""
     sm = summary(items)
     def esc(s): return html.escape(s or "")
-    from ..grades import collate_grade, needs_memo
+    from ..grades import collate_grade, needs_memo, COLLATE_COLOR_LEGEND
+    legend = COLLATE_COLOR_LEGEND if mode == "none" else COLLATE_LEGEND
     gname = {"green": "<span style='color:#0B7A3B;text-decoration:underline dotted'>초록</span>", "blue": "<span style='color:#1F4FBF;background:#E1EBFF;text-decoration:underline dashed'>파랑</span>",
              "red": "<span style='color:#C00000;background:#FFFF00'><b>빨강</b></span>"}
     mlabel = {"notice": "고지 메모", "all": "메모", "inline": "글 속 〔〕 표기"}.get(mode, "메모")
@@ -170,7 +171,7 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
         cls = {"A": "a", "B1": "b1", "B2": "b2", "C": "c"}.get(it.kind, "")
         g = collate_grade(it)
         grade = "—" if g is None else gname[g] + (f" · {mlabel}" if needs_memo(it, mode) else "")
-        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}<br><small>{grade}</small></td><td>{it.para}</td>"
+        rows.append(f"<tr class='{cls}'><td>{it.kind}</td><td>{'자동 반영' if it.auto else '표시만'}<br><small>{grade}</small></td><td>{it.para + 1}</td>"
                     f"<td class=ctx>{esc(it.hw_ctx) or esc(it.hwpx) or '—'}</td><td class=ctx>{esc(it.oc_ctx) or esc(it.ocr) or '—'}</td>"
                     f"<td><b>{esc(it.new) or '—'}</b></td><td>{esc('/'.join(it.candidates))}</td><td>{it.pdf_page}</td><td>{esc(it.note)}</td></tr>")
     appl = ""
@@ -186,9 +187,9 @@ def report_html(section: Section, pdf_anchor: PdfAnchor | None, pages: tuple[int
     .sum span{display:inline-block;margin-right:12px;padding:2px 8px;border-radius:10px;background:#e4d7b4}
     td.ctx{font-size:15px;letter-spacing:.02em}td.ctx b{color:#b3261e}"""
     doc = (f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>교정 · {esc(section.anchor.name)}</title><style>{css}</style></head><body>"
-           f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start}~{section.end - 1} · PDF {pages[0]}~{pages[1]}쪽"
+           f"<header><h1>책갈피 교정 — {esc(section.anchor.name)}</h1><small>HWPX 문단 {section.start + 1}~{section.end} · PDF {pages[0]}~{pages[1]}쪽"
            + (f" · PDF 책갈피 「{esc(pdf_anchor.title)}」" if pdf_anchor else " · PDF 책갈피 짝 없음(쪽 범위 직접 지정)") + f" · 정책: {esc(POLICIES.get(policy, policy))}"
-           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + f"<br>{esc(COLLATE_LEGEND)}</small></header><main>"
+           + (f"<br>기준 HWPX: {esc(hwpx_file)}" if hwpx_file else "") + f"<br>{esc(legend)}</small></header><main>"
            f"<p class=sum><span>자동 교정 {sm['auto']}</span><span>표시만 {sm['mark']}</span><span>A {sm['A']}</span><span>B1 {sm['B1']}</span><span>B2 {sm['B2']}</span><span>C {sm['C']}</span></p>"
            + (f"<p><b>참고:</b> {esc(note)}</p>" if note else "") + appl +
            f"<table><tr><th>갈래</th><th>처리</th><th>문단</th><th>HWPX (「」 안이 해당 자리)</th><th>판독(간체)</th><th>반영</th><th>다른 후보</th><th>PDF 쪽</th><th>설명</th></tr>{''.join(rows) or '<tr><td colspan=9>차이 없음</td></tr>'}</table>"
@@ -385,7 +386,7 @@ def backup_record(work, n: int) -> Path | None:
 
 
 def note_remerged(work, pages: list[int], backups: list | None = None) -> None:
-    """비교 표시를 다시 계산한 쪽을 알린다. 한 실행에 처음 한 번은 '주의:' 로(창의 알림창에 보이게) — merged 에 손으로 고친 글이 사라지므로.
+    """비교 표시를 다시 계산한 쪽을 알린다. 한 실행에 처음 한 번은 '주의:' 로(창의 알림창에 보이게).
     backups: 이번에 남긴 사본 경로(backup_record) — 어디서 되찾는지 그 경로를 적는다."""
     from .. import __version__, prompts
     ps = ", ".join(str(p) for p in pages[:8]) + (" …" if len(pages) > 8 else "")
@@ -398,15 +399,36 @@ def note_remerged(work, pages: list[int], backups: list | None = None) -> None:
             return b.as_posix()
     where = (", ".join(rel(b) for b in saved[:4]) + (f" 외 {len(saved) - 4}개" if len(saved) > 4 else "")) if saved else "readings/prev/"
     log(f"{head}쪽 {ps}({len(pages)}쪽)의 판독 기록이 다른 판·모드로 비교한 것이라 지금 규칙(판 {__version__}·{prompts.MODE})으로 비교 표시를 다시 계산했습니다 — "
-        f"판독 기록(merged)에 손으로 고친 글은 사라지고, 계산 전 기록은 {where} 에 남김" + ("" if len(saved) >= len(pages) else "(사본이 이미 있던 쪽은 그 사본)"))
+        f"판독 기록(merged)의 기존 교정은 보존하고, 계산 전 기록은 {where} 에 남김" + ("" if len(saved) >= len(pages) else "(사본이 이미 있던 쪽은 그 사본)"))
     try:
         work._remerge_noted = True
     except Exception:
         pass
 
 
+def _document_digest(path) -> str | None:
+    try:
+        with Path(path).open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def _manual_protection(target, book) -> set[int]:
+    from .section_edit import manual_protected_paragraphs
+    try:
+        return manual_protected_paragraphs(target, book.paragraphs)
+    except (OSError, ValueError) as exc:
+        raise SaveFailed(f"사람이 수정한 문단의 보존 기록을 확인하지 못했습니다. 교정본을 덮어쓰지 않습니다 — {exc}") from exc
+
+
 def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matches, idx: int, flat: bool = False) -> dict:
     from ..cli import resolve_mode
+    target = Path(getattr(args, "out", None) or corrected_path(book.path))
+    protected = _manual_protection(target, book)
+    target_digest, source_digest = _document_digest(target), _document_digest(book.path)
+    original = getattr(args, "hwpx", None) or book.path
+    original_digest = _document_digest(original)
     resolve_mode(args, pdf_doc, work)
     a = anchors[idx]; m = matches[idx]
     sec = book.section(anchors, idx, flat=flat)
@@ -415,15 +437,17 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     if getattr(args, "pdf_pages", None):
         from ..pdfio import parse_pages
         ps = parse_pages(args.pdf_pages, len(pdf_doc)); pages = (min(ps), max(ps))
-    elif m.pdf:
-        j = pdf_anchors.index(m.pdf); pages = page_range(pdf_anchors, j, len(pdf_doc))
+    elif (matched_pages := section_page_range(sec, matches, len(pdf_doc))) is not None:
+        pages = matched_pages
     else:
-        guess = find_title_pages(pdf_doc, a.name, sec.next_anchor.name if sec.next_anchor else None)
+        lo, hi = fallback_page_bounds(matches, idx, len(pdf_doc))
+        guess = find_title_pages(pdf_doc, a.content_name, sec.next_anchor.content_name if sec.next_anchor else None,
+                                 start_page=lo, end_page=hi)
         if not guess:
-            raise RuntimeError(f"「{a.name}」 에 맞는 PDF 책갈피가 없고 PDF 글자층에서도 제목을 찾지 못했습니다. --pdf-pages 로 쪽 범위를 주십시오.")
+            raise RuntimeError(f"「{a.name}」 의 PDF 제목·범위를 확실히 확인하지 못했습니다. 원본을 확인하고 --pdf-pages 로 쪽 범위를 주십시오.")
         pages = guess
         log(f"PDF 책갈피에 짝이 없어 PDF 글자층에서 「{a.name}」 을 찾음 → {pages[0]}~{pages[1]}쪽")
-    log(f"구획 「{a.name}」: HWPX 문단 {sec.start}~{sec.end - 1}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
+    log(f"구획 「{a.name}」: HWPX 문단 {sec.start + 1}~{sec.end}({sec.n_paras}개) · PDF {pages[0]}~{pages[1]}쪽" + (f" · PDF 책갈피 「{m.pdf.title}」({m.how})" if m.pdf else ""))
     read_partial = ensure_pages_read(args, work, pdf_doc, pages)          # 범위 쪽 기록이 빠졌으면 PartialRead — 이 구획은 대조하지 않는다
     oc_all = []; layers: dict[int, str] = {}; remerged: list[int] = []; backups: list[Path] = []
     from .. import __version__, prompts
@@ -445,14 +469,14 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                 # 같은 판·같은 모드면 결과가 같으니 건너뛴다 — merged 에 손으로 고친 글이 실행마다 지워지지 않게. 계산 전 기록은 readings/prev/ 에 남기고 그 경로를 알린다
                 try:
                     bk = backup_record(work, n)
-                    rec = remerge_record(rec, layer, layer_d); rec["mode"] = prompts.MODE; work.save_record(n, rec); remerged.append(n)
+                    rec = remerge_record(rec, layer, layer_d, mode=prompts.MODE); work.save_record(n, rec); remerged.append(n)
                     if bk: backups.append(bk)
                 except Exception as e:
                     log(f"  {n}쪽 비교 다시 계산 실패(기존 기록 사용): {e}")
             oc_all.extend(reading_paras(rec))
     if remerged:
         note_remerged(work, remerged, backups)
-    oc_paras, note = trim_to_section(oc_all, a.name, sec.next_anchor.name if sec.next_anchor else (m.pdf and None))
+    oc_paras, note = trim_to_section(oc_all, a.content_name, sec.next_anchor.content_name if sec.next_anchor else None)
     once = sorted({pg for pg, _, o in oc_paras if o})
     if once:
         log(f"주의: 쪽 {', '.join(map(str, once[:10]))}{' …' if len(once) > 10 else ''} 의 일부 영역은 2차 판독이 빠져 1차만으로 읽은 글이라 그 자리의 차이는 고치지 않고 표시만 합니다(B1)"
@@ -460,6 +484,15 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
     policy = getattr(args, "policy", "all") or "all"
     log(f"기준 HWPX: {Path(book.path).name} (문단 {len(book.paragraphs):,}개)")
     items = collate(hwpx_cells(hw_paras, sec.start), ocr_cells(oc_paras), policy=policy, titles=book_titles(book.texts()))
+    held = [item for item in items if item.para in protected]
+    items = [item for item in items if item.para not in protected]
+    for item in held:
+        item.auto = False
+        item.note = "사람이 수정한 문단 — 자동 반영·표시 보류, 보고에만 제안" + (f" · {item.note}" if item.note else "")
+    if held:
+        notice = f"사람이 수정한 문단 {len({item.para for item in held})}개의 차이 {len(held)}건은 보고에만 남기고 문서에 반영하지 않습니다."
+        log(notice)
+        note = f"{note} · {notice}" if note else notice
     # 3차 판별(글자 조각)을 글자층 대조보다 먼저 — 글자층은 같은 화소를 본 다른 OCR 이라 자형 혼동을 가리지 못하고, 먼저 올려 버리면(B1→A·B2) 3차가 묻지 않게 된다
     gst = {}; reader = glyph_reader(args) if any(glyph_candidate(it) for it in items) else None
     if reader is not None:
@@ -482,24 +515,37 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
             + (f" · 자형 편향 쌍이라 증인으로 안 씀 {wst['weak']}건" if wst.get("weak") else "")
             + (f" · 3차 판별이 가린 자리라 건너뜀 {wst['glyph']}건" if wst.get("glyph") else "")
             + (" · 글자층만으로는 교정 후보로 올리지 않음(3차 판별이 가림)" if reader is not None else ""))
+    items.extend(held)
+    items.sort(key=lambda item: (item.para, item.start, item.end))
     sm = summary(items)
     log(f"대조: 자동 교정 {sm['auto']}건 · 표시만 {sm['mark']}건 (A {sm['A']} · B1 {sm['B1']} · B2 {sm['B2']} · C {sm['C']})" + (f" · {note}" if note else ""))
     out_dir = work.dir / "collate"; out_dir.mkdir(exist_ok=True)
-    stem = re.sub(r"[\\/:*?\"<>|\s]+", "_", a.name)[:40] or f"sec{idx}"
+    from .results import result_binding, report_stem, normalized_path
+    binding = result_binding(getattr(args, "pdf", None) or getattr(work, "pdf_path", ""),
+                             getattr(args, "hwpx", None) or book.path, a.name, sec.start, sec.end)
     applied = None; saved = None
     if getattr(args, "apply", False):
-        if not items:
+        def check_current():
+            if (_document_digest(original) != original_digest
+                    or _document_digest(book.path) != source_digest
+                    or _document_digest(target) != target_digest):
+                raise SaveFailed("대조하는 동안 HWPX 파일이 다른 곳에서 변경되었습니다. 현재 교정본을 덮어쓰지 않습니다. 다시 열어 확인하십시오.")
+        # Check before editing and again inside save_copy after serialization.
+        check_current()
+        protected = _manual_protection(target, book)
+        applicable = [item for item in items if item.para not in protected]
+        if not applicable:
             log("차이가 없어 고칠 것이 없습니다.")
         else:
             mode = memo_mode(args)
             ed = Editor(book, memo=mode, heads={x.para for x in anchors})   # 이번 실행의 구획 기준(구획 시작 포함, PDF 책갈피 제목·고른 스타일)
-            applied = ed.apply(items)
-            if mode != "inline":
+            applied = ed.apply(applicable)
+            if mode not in ("inline", "none"):
                 ed.add_legend_memo()                                   # 범례 메모 하나(이미 있으면 그대로)
-            out = getattr(args, "out", None) or corrected_path(book.path)
+            out = str(target)
             try:
                 Path(out).parent.mkdir(parents=True, exist_ok=True)
-                saved = ed.save_copy(out)
+                saved = ed.save_copy(out, check_current=check_current)
             except OSError as e:                                       # 한컴에 열린 교정본 등 — 고친 것이 저장되지 않았다
                 raise SaveFailed(f"교정본 {Path(out).name} 을(를) 저장하지 못했습니다({str(e)[:80]}) — 한컴 등에서 그 파일을 열어 두었으면 닫고 다시 누르십시오") from e
             ok = sum(1 for x in applied if x.ok); bad = [x for x in applied if not x.ok]
@@ -510,17 +556,27 @@ def run_section(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, ma
                 if g: gc[g] += 1
             n_memo = sum(1 for x in applied if x.ok and x.memo)   # 실제로 단 메모·글 속 표기만('이미 표시된 자리'·제목 문단·표기 자리 없음은 세지 않음)
             log(f"반영 {ok}건" + (f", 실패 {len(bad)}건" if bad else "") + f" → 저장: {saved}")
-            log(f"표시: 초록 {gc['green']} · 파랑 {gc['blue']} · 빨강 {gc['red']} · 메모 {n_memo}건({ {'notice': '고지 사항', 'all': '모든 표시', 'inline': '글 속 〔〕'}[mode] })"
+            log(f"표시: 초록 {gc['green']} · 파랑 {gc['blue']} · 빨강 {gc['red']} · 메모 {n_memo}건({ {'none': '색상만', 'notice': '고지 사항', 'all': '모든 표시', 'inline': '글 속 〔〕'}[mode] })"
                 + (" — 원래 글자·근거는 보고 화면(html·json)에" if mode != "all" else ""))
             n_hidden = sum(1 for x in applied if x.ok and x.hidden)
             if n_hidden:
-                log(f"제목 문단의 표시 {n_hidden}건(지운 글자·폭 없는 표시)은 문서에 보이지 않고 보고(html)에만 있습니다 — 구획 이름이 바뀌지 않게 글 속 표기를 넣지 않음")
+                if mode == "none":
+                    log(f"색을 표시할 글자가 없는 항목 {n_hidden}건은 보고(html)에만 있습니다.")
+                else:
+                    log(f"제목 문단의 표시 {n_hidden}건(지운 글자·폭 없는 표시)은 문서에 보이지 않고 보고(html)에만 있습니다 — 구획 이름이 바뀌지 않게 글 속 표기를 넣지 않음")
             for x in bad[:5]:
-                log(f"  실패: {x.item.kind} 문단 {x.item.para} [{x.item.start}:{x.item.end}] — {x.note}")
+                log(f"  실패: {x.item.kind} 문단 {x.item.para + 1} [{x.item.start}:{x.item.end}] — {x.note}")
+    if saved and normalized_path(saved) == binding["source_hwpx"]["path"]:
+        # 교정본 자체를 입력으로 골랐다면 저장한 현재 파일에 결과를 연결한다.
+        binding = result_binding(getattr(args, "pdf", None) or getattr(work, "pdf_path", ""),
+                                 getattr(args, "hwpx", None) or book.path, a.name, sec.start, sec.end)
+    stem = report_stem(binding, a.name, sec.start)
     rep = report_html(sec, m.pdf, pages, hw_paras, oc_paras, items, policy, applied, out_dir / f"{stem}.html", note, hwpx_file=str(book.path), mode=memo_mode(args))
-    (out_dir / f"{stem}.json").write_text(json.dumps({"section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
+    (out_dir / f"{stem}.json").write_text(json.dumps({**binding, "section": a.name, "hwpx_paras": [sec.start, sec.end], "pdf_pages": list(pages), "policy": policy,
                                                       "hwpx_file": str(book.path), "hwpx_paragraphs": len(book.paragraphs), "witness_stats": wst, "glyph_stats": gst,
-                                                      "summary": sm, "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                                                      "summary": sm, "memo_mode": memo_mode(args), "manual_protected_paragraphs": sorted(protected),
+                                                      "manual_held_items": len(held),
+                                                      "items": [_item_json(i, memo_mode(args)) for i in items], "saved": saved, "at": time.strftime("%Y-%m-%d %H:%M:%S")},
                                                      ensure_ascii=False, indent=1), encoding="utf-8")
     log(f"보고: {rep}")
     return {"section": a.name, "pages": pages, "summary": sm, "report": rep, "saved": saved, "items": items, "read_partial": bool(read_partial), "remerged": remerged,
@@ -547,8 +603,11 @@ def run_all(args, *, pdf_doc, work, book: HwpxBook, anchors, pdf_anchors, matche
         if sec.n_paras <= 0 or not any(t.strip() for t in book.section_texts(sec)[1:]):
             continue                                            # 제목뿐인 구획(장 제목 등)
         m = matches[i]
-        if not m.pdf and not find_title_pages(pdf_doc, a.name, sec.next_anchor.name if sec.next_anchor else None):
-            skipped.append(a.name); continue
+        if section_page_range(sec, matches, len(pdf_doc)) is None:
+            lo, hi = fallback_page_bounds(matches, i, len(pdf_doc))
+            if not find_title_pages(pdf_doc, a.content_name, sec.next_anchor.content_name if sec.next_anchor else None,
+                                    start_page=lo, end_page=hi):
+                skipped.append(a.name); continue
         try:
             r = run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=i, flat=True)
             results.append(r); partial = partial or to_check(r)
@@ -635,6 +694,13 @@ def _cmd_collate(args, resources):
     book = HwpxBook(args.hwpx)
     resources.callback(book.doc.close)
     anchors, pdf_anchors, matches = index_both(pdf_doc, book, src, styles)
+    selected_idx = None
+    if getattr(args, "anchor_index", None) or getattr(args, "anchor_para", None) is not None:
+        try:
+            selected_idx = resolve_anchor_index(anchors, getattr(args, "anchor_index", None),
+                                                para=getattr(args, "anchor_para", None), name=getattr(args, "anchor_name", None))
+        except ValueError as exc:
+            log(str(exc)); return 2
     moved = None                                                 # 교정본을 _이전_n 으로 옮겼으면 그 경로 — 끝나도 3(확인할 것 있음)으로 알린다
     # 교정본(<이름>_교정.hwpx)이 이미 있으면 거기에 이어서 고친다 — 앞서 고친 구획이 지워지지 않게.
     # 구획 번호가 원본 기준으로 매겨지므로, 교정본의 기준 목록이 원본과 같을 때만 바꿔 탄다.
@@ -644,11 +710,18 @@ def _cmd_collate(args, resources):
             book2 = HwpxBook(str(target))
             resources.callback(book2.doc.close)
             a2, _, m2 = index_both(pdf_doc, book2, src, styles)
-            if len(a2) == len(anchors) and all(x.para == y.para for x, y in zip(a2, anchors)):
+            if len(a2) == len(anchors) and all(
+                    (x.para, x.level, x.kind) == (y.para, y.level, y.kind)
+                    and bool({_key(n) for n in x.names} & {_key(n) for n in y.names})
+                    for x, y in zip(a2, anchors)):
                 book.doc.close()
                 book, anchors, matches = book2, a2, m2
                 log(f"기존 교정본에 이어서 작업합니다(앞서 고친 구획 유지): {target.name}")
             elif getattr(args, "apply", False) and not preview:
+                from .section_edit import manual_history_path
+                if manual_history_path(target).exists():
+                    log("오류: 사람이 수정한 교정본의 구획 목록이 원본과 다릅니다. 교정본을 옮기거나 원본부터 다시 덮어쓰지 않습니다. 대조 편집에서 문서를 확인하십시오.")
+                    return 1
                 # 저장하면 덮어써질 교정본 — 앞서 고친 것이 사라지지 않게 옆으로 옮겨 두고 원본에서 다시 시작한다
                 book2.doc.close()                           # Windows 에서 읽던 ZIP 핸들을 닫아야 파일을 옮길 수 있다
                 moved = set_aside(target)
@@ -666,18 +739,23 @@ def _cmd_collate(args, resources):
     # '모든 쪽의 기록이 있음' 경로도 바뀐 PDF·DPI의 옛 판독을 재사용하지 않는다.
     work = Work(args.pdf, args.work)
     work.ensure_source(getattr(args, "dpi", 300))
-    from ..cli import progress
+    from ..cli import progress, _load_manual_corrections
+    # A single immutable snapshot for this command, even when --all reads many
+    # sections. Keep it off the caller's Namespace so another book cannot reuse it.
+    args = Namespace(**vars(args))
+    try:
+        args._correction_memory = _load_manual_corrections(args)
+    except (OSError, ValueError) as exc:
+        log(f"오류: 사람 수정 기록을 확인하지 못했습니다. 기록과 교정본을 확인한 뒤 다시 실행하십시오 — {exc}")
+        return 1
     if getattr(args, "all", False):
         r = run_all(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches) or {}
         # 중지·판독 오류로 멈추면 '완료'로 보이지 않게. 판독 일부 실패·손 고침 다시 계산·교정본 옮김은 끝났어도 3(창이 '주의:' 를 알림창에)
         return 130 if r.get("stopped") else (1 if r.get("failed") else (3 if r.get("partial") or moved else 0))
-    ai = getattr(args, "anchor_index", None)
-    if ai:
-        if not 1 <= ai <= len(anchors):
-            log(f"구획 번호 {ai} 가 범위(1~{len(anchors)}) 밖입니다."); return 2
+    if selected_idx is not None:
         progress("collate", 0, 1)
         try:
-            r = run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=ai - 1)
+            r = run_section(args, pdf_doc=pdf_doc, work=work, book=book, anchors=anchors, pdf_anchors=pdf_anchors, matches=matches, idx=selected_idx)
         except Cancelled:
             log("중지 요청으로 멈춤 — 쪽 판독 도중이라 이 구획은 대조하지 않았습니다(끝난 쪽 판독은 남음)."); return 130
         except PartialRead as e:
@@ -696,7 +774,7 @@ def _cmd_collate(args, resources):
     if len(hits) > 1 and not getattr(args, "nth", None):
         log(f"「{args.section}」 에 맞는 기준이 {len(hits)}개입니다. --nth 로 고르십시오:")
         for i, h in enumerate(hits, 1):
-            log(f"  {i}. {h.name} (문단 {h.para}, 급 {h.level})")
+            log(f"  {i}. {h.name} (문단 {h.para + 1}, 급 {h.level})")
         return 2
     a = hits[(getattr(args, "nth", 1) or 1) - 1]
     try:

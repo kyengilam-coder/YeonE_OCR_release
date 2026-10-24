@@ -6,23 +6,26 @@ engine records belong to ComparisonProject; editing widgets never write into the
 from __future__ import annotations
 
 import difflib
+from dataclasses import replace
 import gc
+import hashlib
 import json
 from pathlib import Path
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk, font as tkfont
+from tkinter import filedialog, ttk, font as tkfont
 import uuid
 
+from ab_ocr.engine_registry import (ENGINES, ENGINE_LABELS, LEGACY_ENGINES,
+                                    engine_set, primary_engine)
 
-from .comparison import ENGINES, DEFAULT_ENGINES
-
-ENGINE_LABELS = {"tesseract": "Tesseract + 자형 보완(중국어)",
-                 "ppocrv6": "PP-OCRv6 medium + 재인식 검증(번체 가로)", "easyocr": "EasyOCR + 자형 보완",
-                 "rapidocr": "PP-OCRv5 mobile + 자형 보완"}
 PROFILES = {"번체·한문": "traditional", "간체·중문": "simplified", "한글·한자 혼용": "mixed"}
 DIRECTIONS = {"가로쓰기": "horizontal", "세로쓰기": "vertical"}
+ENGINE_MODES = {"권장 비교": "recommended", "기존 3엔진": "legacy",
+                f"전체 {len(ENGINES)}엔진": "all", "주력만": "primary", "PP-OCRv6만": "ppocrv6"}
+RAW_TAB_LABELS = {"tesseract": "Tess", "rapidocr": "Rapid", "easyocr": "Easy",
+                  "paddle_server": "Paddle", "glmocr": "GLM", "surya": "Surya", "ppocrv6": "PP-v6"}
 
 
 def default_selected_engines(engine_root=None):
@@ -37,7 +40,7 @@ def default_selected_engines(engine_root=None):
                 return ("ppocrv6",)
     except (OSError, ValueError):
         pass
-    return DEFAULT_ENGINES
+    return LEGACY_ENGINES
 
 
 def parse_page_range(value: str, page_count: int) -> list[int]:
@@ -86,20 +89,38 @@ def _page_labels(numbers):
     return ", ".join(str(group[0]) if len(group) == 1 else f"{group[0]}-{group[-1]}" for group in groups)
 
 
+def _anchor_recovery_notice(record, proposal=None):
+    """Describe deterministic position recovery separately from the AI answer."""
+    recovery = record.get("metadata", {}).get("anchor_recovery", {})
+    if recovery.get("policy") != "unique-literal-v1":
+        return ""
+    relocations = recovery.get("relocations", [])
+    if proposal is None:
+        return f"위치 복원 {len(relocations)}곳: 같은 검증 범위에서 원문이 한 곳에만 일치하는지 확인했습니다."
+    before_sha256 = hashlib.sha256(proposal.get("before", "").encode("utf-8")).hexdigest()
+    matches = [item for item in relocations if item.get("start") == proposal.get("start")
+               and item.get("end") == proposal.get("end") and item.get("before_sha256") == before_sha256]
+    if not matches:
+        return ""
+    item = matches[0]
+    return (f"위치 복원: AI가 지정한 {item['original_start']}–{item['original_end']}에서 "
+            f"원문이 한 곳에만 일치하는 {item['start']}–{item['end']}로 복원했습니다. "
+            "문자 위치는 0부터 셉니다. AI 원시 응답은 이력에 그대로 보존됩니다.")
+
+
 class ComparisonEditor(tk.Toplevel):
     """A Toplevel, not a second Tk root or a replacement of the existing GUI."""
 
     def __init__(self, master, source_path=None, project_path=None, *, work_dir=None,
                  engine_root=None, project=None, on_export=None, profile=None, direction=None, on_engine_root=None,
-                 on_ai_settings=None, automatic=True):
+                 on_ai_settings=None):
         super().__init__(master)
-        self.title("연어OCR · 로컬 엔진 비교와 원본 대조 편집")
+        self.title("연어OCR · OCR 모델 비교와 원본 대조 편집")
         self.geometry("1440x930")
         self.minsize(1080, 720)
         self.project = None
         self.work_dir = Path(work_dir) if work_dir else None
         self.engine_root = Path(engine_root) if engine_root else None
-        self.automatic = tk.BooleanVar(self, bool(automatic))
         self.on_export = on_export
         self.on_engine_root = on_engine_root
         self.on_ai_settings = on_ai_settings
@@ -130,6 +151,8 @@ class ComparisonEditor(tk.Toplevel):
         self._suggestions = {}
         self._ai_proposals = {}
         self._selected_ai_proposal = None
+        self._selected_refinement = None
+        self._recognition_engine_count = len(LEGACY_ENGINES)
         self._recovery_path = None
         self._tooltips = []
         self._controls = []
@@ -171,7 +194,7 @@ class ComparisonEditor(tk.Toplevel):
         self._body_font = ("맑은 고딕", 9)
         row_height = tkfont.Font(self, font=self._body_font).metrics("linespace") + 5
         layouts = {
-            "TButton": [("Button.border", {"sticky": "nswe", "border": "1", "children": [("Button.focus", {"sticky": "nswe", "children": [("Button.padding", {"sticky": "nswe", "children": [("Button.label", {"sticky": "nswe"})]})]})]})],
+            "TButton": style.layout("TButton"),
             "TEntry": [("Entry.field", {"sticky": "nswe", "border": "1", "children": [("Entry.padding", {"sticky": "nswe", "children": [("Entry.textarea", {"sticky": "nswe"})]})]})],
             "TCombobox": [("Combobox.downarrow", {"side": "right", "sticky": "ns"}), ("Combobox.field", {"sticky": "nswe", "children": [("Combobox.padding", {"sticky": "nswe", "children": [("Combobox.textarea", {"sticky": "nswe"})]})]})],
             "TCheckbutton": [("Checkbutton.padding", {"sticky": "nswe", "children": [("Checkbutton.indicator", {"side": "left", "sticky": ""}), ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [("Checkbutton.label", {"sticky": "nswe"})]})]})],
@@ -266,7 +289,7 @@ class ComparisonEditor(tk.Toplevel):
         heading = ttk.Frame(self, padding=(12, 10, 12, 6))
         self._header_frame = heading
         heading.grid(row=0, column=0, sticky="ew")
-        ttk.Label(heading, text="로컬 엔진 비교 · 원본 대조 편집", font=("맑은 고딕", 12, "bold")).pack(side="left")
+        ttk.Label(heading, text="OCR 모델 비교 · 원본 대조 편집", font=("맑은 고딕", 12, "bold")).pack(side="left")
         self.document_label = tk.StringVar(self, "원본 PDF 또는 이미지를 열어 시작하세요")
         document_label = ttk.Label(heading, textvariable=self.document_label, anchor="e", width=1)
         document_label.pack(side="right", fill="x", expand=True, padx=15)
@@ -291,6 +314,7 @@ class ComparisonEditor(tk.Toplevel):
         self.dpi = tk.StringVar(self, "300")
         self.range_var = tk.StringVar(self, "")
         self.force = tk.BooleanVar(self, False)
+        self.engine_mode = tk.StringVar(self, next(iter(ENGINE_MODES)))
         self.setting_widgets = []
         for label, variable, values, width in (("문서", self.profile, list(PROFILES), 16),
                 ("읽기", self.direction, list(DIRECTIONS), 11), ("PDF DPI", self.dpi, (200, 300, 400, 600), 5)):
@@ -303,27 +327,22 @@ class ComparisonEditor(tk.Toplevel):
         self.range_entry = ttk.Entry(line, textvariable=self.range_var, width=14)
         self.range_entry.pack(side="left")
         ttk.Label(line, text="예: 1-5,8 · 빈칸은 전체").pack(side="left", padx=7)
-        mode_line = ttk.Frame(settings)
-        mode_line.pack(fill="x", pady=(5, 0))
-        self.auto_check = ttk.Checkbutton(mode_line, text="자동 엔진 선택 · 쪽마다 사용 가능한 엔진을 비교해 결과 선택",
-                                         variable=self.automatic, command=self._auto_mode_changed)
-        self.auto_check.pack(side="left")
-        self.auto_result = tk.StringVar(self, "")
-        ttk.Label(mode_line, textvariable=self.auto_result).pack(side="left", padx=12)
-        engine_line = ttk.Frame(settings)
-        engine_line.pack(fill="x", pady=(5, 0))
-        ttk.Label(engine_line, text="비교 엔진").pack(side="left", padx=(0, 8))
-        defaults = default_selected_engines(self.engine_root)
-        self.engine_vars = {engine: tk.BooleanVar(self, engine in defaults) for engine in ENGINES}
-        self.engine_checks = []
-        for engine in ENGINES:
-            check = ttk.Checkbutton(engine_line, text=ENGINE_LABELS.get(engine, engine),
-                variable=self.engine_vars[engine], command=self._engines_changed)
-            check.pack(side="left", padx=(0, 12))
-            self.engine_checks.append(check)
+        model_line = ttk.Frame(settings)
+        model_line.pack(fill="x", pady=(5, 0))
+        ttk.Label(model_line, text="판독 모델").pack(side="left", padx=(0, 5))
+        self.engine_mode_box = ttk.Combobox(model_line, textvariable=self.engine_mode,
+                                           values=list(ENGINE_MODES), state="readonly", width=13)
+        self.engine_mode_box.pack(side="left", padx=(0, 10))
+        self.engine_mode_box.bind("<<ComboboxSelected>>", self._settings_changed)
+        self.setting_widgets.append(self.engine_mode_box)
+        self.model_summary = tk.StringVar(self)
+        self.model_details = tk.StringVar(self)
+        model_summary = ttk.Label(model_line, textvariable=self.model_summary, width=1)
+        model_summary.pack(side="left", fill="x", expand=True)
+        self._tooltip(model_summary, self.model_details)
         actions = ttk.Frame(settings)
         actions.pack(fill="x", pady=(6, 0))
-        self._button(actions, "현재 쪽 · 선택 엔진 인식", lambda: self.recognize(False), True).pack(side="left", padx=(0, 5))
+        self._button(actions, "현재 쪽 인식", lambda: self.recognize(False), True).pack(side="left", padx=(0, 5))
         self._button(actions, "지정 범위 · 이어 읽기", lambda: self.recognize(True), True).pack(side="left", padx=(0, 5))
         self.stop_button = ttk.Button(actions, text="중지", command=self.cancel, state="disabled")
         self.stop_button.pack(side="left")
@@ -422,6 +441,7 @@ class ComparisonEditor(tk.Toplevel):
             self._add_raw_tab(engine)
         self.raw_note = tk.StringVar(self, "엔진 신뢰도는 정확도 수치가 아니며 엔진끼리 직접 비교할 수 없습니다.")
         self._tooltip(baseline_bar, self.raw_note)
+        self._tooltip(self.raw_notebook, self.raw_note)
 
         edit_frame = ttk.Frame(review, padding=5)
         edit_frame.columnconfigure(0, weight=1)
@@ -516,9 +536,13 @@ class ComparisonEditor(tk.Toplevel):
         self._tooltip(self.ai_tree, self.ai_detail)
         self._tooltip(self.ai_start_button, self.ai_detail)
 
+        from .comparison_refinement_ui import RefinementPanel
+        self.refinement_panel = RefinementPanel(self, self.proposal_notebook)
+        self.proposal_notebook.add(self.refinement_panel, text="로컬 교정·영역")
+
         footer = ttk.Frame(self, padding=(12, 6, 12, 8))
         footer.grid(row=4, column=0, sticky="ew")
-        self.status = tk.StringVar(self, "로컬 엔진 세 개의 결과와 사람의 교정 이력을 각각 보존합니다.")
+        self.status = tk.StringVar(self, "모델별 원시 판독·AI 제안·사람의 교정 이력을 각각 보존합니다.")
         self.recovery_close_button = ttk.Button(footer, text="복구 사본을 보존하고 닫기", command=self._close_from_recovery)
         status_label = ttk.Label(footer, textvariable=self.status, anchor="w", width=1)
         status_label.pack(side="left", fill="x", expand=True)
@@ -534,36 +558,49 @@ class ComparisonEditor(tk.Toplevel):
         scroll.grid(row=0, column=1, sticky="ns")
         widget.configure(yscrollcommand=scroll.set)
         widget.tag_configure("evidence", background="#ffe6aa")
-        self.raw_notebook.add(frame, text=ENGINE_LABELS.get(engine, engine))
+        self.raw_notebook.add(frame, text=RAW_TAB_LABELS.get(engine, engine))
         self.raw_tabs[engine] = frame
         self.raw_widgets[engine] = widget
         self._apply_local_styles(frame)
 
     def _settings_changed(self, _event=None):
+        selected = self._selected_engines()
+        preferred = primary_engine(PROFILES[self.profile.get()], DIRECTIONS[self.direction.get()])
+        baseline_note = ("새 쪽 기준: " + ENGINE_LABELS[preferred]
+                         if preferred in selected else "기존 3엔진의 기준 판독 사용")
+        self.model_summary.set(baseline_note + " · " + str(len(selected)) + "개 모델")
+        self.model_details.set(self.model_summary.get() + "\n"
+                               + ", ".join(ENGINE_LABELS[engine] for engine in selected))
         if self.direction.get() == "세로쓰기":
-            hint = "PP-OCRv5·v6와 EasyOCR는 오른쪽 열부터 왼쪽으로, 열 안에서는 위에서 아래로 읽습니다. 세로 비교는 시험 기능이며 주석·가로 제목이 섞인 문헌은 순서를 확인하세요. 기존 AI 세로 판독은 기존 작업 탭에서 사용할 수 있습니다."
+            hint = "세로 비교는 시험 기능입니다. 전용 모델·지원 범위가 다르며 원문 순서를 확인해야 합니다. 기존 AI 세로 판독은 기존 작업 탭에서 사용할 수 있습니다."
         elif self.profile.get() == "한글·한자 혼용":
-            hint = "혼용: Tesseract가 한글·한자를 함께 읽습니다. 한국어 모델은 한자 미지원입니다. PP-OCRv6 medium은 혼용 비교에서 제외됩니다."
+            hint = "혼용: 모델마다 한글·한자 지원 범위가 다릅니다. 기존 한국어 전용 모델의 한자 누락을 다수결로 삭제하지 않습니다."
         else:
-            hint = "내장 PP-OCRv6는 기존 엔진 폴더 설정과 관계없이 자동으로 찾습니다. 원시 판독은 변환 없이 보존합니다."
-        if self.automatic.get():
-            hint = "자동 선택: 사용 가능한 엔진을 하나씩 실행하고 누락·문자 품질·결과 일치도를 비교합니다. 선택한 쪽별 원문과 근거를 보존하며, 기존 직접 교정은 유지합니다. " + hint
+            hint = "같은 원본을 선택한 모델로 읽습니다. 원문 문자·이체자·부호를 보존하며 완료한 판독은 이어 읽기에 재사용합니다."
+        if len(selected) == 1:
+            hint += " 단독 판독도 낮은 신뢰도·누락 의심 구간을 AI로 검증할 수 있습니다."
+        if selected == ("ppocrv6",) and self.profile.get() == "한글·한자 혼용":
+            hint += " PP-OCRv6는 한글·한자 혼용을 지원하지 않습니다. 다른 모델을 선택하세요."
         self.hint.set(hint)
-
-    def _selected_engines(self):
-        if self.automatic.get():
-            return ENGINES
-        return tuple(engine for engine in ENGINES if self.engine_vars[engine].get())
-
-    def _auto_mode_changed(self):
-        self._settings_changed()
-        self._engines_changed()
-        self._set_enabled()
-
-    def _engines_changed(self):
-        if self.project:
+        if self.project is not None and hasattr(self, "page_tree"):
             for number in range(1, self.project.page_count + 1):
                 self._update_page(number)
+        if hasattr(self, "ai_start_button"):
+            self._set_enabled()
+
+    def _selected_engines(self):
+        label = self.engine_mode.get()
+        mode = ENGINE_MODES.get(label, "all" if label == "전체 6엔진" else "recommended")
+        if mode == "ppocrv6":
+            return ("ppocrv6",)
+        return engine_set(mode, PROFILES[self.profile.get()],
+                          DIRECTIONS[self.direction.get()])
+
+    def _ai_ready_count(self):
+        if self.project is None:
+            return 0
+        from .comparison import usable_runs
+        return len(usable_runs(self.project.page(self.page_number)))
 
     def _set_enabled(self):
         active = self.project is not None and not self._busy
@@ -574,9 +611,6 @@ class ComparisonEditor(tk.Toplevel):
             combo.configure(state="readonly" if not self._busy else "disabled")
         self.range_entry.configure(state="normal" if not self._busy else "disabled")
         self.force_check.configure(state="normal" if not self._busy else "disabled")
-        self.auto_check.configure(state="normal" if not self._busy else "disabled")
-        for check in self.engine_checks:
-            check.configure(state="normal" if not self._busy and not self.automatic.get() else "disabled")
         self.stop_button.configure(state="normal" if self._busy else "disabled")
         self.text.configure(state="normal" if active else "disabled")
         self.baseline_box.configure(state="readonly" if active else "disabled")
@@ -590,12 +624,14 @@ class ComparisonEditor(tk.Toplevel):
         self.accept_button.configure(state="normal" if selected and pending and eligible and self.candidate.get() else "disabled")
         self.reject_button.configure(state="normal" if selected else "disabled")
         self.candidate_box.configure(state="readonly" if selected else "disabled")
-        self.ai_start_button.configure(state="normal" if active and self.on_ai_settings else "disabled")
+        self.ai_start_button.configure(state="normal" if active and self.on_ai_settings and self._ai_ready_count() >= 1 else "disabled")
         self.ai_history_button.configure(state="normal" if self.project else "disabled")
         ai_item = self._selected_ai_proposal or {}
         ai_pending = active and bool(ai_item) and ai_item.get("decision", "pending") in ("pending", "undone")
         self.ai_accept_button.configure(state="normal" if ai_pending and ai_item.get("applicable", True) and not ai_item.get("uncertain") and not ai_item.get("superseded") else "disabled")
         self.ai_reject_button.configure(state="normal" if ai_pending else "disabled")
+        if hasattr(self, "refinement_panel"):
+            self.refinement_panel.set_enabled()
 
     def _title(self):
         name = Path(self.project.source_path).name if self.project else ""
@@ -704,14 +740,9 @@ class ComparisonEditor(tk.Toplevel):
             return
         page = self.project.page(number)
         selected = self._selected_engines()
-        if page.get("profile") == "mixed":
-            selected = tuple(e for e in selected if e != "ppocrv6")
-        count = len(set(self._latest_runs(page)) & set(selected))
+        count = sum(1 for engine, run in self._latest_runs(page).items() if engine in selected
+                    and run.get("raw", {}).get("engine_metadata", {}).get("generation_complete") is not False)
         state = f"{count}/{len(selected)}"
-        if self.automatic.get() and page.get("auto_selections"):
-            last = page["auto_selections"][-1]
-            if last.get("applied") and last.get("selected_run_id") == page.get("baseline_run_id") and page.get("baseline_choice") == "automatic":
-                state = "자동 · " + ("v6" if last["selected_engine"] == "ppocrv6" else last["selected_engine"])
         if page.get("reviewed"):
             state += " · 검수"
         elif page.get("corrected_text") is not None:
@@ -759,25 +790,12 @@ class ComparisonEditor(tk.Toplevel):
             widget.delete("1.0", "end")
             widget.insert("1.0", raw.get("text", ""))
             widget.configure(state="disabled")
-            label = engine + (f" · {raw.get('languages', '')}" if raw else " · 대기")
+            label = RAW_TAB_LABELS.get(engine, engine) + ("" if raw else " ·")
             self.raw_notebook.tab(self.raw_tabs[engine], text=label)
         self.baseline_box.configure(values=tuple(latest) or ENGINES)
-        self.baseline.set(page.get("baseline_engine") or "easyocr")
-        automatic = page.get("auto_selections", [])
-        if automatic:
-            selection = automatic[-1]
-            label = ENGINE_LABELS.get(selection.get("selected_engine"), "선택 가능한 텍스트 없음")
-            applied = selection.get("applied") and selection.get("selected_run_id") == page.get("baseline_run_id") and page.get("baseline_choice") == "automatic"
-            note = " · 사용자 기준·교정 유지" if selection.get("preserved_human_work") or not applied else (
-                " · 원본 대조 권장" if selection.get("needs_review") else " · 결과 일치")
-            self.auto_result.set(("자동 선택: " if applied else "자동 추천: ") + label + note)
-        else:
-            self.auto_result.set("")
+        self.baseline.set(page.get("baseline_engine") or primary_engine(PROFILES[self.profile.get()], DIRECTIONS[self.direction.get()]))
         errors = page.get("last_errors", {})
         self.raw_note.set(" · ".join(errors.values()) if errors else "신뢰도는 정확도 수치가 아닙니다. 각 엔진의 원문·좌표·모델 정보는 프로젝트에 별도로 보존됩니다.")
-        if automatic:
-            scores = " · ".join(f"{r['engine']} {r['score']:.3f}" for r in selection.get("scores", []))
-            self.raw_note.set(self.raw_note.get() + "\n자동 선택 추정 점수: " + scores)
         self._loading = True
         try:
             value = self.project.text(self.page_number)
@@ -792,6 +810,7 @@ class ComparisonEditor(tk.Toplevel):
             self._loading = False
         self._populate_suggestions(page)
         self._populate_ai_proposals(page)
+        self.refinement_panel.refresh()
         self._set_enabled()
 
     def _text_changed(self, _event=None):
@@ -904,6 +923,7 @@ class ComparisonEditor(tk.Toplevel):
         self._set_enabled()
 
     def _difference_selected(self, _event=None):
+        self._selected_refinement = None
         self._selected_ai_proposal = None
         selected = self.diff_tree.selection()
         self._selected_suggestion = self._suggestions.get(selected[0]) if selected else None
@@ -983,17 +1003,22 @@ class ComparisonEditor(tk.Toplevel):
             key = credentials["api_key"].strip()
             if provider not in ("gemini", "openai", "anthropic") or not model or not key:
                 raise ValueError()
+            key_count = credentials.get("key_count", 1)
+            if type(key_count) is not int or key_count < 1:
+                raise ValueError()
         except Exception:
             self.status.set("선택한 AI 제공사·모델·API 키가 준비되지 않았습니다. 기존 설정 탭에서 확인하십시오.")
             return
         window = tk.Toplevel(self)
         window.title("AI 검증 · 전송 범위와 편집 정책")
-        window.geometry("760x540")
+        window.geometry("760x620")
         window.transient(self)
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text=f"선택한 제공사: {provider}  /  모델: {model}", font=("맑은 고딕", 10, "bold"), wraplength=710).pack(anchor="w", pady=(0, 10))
-        ttk.Label(frame, text="로컬 판독의 불일치·낮은 신뢰도·누락 의심 구간만 이미지 조각·앞뒤 문맥과 함께 선택한 AI에 보냅니다.\nPP-OCRv6 단독 판독도 검증할 수 있습니다. 먼저 대상·호출 수를 확인하며 결과는 교정 제안으로 저장합니다.", wraplength=710).pack(anchor="w", pady=(0, 12))
+        if key_count > 1:
+            ttk.Label(frame, text=f"등록된 키 {key_count}개 중 첫 번째 키만 사용합니다. 다른 키로 자동 전환하지 않습니다.", wraplength=710).pack(anchor="w", pady=(0, 6))
+        ttk.Label(frame, text="기본은 로컬 판독의 불일치·낮은 신뢰도·누락 의심 구간만 이미지와 문맥으로 검증합니다.\nPP-OCRv6 단독 판독도 사용할 수 있습니다. 먼저 대상·호출 수를 확인하며 결과는 제안으로 저장합니다.", wraplength=710).pack(anchor="w", pady=(0, 12))
         selected_id = (self._selected_suggestion or {}).get("id")
         scopes = ("선택한 불일치", "현재 쪽", "지정 범위")
         scope = tk.StringVar(window, scopes[0] if selected_id else scopes[1])
@@ -1002,13 +1027,15 @@ class ComparisonEditor(tk.Toplevel):
         ttk.Label(row, text="검증 범위").pack(side="left", padx=(0, 10))
         ttk.Combobox(row, textvariable=scope, values=scopes, state="readonly", width=22).pack(side="left")
         ttk.Label(row, text="범위는 위쪽 쪽 범위 입력을 사용합니다.").pack(side="left", padx=10)
-        traditional = tk.BooleanVar(window, True)
+        traditional = tk.BooleanVar(window, PROFILES[self.profile.get()] == "traditional")
         punctuation = tk.BooleanVar(window, True)
+        visual_page = tk.BooleanVar(window, False)
         force = tk.BooleanVar(window, False)
         ttk.Checkbutton(frame, text="번체 변환 후보 포함 (교정문 자동 변경 없음)", variable=traditional).pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="중문부호 수정 후보 포함", variable=punctuation).pack(anchor="w", pady=3)
-        ttk.Label(frame, text="[현재 쪽]·[지정 범위]에서도 의심 구간만 골라 검증합니다.\n번체·부호 검토는 같은 대상 구간에만 적용하고 앞뒤 문맥을 함께 보냅니다.", wraplength=710).pack(anchor="w", pady=3)
-        ttk.Label(frame, text="이체자는 보존합니다. 불확실한 판독은 보류하고 사람이 직접 확인합니다.").pack(anchor="w", pady=3)
+        ttk.Checkbutton(frame, text="쪽 전체 이미지 검증 (선택한 불일치는 해당 영역만)", variable=visual_page).pack(anchor="w", pady=3)
+        ttk.Label(frame, text="기본은 의심 구간과 앞뒤 문맥만 보냅니다. 번체·부호 검토도 같은 구간에 적용합니다.\n쪽 전체 검증은 위 옵션을 직접 켰을 때만 사용합니다.", wraplength=710).pack(anchor="w", pady=3)
+        ttk.Label(frame, text="이체자·원문 부호를 보존합니다. 로컬 후보·영역 재판독도 미확정 근거로 함께 검증합니다.", wraplength=710).pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="이미 검증한 같은 범위도 다시 전송하기", variable=force).pack(anchor="w", pady=3)
         cap_row = ttk.Frame(frame)
         cap_row.pack(fill="x", pady=5)
@@ -1032,35 +1059,39 @@ class ComparisonEditor(tk.Toplevel):
                 limit = int(max_calls.get())
                 if not 1 <= limit <= 100:
                     raise ValueError("호출 상한은 1~100으로 입력하십시오.")
-                policy = {"traditional": traditional.get(), "punctuation": punctuation.get()}
+                policy = {"traditional": traditional.get(), "punctuation": punctuation.get(),
+                          "visual_scope": "page" if visual_page.get() and identifiers is None else "auto"}
                 repeat = force.get()
             except (ValueError, TypeError) as exc:
                 error.set(str(exc))
                 return
             window.destroy()
-            self._prepare_ai(pages, identifiers, policy, provider, model, key, limit, repeat)
+            self._prepare_ai(pages, identifiers, policy, provider, model, key, limit, repeat, key_count=key_count)
         ttk.Button(buttons, text="범위 준비 (아직 전송하지 않음)", command=prepare).pack(side="right")
         ttk.Button(buttons, text="취소", command=window.destroy).pack(side="right", padx=8)
         self._apply_local_styles(window)
         window.grab_set()
         window.focus_set()
 
-    def _prepare_ai(self, pages, identifiers, policy, provider, model, api_key, max_calls=20, force=False):
+    def _prepare_ai(self, pages, identifiers, policy, provider, model, api_key, max_calls=20, force=False, *, key_count=1):
         if self._busy or not self.project:
             return
         self._commit_text()
         project = self.project
         def worker(stop, _generation, _job):
             from .comparison_ai import AISettings, ReviewPolicy, prepare_plan
-            settings = AISettings(provider=provider, model=model, max_calls=max_calls,
-                                  max_total_output_tokens=max_calls * 4096)
-            selected_policy = ReviewPolicy(traditional=policy["traditional"], punctuation=policy["punctuation"], preserve_variants=True, selective=True)
+            settings = AISettings(provider=provider, model=model)
+            settings = replace(settings, max_calls=max_calls,
+                               max_total_output_tokens=max_calls * settings.max_output_tokens)
+            selected_policy = ReviewPolicy(traditional=policy["traditional"], punctuation=policy["punctuation"],
+                                           preserve_variants=True, visual_scope=policy.get("visual_scope", "auto"),
+                                           selective=policy.get("visual_scope", "auto") != "page")
             plan = prepare_plan(project, pages, selected_policy, settings=settings,
                                 suggestion_ids=identifiers, force=force, should_stop=stop.is_set)
-            return "ai-plan", (plan, api_key, project, bool(identifiers))
+            return "ai-plan", (plan, api_key, project, bool(identifiers), key_count)
         self._start_job("AI에 보낼 이미지와 문장 범위를 준비합니다. 아직 외부로 전송하지 않습니다.", worker)
 
-    def _confirm_ai_plan(self, plan, api_key, project, selected_only=False):
+    def _confirm_ai_plan(self, plan, api_key, project, selected_only=False, key_count=1):
         if self._closing or self._closed or self.project is not project or self._stop.is_set():
             self.status.set("AI 검증 준비를 취소했습니다. 전송하지 않았습니다.")
             return
@@ -1093,20 +1124,74 @@ class ComparisonEditor(tk.Toplevel):
         selective = bool(getattr(policy, "selective", False))
         if summary.get("unlocalized_targets"):
             image_disclosure += "위치를 특정하지 못한 의심 구간은 전송에서 제외했습니다. 원본 대조가 필요합니다.\n"
-        details = (f"제공사: {plan.settings.provider}\n모델: {plan.settings.model}\n"
+        output_per_call = summary.get("max_output_tokens", getattr(plan.settings, "max_output_tokens", 0))
+        output_cap = summary.get("output_token_cap", calls * output_per_call)
+        budget_disclosure = (f"이미지 판독 {summary.get('visual_calls', 0)}회 · 문자·부호 검토 {summary.get('editorial_calls', 0)}회\n"
+                             f"호출당 출력 상한: {output_per_call:,}토큰 · 이번 범위 합계 상한: {output_cap:,}토큰\n")
+        if "target_char_cap" in summary and "batch_target_cap" in summary:
+            budget_disclosure += f"문장 묶음당 최대 {summary['target_char_cap']}자 · 호출당 최대 {summary['batch_target_cap']}묶음\n"
+        if summary.get("codepoint_ledger_entries"):
+            budget_disclosure += f"문자 위치 대조표: {summary['codepoint_ledger_entries']:,}항목을 전송 문맥에 포함\n"
+        thinking = summary.get("gemini_thinking_level")
+        if thinking:
+            budget_disclosure += f"Gemini 생각 수준: {thinking}\n"
+        if key_count > 1:
+            budget_disclosure += f"등록된 키 {key_count}개 중 첫 번째 키만 사용 · 자동 전환 없음\n"
+        if summary.get("anchor_policy") == "unique-literal-v1":
+            budget_disclosure += "위치 복원: 같은 검증 범위의 원문이 한 곳에만 일치할 때만 수행\n"
+        if summary.get("refinement_proposals") or summary.get("region_readings"):
+            budget_disclosure += (f"미확정 로컬 후보 {summary.get('refinement_proposals', 0)}곳 · "
+                                  f"영역 재판독 {summary.get('region_readings', 0)}건을 근거로 포함\n")
+        details = (f"제공사: {plan.settings.provider} / 모델: {plan.settings.model}\n"
                    f"원본: {project.source_path}\n쪽: {scope}\n"
                    f"검증 단위 {summary.get('targets', 0)}개 · 이미지 {summary.get('images', 0)}개 · 최대 호출 {calls}회\n"
                    f"{image_disclosure}"
-                   f"출력 토큰 상한: {summary.get('output_token_cap', calls * 4096):,}\n"
-                   f"번체 후보: {'포함' if traditional else '제외'} · 중문부호: {'포함' if punctuation else '제외'}\n이체자 보존\n\n"
-                   + (("번체·중문부호 검토: 의심 구간만 수정 대상으로 삼고 앞뒤 문맥을 함께 보냅니다.\n\n" if selective else
-                       "번체·중문부호 검토: 선택한 불일치를 수정 대상으로 삼고 앞뒤 문맥을 함께 보냅니다.\n\n" if selected_only else
-                       "번체·중문부호 검토: 위 쪽의 전체 본문을 보냅니다.\n\n") if traditional or punctuation else "") +
-                   "원본 이미지와 OCR 문장이 이 제공사로 전송되며 API 요금이 발생할 수 있습니다.\nAI의 답은 제안으로 저장하고 교정문은 사람이 채택할 때만 바꿉니다.\n\n이 범위로 검증을 시작하시겠습니까?")
-        if not messagebox.askyesno("AI 검증 · 전송 범위 확인", details, parent=self, default="no"):
+                   f"{budget_disclosure}"
+                   f"번체 후보: {'포함' if traditional else '제외'} · 중문부호: {'포함' if punctuation else '제외'} · 이체자 보존\n"
+                   + (("번체·부호 검토: 의심 구간만 수정 대상으로, 앞뒤 문맥도 전송\n" if selective else
+                       "번체·부호 검토: 선택한 불일치만 수정 대상으로, 앞뒤 문맥도 전송\n" if selected_only else "번체·부호 검토: 위 쪽의 전체 본문 전송\n") if traditional or punctuation else "") +
+                   "\n원본 이미지와 OCR 문장을 이 제공사에 보내며 API 요금이 발생할 수 있습니다.\n제안은 별도 저장하며, 사람이 채택할 때만 교정문을 바꿉니다.\n\n이 범위로 검증을 시작하시겠습니까?")
+        if not self._ask_ai_plan_confirmation(details):
             self.status.set("AI 검증을 취소했습니다. 문서와 이미지를 전송하지 않았습니다.")
             return
         self._run_ai_plan(project, plan, api_key)
+
+    def _ask_ai_plan_confirmation(self, details):
+        """Keep the concrete scope readable and both actions visible on small screens."""
+        window = tk.Toplevel(self)
+        window.title("AI 검증 · 전송 범위 확인")
+        width = min(840, max(360, self.winfo_screenwidth() - 80), max(360, self.winfo_width() - 40))
+        height = min(680, max(320, self.winfo_screenheight() - 100), max(320, self.winfo_height() - 60))
+        window.geometry(f"{width}x{height}")
+        window.transient(self)
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill="both", expand=True)
+        buttons = ttk.Frame(frame)
+        buttons.pack(side="bottom", fill="x", pady=(10, 0))
+        body = ttk.Frame(frame)
+        body.pack(fill="both", expand=True)
+        text = tk.Text(body, wrap="word", font=("맑은 고딕", 10), padx=10, pady=8)
+        scroll = ttk.Scrollbar(body, command=text.yview)
+        scroll.pack(side="right", fill="y")
+        text.configure(yscrollcommand=scroll.set)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", details)
+        text.configure(state="disabled")
+        approved = False
+        def finish(value=False):
+            nonlocal approved
+            approved = value
+            window.destroy()
+        ttk.Button(buttons, text="검증 시작", command=lambda: finish(True)).pack(side="right")
+        cancel = ttk.Button(buttons, text="취소", command=finish)
+        cancel.pack(side="right", padx=8)
+        window.protocol("WM_DELETE_WINDOW", finish)
+        window.bind("<Escape>", lambda _event: finish())
+        self._apply_local_styles(window)
+        window.grab_set()
+        cancel.focus_set()
+        window.wait_window()
+        return approved
 
     def _run_ai_plan(self, project, plan, api_key):
         events, recovery = self._events, self._recovery_path
@@ -1147,18 +1232,25 @@ class ComparisonEditor(tk.Toplevel):
                 decision = "대체됨"
             elif item.get("stale"):
                 decision = "재검토"
+            elif item.get("source_fidelity_blocked") and item.get("decision", "pending") == "pending":
+                decision = "원본보존 보류"
             self.ai_tree.insert("", "end", iid=identifier, values=(_short(item.get("before", ""), 18), _short(item.get("after", ""), 24), kind, decision))
-        self.ai_count.set(f"제안 {len(items):,}곳")
+        ready = self._ai_ready_count()
+        self.ai_count.set(f"제안 {len(items):,}곳" + (" · 정상 로컬 판독 필요" if ready < 1 else f" · 정상 판독 {ready}개"))
         self._set_enabled()
 
     def _ai_selected(self, _event=None):
+        self._selected_refinement = None
         selected = self.ai_tree.selection()
         self._selected_ai_proposal = self._ai_proposals.get(selected[0]) if selected else None
         self._selected_suggestion = None
         item = self._selected_ai_proposal
         if item:
-            self.ai_detail.set(f"{item.get('provider')} / {item.get('model')} · {item.get('reason', '')}" + (" · " + item.get("blocked_reason", "") if item.get("blocked_reason") else ""))
             record = next((record for record in self.project.page(self.page_number).get("ai_reviews", []) if record["id"] == item["review_id"]), {})
+            recovery_notice = _anchor_recovery_notice(record, item)
+            self.ai_detail.set(f"{item.get('provider')} / {item.get('model')} · {item.get('reason', '')}" + (" · " + item.get("blocked_reason", "") if item.get("blocked_reason") else "") + (" · " + recovery_notice if recovery_notice else ""))
+            if item.get("source_fidelity_contract"):
+                self.ai_detail.set(self.ai_detail.get() + " · 현재 보호 검사: " + item["source_fidelity_contract"])
             snapshot = record.get("request", {}).get("snapshot_text", "")
             span = mapped_span(snapshot, self.text.get("1.0", "end-1c"), item.get("start", 0), item.get("end", 0))
             self.text.tag_remove("selection-evidence", "1.0", "end")
@@ -1202,10 +1294,28 @@ class ComparisonEditor(tk.Toplevel):
         window.title("AI 교정 제안 · 원본과 직접 대조")
         window.geometry("780x550")
         text = tk.Text(window, wrap="word", font=("맑은 고딕", 11), padx=12, pady=10)
+        scroll = ttk.Scrollbar(window, command=text.yview)
+        scroll.pack(side="right", fill="y")
+        text.configure(yscrollcommand=scroll.set)
         text.pack(fill="both", expand=True)
         text.insert("end", f"{item.get('provider')} / {item.get('model')}\n종류: {item.get('kind')}\n\n변경 전:\n{item.get('before', '')}\n\nAI 제안:\n{item.get('after', '')}\n\n근거:\n{item.get('reason', '')}\n\n")
+        record = next((record for record in self.project.page(self.page_number).get("ai_reviews", []) if record["id"] == item["review_id"]), {})
+        recovery_notice = _anchor_recovery_notice(record, item)
+        if recovery_notice:
+            text.insert("end", recovery_notice + "\n\n")
+        current = item.get("source_fidelity_current")
+        if current is not None:
+            text.insert("end", "현재 프로그램 검증 근거 (AI 원시 응답·당시 저장 판정과 별도로 계산):\n"
+                        + json.dumps(current, ensure_ascii=False, indent=2) + "\n\n")
+        stored = record.get("metadata", {}).get("source_fidelity")
+        if stored is not None:
+            selected = {key: value for key, value in stored.items() if key != "proposals"}
+            selected["proposals"] = [proposal for proposal in stored.get("proposals", [])
+                                     if proposal.get("proposal_id") == item["id"]]
+            text.insert("end", "당시 저장된 원본보존 검증 (원래 기록을 보존한 프로그램 판정):\n"
+                        + json.dumps(selected, ensure_ascii=False, indent=2) + "\n\n")
         if item.get("uncertain") or not item.get("applicable", True):
-            text.insert("end", "자동 채택할 수 없습니다. " + item.get("blocked_reason", "판독이 불확실하여 원본을 직접 확인해야 합니다."))
+            text.insert("end", "제안 채택이 보류되었습니다. " + item.get("blocked_reason", "판독이 불확실하여 원본을 직접 확인해야 합니다."))
         text.configure(state="disabled")
 
     def show_ai_history(self):
@@ -1216,12 +1326,29 @@ class ComparisonEditor(tk.Toplevel):
         window.title(f"{self.page_number}쪽 · AI 원시 응답과 교정 이력")
         window.geometry("850x650")
         text = tk.Text(window, wrap="word", font=("맑은 고딕", 10), padx=12, pady=10)
+        scroll = ttk.Scrollbar(window, command=text.yview)
+        scroll.pack(side="right", fill="y")
+        text.configure(yscrollcommand=scroll.set)
         text.pack(fill="both", expand=True)
         for record in page.get("ai_reviews", []):
             request = record.get("request", {})
-            text.insert("end", f"\n{record.get('created_at')} · {record.get('provider')} / {record.get('model')} · {record.get('status')}\n단계: {request.get('phase', '')}\n정책: {json.dumps(record.get('policy', {}), ensure_ascii=False)}\n전송 대상과 문맥:\n{json.dumps(request.get('targets', []), ensure_ascii=False, indent=2)}\n원시 응답:\n{record.get('response_text', '')}\n")
+            text.insert("end", f"\n{record.get('created_at')} · {record.get('provider')} / {record.get('model')} · {record.get('status')}\n단계: {request.get('phase', '')}\n")
+            metadata = record.get("metadata", {})
+            if "response_complete" in metadata or metadata.get("finish_reason"):
+                text.insert("end", f"응답 완료: {metadata.get('response_complete', '미기록')} · 종료 사유: {metadata.get('finish_reason', '미기록')}\n")
             if record.get("error"):
                 text.insert("end", "오류: " + record["error"] + "\n")
+            text.insert("end", f"\n원시 응답:\n{record.get('response_text', '')}\n")
+            if "source_fidelity" in metadata:
+                text.insert("end", "\n당시 저장된 원본보존 검증 (프로그램의 파생 판정, AI 원시 응답과 구분):\n"
+                            + json.dumps(metadata["source_fidelity"], ensure_ascii=False, indent=2) + "\n")
+            recovery = metadata.get("anchor_recovery", {})
+            recovery_notice = _anchor_recovery_notice(record)
+            if recovery_notice:
+                text.insert("end", f"\n{recovery_notice}\n위치를 복원한 검증용 응답 (AI 원시 응답과 구분):\n{recovery.get('derived_response_text', '')}\n")
+            text.insert("end", f"\n정책: {json.dumps(record.get('policy', {}), ensure_ascii=False)}\n전송 대상과 문맥:\n{json.dumps(request.get('targets', []), ensure_ascii=False, indent=2)}\n")
+            if recovery_notice:
+                text.insert("end", f"복원 내역:\n{json.dumps(recovery.get('relocations', []), ensure_ascii=False, indent=2)}\n")
         text.insert("end", "\n사람의 채택·거절·되돌리기 이력:\n")
         for decision in page.get("ai_decisions", []):
             text.insert("end", json.dumps(decision, ensure_ascii=False) + "\n")
@@ -1260,51 +1387,40 @@ class ComparisonEditor(tk.Toplevel):
             dpi = int(self.dpi.get())
             profile, direction = PROFILES[self.profile.get()], DIRECTIONS[self.direction.get()]
             force = self.force.get()
-            automatic = self.automatic.get()
-            engines = self._selected_engines()
-            if not engines:
-                raise ValueError("비교할 엔진을 하나 이상 선택하세요.")
-            if profile == "mixed" and engines == ("ppocrv6",):
-                raise ValueError("PP-OCRv6 medium은 간체·번체 문서에서 사용하세요. 한글·한자 혼용은 지원하지 않습니다.")
+            selected_engines = self._selected_engines()
+            preferred = primary_engine(profile, direction)
         except (ValueError, KeyError) as exc:
             self.status.set(str(exc))
             return
         project, recovery = self.project, self._recovery_path
         events, engine_root = self._events, self.engine_root
-        self._job_engine_count = len(engines)
-        self.progress.configure(maximum=max(1, len(numbers) * len(engines)), value=0)
+        self._recognition_engine_count = len(selected_engines)
+        self.progress.configure(maximum=max(1, len(numbers) * len(selected_engines)), value=0)
         self.progress_label.set(f"0 / {len(numbers)}쪽")
         def worker(stop, generation, job):
-            from .comparison import run_page
-            from .automatic_ocr import run_automatic_page
-            done, errors = 0, 0
-            for index, number in enumerate(numbers):
-                if stop.is_set():
-                    break
-                events.put(("page-start", generation, job, (number, index + 1, len(numbers))))
-                def checkpoint(result):
-                    if recovery:
-                        project.save_recovery(recovery)
-                    if project.project_path:
-                        project.save()
-                    events.put(("engine-done", generation, job, (number, getattr(result, "engine", None) or (result.get("engine") if isinstance(result, dict) else ""))))
-                options = {} if automatic else {"engines": engines}
-                recognize = run_automatic_page if automatic else run_page
-                result = recognize(project, number, profile=profile, direction=direction, dpi=dpi,
-                                   should_stop=stop.is_set, on_result=checkpoint, engine_root=engine_root, force=force,
-                                   **options)
+            from .comparison import run_pages
+            completed = 0
+            touched = set()
+            def checkpoint(_result):
                 if recovery:
                     project.save_recovery(recovery)
                 if project.project_path:
                     project.save()
-                errors += len(result.get("errors", {}))
-                done += 1
-                events.put(("page-done", generation, job, (number, index + 1, len(numbers), result)))
-                if result.get("cancelled"):
-                    break
-            return "recognized", {"pages": done, "errors": errors, "cancelled": stop.is_set(), "automatic": automatic}
-        self._start_job("사용 가능한 엔진을 차례로 인식하고 쪽별 결과를 자동 선택합니다." if automatic else
-                        "선택 엔진을 차례로 인식합니다. 완료한 엔진마다 복구 기록을 저장합니다.", worker)
+            def progress(number, engine, _outcome):
+                nonlocal completed
+                completed += 1
+                touched.add(number)
+                events.put(("batch-progress", generation, job,
+                            (number, engine, completed, len(numbers) * len(selected_engines))))
+            result = run_pages(project, numbers, profile=profile, direction=direction, dpi=dpi,
+                should_stop=stop.is_set, on_result=checkpoint, engine_root=engine_root, force=force,
+                engines=selected_engines, primary_engine=preferred if preferred in selected_engines else None,
+                on_wait=lambda value: events.put(("gpu-wait", generation, job, value)), on_page=progress)
+            checkpoint(None)
+            return "recognized", {"pages": len(touched),
+                "errors": sum(len(errors) for errors in result["errors"].values()),
+                "cancelled": result["cancelled"]}
+        self._start_job(f"선택한 {len(selected_engines)}개 모델을 인식합니다. 완료한 모델마다 복구 기록을 저장합니다.", worker)
 
     def cancel(self):
         if self._busy:
@@ -1356,14 +1472,14 @@ class ComparisonEditor(tk.Toplevel):
             for engine in ENGINES:
                 if stop.is_set():
                     break
-                results.append(doctor(engine=engine, engine_root=selected, should_stop=stop.is_set))
+                results.append(doctor(engine=engine, engine_root=root, should_stop=stop.is_set))
             return "inspected", (str(root), results)
         self._start_job("로컬 엔진과 모델 파일을 확인하는 중… 자동 다운로드나 문서 전송은 없습니다.", worker)
 
     def _show_engine_info(self, value):
         root, records = value
         window = tk.Toplevel(self)
-        window.title("로컬 엔진 · 설치 확인")
+        window.title("로컬 OCR 모델 · 설치 확인")
         window.geometry("760x520")
         frame = ttk.Frame(window, padding=12)
         frame.pack(fill="both", expand=True)
@@ -1377,14 +1493,12 @@ class ComparisonEditor(tk.Toplevel):
             text.insert("end", f"{engine} · {ready}\n")
             if record.get("languages"):
                 text.insert("end", "언어: " + ", ".join(record["languages"]) + "\n")
-            if record.get("engine_root") or record.get("executable"):
-                text.insert("end", "위치: " + record.get("engine_root", record.get("executable", "")) + "\n")
             text.insert("end", record.get("message", "") + "\n\n")
-        text.insert("end", "설치는 명시적으로 실행해야 합니다. 새 한국어 모델은 한자를 지원하지 않으며 세로 비교의 글줄 순서는 원본과 확인해야 합니다.\n설치 절차: docs/LOCAL_OCR.md")
+        text.insert("end", "설치는 명시적으로 실행해야 합니다. 모델별 언어 지원 범위와 세로 비교의 글줄 순서는 원본과 확인해야 합니다.\n설치 절차: docs/LOCAL_OCR.md")
         text.configure(state="disabled")
         ttk.Button(frame, text="닫기", command=window.destroy).pack(anchor="e", pady=(8, 0))
         available = sum(bool(record.get("available")) for record in records)
-        self.status.set(f"설치 확인 완료 · {available}/{len(ENGINES)} 엔진 사용 가능 · {root}")
+        self.status.set(f"설치 확인 완료 · {available}/{len(records)} 엔진 사용 가능 · {root}")
 
     def export_document(self):
         if not self.project or self._busy:
@@ -1501,6 +1615,9 @@ class ComparisonEditor(tk.Toplevel):
 
     def _highlight_image(self):
         self.canvas.delete("evidence")
+        if self._selected_refinement and self.refinement_panel.highlight_image():
+            self.evidence_label.set("로컬 교정 후보 · 실제 OCR 영역")
+            return
         if self._selected_ai_proposal:
             self._highlight_ai_image()
             return
@@ -1516,6 +1633,12 @@ class ComparisonEditor(tk.Toplevel):
             bbox = entry.get("bbox")
             run = next((run for run in page.get("runs", []) if run["id"] == entry.get("run_id")), None) or latest.get(entry.get("engine"), {})
             raw = run.get("raw", {})
+            if entry.get("engine") == "glmocr" and not bbox:
+                ox, oy = self._origin
+                self.canvas.create_rectangle(ox, oy, ox + self._preview.width * self._image_scale,
+                    oy + self._preview.height * self._image_scale, outline="#de652b", width=3, tags="evidence")
+                self.evidence_label.set("GLM-OCR: 좌표 없음 · 원본 전체 표시")
+                return
             if not bbox or len(bbox) != 4 or not raw.get("image_width") or not raw.get("image_height"):
                 continue
             if entry.get("run_id") and entry["run_id"] != run.get("id"):
@@ -1527,7 +1650,9 @@ class ComparisonEditor(tk.Toplevel):
             sy = self._preview.height / raw["image_height"] * self._image_scale
             ox, oy = self._origin
             self.canvas.create_rectangle(ox + x0 * sx, oy + y0 * sy, ox + x1 * sx, oy + y1 * sy, outline="#de652b", width=3, tags="evidence")
-            self.evidence_label.set(f"{entry.get('engine')}의 판독 영역 · 글자 단위가 아닌 줄/단어 범위일 수 있습니다.")
+            granularity = raw.get("engine_metadata", {}).get("bbox_granularity")
+            region = "블록 범위" if granularity == "block" else "글줄/단어 범위"
+            self.evidence_label.set(f"{ENGINE_LABELS.get(entry.get('engine'), entry.get('engine'))}의 판독 영역 · {region}이며 글자 위치와 다를 수 있습니다.")
             return
         self.evidence_label.set("이 차이에 신뢰할 수 있는 좌표가 없습니다. 원본과 판독문을 직접 확인하십시오.")
 
@@ -1599,9 +1724,17 @@ class ComparisonEditor(tk.Toplevel):
                 if action == "project":
                     self._set_project(payload)
                     notices = getattr(payload, "import_notices", [])
-                    self.status.set("기존 기록 가져오기 주의: " + " · ".join(notices) if notices else "프로젝트를 열었습니다. 로컬 엔진의 원시 판독과 사람의 교정문을 구분해 보관합니다.")
+                    self.status.set("기존 기록 가져오기 주의: " + " · ".join(notices) if notices else "프로젝트를 열었습니다. 모델별 원시 판독과 사람의 교정문을 구분해 보관합니다.")
                 elif action == "recognized":
                     self.status.set(f"{'중지됨' if payload['cancelled'] else '인식 완료'} · {payload['pages']}쪽 처리 · 엔진 오류 {payload['errors']}건 · 복구 사본 저장됨")
+                elif action == "refined":
+                    self.status.set(f"조합 후보 {payload['local']}곳 · 재판독 후보 {payload['regional']}곳 저장됨 · 사람의 확정문은 보존됨")
+                elif action == "source-checked":
+                    self.status.set(f"PDF 부호 후보 {payload['checked']}곳 대조 · 보류 {payload['held']}곳 · 근거 부족 {payload['unavailable']}곳 · 교정문 변경 없음")
+                elif action == "image-checked":
+                    self.status.set(f"이미지 OCR 제안 {payload['checked']}곳 재검사 · 보류 {payload['held']}곳 · 원시·AI 제안·사람 확정 이력 보존")
+                elif action == "region-read":
+                    self.status.set(f"영역 재판독 {payload} · 원시 결과·후보를 별도 저장했습니다.")
                 elif action == "saved":
                     self.status.set(f"저장됨 · {payload}")
                 elif action == "imported":
@@ -1627,9 +1760,22 @@ class ComparisonEditor(tk.Toplevel):
                 else:
                     self._closing = False
             return
-        if kind == "page-start":
+        if kind == "gpu-wait":
+            position = value.get("position") if isinstance(value, dict) else None
+            elapsed = value.get("elapsed_seconds") if isinstance(value, dict) else None
+            wait_time = f" · {int(elapsed)}초" if isinstance(elapsed, (int, float)) else ""
+            self.status.set(f"GPU 사용 순서를 기다리는 중{' · 대기 ' + str(position) + '번째' if position else ''}{wait_time} · 중지할 수 있습니다.")
+        elif kind == "batch-progress":
+            number, engine, completed, total = value
+            self.progress.configure(value=completed)
+            self.progress_label.set(f"{completed} / {total} 모델·쪽")
+            self.status.set(f"{number}쪽 · {ENGINE_LABELS.get(engine, engine)} 처리됨 · 모델별 연속 처리")
+            self._update_page(number)
+            if number == self.page_number:
+                self._populate_page()
+        elif kind == "page-start":
             number, index, total = value
-            self.status.set(f"{number}쪽 · 선택 엔진 인식 중 ({index}/{total}쪽)")
+            self.status.set(f"{number}쪽 · 선택한 {self._recognition_engine_count}개 모델 인식 중 ({index}/{total}쪽)")
         elif kind == "engine-done":
             number, engine = value
             self.status.set(f"{number}쪽 · {engine} 원시 결과 저장됨")
@@ -1639,15 +1785,13 @@ class ComparisonEditor(tk.Toplevel):
                 self._populate_page()
         elif kind == "page-done":
             number, index, total, result = value
-            self.progress.configure(value=index * getattr(self, "_job_engine_count", len(DEFAULT_ENGINES)))
+            self.progress.configure(value=index * self._recognition_engine_count)
             self.progress_label.set(f"{index} / {total}쪽")
             self._update_page(number)
             if self.page_number == number:
                 self._populate_page()
             if result.get("errors"):
                 self.status.set(f"{number}쪽 · " + " · ".join(f"{engine}: {error}" for engine, error in result["errors"].items()))
-            elif result.get("unsupported"):
-                self.status.set(f"{number}쪽 · " + " · ".join(result["unsupported"].values()))
         elif kind == "ai-result":
             number, completed = value[:2]
             state = value[2] if len(value) > 2 else "completed"

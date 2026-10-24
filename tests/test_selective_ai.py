@@ -126,14 +126,18 @@ class SelectiveReviewTests(unittest.TestCase):
         outcome, calls = self.fake_run(plan, [{"start": 1, "end": 2, "before": "乙", "after": "仁",
                 "kind": "recognition", "reason": "synthetic pixels", "uncertain": False}])
         self.assertEqual((outcome["completed"], len(calls)), (1, 1))
-        self.assertTrue(self.project.ai_proposals(1)[0]["applicable"])
+        proposal = self.project.ai_proposals(1)[0]
+        self.assertFalse(proposal["stale"])
+        self.assertFalse(proposal["applicable"])
+        self.assertTrue(proposal["source_fidelity_blocked"])  # One family cannot authorize a Han substitution.
         path = self.root / "review.json"
         self.project.save(path)
         loaded = ComparisonProject.load(path)
-        self.assertTrue(loaded.ai_proposals(1)[0]["applicable"])
+        self.assertFalse(loaded.ai_proposals(1)[0]["stale"])
+        self.assertTrue(loaded.ai_proposals(1)[0]["source_fidelity_blocked"])
         self.assertEqual(loaded.text(1), "甲乙丙")
         self.add("tesseract", confidence=95, dpi=300)
-        self.assertFalse(self.project.ai_proposals(1)[0]["applicable"])
+        self.assertTrue(self.project.ai_proposals(1)[0]["stale"])
 
     def test_new_current_reading_invalidates_frozen_plan(self):
         self.add(confidence=.4)
@@ -165,7 +169,8 @@ class SelectiveReviewTests(unittest.TestCase):
                "kind": "recognition", "reason": "synthetic pixels", "uncertain": False}])
         self.assertEqual(outcome["completed"], 1)
         self.assertEqual(self.project.text(1), "")
-        self.assertTrue(self.project.ai_proposals(1)[0]["applicable"])
+        self.assertFalse(self.project.ai_proposals(1)[0]["applicable"])
+        self.assertTrue(self.project.ai_proposals(1)[0]["source_fidelity_blocked"])
 
     def test_missing_geometry_uses_only_unambiguous_ink_band(self):
         self.make_image(ink=True)
@@ -219,7 +224,7 @@ class SelectiveReviewTests(unittest.TestCase):
         self.add(text=text, words=words(text))
         self.add("rapidocr", text=other, words=words(other))
         self.project.compare_page(1, baseline="ppocrv6")
-        plan = self.plan()
+        plan = self.plan(policy=ReviewPolicy(selective=True, batch_size=4))
         self.assertGreater(plan.summary["targets"], 24)
         self.assertEqual(plan.summary["dense_pages"], [])
         self.assertEqual(plan.summary["full_page_images"], 0)
