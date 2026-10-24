@@ -993,7 +993,7 @@ class ComparisonEditor(tk.Toplevel):
         frame = ttk.Frame(window, padding=16)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text=f"선택한 제공사: {provider}  /  모델: {model}", font=("맑은 고딕", 10, "bold"), wraplength=710).pack(anchor="w", pady=(0, 10))
-        ttk.Label(frame, text="원본 이미지 조각·OCR 문장·엔진 판독을 선택한 AI에 보냅니다.\n먼저 범위를 준비하고 호출·이미지 수를 확인한 뒤 전송합니다. 결과는 교정 제안으로만 저장합니다.", wraplength=710).pack(anchor="w", pady=(0, 12))
+        ttk.Label(frame, text="로컬 판독의 불일치·낮은 신뢰도·누락 의심 구간만 이미지 조각·앞뒤 문맥과 함께 선택한 AI에 보냅니다.\nPP-OCRv6 단독 판독도 검증할 수 있습니다. 먼저 대상·호출 수를 확인하며 결과는 교정 제안으로 저장합니다.", wraplength=710).pack(anchor="w", pady=(0, 12))
         selected_id = (self._selected_suggestion or {}).get("id")
         scopes = ("선택한 불일치", "현재 쪽", "지정 범위")
         scope = tk.StringVar(window, scopes[0] if selected_id else scopes[1])
@@ -1007,7 +1007,7 @@ class ComparisonEditor(tk.Toplevel):
         force = tk.BooleanVar(window, False)
         ttk.Checkbutton(frame, text="번체 변환 후보 포함 (교정문 자동 변경 없음)", variable=traditional).pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="중문부호 수정 후보 포함", variable=punctuation).pack(anchor="w", pady=3)
-        ttk.Label(frame, text="번체·부호 검토: [현재 쪽]·[지정 범위]는 해당 쪽의 전체 본문,\n[선택한 불일치]는 그 범위만 수정 대상으로 삼고 앞뒤 문맥도 함께 보냅니다.", wraplength=710).pack(anchor="w", pady=3)
+        ttk.Label(frame, text="[현재 쪽]·[지정 범위]에서도 의심 구간만 골라 검증합니다.\n번체·부호 검토는 같은 대상 구간에만 적용하고 앞뒤 문맥을 함께 보냅니다.", wraplength=710).pack(anchor="w", pady=3)
         ttk.Label(frame, text="이체자는 보존합니다. 불확실한 판독은 보류하고 사람이 직접 확인합니다.").pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="이미 검증한 같은 범위도 다시 전송하기", variable=force).pack(anchor="w", pady=3)
         cap_row = ttk.Frame(frame)
@@ -1054,7 +1054,7 @@ class ComparisonEditor(tk.Toplevel):
             from .comparison_ai import AISettings, ReviewPolicy, prepare_plan
             settings = AISettings(provider=provider, model=model, max_calls=max_calls,
                                   max_total_output_tokens=max_calls * 4096)
-            selected_policy = ReviewPolicy(traditional=policy["traditional"], punctuation=policy["punctuation"], preserve_variants=True)
+            selected_policy = ReviewPolicy(traditional=policy["traditional"], punctuation=policy["punctuation"], preserve_variants=True, selective=True)
             plan = prepare_plan(project, pages, selected_policy, settings=settings,
                                 suggestion_ids=identifiers, force=force, should_stop=stop.is_set)
             return "ai-plan", (plan, api_key, project, bool(identifiers))
@@ -1067,7 +1067,9 @@ class ComparisonEditor(tk.Toplevel):
         summary = plan.summary
         calls = summary.get("calls", 0)
         if not calls:
-            self.status.set("새로 AI에 검증할 범위가 없습니다. 같은 범위 재전송은 별도로 선택할 수 있습니다.")
+            self.status.set("의심 구간의 위치를 특정하지 못해 전송하지 않았습니다. 원본과 로컬 판독을 직접 확인하십시오."
+                            if summary.get("unlocalized_targets") else
+                            "새로 AI에 검증할 의심 구간이 없습니다. 같은 구간 재전송은 별도로 선택할 수 있습니다.")
             return
         policy = plan.policy
         traditional = getattr(policy, "traditional", False)
@@ -1088,13 +1090,18 @@ class ComparisonEditor(tk.Toplevel):
         dense_pages = summary.get("dense_pages", [])
         if dense_pages:
             image_disclosure += f"불일치가 많은 {_page_labels(dense_pages)}쪽은 쪽 본문을 문장 묶음으로 나누어 검증합니다.\n"
+        selective = bool(getattr(policy, "selective", False))
+        if summary.get("unlocalized_targets"):
+            image_disclosure += "위치를 특정하지 못한 의심 구간은 전송에서 제외했습니다. 원본 대조가 필요합니다.\n"
         details = (f"제공사: {plan.settings.provider}\n모델: {plan.settings.model}\n"
                    f"원본: {project.source_path}\n쪽: {scope}\n"
                    f"검증 단위 {summary.get('targets', 0)}개 · 이미지 {summary.get('images', 0)}개 · 최대 호출 {calls}회\n"
                    f"{image_disclosure}"
                    f"출력 토큰 상한: {summary.get('output_token_cap', calls * 4096):,}\n"
                    f"번체 후보: {'포함' if traditional else '제외'} · 중문부호: {'포함' if punctuation else '제외'}\n이체자 보존\n\n"
-                   + (("번체·중문부호 검토: 선택한 불일치를 수정 대상으로 삼고 앞뒤 문맥을 함께 보냅니다.\n\n" if selected_only else "번체·중문부호 검토: 위 쪽의 전체 본문을 보냅니다.\n\n") if traditional or punctuation else "") +
+                   + (("번체·중문부호 검토: 의심 구간만 수정 대상으로 삼고 앞뒤 문맥을 함께 보냅니다.\n\n" if selective else
+                       "번체·중문부호 검토: 선택한 불일치를 수정 대상으로 삼고 앞뒤 문맥을 함께 보냅니다.\n\n" if selected_only else
+                       "번체·중문부호 검토: 위 쪽의 전체 본문을 보냅니다.\n\n") if traditional or punctuation else "") +
                    "원본 이미지와 OCR 문장이 이 제공사로 전송되며 API 요금이 발생할 수 있습니다.\nAI의 답은 제안으로 저장하고 교정문은 사람이 채택할 때만 바꿉니다.\n\n이 범위로 검증을 시작하시겠습니까?")
         if not messagebox.askyesno("AI 검증 · 전송 범위 확인", details, parent=self, default="no"):
             self.status.set("AI 검증을 취소했습니다. 문서와 이미지를 전송하지 않았습니다.")

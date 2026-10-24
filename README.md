@@ -1,8 +1,10 @@
 # YeonE_OCR · 연어OCR
 
 세로쓰기 한자·한글 혼용 문헌(풍수·역학서 등 스캔 PDF)과 가로쓰기 한문(간체) 문헌을 `yeone_ocr/지침.md`에 따라 OCR·교정해 **HWPX 또는 검색 가능한 문자 PDF**로 만드는 PC 프로그램입니다.
-기존 AI 판독에서는 **Gemini·ChatGPT(OpenAI)·Claude(Anthropic)** 중 고른 모델이 읽고, 프로그램은 영역 잘라내기·두 판독 비교·3차 글자 판별·문서 조립·상태 기록을 맡습니다. **0.9.0**은 AB_OCR의 **Tesseract·RapidOCR·EasyOCR 비교·원본 대조 편집**에 **AI 이미지·문맥 재검증과 번체자·중문부호 제안**을 연결합니다.
-PDF는 **[일반 OCR]**, 이미지와 캡처는 세 번째 **[이미지(스크린샷) OCR]** 탭에서 원본을 고르고 **[한 번에 인식]**을 누릅니다. 읽기 방향·인쇄 쪽수 차이·이전 판 기록 갱신·2차 비교·3차 판별·문서·검수 화면·보고를 프로그램이 알아서 이어서 합니다.
+**1.1.0**의 기본 인식은 **로컬 엔진 먼저 → 불일치·어려운 구간만 Gemini·ChatGPT(OpenAI)·Claude(Anthropic) API 검증 → 문서·검수 화면·보고**입니다. 지원되는 설치 엔진을 순차 실행해 쪽별 결과를 선택하며 **PP-OCRv6 하나의 결과도 검증**할 수 있습니다. 위험 신호가 없는 구간은 API를 호출하지 않고, AI 수정 제안은 사람이 채택하기 전까지 본문에 덮어쓰지 않습니다. [로컬 우선 흐름·호출 상한·이어 읽기](docs/LOCAL_FIRST.md)
+PDF는 **[일반 OCR]**, 이미지와 캡처는 세 번째 **[이미지(스크린샷) OCR]** 탭에서 원본을 고르고 **[한 번에 인식]**을 누릅니다. 이전 전체 쪽 AI 판독은 **전체 쪽 AI 판독** 설정 또는 CLI `--ocr-strategy ai-full`로 선택합니다. 아래 버전별 설명은 기존 배포 이력도 포함하므로 현재 기본 동작은 위 로컬 우선 안내를 기준으로 확인하십시오.
+
+현재 배포 준비 버전은 기존 **1.0.6**을 갱신하는 **v1.1.0**입니다. [v1.1.0 다운로드 경로](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.1.0)는 공개 게시 후 설치 파일·포터블·소스·라이선스 ZIP·SHA-256 목록을 받을 주소입니다. 빌드·게시 완료 여부는 [릴리스 기록](docs/release-notes.md)에서 확인하십시오. 아래 0.11.0·0.9.0 설명과 다운로드는 개발 저장소의 이전 버전 이력입니다.
 
 ## 로컬 비교 추가: PP-OCRv6 medium
 
@@ -34,7 +36,7 @@ python -m yeone_ocr compare-engines "D:\문헌\원본.pdf" --pages 1-3 --profile
 
 ## 시작하기 (Windows)
 
-**Windows 10/11 x64 설치판에는 앱 실행에 필요한 Python과 패키지가 포함됩니다.** 배포 완료 후 [0.9.0 다운로드](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)에서 **`YeonE_OCR-0.9.0-Setup-x64.exe`**를 받아 실행한 뒤 시작 메뉴의 **연어OCR**을 여십시오. 기본 설치 위치는 `%LOCALAPPDATA%\Programs\YeonE_OCR`이며 현재 Windows 사용자 계정에 설치됩니다. 바탕 화면 바로가기는 설치 중 선택할 수 있습니다. 로컬 세 엔진의 실행 환경과 공개 모델은 별도로 설치합니다. [로컬 엔진 설치 안내](docs/LOCAL_OCR.md)를 따르십시오.
+**Windows 10/11 x64 설치판에는 앱 실행에 필요한 Python과 패키지가 포함됩니다.** 1.1.0 배포 완료 후 [v1.1.0 다운로드](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.1.0)에서 **`YeonE_OCR-1.1.0-Setup-x64.exe`**를 받아 실행한 뒤 시작 메뉴의 **연어OCR**을 여십시오. 기본 설치 위치는 `%LOCALAPPDATA%\Programs\YeonE_OCR`이며 현재 Windows 사용자 계정에 설치됩니다. 바탕 화면 바로가기는 설치 중 선택할 수 있습니다. 설치판은 PP-OCRv6를 포함하며 Tesseract·RapidOCR/v5·EasyOCR는 별도 설치합니다. 포터블은 엔진 환경도 별도로 준비해야 합니다. [로컬 엔진 설치 안내](docs/LOCAL_OCR.md)를 따르십시오.
 
 네 번째 **[설정]** 탭에서 **Gemini / ChatGPT(OpenAI) / Claude(Anthropic)**를 고르고 해당 제공사의 API 키와 모델을 설정합니다. **[설정 저장] → [OCR로 돌아가기]**를 누른 뒤 PDF는 **[일반 OCR]**의 **[PDF 고르기…]**, PNG·JPG 등은 **[이미지(스크린샷) OCR]**의 **[이미지 고르기…]**에서 선택하고 **[한 번에 인식]**을 누릅니다. 세 작업 탭의 원본 선택은 각각 유지하며 공통 설정을 함께 사용합니다. API 사용 권한과 비용은 별도이며 ChatGPT·Claude 웹 구독으로 로그인하는 방식은 아닙니다. 설치판에는 API 키가 들어 있지 않습니다.
 

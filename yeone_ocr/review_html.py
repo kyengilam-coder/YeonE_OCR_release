@@ -151,6 +151,19 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
         parts.append(f"<div class=status>{sts}</div>")
         if pr.page_note:
             parts.append(f"<div class=meta>메모: {html.escape(pr.page_note)}</div>")
+        local = rec.get("local_first")
+        if local:
+            review = local.get("review", {})
+            parts.append("<h4>로컬 우선 · 의심 구간 AI 검증</h4>")
+            parts.append(f"<p>{html.escape(str(review.get('status', '')))} · 대상 {review.get('targets', 0)}개</p>")
+            proposals = local.get("ai_proposals", [])
+            if proposals:
+                parts.append("<ul class=unc>" + "".join(
+                    f"<li>{html.escape(str(p.get('before', '')))} → {html.escape(str(p.get('after', '')))}"
+                    f" · {html.escape(str(p.get('reason', '')))}"
+                    + (" · 불확실" if p.get("uncertain") else "")
+                    + f" · {html.escape(str(p.get('decision', 'pending')))}</li>" for p in proposals) + "</ul>")
+            parts.append("<p>수정 제안의 채택·기각은 로컬 비교·교정 창에서 합니다. 원문에는 자동 반영하지 않습니다.</p>")
         for reg in pr.regions:
             cls = "img-kind" if reg.kind in IMAGE_KINDS else ("title" if reg.kind in TITLE_KINDS else "")
             parts.append(f"<div class='reg {cls}'><span class=k>{html.escape(reg.kind)}</span><small>{reg.id} bbox {reg.bbox} {html.escape(reg.reading_direction)}</small>")

@@ -324,6 +324,65 @@ def run(report_path: Path) -> int:
                     "storage": "reopened; credential excluded; completed requests reused", "network_calls": 0}
         check("comparison-ai-proposals-offline", comparison_ai_probe)
 
+        def selective_single_engine_probe():
+            from types import SimpleNamespace
+            from . import local_first
+            from .comparison import ComparisonProject
+            from .comparison_ai import AISettings, ReviewPolicy, prepare_plan, run_plan
+            from .local_reading import reading_from_run
+            from ab_ocr.ocr import file_sha256
+            from ab_ocr.runtime import resource_root
+            assert callable(local_first.command)
+            assert (resource_root() / "docs" / "LOCAL_FIRST.md").is_file()
+            source = folder / "image.png"
+            text = "天地玄黃"
+            def project_with_confidence(confidence):
+                project = ComparisonProject.open(source)
+                project.add_result({"kind": "recognition", "schema_version": 1, "engine": "ppocrv6",
+                    "coordinate_system": "rendered-image pixels, xyxy", "text": text,
+                    "words": [{"text": text, "bbox": [8, 8, 40, 28], "confidence": confidence,
+                               "block": 1, "paragraph": 1, "line": 1}],
+                    "source_path": str(source), "source_sha256": file_sha256(source), "page_number": 1,
+                    "image_width": 64, "image_height": 48, "engine_version": "selective-offline-fixture",
+                    "languages": "chi_tra", "psm": None, "duration_seconds": 0,
+                    "preprocessing": {}, "engine_metadata": {"synthetic": True}},
+                    request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                             "engine_root": None, "policy": "local-three-engine-v1"})
+                project.choose_baseline(1, "ppocrv6", automatic=True)
+                return project
+            settings = AISettings("openai", "selective-offline-fixture", max_calls=2)
+            policy = ReviewPolicy(selective=True)
+            clean = prepare_plan(project_with_confidence(.99), [1], policy, settings=settings)
+            assert clean.summary["calls"] == 0
+            project = project_with_confidence(.2)
+            before = project.page(1)["runs"]
+            plan = prepare_plan(project, [1], policy, settings=settings)
+            assert plan.summary["calls"] == 1 and plan.summary["full_page_images"] == 0
+            requests = []
+            def request(**kwargs):
+                requests.append(kwargs)
+                prompt = kwargs["input"][0]["content"][0]["text"]
+                data = json.loads(prompt.split("Source DATA (JSON):\n", 1)[1].rsplit("\nReturn JSON", 1)[0])
+                payload = {"items": [{"target_id": t["id"], "uncertain": False,
+                            "note": "offline synthetic protocol fixture", "proposals": []} for t in data["targets"]]}
+                return SimpleNamespace(output_text=json.dumps(payload), status="completed", usage=None,
+                                       model=settings.model, id="selective-offline-response")
+            client = SimpleNamespace(responses=SimpleNamespace(create=request), close=lambda: None)
+            outcome = run_plan(project, plan, api_key="selective-offline-not-a-key", client_factory=lambda *_: client)
+            assert outcome["completed"] == 1 and outcome["failed"] == 0 and len(requests) == 1
+            assert project.page(1)["runs"] == before and project.text(1) == text
+            assert reading_from_run(before[0]["raw"], 1, "horizontal").regions
+            path = folder / "selective-single.yeone-compare.json"
+            project.save(path)
+            reopened = ComparisonProject.load(path)
+            assert len(reopened.page(1)["ai_reviews"]) == 1
+            resumed = prepare_plan(reopened, [1], policy,
+                                   settings=AISettings("openai", settings.model, max_calls=5))
+            assert resumed.summary["calls"] == 0
+            return {"single_engine": "ppocrv6", "clean_calls": 0, "difficult_mock_calls": 1,
+                    "full_page_images": 0, "resume_calls": 0, "raw_preserved": True, "network_calls": 0}
+        check("selective-single-ppocrv6-review-offline", selective_single_engine_probe)
+
         def comparison_resources_probe():
             from ab_ocr.runtime import resource_root, worker_path
             checked = []

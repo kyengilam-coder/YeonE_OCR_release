@@ -68,6 +68,11 @@ try {
     Invoke-TestProcess $Installer ($InstallArgs + ('/LOG="' + (Join-Path $TestRoot 'reinstall.log') + '"'))
     if ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash -ne $InstalledHash) { throw 'Reinstall changed the executable unexpectedly.' }
     $Checks.reinstall = $true
+    if ($TestPython) {
+        & $TestPython (Join-Path $RepoRoot 'tools\verify_installed_local_first.py') --app $AppPath --output (Join-Path $TestRoot 'local-first')
+        if ($LASTEXITCODE -ne 0) { throw 'Installed local-first real inference failed.' }
+        $Checks.installed_local_first = $true
+    }
     if ($PPOCRv6Fixture) {
         if (-not $TestPython) { throw 'Specify -TestPython for the installed OCR verifier.' }
         & $TestPython (Join-Path $RepoRoot 'tools\verify_ppocrv6_bundle.py') (Join-Path $AppPath 'tools\ppocrv6')

@@ -37,6 +37,9 @@ def make_report(work: Work, total_pages: int) -> str:
             ms = rec.get("merge_stats") or {}
             if ms.get("columns_compared"): d += f", 2차 비교 {ms['columns_compared']}열 중 {ms['columns_differ']}열 불일치"
             if rec.get("reader") == "mock": d += " — 기존 OCR 레이어 그대로, 원본 대조 전"
+            if rec.get("local_first"):
+                review = rec["local_first"].get("review", {})
+                d += f", 로컬 우선·선택 검증 {review.get('status', '')}·대상 {review.get('targets', 0)}개"
             u = rec.get("usage") or {}
             if u.get("calls"):
                 d += f", 호출 {u['calls']}회·토큰 {u.get('prompt_tokens', 0):,}/{u.get('output_tokens', 0) + u.get('thinking_tokens', 0):,}"

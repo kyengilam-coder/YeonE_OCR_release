@@ -1,3 +1,13 @@
+# Windows 1.1.0 설치판
+
+1.1.0은 내장 PP-OCRv6 환경을 유지하고 일반·이미지 OCR의 기본 경로를 로컬 인식 후 선택 구간 AI 검증으로 연결한다. [사용법·검증 경계](LOCAL_FIRST.md)와 [릴리스 기록](release-notes.md)을 따른다. 기존 AppId와 사용자 자료 저장 위치를 유지하며 최신 배포판 1.0.6 설치 위에 갱신할 수 있도록 빌드한다. 기존 1.0.6의 저장·교정 동작을 통합한 소스를 기준으로 검증한다. 포터블 단일 파일은 엔진 환경을 별도로 준비해야 한다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.1.0**으로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.1/build`, `OutputDirectory`는 `dist/1.1.0`으로 지정한다. 검증한 고정 PP-OCRv6 묶음을 `-PPOCRv6Bundle`에 전달하고 빌드 환경에는 잠금 의존성을 설치한다. 소스·문서의 버전 변경은 설치 파일 생성이나 게시 완료를 뜻하지 않는다.
+
+배포 전 설치본에서 버전 표시·엔진 탐색·로컬 인식·선택 구간 계획·키 없는 실행·명시적 로컬 전용·재개·HWPX/검색 PDF 출력·사용자 자료 보존을 확인한다. AI 연결은 모의 전송 검증과 실제 유료 호출을 구분해 기록한다. 소스 기준 75개 모듈·1,256개 회귀 검사의 통과 기록은 `work/local-first-final-regression/summary.json`이며 설치본 검증을 대체하지 않는다. 빌드 산출물 해시와 설치본 검증 결과·게시 완료는 실제 완료 후 기록한다.
+
+공개 게시 대상은 [v1.1.0 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.1.0)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 0.11.0 설치판
 
 0.11.0은 같은 고정 PP-OCRv6 환경을 포함하고 내장 엔진의 독립 탐색과 쪽별 자동 선택을 추가한다. 기존 0.10.0 설치를 같은 AppId로 갱신할 수 있다. 새 빌드는 아래 명령에서 `WorkRoot`를 `work/windows-0.11/build`, `OutputDirectory`를 `dist/0.11.0`으로 지정한다. 현재 버전은 앱 소스에서 읽는다. 검증 스크립트의 `-AutomaticOCR` 옵션으로 구형 엔진 폴더 설정이 있는 상태에서 설치된 EXE의 기본 자동 OCR을 확인한다.

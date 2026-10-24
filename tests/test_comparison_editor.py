@@ -460,6 +460,7 @@ class HostedComparisonEditor(unittest.TestCase):
             remote.assert_not_called()
             confirm.assert_called_once()
             plan = confirm.call_args.args[0]
+            self.assertTrue(plan.policy.selective)
             self.assertEqual(plan.settings.max_calls, 50)
             self.assertEqual(plan.settings.max_total_output_tokens, 50 * 4096)
         self.assertNotIn("synthetic-secret", json.dumps(self.project.to_dict(), ensure_ascii=False))

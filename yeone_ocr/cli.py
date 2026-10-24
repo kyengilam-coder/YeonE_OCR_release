@@ -54,6 +54,7 @@ CANCEL = threading.Event()   # 창 프로그램의 [중지] 단추가 켠다. �
 PROGRESS = None              # 창 프로그램이 넣는 진행 알림 함수 f(단계, 끝난 수, 전체 수). 명령줄에서는 None.
 PAGE_EVENT = None            # 창 프로그램이 넣는 쪽 알림 함수 f(쪽 번호, 상태) — 쪽 띠의 칸. 상태는 PAGE_STATES. 명령줄에서는 None.
 PAGE_STATES = ("record", "remain", "now", "done", "fail")   # 기록 있어 건너뜀 · 읽을 차례 · 판독 중 · 끝남 · 판독 실패(다시 시도 가능)
+LOCAL_API_CALLS = 0  # Direct selective-review SDK calls, separate from legacy reader counters.
 DOC_LOCK = threading.Lock()  # PyMuPDF 문서 객체는 스레드 안전하지 않다. 여러 쪽을 동시에 읽을 때 문서 접근을 직렬화한다.
 LOG_LOCK = threading.Lock()
 
@@ -1812,7 +1813,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 mode = rec.get("mode") if rec.get("mode") in ("vertical", "horizontal_zh") else state_mode
                 img, _ = _load_page_image(work, doc, n, args.dpi)
                 with DOC_LOCK:
-                    frame = page_frame(doc, n)
+                    frame = page_frame(doc, n, prefer_embedded=rec.get("image_frame") != "full-page")
                 yield n, PageReading.model_validate(rec["merged"]), img, frame, mode != "horizontal_zh"
         t0 = time.time()
         bold, binfo = measure_bold(pages_for_bold(), log=log)
@@ -2027,8 +2028,13 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
         def page_data(n: int):
             rec = records[n]
             mode = rec.get("mode") if rec.get("mode") in ("vertical", "horizontal_zh") else state_mode
-            img, _ = _load_page_image(work, doc, n, dpi)        # 판독에 쓴 쪽 이미지(영역 상자의 기준)
-            return PageReading.model_validate(rec["merged"]), img, page_frame(doc, n), mode != "horizontal_zh"
+            if rec.get("image_frame") == "full-page":
+                from .local_reading import render_for_record
+                img, frame = render_for_record(work, doc, n, dpi, rec)
+            else:
+                img, _ = _load_page_image(work, doc, n, dpi)
+                frame = page_frame(doc, n)
+            return PageReading.model_validate(rec["merged"]), img, frame, mode != "horizontal_zh"
         log(f"▶ 검색 가능한 PDF: 판독 기록이 있는 {len(todo)}쪽에 보이지 않는 글자층을 넣습니다 → {out}")
         try:
             st = searchable_pdf(doc, todo, page_data, out, strip_old=not getattr(args, "keep_old_layer", False), log=log,
@@ -2395,6 +2401,9 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
 def cmd_run(args, work: Work | None = None, doc=None):
     """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
     사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
+    if getattr(args, "ocr_strategy", "ai-full") == "local-first" and args.reader != "mock":
+        from .local_first import command
+        return command(args, work=work, doc=doc)
     pdf_only = getattr(args, "pdf_only", False)
     bad = None if pdf_only else _check_document(args)         # PDF 전용은 문서의 양식·자동 교정 설정을 쓰지 않는다
     if bad:
@@ -2648,6 +2657,14 @@ def build_parser():
     p = sub.add_parser("mark"); common(p); p.add_argument("--status", required=True, choices=STATUSES); p.add_argument("--note")
     p.add_argument("--clear-check", action="store_true", help="'판독 확인 필요' 표시를 지움(사람이 확인한 뒤)"); p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("run"); common(p); read_opts(p); adjudicate_opts(p); build_opts(p); answered_opt(p); p.set_defaults(fn=cmd_run)
+    p.add_argument("--ocr-strategy", choices=("local-first", "ai-full"), default="local-first",
+                   help="local-first(기본)=로컬 인식 뒤 의심 구간만 API 검증, ai-full=기존 전체 쪽 AI 판독")
+    p.add_argument("--local-engine-root", help="tools 폴더를 포함하는 로컬 엔진 설치 루트")
+    p.add_argument("--local-profile", choices=("traditional", "simplified", "mixed"), default="traditional")
+    p.add_argument("--local-ai-review", action=argparse.BooleanOptionalAction, default=True,
+                   help="로컬 인식의 불일치·어려운 구간만 선택한 AI로 검증(키가 없으면 대상으로 보관)")
+    p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,
+                   help="이번 실행 전체의 선택 구간 API 호출 상한(기본20, --max-calls도 함께 적용)")
     p.add_argument("--pdf-only", action="store_true", help="판독·3차 판별 뒤 검색 가능한 PDF만 만듦(문서 조립·자동 교정·HWPX 중간 저장 생략)")
     p = sub.add_parser("textlayer", help="검색 가능한 PDF: 판독 기록의 글을 원본 PDF 에 보이지 않는 글자층으로 넣어 새 PDF 로 저장(모델 호출 없음)"); common(p)
     p.add_argument("--out", help="저장할 PDF 경로(기본 결과 폴더 out/<이름>_글자층.pdf)")
@@ -2680,6 +2697,8 @@ def build_parser():
 
 
 def main(argv=None):
+    global LOCAL_API_CALLS
+    LOCAL_API_CALLS = 0
     args = build_parser().parse_args(argv)
     if args.cmd == "compare-engines":
         return args.fn(args)

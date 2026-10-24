@@ -113,7 +113,7 @@ def _now_status(key: str, done: int, total: int, note: str = "") -> list[tuple[s
 
 def band_view(cmd: str, *, phase: str, idx: int = -1, done: int = 0, total: int = 0, note: str = "", seen: dict | None = None,
               result: dict | None = None, without: bool = False, counts: dict | None = None, rows: list | None = None,
-              est: str = "none", ctx_model: bool = True) -> list[dict]:
+              est: str = "none", ctx_model: bool = True, local_first: bool = False) -> list[dict]:
     """단계 띠 여섯 열의 그림 값. phase: 'empty'(원본 없음) · 'ready'(실행 전) · 'running' · 'done'(끝난 뒤 — result 의 kind·rc).
     idx·done·total·note 는 Tracker 의 지금 단계, seen 은 실행 중 단계마다 마지막으로 본 (끝난 수, 전체), counts 는 실행을 시작할 때의 책 수치
     (target·records·to_read), rows 는 장부(마지막 run 어림)의 줄, without 은 [아니요 · 모델 단계 없이]로 시작한 실행, ctx_model 은 문맥 교정 모델을 쓰는가.
@@ -207,6 +207,21 @@ def band_view(cmd: str, *, phase: str, idx: int = -1, done: int = 0, total: int 
         receipt = key in ("read", "adjudicate") or (key == "build" and ctx_model)
         out.append({"key": key, "name": STAGE_NAMES.get(key, key), "num": i + 1, "circle": circle, "receipt": receipt,
                     "bold": circle in ("done", "now", "fail", "stop"), "tag_top": key == "adjudicate", "lines": lines})
+    if local_first:
+        for item in out:
+            key = item["key"]
+            if key == "read":
+                item["name"] = "로컬 판독·구간 검증"
+                item["lines"] = item["lines"][:1] + [[("로컬 먼저 · 어려운 구간만 API", "cap")]]
+                item["receipt"] = True
+            elif key == "adjudicate":
+                item["name"] = "검증 기록"
+                item["lines"] = [[("일부 구간 AI 검증 미완료", "warn")]] if rc == 4 else [[("구간 검증은 판독 중 수행", "cap")]]
+                item["receipt"] = False
+                item["tag_top"] = False
+            elif key == "build":
+                item["lines"] = item["lines"][:1] + [[("로컬 결과·채택한 교정 반영", "cap")], [("추가 모델 호출 없음", "cap")]]
+                item["receipt"] = False
     for i, v in enumerate(out):
         v["connector"] = None if i == len(out) - 1 else ("done" if v["circle"] == "done" else "plain")
     return out

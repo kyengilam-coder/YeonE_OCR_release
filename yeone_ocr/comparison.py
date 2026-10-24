@@ -1138,7 +1138,10 @@ class ComparisonProject:
         # Cloud comparison uses the active local readings. Adding read-only
         # imported AI history must not invalidate those local image readings.
         if any(engine in ENGINES for engine in references):
-            expected_engines = {engine for engine, run in current.items() if engine in ENGINES and run.get("active", True)}
+            baseline = next((run for run in current.values() if run["id"] == page["baseline_run_id"]), None)
+            expected_engines = {engine for engine, run in current.items()
+                                if engine in ENGINES and run.get("active", True)
+                                and baseline is not None and _compatible(baseline, run)}
             if expected_engines != (set(references) & set(ENGINES)):
                 return "AI 검증 뒤 참여한 로컬 판독 목록이 변경되었습니다. 다시 검증하세요."
         for engine, reference in references.items():

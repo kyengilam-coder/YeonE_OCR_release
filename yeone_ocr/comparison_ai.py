@@ -20,7 +20,7 @@ import uuid
 
 from ab_ocr import ocr
 
-LOCAL_ENGINES = ("tesseract", "rapidocr", "easyocr")
+LOCAL_ENGINES = ("tesseract", "rapidocr", "easyocr", "ppocrv6")
 PROMPT_VERSION = "comparison-ai-v2"
 
 
@@ -80,9 +80,10 @@ class ReviewPolicy:
     max_image_pixels: int = 4_000_000
     max_image_bytes: int = 4_000_000
     crop_padding: int = 12
+    selective: bool = False
 
     def __post_init__(self):
-        if any(type(v) is not bool for v in (self.traditional, self.punctuation, self.preserve_variants)):
+        if any(type(v) is not bool for v in (self.traditional, self.punctuation, self.preserve_variants, self.selective)):
             raise AIReviewError("문자·부호 정책은 참 또는 거짓이어야 합니다.")
         bounds = ((self.batch_size, 1, 4), (self.context_chars, 0, 400), (self.chunk_chars, 50, 1600),
                   (self.max_targets, 1, 500), (self.max_image_pixels, 65536, 4_000_000),
@@ -114,15 +115,15 @@ def _active(project, number):
     for run in page["runs"]:
         if run["engine"] in LOCAL_ENGINES and run.get("active", True):
             runs[run["engine"]] = run
-    if set(runs) != set(LOCAL_ENGINES):
-        raise AIReviewError(f"{number}쪽의 세 로컬 엔진 판독을 먼저 완료하세요.")
+    if not runs:
+        raise AIReviewError(f"{number}쪽의 로컬 엔진 판독을 먼저 완료하세요.")
     baseline = next((run for run in runs.values() if run["id"] == page["baseline_run_id"]), None)
     if baseline is None:
-        raise AIReviewError("현재 기준 판독을 세 로컬 엔진 중에서 선택하세요.")
-    geometry = {(r["raw"]["image_width"], r["raw"]["image_height"]) for r in runs.values()}
+        raise AIReviewError("현재 기준 판독을 최신 로컬 엔진 판독 중에서 선택하세요.")
     from .comparison import _compatible
-    if len(geometry) != 1 or any(not _compatible(baseline, r) for r in runs.values()):
-        raise AIReviewError("세 엔진의 원본 렌더링 크기가 다릅니다. 같은 조건으로 다시 비교하세요.")
+    # Prior language/direction/DPI runs remain in the audit, but cannot become
+    # evidence for a newly selected local reading.
+    runs = {engine: run for engine, run in runs.items() if _compatible(baseline, run)}
     return page, runs, baseline
 
 
@@ -134,7 +135,7 @@ def _page_scope(project, number):
             "snapshot_text": snapshot, "snapshot_sha256": _text_hash(snapshot),
             "baseline_run_id": baseline["id"], "dpi": dpi,
             "source_width": baseline["raw"]["image_width"], "source_height": baseline["raw"]["image_height"],
-            "runs": [{"run_id": runs[e]["id"], "engine": e, "raw_sha256": runs[e]["raw_sha256"]} for e in LOCAL_ENGINES]}
+            "runs": [{"run_id": run["id"], "engine": e, "raw_sha256": run["raw_sha256"]} for e, run in runs.items()]}
 
 
 def _bbox_for(raw, start, end):
@@ -169,11 +170,11 @@ def _whole_page_targets(scope, runs, baseline, policy, origin):
     from .comparison import _slice_aligned, _eligibility
     alignments = {engine: difflib.SequenceMatcher(None, scope["snapshot_text"], runs[engine]["raw"]["text"],
                                                  autojunk=len(scope["snapshot_text"]) > 20_000).get_opcodes()
-                  for engine in LOCAL_ENGINES}
+                  for engine in runs}
     result = []
     for start, end in _chunks(scope["snapshot_text"], policy.chunk_chars):
         candidates = []
-        for engine in LOCAL_ENGINES:
+        for engine in runs:
             value, _, _ = _slice_aligned(runs[engine]["raw"]["text"], alignments[engine], start, end)
             eligible, note = _eligibility(runs[engine], value, scope["snapshot_text"][start:end], engine == baseline["engine"])
             candidates.append({"engine": engine, "text": value[:policy.chunk_chars],
@@ -181,6 +182,178 @@ def _whole_page_targets(scope, runs, baseline, policy, origin):
                                "eligible": eligible, "support_note": note})
         result.append(_target(scope, start, end, kind="visual", bbox=None, candidates=candidates, origin=origin))
     return result
+
+
+def _ink_regions(image):
+    """Conservative dark-ink row bands, used only when OCR has no geometry.
+
+    These are image evidence, never inferred text. Dust-sized components are
+    ignored. Tall bands are split so a missed page never turns into a full-page
+    API fallback.
+    """
+    import numpy as np
+    pixels = np.asarray(image.convert("L")) < 180
+    rows = np.flatnonzero(pixels.sum(axis=1) >= 3)
+    if not len(rows) or int(pixels.sum()) < 12:
+        return []
+    groups, start, last = [], int(rows[0]), int(rows[0])
+    for row in rows[1:]:
+        row = int(row)
+        if row - last > 4:
+            groups.append((start, last + 1)); start = row
+        last = row
+    groups.append((start, last + 1))
+    boxes = []
+    maximum = max(32, min(256, image.height // 3))
+    for top, bottom in groups:
+        for y in range(top, bottom, maximum):
+            end = min(bottom, y + maximum)
+            xs = np.flatnonzero(pixels[y:end].sum(axis=0))
+            if len(xs) and int(pixels[y:end].sum()) >= 12:
+                boxes.append([int(xs[0]), y, int(xs[-1]) + 1, end])
+    return boxes
+
+
+def _word_spans(raw):
+    position = 0
+    for word in raw.get("words", []):
+        text = word.get("text", "")
+        start = raw["text"].find(text, position) if text else -1
+        if start >= 0:
+            position = start + len(text)
+            yield start, position, word
+
+
+def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids):
+    """Local-only risk detection; all returned targets have image coordinates."""
+    snapshot, raw = scope["snapshot_text"], baseline["raw"]
+    result, seen, skipped, known = [], set(), [], set()
+    ink = None
+
+    def image_regions():
+        nonlocal ink
+        if ink is None:
+            ink = _ink_regions(image)
+        return ink
+
+    def add(start, end, box, reason, candidates=None, origin=None):
+        if box is None:
+            skipped.append(reason + ":missing-localized-geometry")
+            return
+        if box[2] - box[0] >= image.width * .9 and box[3] - box[1] >= image.height * .9:
+            regions = image_regions()
+            if len(regions) != 1:
+                skipped.append(reason + ":unlocalized-large-region")
+                return
+            box = regions[0]
+            if box == [0, 0, image.width, image.height]:
+                skipped.append(reason + ":unlocalized-full-image-ink")
+                return
+        # No guessed character offsets after a human has changed this range.
+        key = (start, end, tuple(box))
+        if key in known:
+            return
+        known.add(key)
+        for left, right in _chunks(snapshot[start:end], policy.chunk_chars):
+            target = _target(scope, start + left, start + right, kind="visual", bbox=list(box),
+                             candidates=candidates, origin=origin or reason)
+            target["difficulty_reason"] = reason
+            result.append(target)
+
+    for item in page.get("suggestions", []):
+        if requested_ids is not None and item["id"] not in requested_ids:
+            continue
+        if item["baseline_run_id"] != baseline["id"] or any(
+            e["engine"] not in runs or e["run_id"] != runs[e["engine"]]["id"] for e in item["evidence"]):
+            if requested_ids is not None:
+                raise AIReviewError("선택한 불일치의 최신 호환 판독을 다시 확인하세요.")
+            skipped.append("stale-or-incompatible-disagreement")
+            continue
+        try:
+            start, end = project._mapped_span(raw["text"], snapshot, item["start"], item["end"])
+        except ValueError:
+            if requested_ids is not None:
+                raise AIReviewError("이미 교정한 불일치 위치를 다시 확인하세요.")
+            skipped.append("human-edited-disagreement")
+            continue
+        boxes = [e["bbox"] for e in item["evidence"] if e.get("bbox")]
+        box = _bbox_for(raw, item["start"], item["end"])
+        if box is None and boxes:
+            box = min(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+        candidates = [{"engine": e["engine"], "text": item["candidates"][e["engine"]][:policy.chunk_chars],
+                       "eligible": e["eligible"], "support_note": e.get("eligibility_reason", "")}
+                      for e in item["evidence"] if e["engine"] in runs]
+        add(start, end, box, "engine-disagreement", candidates, item["id"])
+        seen.add(item["id"])
+
+    if requested_ids is not None:
+        return result, seen, skipped
+    # Thresholds are engine-specific routing hints, never cross-engine votes or
+    # measured accuracy. A null score cannot establish a clean single reading.
+    threshold = {"tesseract": 70.0, "rapidocr": .85, "easyocr": .55, "ppocrv6": .85}[baseline["engine"]]
+    spans = list(_word_spans(raw))
+    for start, end, word in spans:
+        value, confidence = word["text"], word.get("confidence")
+        unknown = ("□" in value or "〔판독불명〕" in value or
+                   any(c == "\ufffd" or unicodedata.category(c) in ("Co", "Cn", "Cs") for c in value))
+        reason = "unknown-glyph" if unknown else ("confidence-unavailable" if confidence is None else
+                 "low-confidence-" + baseline["engine"] if confidence < threshold else None)
+        if reason is None:
+            continue
+        try:
+            left, right = project._mapped_span(raw["text"], snapshot, start, end)
+        except ValueError:
+            skipped.append("human-edited-difficult-span")
+            continue
+        add(left, right, word.get("bbox"), reason)
+    # Unknown glyphs and unrepresented text may have no word box. Match source
+    # lines to independent ink bands only when their counts give an exact route.
+    represented = [False] * len(raw["text"])
+    for start, end, _ in spans:
+        represented[start:end] = [True] * (end - start)
+    missing = any(not represented[i] and not c.isspace() for i, c in enumerate(raw["text"]))
+    if missing:
+        lines, position = [], 0
+        for line in raw["text"].splitlines(keepends=True):
+            end = position + len(line.rstrip("\r\n"))
+            if line.strip():
+                lines.append((position, end))
+            position += len(line)
+        regions = image_regions()
+        if len(lines) == len(regions):
+            for (start, end), box in zip(lines, regions):
+                try:
+                    left, right = project._mapped_span(raw["text"], snapshot, start, end)
+                except ValueError:
+                    skipped.append("human-edited-missing-geometry"); continue
+                add(left, right, box, "missing-ocr-geometry")
+        else:
+            skipped.append("missing-ocr-geometry:ambiguous-ink-mapping")
+    if not raw["text"].strip() and not snapshot.strip():
+        for box in image_regions():
+            add(0, 0, box, "empty-ocr-with-ink")
+    elif spans and not missing:
+        # A confidently recognized line says nothing about ink on an entirely
+        # missed line. Detect only disjoint ink bands; partly covered regions
+        # are left for human review rather than inventing character locations.
+        vertical = baseline.get("request", {}).get("direction") == "vertical"
+        def order(box):
+            x, y = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            return (-x, y) if vertical else (y, x)
+        boxed = [(start, end, word["bbox"]) for start, end, word in spans if word.get("bbox")]
+        for box in image_regions():
+            overlap = any(min(box[2], other[2]) > max(box[0], other[0])
+                          and min(box[3], other[3]) > max(box[1], other[1]) for _, _, other in boxed)
+            if overlap:
+                continue
+            preceding = [(order(other), end) for _, end, other in boxed if order(other) < order(box)]
+            at = max(preceding)[1] if preceding else 0
+            try:
+                left, right = project._mapped_span(raw["text"], snapshot, at, at)
+            except ValueError:
+                skipped.append("human-edited-missing-ink-region"); continue
+            add(left, right, box, "unrecognized-ink-region")
+    return result, seen, skipped
 
 
 def _image_bytes(image, source_bbox, policy):
@@ -215,6 +388,9 @@ def _attach_image(target, image, policy):
     else:
         crop = [max(0, math.floor(bbox[0]) - policy.crop_padding), max(0, math.floor(bbox[1]) - policy.crop_padding),
                 min(width, math.ceil(bbox[2]) + policy.crop_padding), min(height, math.ceil(bbox[3]) + policy.crop_padding)]
+        if policy.selective and crop == [0, 0, width, height]:
+            crop = [max(0, math.floor(bbox[0])), max(0, math.floor(bbox[1])),
+                    min(width, math.ceil(bbox[2])), min(height, math.ceil(bbox[3]))]
     if crop[0] >= crop[2] or crop[1] >= crop[3]:
         raise AIReviewError("검증 이미지 좌표가 원본 범위를 벗어났습니다.")
     content, out_width, out_height = _image_bytes(image, crop, policy)
@@ -243,13 +419,25 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
     project.validate_source()
     scope_pages, phase_targets, seen_ids, dense_pages, edited_fallback_pages = [], [], set(), [], []
     target_count = 0
+    selective_skips, difficulty_reasons = {}, {}
     for number in numbers:
         _cancel(should_stop)
         page, runs, baseline = _active(project, number)
         scope = _page_scope(project, number)
         scope_pages.append(scope)
         visual = []
-        for item in page.get("suggestions", []):
+        image = None
+        if policy.selective:
+            image = ocr.render_page(project.source_path, number, dpi=scope["dpi"], should_stop=should_stop)
+            try:
+                visual, found_ids, skipped_reasons = _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids)
+                seen_ids.update(found_ids)
+                if skipped_reasons:
+                    selective_skips[str(number)] = skipped_reasons
+            except Exception:
+                image.close()
+                raise
+        for item in ([] if policy.selective else page.get("suggestions", [])):
             if requested_ids is not None and item["id"] not in requested_ids:
                 continue
             if item["baseline_run_id"] != baseline["id"]:
@@ -274,17 +462,17 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                 visual.append(_target(scope, start + chunk_start, start + chunk_end, kind="visual", bbox=bbox,
                                       candidates=candidates, origin=item["id"]))
             seen_ids.add(item["id"])
-        if requested_ids is None and len(visual) > 24 and number not in edited_fallback_pages:
+        if not policy.selective and requested_ids is None and len(visual) > 24 and number not in edited_fallback_pages:
             # Dense whitespace/layout disagreements are one selected page, not
             # hundreds of useful independent requests. Read bounded page chunks
             # that cover EVERY character, including all disagreement intervals.
             dense_pages.append(number)
             visual = _whole_page_targets(scope, runs, baseline, policy, "dense-disagreements-whole-page")
-        if not visual and requested_ids is None:
+        if not policy.selective and not visual and requested_ids is None:
             visual = _whole_page_targets(scope, runs, baseline, policy, "whole-page-agreement-check")
         editorial = []
         if policy.traditional or policy.punctuation:
-            if requested_ids is None:
+            if requested_ids is None and not policy.selective:
                 for start, end in _chunks(scope["snapshot_text"], policy.chunk_chars):
                     try:
                         raw_start, raw_end = project._mapped_span(scope["snapshot_text"], baseline["raw"]["text"], start, end)
@@ -294,7 +482,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                     editorial.append(_target(scope, start, end, kind="editorial", bbox=box, origin="whole-page-editorial"))
             else:
                 editorial = [_target(scope, v["start"], v["end"], kind="editorial", bbox=v["bbox"], origin=v["origin"]) for v in visual]
-        image = ocr.render_page(project.source_path, number, dpi=scope["dpi"], should_stop=should_stop)
+        image = image or ocr.render_page(project.source_path, number, dpi=scope["dpi"], should_stop=should_stop)
         try:
             if image.size != (scope["source_width"], scope["source_height"]):
                 raise AIReviewError("원본 표시 좌표가 인식 당시와 다릅니다. 같은 DPI로 다시 비교하세요.")
@@ -302,6 +490,9 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                 for target in targets:
                     _cancel(should_stop)
                     descriptor = _attach_image(target, image, policy)
+                    if phase == "visual" and target.get("difficulty_reason"):
+                        reason = target["difficulty_reason"]
+                        difficulty_reasons[reason] = difficulty_reasons.get(reason, 0) + 1
                     target["context_before"] = scope["snapshot_text"][max(0, target["start"] - policy.context_chars):target["start"]]
                     target["context_after"] = scope["snapshot_text"][target["end"]:target["end"] + policy.context_chars]
                     target_count += 1
@@ -312,10 +503,17 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
             image.close()
     if requested_ids is not None and seen_ids != requested_ids:
         raise AIReviewError("선택한 불일치 항목이 현재 쪽 범위에 없습니다.")
-    if not phase_targets:
+    if not phase_targets and not policy.selective:
         raise AIReviewError("검증할 문장 범위가 없습니다.")
+    fingerprint_settings = asdict(settings)
+    if policy.selective:
+        # Scheduling caps authorize how many pending requests may run; they do
+        # not change the images, model, prompt, or already purchased answers.
+        # Keep full settings in ReviewPlan._integrity for tamper protection.
+        fingerprint_settings.pop("max_calls")
+        fingerprint_settings.pop("max_total_output_tokens")
     scope_all = {"source_sha256": project.source_sha256, "pages": scope_pages, "policy": asdict(policy),
-                 "settings": asdict(settings), "prompt_version": PROMPT_VERSION,
+                 "settings": fingerprint_settings, "prompt_version": PROMPT_VERSION,
                  "targets": [[p, s["page_number"], t, image] for p, s, t, image in phase_targets]}
     fingerprint = _hash(scope_all)
     batches, skipped, pending_visual_pages, refreshed_editorial = [], 0, set(), 0
@@ -364,7 +562,9 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                "fallback_reason": " ".join(reason for reason in (
                    "24곳을 넘는 불일치 쪽은 같은 승인 쪽의 전체 문자를 나눈 이미지 검증으로 묶습니다." if dense_pages else "",
                    "이미 교정한 불일치 위치는 추측하지 않고 선택한 쪽의 현재 교정문 전체와 원본을 검증합니다." if edited_fallback_pages else "") if reason),
-               "provider": settings.provider, "model": settings.model}
+               "provider": settings.provider, "model": settings.model,
+               "selective": policy.selective, "difficulty_reasons": difficulty_reasons,
+               "unlocalized_targets": selective_skips}
     project.validate_source()
     for scope in scope_pages:
         if _page_scope(project, scope["page_number"]) != scope:
@@ -619,11 +819,12 @@ def run_plan(project, plan, *, api_key, should_stop=None, on_result=None, client
     """Execute exactly an approved plan; append and checkpoint every response."""
     if not isinstance(plan, ReviewPlan) or plan._integrity != _integrity(plan.settings, plan.policy, plan.pages, plan.fingerprint, plan.batches, plan.summary, plan._scope):
         raise AIReviewError("승인한 검증 계획이 변경됐습니다. 범위를 다시 확인하세요.")
-    if not isinstance(api_key, str) or not api_key.strip() or any(c.isspace() for c in api_key.strip()) or "," in api_key:
-        raise AIReviewError("선택한 제공사의 API 키 하나를 명시하세요.")
     outcome = {"completed": 0, "failed": 0, "calls": 0, "cancelled": False, "errors": []}
     if not plan.batches:
+        _assert_scope(project, plan)
         return outcome
+    if not isinstance(api_key, str) or not api_key.strip() or any(c.isspace() for c in api_key.strip()) or "," in api_key:
+        raise AIReviewError("선택한 제공사의 API 키 하나를 명시하세요.")
     client = None
     try:
         for batch in plan.batches:

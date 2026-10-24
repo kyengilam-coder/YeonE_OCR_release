@@ -32,7 +32,7 @@ for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py
              "install_easyocr.py", "easyocr-lock.json", "install_ppocrv6.py", "ppocrv6-lock.json",
              "create_chinese_ocr_fixture.py"):
     datas.append((str(ROOT / "scripts" / name), "scripts"))
-for name in ("LOCAL_OCR.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
+for name in ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
     datas.append((str(ROOT / "docs" / name), "docs"))
 for name in ("THIRD_PARTY_NOTICES.txt", "requirements-windows.lock.txt"):
     resource = ROOT / "packaging" / name

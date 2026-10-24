@@ -76,7 +76,7 @@ jobs:
       - name: Verify installation, reinstall and removal
         run: |
           $build = Get-Content -LiteralPath work/windows-release/build-result.json -Raw | ConvertFrom-Json
-          ./tools/test_windows_installer.ps1 -Installer "dist/YeonE_OCR-$($build.version)-Setup-x64.exe" -ExpectedVersion $build.version
+          ./tools/test_windows_installer.ps1 -Installer "dist/YeonE_OCR-$($build.version)-Setup-x64.exe" -ExpectedVersion $build.version -TestPython $env:BUILD_PYTHON
       - name: Prepare complete release artifacts
         run: |
           & $env:BUILD_PYTHON tools/prepare_windows_release.py dist --revision HEAD

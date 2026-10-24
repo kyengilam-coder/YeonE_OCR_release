@@ -28,7 +28,10 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "preset": DEFAULT_PRESET, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "notice", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
-            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": ""}
+            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
+            "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20}
+OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
+LOCAL_PROFILE_LABELS = {"traditional": "번체·한문", "simplified": "간체·중문", "mixed": "한글·한자 혼용"}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 LAYOUT_LABELS = {"page": "원본 쪽대로(검수용)", "flow": "내용별(제목·문단)"}   # 문서 짜임 --layout
 PRESET_PICK = "파일에서 고르기…"                                   # 짜임 규칙 칸의 끝 항목 — 규칙 JSON 파일을 고른다(--preset 파일 경로)
@@ -44,8 +47,8 @@ STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 �
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
 한자·한글 혼용 문헌(세로쓰기 스캔 PDF, 가로쓰기 한문 책)을 지침에 따라 OCR·교정해 HWPX 로 만듭니다.
-글자는 선택한 Gemini·ChatGPT(OpenAI)·Claude 가 읽고, 프로그램은 영역 잘라내기·두 판독 비교·문서 조립·상태 기록을 맡습니다.
-제공사별 API 키와 모델을 따로 기억합니다. 채팅 서비스 구독과 별도로 해당 제공사의 API 키가 필요합니다.
+기본은 PC의 로컬 엔진으로 먼저 읽고, 불일치·낮은 신뢰도·누락 의심 구간만 선택한 Gemini·ChatGPT(OpenAI)·Claude로 검증합니다.
+로컬 인식에는 API 키가 필요하지 않습니다. AI 검증을 켜면 선택한 제공사의 API 키가 필요하며 키·모델을 제공사별로 기억합니다.
 같은 파일·결과 폴더에서 판독기를 바꿔 실행하면 완료한 쪽은 보존하고 남은 작업을 이어 갑니다.
 문서를 만들 때 [설정] → [자동 교정]에서 선택한 간체→번체, 중문부호 규칙, 云/雲 교정을 적용하고 변경 내역을 남깁니다.
 중문부호 규칙은 [규칙 추가·수정]에서 편집하여 JSON 파일로 저장하거나 [파일에서 고르기]로 불러옵니다.
@@ -57,15 +60,16 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 문서 짜임·양식·짜임 규칙·획 굵기·쪽 범위·인쇄 쪽수 보정·읽기 방향은 책마다 그 결과 폴더의 book_settings.json 에 따로 기억합니다
 (설정 저장·창 닫기·다른 책으로 바꿀 때·실행 직전에 저장, 새 책은 지난 문서 설정을 이어 쓰고 쪽 범위·보정은 비움).
 
-쓰는 법은 세 단계입니다. ① API 키 넣기(처음 한 번) → ② 원본 선택 → ③ [▶ 한 번에 인식].
-읽기 방향·인쇄 쪽수 차이·이전 판 기록 갱신·2차 비교·3차 글자 판별·문서·검수 화면·보고·혼동 장부를 프로그램이 알아서 이어서 합니다.
+쓰는 법은 세 단계입니다. ① [설정]에서 로컬 문서 종류·AI 검증 여부 선택 → ② 원본 선택 → ③ [▶ 한 번에 인식].
+읽기 방향 판정·로컬 엔진 비교·의심 구간 AI 검증·문서·검수 화면·보고를 이어서 합니다. API 키가 없으면 로컬 결과와 남은 검증 대상을 저장합니다.
+AI의 답은 제안으로 보존하며 [로컬 엔진 비교·교정]에서 채택·기각합니다. 기존 AI 전체 쪽 판독은 [설정] → [인식 방식]에서 고를 수 있습니다.
 진행 카드의 막대는 처음부터 끝까지 한 방향으로 차고, 단계 띠(준비 → 판독 → 3차 판별 → 문서 만들기 → 검수 화면 → 보고)와 쪽·지난·남은 시간·호출 수가 나옵니다.
 쪽 띠의 칸을 누르면 [쪽별 상태]에서 그 쪽을 보입니다.
 2차 판독 모델·속도·조각 같은 설정은 판독 칸의 [세부 설정 ▾] 에, 단계별 단추는 작업 탭 기록 카드의 [고급 도구 ▸] 에 접혀 있습니다. 단추에 마우스를 올리면 하는 일이 나옵니다.
 
 차례
  1. Windows 실행 파일에는 패키지가 들어 있습니다. Python 소스로 실행하면 [패키지 설치·점검]([고급 도구 ▸] 안)으로 설치할 수 있습니다.
- 2. [설정]에서 판독기를 고르고 해당 제공사의 API 키를 넣어 [키 확인·모델 고르기] — 키가 맞는지 확인하고 쓸 수 있는 모델을 고릅니다.
+ 2. [설정]에서 로컬 문서 종류를 고릅니다. AI 구간 검증을 쓰려면 제공사·모델·API 키를 설정하고 호출 상한을 정합니다.
  3. [일반 OCR]의 [PDF 고르기…]로 PDF를 고릅니다. 스캔 이미지(PNG·JPG·TIFF 등)는 [이미지(스크린샷) OCR]의 [이미지 고르기…]로 엽니다.
     이미지를 여러 장 함께 고르면 이름의 숫자 순서로
     한 권(PDF)으로 묶어 읽습니다. 쪽 범위는 비워 두면 전체입니다. 읽기 방향(세로쓰기 한자·한글 / 가로쓰기 한문)과
@@ -288,7 +292,7 @@ def _pages_failed(problems: list[str] | None) -> bool:
     return problems is None or any(p.startswith("오류:") and "쪽" in p and ("실패" in p or "덜 " in p) for p in problems)
 
 
-def finish_words(rc, problems: list[str] | None = None) -> tuple[str, str, str]:
+def finish_words(rc, problems: list[str] | None = None, *, local_first: bool = False) -> tuple[str, str, str]:
     """끝난 명령의 반환값 → (종류, 상태 글 꼬리, 진행 글의 머리). 0=끝, 3=끝났지만 실패한 쪽 있음(쪽 실패 없이 '주의:' 만이면 확인할 것 있음),
     4=끝났지만 3차 글자 판별을 못 마침, 130=중지, 그 밖=오류. 창 없이 검사할 수 있게 따로 둔다."""
     if rc == 0 or rc is None:
@@ -298,6 +302,8 @@ def finish_words(rc, problems: list[str] | None = None) -> tuple[str, str, str]:
     if rc == 3:
         return "partial", "끝 (실패한 쪽 있음 — 진행 기록 확인)", "100% · 완료(실패 쪽 있음)"
     if rc == 4:
+        if local_first:
+            return "partial", "끝 (일부 의심 구간 AI 검증 미완료 — 로컬 결과·제안 보존)", "100% · 로컬 결과 저장(AI 검증 확인 필요)"
         return "partial", "끝 (3차 글자 판별 못 마침 — 〔a/b〕 남음)", "100% · 완료(3차 판별 못 마침)"
     if rc == 5:
         return "partial", "끝 (문맥 교정 확인 필요 — 교정 기록 확인)", "100% · 완료(문맥 교정 확인 필요)"
@@ -309,7 +315,7 @@ def finish_words(rc, problems: list[str] | None = None) -> tuple[str, str, str]:
 PASSING_NOTES = ("주의: 요청 한도 초과 —",)   # 스스로 풀린 일시 대기(429 재시도) — 끝난 뒤 알림창에 올리면 정작 볼 줄을 밀어낸다
 
 
-def finish_alert(rc, label: str, problems: list[str]) -> tuple[str, str] | None:
+def finish_alert(rc, label: str, problems: list[str], *, local_first: bool = False) -> tuple[str, str] | None:
     """끝난 명령 뒤 알림창 ("warning"|"error", 글) 또는 None. 창 없이 검사할 수 있게 따로 둔다.
     성공(0)이어도 '주의:'·'오류:' 줄이 있으면 알린다(깨진 기록 치움 등). 책갈피 교정의 다시 계산·교정본 옮김·판독 덜 된 구획은 끝 코드 3(확인할 것 있음)이다."""
     kind = finish_words(rc)[0]
@@ -319,7 +325,8 @@ def finish_alert(rc, label: str, problems: list[str]) -> tuple[str, str] | None:
     if kind == "error":
         return "error", f"{label} 이(가) 중단되었습니다.\n\n" + "\n".join(ps[-3:])
     if rc == 4:
-        head = f"{label} 이(가) 끝났지만 3차 글자 판별을 마치지 못해 〔a/b〕 표시가 남았습니다. 다시 실행하면 3차 판별을 이어서 합니다."
+        head = (f"{label} 이(가) 끝났지만 일부 의심 구간의 AI 검증을 마치지 못했습니다. 로컬 결과와 제안을 보존했습니다. 로컬 비교·교정에서 확인하거나 다시 실행해 남은 구간을 검증하십시오."
+                if local_first else f"{label} 이(가) 끝났지만 3차 글자 판별을 마치지 못해 〔a/b〕 표시가 남았습니다. 다시 실행하면 3차 판별을 이어서 합니다.")
     elif rc == 5:
         head = f"{label} 이(가) 끝났지만 문맥으로 확정하지 못한 글자가 있습니다. 원래 글자는 보존했으며 출력 폴더의 교정 기록에서 원문·후보·문맥을 확인할 수 있습니다."
     elif kind == "partial" and _pages_failed(ps):
@@ -1915,7 +1922,8 @@ class App(tk.Tk):
             document += " · 내용별" + (f" · 양식 {Path(tpl).name}" if tpl else " · 양식 없음(기본 모양)")
             ref = App.preset_ref(self); lab = preset_label(ref)
             document += " · 짜임 " + (lab.split(" (")[0] if (ref or DEFAULT_PRESET) in BUILTIN or ref in ALIASES else lab)   # 파일은 '(읽지 못함)' 까지 — 실행 전에 보이게
-        self.v_settings_summary.set(f"{self.v_provider.get()} · {self.v_model.get().strip()} · {self.v_mode.get()} · {document}")
+        strategy = "로컬 먼저 · " if vars(self).get("v_ocr_strategy") is not None and App._local_first(self) else ""
+        self.v_settings_summary.set(f"{strategy}{self.v_provider.get()} · {self.v_model.get().strip()} · {self.v_mode.get()} · {document}")
         scope = "이미지 OCR" if self._active_input == 2 else "일반 OCR"
         self.v_force_scope.set(f"{scope}: 기록 있는 쪽도 다시 판독")
 
@@ -2005,6 +2013,10 @@ class App(tk.Tk):
         # 변수(설정 열쇠)는 그대로 — 자리만 섹션 줄로 옮겼다(_build_settings_tab)
         self.v_up = tk.StringVar(value=self.cfg["upscale"]); self.v_reader = tk.StringVar(value=self.cfg["reader"])
         self.v_model = tk.StringVar(value=self.cfg["model"]); self.v_key = tk.StringVar(value=self.cfg["api_key"])
+        self.v_ocr_strategy = tk.StringVar(value=OCR_STRATEGY_LABELS.get(self.cfg.get("ocr_strategy"), OCR_STRATEGY_LABELS["local-first"]))
+        self.v_local_profile = tk.StringVar(value=LOCAL_PROFILE_LABELS.get(self.cfg.get("local_profile"), LOCAL_PROFILE_LABELS["traditional"]))
+        self.v_local_ai_review = tk.BooleanVar(value=bool(self.cfg.get("local_ai_review", True)))
+        self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
         self.v_second = tk.BooleanVar(value=self.cfg["second_pass"]); self.v_docx = tk.BooleanVar(value=self.cfg["docx"])
@@ -2054,7 +2066,7 @@ class App(tk.Tk):
         self._adv_card = self._build_tools_card(self._work)
         self._log_card = self._build_log_card(host)                         # 기록 카드는 하나 — 보이는 탭의 왼쪽 열로 옮긴다(_place_cards)
         self._reader_changed()
-        for variable in (self.v_provider, self.v_model, *self._mode_vars.values(), self.v_docx, self.v_tlpdf, self.v_layout, self.v_template):
+        for variable in (self.v_provider, self.v_model, *self._mode_vars.values(), self.v_docx, self.v_tlpdf, self.v_layout, self.v_template, self.v_ocr_strategy):
             variable.trace_add("write", self._sync_settings_summary)
         self._inputs_ready = True
         self._cards_ready = True                                            # 이제부터 칸이 바뀌면 책 카드·실행 카드·장부·진행 카드를 다시 그린다(_schedule_cards)
@@ -2062,6 +2074,7 @@ class App(tk.Tk):
             self.v_force, self.v_layout, self.v_template, self.v_preset, self.v_bold, self.v_provider, self.v_model, self.v_reader, self.v_model2,
             self.v_traditional, self.v_yun, self.v_punctuation, self.v_punctuation_rules, self.v_docx, self.v_tlpdf, self.v_ctxmodel, self.v_status,
             self.v_second, self.v_suspects, self.v_blind, self.v_skipany, self.v_up, self.v_cache, self.v_join, self.v_policy, self.v_cmemo]
+        watched += [self.v_ocr_strategy, self.v_local_profile, self.v_local_ai_review, self.v_local_ai_max_calls]
         for variable in watched:
             variable.trace_add("write", self._schedule_cards)
         self.v_output_dir.trace_add("write", lambda *_: self.after_idle(self._scroll_out_ends))
@@ -2100,6 +2113,19 @@ class App(tk.Tk):
             return self.b_details
         s = S["read"] = self._settings_section(common, "판독", "모든 책 공통 · 세 OCR 탭이 함께 씀", right=details_button)
         b = s["body"]
+
+        R["ocr_strategy"] = row(b, "인식 방식", "일반·이미지 OCR의 한 번에 인식에 적용",
+            lambda p: ttk.Combobox(p, textvariable=self.v_ocr_strategy, values=list(OCR_STRATEGY_LABELS.values()), state="readonly", width=chars(280)))
+        R["local_profile"] = row(b, "로컬 문서 종류", "설치된 엔진 중 해당 언어를 지원하는 엔진을 비교",
+            lambda p: ttk.Combobox(p, textvariable=self.v_local_profile, values=list(LOCAL_PROFILE_LABELS.values()), state="readonly", width=chars(220)))
+
+        def local_review(parent):
+            f = boxed(parent)
+            ttk.Checkbutton(f, text="어려운 구간의 이미지·문맥 전송", variable=self.v_local_ai_review).pack(side="left")
+            ttk.Spinbox(f, from_=1, to=100, width=4, textvariable=self.v_local_ai_max_calls).pack(side="left", padx=(P(8), P(4)))
+            L(f, "회까지").pack(side="left")
+            return f
+        R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
 
         def provider(parent):
             cb = self.cb_provider = ttk.Combobox(parent, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=chars(220))
@@ -3427,6 +3453,8 @@ class App(tk.Tk):
         cmd = d.get("_running_cmd") or ""
         stage = getattr(d.get("tracker"), "stage", "") or ""
         doing = (STAGE_NAMES.get(stage, stage) if stage else "시작") + " 중"
+        if d.get("_run_local_first") and stage == "read":
+            doing = "로컬 판독·구간 검증 중"
         # 잠긴 단추(disabled)에 그림만 주면 ttk 가 그 위에 바탕색 점무늬(stipple)를 덮는다(Tk 는 macOS 에서만 건너뜀) — 잠긴 상태의 그림을 따로 준다.
         lock = (self.icons["lock_seal"], "disabled", self.icons["lock_seal"])
         def fit(b, texts: tuple[str, ...], font: str) -> str:
@@ -3551,7 +3579,11 @@ class App(tk.Tk):
         """이번 명령의 모델 호출 수(재시도 포함) — 판독기를 불러온 뒤에만(창이 판독기 모듈을 일부러 불러오지 않는다)."""
         mod = sys.modules.get(f"{__package__}.reader_gemini") if __package__ else None
         cap = getattr(mod, "CALL_CAP", None)
-        return int(getattr(cap, "used", 0)) if cap is not None else None
+        cli = sys.modules.get(f"{__package__}.cli") if __package__ else None
+        local = getattr(cli, "LOCAL_API_CALLS", None)
+        if cap is None and local is None:
+            return None
+        return int(getattr(cap, "used", 0)) + int(local or 0)
 
     def _count_calls(self, snap: int | None = None) -> bool:
         """이번 실행의 모델 호출(재시도 포함, CALL_CAP.used)을 단계 몫으로 나눈다(명세 §9 _calls_by_stage — 장부의 '호출 n회 / 예상 m회').
@@ -3605,7 +3637,7 @@ class App(tk.Tk):
         elif live:
             cap = "금액은 실행 전 어림 · 호출은 실제"
         elif led is None:
-            cap = "어림 전"
+            cap = "로컬 먼저 · API는 어려운 구간만" if vars(self).get("v_ocr_strategy") is not None and App._local_first(self) else "어림 전"
         elif stale:
             cap, cap_fg = "어림 다시 필요 — 설정이 바뀜", C["WARN"]
         elif led.get("saved"):
@@ -3621,8 +3653,11 @@ class App(tk.Tk):
                 tail = {"ok": " · 끝", "partial": " · 끝", "stopped": " · 중지됨"}.get(res.get("kind"), " · 오류로 멈춤")
             parts = ("이번 실행: ", "아니요 · 모델 단계 없이" if without else "예 · 모두 실행", " · " + ("문자 PDF" if pdf_act else "HWPX") + tail)
         elif led is None:
-            parts = ("[비용 미리 보기]로 어림할 수 있습니다 — 실행 단추를 눌러도 먼저 어림해 묻습니다" if has
-                     else "원본을 고르면 [비용 미리 보기]로 어림할 수 있습니다", "", "")
+            if vars(self).get("v_ocr_strategy") is not None and App._local_first(self):
+                parts = ("로컬 인식 후 검증 대상을 정합니다 · API 호출 상한은 [설정]의 로컬 뒤 AI 검증", "", "")
+            else:
+                parts = ("[비용 미리 보기]로 어림할 수 있습니다 — 실행 단추를 눌러도 먼저 어림해 묻습니다" if has
+                         else "원본을 고르면 [비용 미리 보기]로 어림할 수 있습니다", "", "")
         else:
             parts = ("이번 실행: 누르면 비용 창에서 [예]·[아니요]를 고릅니다", "", "")
         if parts[1]:
@@ -3983,7 +4018,13 @@ class App(tk.Tk):
         from . import gui_progress as G
         phase, cmd, label, res = App._progress_state(self)
         tr = self.tracker
+        local_first = (d.get("_run_local_first", False) if phase in ("running", "done") else
+                       vars(self).get("v_ocr_strategy") is not None and App._local_first(self)) and cmd in G.RUN_CMDS
         pill, look = G.pill_view(phase=phase, stage=tr.stage if phase == "running" else "", label=label, result=res)
+        if local_first and phase == "running" and tr.stage == "read":
+            pill = "● 로컬 판독·구간 검증 중"
+        elif local_first and phase == "done" and res and res.get("rc") == 4:
+            pill = "끝 · 일부 구간 AI 검증 미완료"
         self.l_pill.configure(text=pill, style=f"Pill{look}.TLabel")
         if phase == "running":
             frac = tr.frac
@@ -4000,7 +4041,8 @@ class App(tk.Tk):
         if cmd in G.RUN_CMDS:
             ctx = bool(led.get("context_model", True)) if live else App._context_model_enabled(self)
             view = G.band_view(cmd, phase=phase, idx=tr._idx, done=tr.done, total=tr.total, note=tr.note, seen=d.get("_seen"), result=res,
-                               without=live and led.get("choice") == "without", counts=counts, rows=(led or {}).get("rows"), est=est, ctx_model=ctx)
+                               without=live and led.get("choice") == "without", counts=counts, rows=(led or {}).get("rows"), est=est, ctx_model=ctx,
+                               local_first=bool(local_first))
             App._draw_band(self, view)
             self._task_row.grid_remove(); self._band.grid()
         else:
@@ -4013,6 +4055,8 @@ class App(tk.Tk):
         now = [n for n, st in (d.get("_page_live") or {}).items() if st == "now"] if phase == "running" else ()
         left = G.big_view(cmd, phase=phase, stage=tr.stage, done=tr.done, total=tr.total, note=tr.note, seen=d.get("_seen"),
                           result=res, counts=counts, screenshot=shot, label=label, now_pages=now)
+        if local_first:
+            left = [(text.replace("3차 판별", "구간 AI 검증").replace("3차 글자 판별", "구간 AI 검증"), style) for text, style in left]
         right, link = App._big_right(self, phase, cmd, res, led, est)
         big = any(lk == "big" for _, lk in left)
         App._set_parts(self, self._big_left, left, "_big_spec", big)
@@ -5108,16 +5152,61 @@ class App(tk.Tk):
         windows[:] = [window for window in windows if window.winfo_exists()]
         for window in windows:
             active = getattr(getattr(window, "project", None), "source_path", None)
-            if source and active and Path(source).resolve() == Path(active).resolve():
+            host_source = getattr(window, "_host_source_path", None)
+            if source and not Path(source).is_dir() and ((isinstance(active, (str, Path)) and Path(source).resolve() == Path(active).resolve()) or
+                           (isinstance(host_source, (str, Path)) and Path(source).resolve() == Path(host_source).resolve())):
                 window.deiconify(); window.lift(); window.focus_set()
                 return
-        window = ComparisonEditor(self, source_path=source or None,
-            work_dir=work_dir_for(source) if source else None,
+        work_dir = work_dir_for(source) if source else None
+        if source and getattr(self, "_selected_tab", 0) != 1 and callable(vars(self).get("work")):
+            work_dir = self.work()
+        project_path = None
+        editor_source = source
+        if work_dir is not None:
+            try:
+                state_path = Path(work_dir) / "state.json"
+                if state_path.stat().st_size <= 4_000_000:
+                    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+                    candidate = state.get("local_first_project") if isinstance(state, dict) else None
+                    if isinstance(candidate, str) and Path(candidate).is_file():
+                        from .comparison import ComparisonProject
+                        if source and Path(source).is_dir():
+                            from .state import Work
+                            if not Work(source, work_dir, initialize=False).source_matches():
+                                variable = vars(self).get("v_status")
+                                if variable is not None:
+                                    variable.set("이미지 폴더가 판독 당시와 다릅니다. 한 번에 인식으로 현재 원본을 다시 처리하십시오.")
+                                return
+                            checked = ComparisonProject.load(candidate)
+                        else:
+                            checked = ComparisonProject.load(candidate, source_path=source)
+                        project_path = checked.project_path
+                        editor_source = str(checked.source_path)
+            except (OSError, ValueError):
+                if source and Path(source).is_dir():
+                    variable = vars(self).get("v_status")
+                    if variable is not None:
+                        variable.set("이미지 묶음의 저장된 원본·프로젝트를 확인하지 못했습니다. 한 번에 인식으로 다시 처리하십시오.")
+                    return
+        if project_path is not None:
+            for window in windows:
+                active_path = getattr(getattr(window, "project", None), "project_path", None)
+                if isinstance(active_path, (str, Path)) and Path(active_path).resolve() == Path(project_path).resolve():
+                    window.deiconify(); window.lift(); window.focus_set()
+                    return
+        profile = "mixed" if mode == "vertical" else ("simplified" if mode == "horizontal_zh" else None)
+        if App._ocr_strategy(self) == "local-first":
+            variable = vars(self).get("v_local_profile")
+            value = variable.get() if variable is not None else vars(self).get("cfg", {}).get("local_profile", "traditional")
+            profile = next((key for key, label in LOCAL_PROFILE_LABELS.items() if value in (key, label)), "traditional")
+        window = ComparisonEditor(self, source_path=editor_source or None, project_path=project_path,
+            work_dir=work_dir,
             engine_root=vars(self).get("cfg", {}).get("local_engine_root") or None,
             on_engine_root=lambda path: App._remember_local_engine_root(self, path),
             on_ai_settings=lambda: App._comparison_ai_settings(self),
-            profile="mixed" if mode == "vertical" else ("simplified" if mode == "horizontal_zh" else None),
-            direction="vertical" if mode == "vertical" else ("horizontal" if mode == "horizontal_zh" else None))
+            profile=None if project_path else profile,
+            direction=None if project_path else "vertical" if mode == "vertical" else ("horizontal" if mode == "horizontal_zh" else None))
+        window._host_source_path = source
         windows.append(window)
 
     def _comparison_ai_settings(self):
@@ -5127,7 +5216,10 @@ class App(tk.Tk):
         model = self.v_model.get().strip()
         if reader not in PROVIDERS or not model:
             raise ValueError("[설정]에서 AI 판독기와 이미지 입력을 지원하는 모델을 선택하십시오.")
-        return {"provider": reader, "model": model, "api_key": self.v_key.get().strip()}
+        from .readers import split_keys
+        raw = self.v_key.get().strip() or next((os.environ[name] for name in ENV_KEYS[reader] if os.environ.get(name)), "")
+        keys = split_keys(reader, raw)
+        return {"provider": reader, "model": model, "api_key": keys[0] if keys else ""}
 
     def _remember_local_engine_root(self, path):
         self.cfg["local_engine_root"] = str(Path(path).expanduser().resolve())
@@ -5180,6 +5272,38 @@ class App(tk.Tk):
         messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [▶ 한 번에 인식] 을 하거나, "
                                       f"기록이 있는 원본을 [PDF 고르기…]나 [이미지 고르기…]로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
         return False
+
+    def _ocr_strategy(self) -> str:
+        variable = vars(self).get("v_ocr_strategy")
+        if variable is not None:
+            return next((key for key, label in OCR_STRATEGY_LABELS.items() if variable.get() in (key, label)), "local-first")
+        # Old test clients and standalone advanced commands have no new controls.
+        return "ai-full"
+
+    def _local_first(self) -> bool:
+        return App._ocr_strategy(self) == "local-first" and self.v_reader.get() != "mock"
+
+    def _strategy_opts(self) -> list[str]:
+        if vars(self).get("v_ocr_strategy") is None and "ocr_strategy" not in vars(self).get("cfg", {}):
+            return []
+        strategy = App._ocr_strategy(self)
+        options = ["--ocr-strategy", strategy]
+        if strategy != "local-first":
+            return options
+        cfg = vars(self).get("cfg", {})
+        variable = vars(self).get("v_local_profile")
+        value = variable.get() if variable is not None else cfg.get("local_profile", "traditional")
+        profile = next((key for key, label in LOCAL_PROFILE_LABELS.items() if value in (key, label)), "traditional")
+        variable = vars(self).get("v_local_ai_review")
+        review = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_review", True))
+        variable = vars(self).get("v_local_ai_max_calls")
+        cap = variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20)
+        options += ["--local-profile", profile, "--local-ai-max-calls", str(cap),
+                    "--local-ai-review" if review else "--no-local-ai-review"]
+        root = cfg.get("local_engine_root")
+        if root:
+            options += ["--local-engine-root", str(root)]
+        return options
 
     def _read_opts(self, print_offset: bool = True, force: bool | None = None) -> list[str]:
         o = ["--reader", self.v_reader.get(), "--upscale", self.v_up.get().strip() or "2"]
@@ -5372,6 +5496,7 @@ class App(tk.Tk):
         """실행 전 점검: API 키(모델을 부르지 않는 실행은 묻지 않는다 — do_build 가 _env_need_key=False 를 둔다)·호출 상한 값, 그리고 설정 저장."""
         reader = self.v_reader.get()
         need_key = self.__dict__.pop("_env_need_key", True)
+        optional_key = self.__dict__.pop("_env_optional_key", False)
         if reader != "mock" and need_key:
             from .readers import split_keys, normalize_key, key_shape_warning
             env_keys = ENV_KEYS[reader]
@@ -5380,12 +5505,19 @@ class App(tk.Tk):
             keys = split_keys(reader, key)
             if key != self.v_key.get():
                 self.v_key.set(key)                  # 공백·따옴표 등을 걷어 낸 값으로 바꿔 보여 준다(키가 여러 개면 쉼표로)
-            if not keys:
+            if not keys and not optional_key:
                 messagebox.showwarning(APP_NAME, f"{PROVIDER_LABELS[reader]} API 키가 없습니다.\n선택한 제공사의 키를 넣으십시오.\n{KEY_URLS[reader]}"); return False
             warn = "\n".join((f"키 {i}: " if len(keys) > 1 else "") + w for i, w in ((i, key_shape_warning(reader, k)) for i, k in enumerate(keys, 1)) if w)
             if warn and not messagebox.askyesno(APP_NAME, warn + "\n\n그래도 이 키로 진행할까요?"):
                 return False
-            os.environ[env_keys[0]] = key
+            if keys:
+                os.environ[env_keys[0]] = key
+        if optional_key:
+            variable = vars(self).get("v_local_ai_max_calls")
+            cap = max_calls_value(variable.get() if variable is not None else vars(self).get("cfg", {}).get("local_ai_max_calls", 20))
+            if cap is None or not 1 <= cap <= 100:
+                messagebox.showwarning(APP_NAME, "로컬 뒤 AI 검증 호출 상한은 1~100 사이 정수여야 합니다.")
+                return False
         if max_calls_value(self.v_maxcalls.get()) is None:
             messagebox.showwarning(APP_NAME, f"호출 상한은 0 이상의 정수여야 합니다(0 = 상한 없음). 지금 값: {self.v_maxcalls.get()!r}"); return False
         self.save_settings(quiet=True)
@@ -5503,6 +5635,9 @@ class App(tk.Tk):
         cmd = argv[0] if argv else ""
         if cmd == "run" and "--pdf-only" in argv:
             cmd = "run-pdf"
+        self._run_local_first = (cmd in ("run", "run-pdf") and "--ocr-strategy" in argv
+                                 and argv[argv.index("--ocr-strategy") + 1] == "local-first"
+                                 and ("--reader" not in argv or argv[argv.index("--reader") + 1] != "mock"))
         self._run_label = label                                         # 한 번에 인식이 아닌 명령은 실행 단추 자리에 '{label} 중'
         self._set_running(True, cmd); self.v_status.set(label + " 중…")
         self._calls_live = True                                         # 이 명령(cli.main)이 CALL_CAP 을 센다 — 장부의 이번 실행 호출
@@ -5613,7 +5748,8 @@ class App(tk.Tk):
         if getattr(self, "_closing", False):             # 닫는 중에 끝났으면 알림창 없이 조용히
             self._last_writer = None; return
         w = getattr(self, "_last_writer", None)
-        kind, status, head = finish_words(rc, w.problems if w is not None else None)    # [중지]로 멈춘 명령은 130(멈추기 전에 일을 다 끝냈으면 0), 실패한 쪽이 있으면 3, 3차 판별을 못 마치면 4
+        local_first = bool(vars(self).get("_run_local_first"))
+        kind, status, head = finish_words(rc, w.problems if w is not None else None, local_first=local_first)
         ok, partial = kind == "ok", kind == "partial"
         from .gui_progress import failed_count, failed_pages
         problems = w.problems if w is not None else None
@@ -5629,7 +5765,7 @@ class App(tk.Tk):
             self.v_prog.set(f"{self.tracker.frac * 100:.0f}% · {head} · {took}")
         self._append(f"— {label} {'끝' if ok or partial else '중단'} (rc={rc})\n")
         self.refresh_table()
-        alert = finish_alert(rc, label, w.problems if w is not None else [])
+        alert = finish_alert(rc, label, w.problems if w is not None else [], local_first=local_first)
         if alert:
             (messagebox.showerror if alert[0] == "error" else messagebox.showwarning)(APP_NAME, alert[1])
         self._last_writer = None
@@ -6060,6 +6196,14 @@ class App(tk.Tk):
             variable = getattr(self, name, None)
             if variable is not None:
                 self.cfg[key] = variable.get()
+        if vars(self).get("v_ocr_strategy") is not None:
+            self.cfg["ocr_strategy"] = App._ocr_strategy(self)
+            value = self.v_local_profile.get()
+            self.cfg["local_profile"] = next((key for key, label in LOCAL_PROFILE_LABELS.items() if value in (key, label)), "traditional")
+            self.cfg["local_ai_review"] = bool(self.v_local_ai_review.get())
+            cap = max_calls_value(self.v_local_ai_max_calls.get())
+            if cap is not None and 1 <= cap <= 100:
+                self.cfg["local_ai_max_calls"] = cap
         if getattr(self, "v_layout", None) is not None:
             self.cfg.update({"layout": self.layout_key(), "template": self.v_template.get().strip(), "bold_split": bool(self.v_bold.get()),
                              "context_model": bool(self.v_ctxmodel.get()), "preset": App.preset_ref(self)})
@@ -6127,6 +6271,28 @@ class App(tk.Tk):
         """비용 한 창: 판독·3차 판별·합의 의심·문맥 교정의 어림(costplan.count_plan)을 작업 스레드에서 세고(462쪽이면 몇 초 — 창이 멈추지 않게
         작은 진행 창을 띄우고 단추를 잠근다) 끝나면 _poll → _plan_done. go(extra) 는 실행(extra = 모델 단계를 뺄 선택), go=None 은 [비용 미리 보기].
         mock 판독기는 모델을 부르지 않아 어림하지 않는다. 어림 중에 다시 눌러도(창이 잠겨 있지만) 두 번 세지 않는다."""
+        if kind in ("run", "run-pdf") and App._local_first(self):
+            cfg = vars(self).get("cfg", {})
+            variable = vars(self).get("v_local_ai_max_calls")
+            cap = max_calls_value(variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20))
+            if cap is None or not 1 <= cap <= 100:
+                messagebox.showwarning(APP_NAME, "로컬 뒤 AI 검증 호출 상한은 1~100 사이 정수여야 합니다.")
+                return
+            variable = vars(self).get("v_local_ai_review")
+            review = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_review", True))
+            notice = ("로컬 엔진으로 먼저 인식합니다(API 호출 0회).\n"
+                      + (f"불일치·낮은 신뢰도·누락 의심 구간만 선택한 AI로 검증합니다.\n이번 실행 API 호출 상한: {cap}회.\n"
+                         "실제 대상 수·이미지 크기·토큰·금액은 로컬 인식 후 결정됩니다.\nAPI 키가 없으면 로컬 결과와 검증 대상을 저장합니다."
+                         if review else "AI 검증을 꺼 두어 외부 전송 없이 로컬 결과를 저장합니다."))
+            if go is None:
+                messagebox.showinfo(APP_NAME, notice)
+            else:
+                vars(self).pop("_ledger_pending", None)
+                self._ledger = None
+                if hasattr(self, "_append"):
+                    self._append(notice.replace("\n", " · ") + "\n")
+                go([])
+            return
         pdf_only = kind == "run-pdf"
         if pdf_only:
             kind = "run"
@@ -6251,26 +6417,34 @@ class App(tk.Tk):
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
     def do_run(self):
-        if self._need_pdf() and App._corrections_ok(self) and self._prepare_env() and template_ok(self) and preset_ok(self):
+        if not self._need_pdf() or not App._corrections_ok(self):
+            return
+        if App._local_first(self):
+            self._env_optional_key = True
+        if self._prepare_env() and template_ok(self) and preset_ok(self):
             def go(extra):                                                 # extra: [아니요 · 모델 단계 없이] 면 --no-adjudicate(문맥 교정 모델이 켜져 있으면 + --no-context-model)
                 self.nb.select(0)
                 self._save_book(create=True)                               # 실행 직전(비용 확인을 받은 뒤): 이 책의 설정을 결과 폴더에
                 App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
                 pages = self.v_pages.get().strip()
                 self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True)
-                           + self._answered_opts() + extra + self._build_opts(), "한 번에 인식 (전체 → HWPX)" if not pages else f"한 번에 인식 ({pages}쪽 → HWPX)")
+                           + self._answered_opts() + extra + self._build_opts() + App._strategy_opts(self), "한 번에 인식 (전체 → HWPX)" if not pages else f"한 번에 인식 ({pages}쪽 → HWPX)")
             self._with_plan("run", go)
 
     def do_run_pdf(self):
         """Read the selected source and produce a searchable PDF without HWPX assembly."""
-        if self._need_pdf() and self._prepare_env():
+        if not self._need_pdf():
+            return
+        if App._local_first(self):
+            self._env_optional_key = True
+        if self._prepare_env():
             def go(extra):
                 self.nb.select(0)
                 self._save_book(create=True)
                 App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
                 out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
                 argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
-                argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra
+                argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra + App._strategy_opts(self)
                 self.start(argv, "한 번에 인식 (문자 PDF 만들기)", open_after=out)
             self._with_plan("run-pdf", go)
 

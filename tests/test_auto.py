@@ -2201,7 +2201,7 @@ class AdjudicateUnfinished(unittest.TestCase):
             cli.resolve_mode(args, d, work); r = MockReader({}); r.fail_pages = set(fail_pages); return r
         buf = io.StringIO()
         with mock.patch.object(cli, "make_reader", mk), mock.patch.object(cli, "cmd_adjudicate", adj), contextlib.redirect_stdout(buf):
-            rc = cli.main(["run", pdf, "--work", os.path.join(td, "w" + str(len(os.listdir(td)))), "--reader", "gemini", "--second-model", "",
+            rc = cli.main(["run", pdf, "--ocr-strategy", "ai-full", "--work", os.path.join(td, "w" + str(len(os.listdir(td)))), "--reader", "gemini", "--second-model", "",
                            "--second-thinking", "full", "--media-resolution", "default", "--checkpoint", "0"])
         _join_prepare_ahead()
         return rc, buf.getvalue()
