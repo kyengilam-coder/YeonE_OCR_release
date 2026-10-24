@@ -1,7 +1,11 @@
 {
   "version": "14.51.36247",
-  "url": "https://aka.ms/vc14/vc_redist.x64.exe",
+  "url": "https://download.visualstudio.microsoft.com/download/pr/ebdab8e5-1d7b-4d9f-a11b-cbb1720c3b12/843068991DAAA1F73AD9F6239BCE4D0F6A07A51F18C37EA2A867E9BECA71295C/VC_redist.x64.exe",
   "sha256": "843068991daaa1f73ad9f6239bce4d0f6a07a51f18c37ea2a867e9beca71295c",
-  "license_url": "https://aka.ms/VCRedistLicense",
-  "license_sha256": "97038d2e22f291e24688a31b80a34ab53b49d85657e41caee740efc5d19f3a4e"
+  "license_url": "https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual-C-V14-License-Redistributable_and_Runtime_ENU.docx",
+  "license_sha256": "08651651a7602fc7c0e2763de0fde1ff9f868df2780597cd1775ee9d6441c783",
+  "license_archive": "packaging/third_party_licenses/msvc-runtime-14.51.36247/LICENSE.txt",
+  "license_archive_sha256": "923d8b11a03c277d59f3262727abc7e422158f5243a5565d67d5c270c6b05e3c",
+  "license_archive_format": "complete-docx-paragraph-text-utf8-lf",
+  "license_terms_updated": "2025-10-01"
 }

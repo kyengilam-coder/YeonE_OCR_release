@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 from PIL import Image
 from ab_ocr import ocr, tesseract_glyph as tess, glyph_verifier as glyph
-from yeone_ocr.comparison import ComparisonProject, ENGINES, run_page, latest_runs
+from yeone_ocr.comparison import ComparisonProject, run_page, latest_runs
+
+# These model-cache migrations cover the original four Chinese engines only.
+FOUR_ENGINES = ("tesseract", "rapidocr", "easyocr", "ppocrv6")
 
 HEADER = 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
 TSV = HEADER+('4\t1\t1\t1\t1\t0\t10\t10\t80\t30\t-1\t\n'
@@ -115,16 +118,16 @@ class TesseractGlyphTests(unittest.TestCase):
             return ocr.RecognitionResult('甲',[],str(source),project.source_sha256,1,100,100,
                 'test',kwargs['languages'],kwargs['psm'],.1,engine=kwargs['engine'])
         with patch.object(ocr,'recognize_file',side_effect=recognize) as mock:
-            run_page(project,1,engines=ENGINES,engine_root=self.root)
+            run_page(project,1,engines=FOUR_ENGINES,engine_root=self.root)
             request=next(r for r in project._page(1)['runs'] if r['engine']=='tesseract')['request']
             request.pop('recognition_policy');request.pop('glyph_font_sources')
             old=project.page(1)['runs']
-            result=run_page(project,1,engines=ENGINES,engine_root=self.root)
+            result=run_page(project,1,engines=FOUR_ENGINES,engine_root=self.root)
             self.assertEqual(result['completed'],['tesseract'])
-            self.assertEqual(result['skipped'],list(ENGINES[1:]))
+            self.assertEqual(result['skipped'],list(FOUR_ENGINES[1:]))
             self.assertTrue(mock.call_args.kwargs['verify_chinese_glyphs'])
             self.assertEqual(project.page(1)['runs'][:4],old)
-            self.assertEqual(run_page(project,1,engines=ENGINES,engine_root=self.root)['skipped'],list(ENGINES))
+            self.assertEqual(run_page(project,1,engines=FOUR_ENGINES,engine_root=self.root)['skipped'],list(FOUR_ENGINES))
             run_page(project,1,engines=('tesseract',),profile='mixed',engine_root=self.root)
             self.assertNotIn('verify_chinese_glyphs',mock.call_args.kwargs)
             self.assertNotIn('recognition_policy',latest_runs(project.page(1))['tesseract']['request'])

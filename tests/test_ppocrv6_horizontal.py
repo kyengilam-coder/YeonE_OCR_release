@@ -11,8 +11,11 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 from ab_ocr import ppocrv6_worker as worker, glyph_verifier as glyph, ocr
-from yeone_ocr.comparison import ComparisonProject, ENGINES, latest_runs, run_page
+from yeone_ocr.comparison import ComparisonProject, latest_runs, run_page
 from yeone_ocr import comparison
+
+# These model-cache migrations cover the original four Chinese engines only.
+FOUR_ENGINES = ("tesseract", "rapidocr", "easyocr", "ppocrv6")
 
 
 class V6HorizontalTests(unittest.TestCase):
@@ -143,17 +146,17 @@ class V6HorizontalTests(unittest.TestCase):
                     return ocr.RecognitionResult('甲',[],str(source),project.source_sha256,1,160,80,
                         'test',kwargs['languages'],kwargs['psm'],.1,engine=kwargs['engine'])
                 with patch.object(ocr,'recognize_file',side_effect=recognize):
-                    run_page(project,1,engines=ENGINES,profile=profile,direction=direction,engine_root=self.root)
+                    run_page(project,1,engines=FOUR_ENGINES,profile=profile,direction=direction,engine_root=self.root)
                     legacy=next(r for r in project._page(1)['runs'] if r['engine']=='ppocrv6')
                     if enabled:
                         legacy['request']['recognition_policy']='ppocrv6-traditional-original-crop-verified-v1'
                     else:
                         legacy['request'].pop('recognition_policy',None);legacy['request'].pop('glyph_font_sources',None)
                     original=project.page(1)['runs']
-                    outcome=run_page(project,1,engines=ENGINES,profile=profile,direction=direction,engine_root=self.root)
+                    outcome=run_page(project,1,engines=FOUR_ENGINES,profile=profile,direction=direction,engine_root=self.root)
                     self.assertEqual(outcome['completed'],['ppocrv6'] if enabled else [])
                     self.assertEqual(project.page(1)['runs'][:4],original)
-                    self.assertEqual(run_page(project,1,engines=ENGINES,profile=profile,direction=direction,engine_root=self.root)['skipped'],list(ENGINES))
+                    self.assertEqual(run_page(project,1,engines=FOUR_ENGINES,profile=profile,direction=direction,engine_root=self.root)['skipped'],list(FOUR_ENGINES))
                     request=latest_runs(project.page(1))['ppocrv6']['request']
                     self.assertEqual('glyph_font_sources' in request,enabled)
 

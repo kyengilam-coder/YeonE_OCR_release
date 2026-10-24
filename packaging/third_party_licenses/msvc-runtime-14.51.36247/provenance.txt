@@ -1,0 +1,22 @@
+Microsoft Visual C++ V14 Redistributable and Runtime license
+
+Official license page (reviewed 2026-10-25 Asia/Seoul):
+https://visualstudio.microsoft.com/license-terms/vs2026-ga-visualcpp-v14-redist-runtime/
+
+Official page's embedded source document:
+https://visualstudio.microsoft.com/wp-content/uploads/2025/10/Visual-C-V14-License-Redistributable_and_Runtime_ENU.docx
+Source DOCX: 39,553 bytes
+Source SHA-256: 08651651a7602fc7c0e2763de0fde1ff9f868df2780597cd1775ee9d6441c783
+Document states: Last Updated October 1, 2025; EULA ID Cpp_v14_ENU.1033.
+
+LICENSE.txt contains every paragraph from word/document.xml, including the
+English and French terms, in original order. Formatting alone was converted:
+concatenate each paragraph's w:t text, join paragraphs with LF, strip trailing
+whitespace at the document end, and append one final LF. UTF-8 without BOM.
+Archive SHA-256: 923d8b11a03c277d59f3262727abc7e422158f5243a5565d67d5c270c6b05e3c
+
+Builds verify this complete archived text against its committed SHA-256 and
+render it as escaped HTML inside the engine bundle. They do not fetch or hash
+the dynamic WordPress license-page wrapper. The original Microsoft-signed CRT
+redistributable remains separately pinned by full payload SHA-256 and checked
+with Windows Authenticode before extraction. No system installation occurs.

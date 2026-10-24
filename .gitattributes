@@ -3,3 +3,5 @@
 
 # The runtime verifies this official dictionary against a pinned byte hash.
 /yeone_ocr/data/unihan_source_protection_17_0_0.json -text
+# Exact archived Microsoft license bytes are pinned in msvc-runtime-lock.json.
+packaging/third_party_licenses/msvc-runtime-14.51.36247/LICENSE.txt -text

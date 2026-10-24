@@ -12,6 +12,8 @@ from unittest import mock
 
 from yeone_ocr import gui, launcher, runtime, state, updater, windows_app
 
+HAS_GUI_DISPLAY = sys.platform == "win32" or bool(os.environ.get("DISPLAY"))
+
 
 class FrozenRuntime(unittest.TestCase):
     def test_windows_redirected_cli_logs_preserve_unicode_in_utf8(self):
@@ -173,22 +175,23 @@ class FrozenRuntime(unittest.TestCase):
         self.assertTrue(all(key not in text for key in keys))
         self.assertEqual(text.count("[REDACTED]"), 3)
 
-    def test_all_six_engine_worker_and_installer_resources_are_self_contained(self):
+    def test_all_registered_engine_worker_and_installer_resources_are_self_contained(self):
         from yeone_ocr.frozen_smoke import comparison_resources_probe
         from ab_ocr import runtime as engine_runtime
         result = comparison_resources_probe()
-        self.assertEqual(set(result["workers"]), {"rapidocr", "easyocr", "paddle_server", "glmocr", "surya"})
-        self.assertEqual(len(set(result["workers"].values())), 4)
+        self.assertEqual(set(result["workers"]), {"rapidocr", "easyocr", "ppocrv6", "paddle_server", "glmocr", "surya"})
+        self.assertEqual(len(set(result["workers"].values())), 5)
         self.assertEqual(result["workers"]["paddle_server"], "rapidocr_worker.py")
         self.assertFalse(result["external_models_loaded"])
         self.assertEqual(result["network_calls"], 0)
         resources = set(result["application_resources"])
         self.assertIn("worker_sessions.py", resources)
         self.assertEqual(result["gpu_queue_database"], "sqlite3 available")
-        for name in ("install_paddle_server.py", "paddle-server-lock.json", "install_glmocr.py",
+        for name in ("install_ppocrv6.py", "ppocrv6-lock.json", "install_paddle_server.py", "paddle-server-lock.json", "install_glmocr.py",
                      "glmocr-models.lock.json", "install_surya.py", "surya-lock.json", "surya-requirements.txt"):
             self.assertIn(name, resources)
-        self.assertTrue({"GLM_OCR.md", "PADDLE_SERVER.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md"}
+        self.assertTrue({"LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md",
+                         "GLM_OCR.md", "PADDLE_SERVER.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md"}
                         <= set(result["documentation"]))
         # A frozen installation must resolve its own workers, never the source
         # checkout or another project's runtime if one bundled file is missing.
@@ -232,6 +235,7 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["automatic_insertions"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    @unittest.skipUnless(HAS_GUI_DISPLAY, "Tk window probe requires a display")
     def test_release_smoke_edits_existing_bookmark_copy_with_backup(self):
         from yeone_ocr.frozen_smoke import bookmark_edit_probe
         result = bookmark_edit_probe(self.root)
@@ -242,6 +246,7 @@ class FrozenRuntime(unittest.TestCase):
         self.assertTrue(result["ui_save_and_reopen"])
         self.assertEqual(result["network_calls"], 0)
 
+    @unittest.skipUnless(HAS_GUI_DISPLAY, "Tk window probe requires a display")
     def test_release_smoke_follows_bookmark_caret_and_matches_pdf_text_size(self):
         from yeone_ocr.frozen_smoke import bookmark_cursor_probe
         from yeone_ocr.collate.section_editor import shared_pdf_worker
@@ -307,6 +312,7 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    @unittest.skipUnless(HAS_GUI_DISPLAY, "Tk window probe requires a display")
     def test_release_smoke_replaces_across_sections_and_recovers_paragraph_input(self):
         from yeone_ocr.frozen_smoke import bookmark_replace_probe
         with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
@@ -326,6 +332,7 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    @unittest.skipUnless(HAS_GUI_DISPLAY, "Tk window probe requires a display")
     def test_release_smoke_edits_generated_pdf_image_and_image_folder_results(self):
         from yeone_ocr.frozen_smoke import generated_editor_probe
         with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
@@ -340,6 +347,7 @@ class FrozenRuntime(unittest.TestCase):
         self.assertEqual(result["ocr_calls"], 0)
         self.assertEqual(result["network_calls"], 0)
 
+    @unittest.skipUnless(HAS_GUI_DISPLAY, "Tk window probe requires a display")
     def test_release_smoke_keeps_comparison_visible_after_delayed_show_and_reload(self):
         from yeone_ocr.frozen_smoke import bookmark_layout_probe
         with mock.patch("socket.create_connection", side_effect=AssertionError("Unexpected network access")), \
