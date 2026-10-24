@@ -1180,6 +1180,7 @@ def bookmark_layout_probe(folder: Path) -> dict:
     """Keep both comparison panes usable after a delayed first show and reload."""
     import tkinter as tk
     import pymupdf
+    from unittest.mock import patch
     from hwpx.document import HwpxDocument
     from .collate.sections import HwpxBook
     from .collate.section_editor import BookmarkSectionEditor
@@ -1237,8 +1238,6 @@ def bookmark_layout_probe(folder: Path) -> dict:
         assert not window.winfo_ismapped()
         assert window._image_size is None and window._render_future is None
         assert int(window._editor_font.cget("size")) == 12
-        window.deiconify()
-
         def balanced():
             return (window.pdf_panel.winfo_width() >= 360
                     and window.doc_panel.winfo_width() >= 360
@@ -1253,8 +1252,16 @@ def bookmark_layout_probe(folder: Path) -> dict:
 
         # A legitimate first layout may finish just before the window is hidden,
         # leaving the 100 ms render timer to run with no mapped canvas.
-        pump_until(balanced, "First mapped layout did not balance the comparison")
+        # Hold render scheduling during initial layout only. On a fast worker,
+        # root.update() may otherwise complete both layout and real rendering
+        # before balanced() is observed, making the intended hidden-timer race
+        # depend on wall-clock speed. Then schedule the REAL callback and hide
+        # immediately, so the unmapped-canvas branch is actually exercised.
+        with patch.object(window, "_request_render"):
+            window.deiconify()
+            pump_until(balanced, "First mapped layout did not balance the comparison")
         assert window._image_size is None
+        window._request_render()
         window.withdraw()
         pump_until(lambda: window._render_job is None, "Hidden initial render timer did not run")
         assert window._image_size is None
@@ -1782,7 +1789,7 @@ def run(report_path: Path) -> int:
         def comparison_editor_probe():
             import tkinter as tk
             from .comparison import ComparisonProject
-            from .comparison_editor import ComparisonEditor
+            from .comparison_editor import ComparisonEditor, ENGINE_MODES
             project = ComparisonProject.load(folder / "comparison.yeone-compare.json")
             original = project.text(1)
             raw_runs = project.page(1)["runs"]
@@ -1799,7 +1806,8 @@ def run(report_path: Path) -> int:
                     time.sleep(.02)
                 assert editor._preview is not None, "Original image preview did not render"
                 assert editor.master is root and isinstance(editor, tk.Toplevel)
-                assert editor.automatic.get(), "Automatic local engine selection must be the default"
+                assert ENGINE_MODES[editor.engine_mode.get()] == "recommended", "Recommended local engine mode must be the default"
+                assert editor._selected_engines(), "Recommended local engine selection is empty"
                 editor.text.insert("end-1c", "，確認")
                 editor.text.edit_modified(True)
                 editor._commit_text()
