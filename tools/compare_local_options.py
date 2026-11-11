@@ -220,6 +220,28 @@ def recognized(source: Path, work: Path, pages: list[int]) -> tuple[str, dict]:
     return "\n".join(texts), engines
 
 
+def engine_seconds(work: Path, pages: list[int]) -> dict:
+    """Seconds each engine spent recognizing the measured pages (from the comparison project).
+
+    Engines run in parallel in the new mode, so these add up to more than the wall time;
+    the largest one is the page's bottleneck.
+    """
+    totals: dict[str, float] = {}
+    for path in (work / "comparison").glob("*.yeone-compare.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for number, page in (data.get("pages") or {}).items():
+            if int(number) not in pages:
+                continue
+            for run in page.get("runs", []):
+                seconds = (run.get("raw") or {}).get("duration_seconds")
+                if isinstance(seconds, (int, float)):
+                    totals[run.get("engine", "?")] = totals.get(run.get("engine", "?"), 0.0) + seconds
+    return {engine: round(value, 1) for engine, value in sorted(totals.items(), key=lambda item: -item[1])}
+
+
 def page_list(spec: str | None, count: int, limit: int = 0) -> list[int]:
     if not spec:
         pages = list(range(1, count + 1))
@@ -400,7 +422,8 @@ def main(argv=None):
                    "seconds": round(seconds, 1),
                    "seconds_per_page": round(seconds / max(1, len(d["pages"])), 1), "pages_read": sum(engines.values()),
                    "engines": engines, "characters": len(hyp), "profile": d["profile"],
-                   "printed_from_answer": d["printed_from_answer"]}
+                   "printed_from_answer": d["printed_from_answer"],
+                   "engine_seconds": {} if SETS[name][2] else engine_seconds(work, d["pages"])}
             if d["_reference"]:
                 reference = crop_reference(d["_reference"], hyp) if d["_partial"] else d["_reference"]
                 errors = char_errors(reference, hyp)
@@ -410,16 +433,19 @@ def main(argv=None):
             result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
             rows.append(row)
             print(f"  쪽당 {row['seconds_per_page']}초 · CER {row.get('cer_percent', '-')}% · {engines}", flush=True)
+            if row["engine_seconds"]:
+                print("  엔진별 판독 시간(합): " + ", ".join(f"{k} {v}초" for k, v in row["engine_seconds"].items()), flush=True)
 
     (args.out / "summary.json").write_text(json.dumps({"sets": names, "rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     with (args.out / "summary.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["문서", "세트", "종료 코드", "쪽", "초", "쪽당 초", "읽은 쪽", "글자 수", "정답 글자", "오류", "CER %",
-                         "문서 종류", "정답에서 인쇄", "선택 엔진"])
+                         "문서 종류", "정답에서 인쇄", "선택 엔진", "엔진별 판독 초"])
         for r in rows:
             writer.writerow([r["document"], r["set"], r["exit"], r["pages"], r["seconds"], r["seconds_per_page"], r["pages_read"],
                              r["characters"], r.get("reference_characters", ""), r.get("errors", ""), r.get("cer_percent", ""),
-                             r["profile"], "예" if r["printed_from_answer"] else "", " ".join(f"{k}:{v}" for k, v in r["engines"].items())])
+                             r["profile"], "예" if r["printed_from_answer"] else "", " ".join(f"{k}:{v}" for k, v in r["engines"].items()),
+                             " ".join(f"{k}:{v}" for k, v in (r.get("engine_seconds") or {}).items())])
     lines = ["| 문서 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
     for d in docs:
         cells = []

@@ -145,3 +145,14 @@ def test_run_set_streams_page_progress_and_keeps_full_log(tmp_path, capsys):
     assert "[1/2쪽" in shown and "GPU" in shown
     assert "MuPDF" not in shown and "detail line" not in shown
     assert "detail line" in (tmp_path / "default.log").read_text(encoding="utf-8")
+
+
+def test_engine_seconds_sums_runs_of_measured_pages(tmp_path):
+    folder = tmp_path / "work" / "comparison"
+    folder.mkdir(parents=True)
+    project = {"pages": {"1": {"runs": [{"engine": "easyocr", "raw": {"duration_seconds": 200.0}},
+                                        {"engine": "ppocrv6", "raw": {"duration_seconds": 20.0}}]},
+                         "2": {"runs": [{"engine": "easyocr", "raw": {"duration_seconds": 50.5}}]},
+                         "3": {"runs": [{"engine": "easyocr", "raw": {"duration_seconds": 999}}]}}}
+    (folder / "local-first-x.yeone-compare.json").write_text(json.dumps(project), encoding="utf-8")
+    assert tool.engine_seconds(tmp_path / "work", [1, 2]) == {"easyocr": 250.5, "ppocrv6": 20.0}
