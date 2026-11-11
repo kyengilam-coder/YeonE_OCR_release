@@ -240,6 +240,36 @@ def recognized(source: Path, work: Path, pages: list[int]) -> tuple[str, dict]:
     return "\n".join(texts), engines
 
 
+def ai_review(source: Path, work: Path, pages: list[int]) -> tuple[dict, list[str]]:
+    """AI review totals (calls, applied, held) and one line per AI proposal, from the page records."""
+    sys.path.insert(0, str(ROOT))
+    from yeone_ocr.state import Work
+    w = Work(str(source), str(work), initialize=False)
+    totals, lines = {"calls": 0, "accepted": 0, "held": 0}, []
+    for number in pages:
+        record = w.load_record(number) or {}
+        local = record.get("local_first") or {}
+        totals["calls"] += (record.get("usage") or {}).get("calls", 0)
+        accept = (local.get("review") or {}).get("ai_accept") or {}
+        totals["accepted"] += accept.get("accepted", 0)
+        totals["held"] += accept.get("held", 0)
+        for item in local.get("ai_proposals") or []:
+            state = item.get("decision") or "?"
+            why = item.get("blocked_reason") or ("AI 불확실" if item.get("uncertain") else "")
+            lines.append(f"{number}쪽\t{state}\t{item.get('before')!s} → {item.get('after')!s}\t{why}")
+    return totals, lines
+
+
+def error_lines(reference: str, hypothesis: str, context: int = 6) -> list[str]:
+    """Every difference against the answer, with a little context: 정답 → 판독."""
+    matcher = difflib.SequenceMatcher(None, reference, hypothesis, autojunk=False)
+    out = []
+    for tag, a0, a1, b0, b1 in matcher.get_opcodes():
+        if tag != "equal":
+            out.append(f"{reference[max(0, a0 - context):a0]}[{reference[a0:a1]}→{hypothesis[b0:b1]}]{reference[a1:a1 + context]}")
+    return out
+
+
 def engine_seconds(work: Path, pages: list[int]) -> dict:
     """Seconds each engine spent recognizing the measured pages (from the comparison project).
 
@@ -452,9 +482,18 @@ def main(argv=None):
                 errors = char_errors(reference, hyp)
                 letters = content(reference)
                 content_errors = char_errors(letters, content(hyp))
+                (result_path.parent / "errors.txt").parent.mkdir(parents=True, exist_ok=True)
+                (result_path.parent / "errors.txt").write_text(
+                    "\ufeff정답 → 판독 차이 (공백 무시)\n" + "\n".join(error_lines(reference, hyp)) + "\n", encoding="utf-8")
                 row.update(reference_characters=len(reference), errors=errors,
                            cer_percent=round(100 * errors / max(1, len(reference)), 2),
                            content_cer_percent=round(100 * content_errors / max(1, len(letters)), 2))
+            totals, proposal_lines = ai_review(Path(d["pdf"]), work, d["pages"])
+            if totals["calls"] or proposal_lines:
+                row["ai"] = totals
+                (result_path.parent / "ai_proposals.txt").write_text(
+                    "\ufeff쪽\t결정\t변경 전 → 변경 후\t보류 이유\n" + "\n".join(proposal_lines) + "\n", encoding="utf-8")
+                print(f"  AI 검증: 호출 {totals['calls']}회 · 반영 {totals['accepted']}개 · 보류 {totals['held']}개", flush=True)
             result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
             rows.append(row)

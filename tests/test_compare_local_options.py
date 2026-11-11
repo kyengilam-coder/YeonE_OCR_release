@@ -162,3 +162,8 @@ def test_engine_seconds_sums_runs_of_measured_pages(tmp_path):
                          "3": {"runs": [{"engine": "easyocr", "raw": {"duration_seconds": 999}}]}}}
     (folder / "local-first-x.yeone-compare.json").write_text(json.dumps(project), encoding="utf-8")
     assert tool.engine_seconds(tmp_path / "work", [1, 2]) == {"easyocr": 250.5, "ppocrv6": 20.0}
+
+
+def test_error_lines_show_answer_and_reading_with_context():
+    lines = tool.error_lines("各己그貌樣이같지", "各已그貌様이같지", context=2)
+    assert lines == ["各[己→已]그貌", "그貌[樣→様]이같"]

@@ -170,3 +170,5 @@ claude auth status                          # "authMethod": "claude.ai", "subscr
 측정 세트 `ai-subscription` = `--local-ai-auth subscription --local-ai-accept --local-ai-max-calls 100 --local-ai-batch 4`.
 
 Surya·GLM-OCR처럼 확신도가 없는 엔진이 기준이면 그 블록 전체가 검증 대상이 되므로, 블록 안에서 다른 엔진과 어긋난 곳을 따로 보내지 않습니다(같은 글을 두 번 보내지 않음). 처음 측정(2026-11)에서는 세로쓰기 Tesseract와의 불일치가 너무 많아 호출 상한을 넘어 AI 검증이 전부 보류됐습니다. 보류되면 이제 쪽마다 이유를 로그에 남깁니다.
+
+첫 실측(2026-11, 한글·한자 세로쓰기 6쪽, Claude Max 구독, opus·medium): CER 2.39% → **2.29%**(부호 제외 2.06% → 1.95%), 쪽당 11.0초 → 35.2초, 5시간 사용률 7% → 7%(눈에 띄는 차감 없음). 측정 도구는 이제 세트 폴더마다 `errors.txt`(정답 → 판독 차이)와 AI 검증을 쓴 세트에서 `ai_proposals.txt`(제안별 반영·보류와 이유)를 남기고, 호출·반영·보류 수를 화면에 보입니다.
