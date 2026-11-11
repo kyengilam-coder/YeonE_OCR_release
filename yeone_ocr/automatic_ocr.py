@@ -62,6 +62,14 @@ def gpu_engines_enabled() -> bool:
 
 
 GPU_VERTICAL_ENV = "YEONE_OCR_GPU_VERTICAL"
+MIXED_KOREAN_ENV = "YEONE_OCR_MIXED_KOREAN_MODELS"
+
+
+def mixed_korean_models() -> bool:
+    """Opt-in trial: let the Korean-only CPU models (RapidOCR, EasyOCR "kor") read mixed
+    Korean-Hanja pages. They do not cover Hanja, so they stay out unless measured."""
+    import os
+    return os.environ.get(MIXED_KOREAN_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def gpu_vertical_enabled() -> bool:
@@ -71,7 +79,7 @@ def gpu_vertical_enabled() -> bool:
     return os.environ.get(GPU_VERTICAL_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded):
+def _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded, skip=()):
     """The first installed CUDA engine usable for this profile (registry order: Surya for mixed,
     GLM-OCR for Chinese); uninstalled ones are skipped silently.
 
@@ -89,6 +97,9 @@ def _gpu_candidates(profile, direction, engine_root, should_stop, memory, reside
         if should_stop and should_stop():
             raise ocr.OCRCancelled("자동 선택을 중지했습니다.")
         if profile == "mixed" and engine == "paddle_server":
+            continue
+        if engine in skip:
+            excluded[engine] = "사용자 설정으로 이번 실행에서 뺐습니다."
             continue                                   # no Korean recognition model
         root = engine_root_for(engine, engine_root)
         if not (root / "tools" / engine / "installation.json").is_file():
@@ -122,7 +133,7 @@ def _gpu_candidates(profile, direction, engine_root, should_stop, memory, reside
     return ready
 
 
-def available_engines(profile, direction, engine_root=None, should_stop=None, resident=(), gpu=False):
+def available_engines(profile, direction, engine_root=None, should_stop=None, resident=(), gpu=False, exclude=()):
     from .comparison import ComparisonError, PROFILES
     if profile not in PROFILES or direction not in ("horizontal", "vertical"):
         raise ComparisonError("문서 종류 또는 읽기 방향을 확인하세요.")
@@ -133,7 +144,10 @@ def available_engines(profile, direction, engine_root=None, should_stop=None, re
             raise ocr.OCRCancelled("자동 선택을 중지했습니다.")
         # The Korean neural models do not cover Hanja. Do not treat their
         # omissions as evidence against a mixed Korean/Hanja reading.
-        if profile == "mixed" and engine != "tesseract":
+        if engine in exclude:
+            excluded[engine] = "사용자 설정으로 이번 실행에서 뺐습니다."
+            continue
+        if profile == "mixed" and engine != "tesseract" and not (mixed_korean_models() and engine in ("rapidocr", "easyocr")):
             excluded[engine] = "한글·한자를 함께 지원하는 모델이 필요합니다."
             continue
         # A resident worker (engine_pool) already holds its memory; free memory says nothing about it.
@@ -157,7 +171,7 @@ def available_engines(profile, direction, engine_root=None, should_stop=None, re
         else:
             excluded[engine] = info.get("message", "선택 언어 모델이 없습니다.") if not info.get("available") else "선택 언어 모델이 없습니다."
     if gpu:
-        ready += _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded)
+        ready += _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded, exclude)
     return ready, excluded
 
 
@@ -244,7 +258,7 @@ def run_automatic_page(project, number, profile="traditional", direction="horizo
     preserve_baseline = bool(previous["reviewed"] or previous.get("baseline_choice") == "manual"
                              or previous["corrected_text"] is not None or previous["edits"])
     try:
-        extra = {k: v for k, v in (("resident", resident), ("gpu", gpu_engines)) if v}
+        extra = {k: v for k, v in (("resident", resident), ("gpu", gpu_engines), ("exclude", tuple(exclude or ()))) if v}
         engines, excluded = available_engines(profile, direction, engine_root, should_stop, **extra)
     except ocr.OCRCancelled:
         return {"completed": [], "errors": {}, "cancelled": True, "skipped": [], "unsupported": {}}

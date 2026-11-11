@@ -65,6 +65,9 @@ SETS = {
     "no-easyocr": (["--local-exclude-engines", "easyocr"], {}, False),   # the horizontal default since 2026-11
     "with-easyocr": (["--local-easyocr"], {}, False),
     "gpu-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),   # trial: Surya/GLM-OCR on vertical pages too
+    "glmocr-vertical": (["--local-exclude-engines", "surya"], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),  # GLM-OCR instead of Surya
+    "korean-models": ([], {"YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),   # trial: Korean-only CPU models on mixed pages
+    "all-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1", "YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")
