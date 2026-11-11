@@ -384,6 +384,12 @@ def clear_folder(work: Path, *, attempts=5, sleep=time.sleep) -> None:
 def run_set(name, doc, args, out_dir):
     extra, env_extra, from_default = SETS[name]
     work = out_dir / name
+    shared = out_dir / "_ai-page-cache"                 # paid AI page readings, reused by every set
+    if (work / "ai-page").is_dir():
+        shared.mkdir(exist_ok=True)
+        for old in (work / "ai-page").glob("*.json"):
+            if not (shared / old.name).exists():
+                shutil.copy2(old, shared / old.name)
     if work.exists():
         clear_folder(work)
     if from_default:
@@ -394,7 +400,7 @@ def run_set(name, doc, args, out_dir):
         argv += ["--local-engine-root", str(args.engine_root)]
     if not args.ai and "--local-ai-auth" not in extra:
         argv.append("--no-local-ai-review")
-    env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
+    env = {**os.environ, "PYTHONUTF8": "1", "YEONE_OCR_AI_PAGE_CACHE": str(shared), **env_extra}
     started = time.perf_counter()
     total = len(doc["pages"])
     # The recognizer writes straight into the log file and this process only reads it back.
@@ -559,6 +565,11 @@ def main(argv=None):
                 row.update(reference_characters=len(reference), errors=errors,
                            cer_percent=round(100 * errors / max(1, len(reference)), 2),
                            content_cer_percent=round(100 * content_errors / max(1, len(letters)), 2))
+                # Letters with character forms unified (説/說, 即/卽): the answer's form choice does not count.
+                sys.path.insert(0, str(ROOT))
+                from yeone_ocr.korean_forms import korean_forms
+                form_errors = char_errors(korean_forms(letters), korean_forms(content(hyp)))
+                row["form_cer_percent"] = round(100 * form_errors / max(1, len(letters)), 2)
             totals, proposal_lines = ai_review(Path(d["pdf"]), work, d["pages"])
             if totals["calls"] or proposal_lines:
                 row["ai"] = totals
@@ -569,7 +580,8 @@ def main(argv=None):
             result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
             rows.append(row)
             print(f"  쪽당 {row['seconds_per_page']}초 · CER {row.get('cer_percent', '-')}% "
-                  f"(부호 제외 {row.get('content_cer_percent', '-')}%) · {engines}", flush=True)
+                  f"(부호 제외 {row.get('content_cer_percent', '-')}% · 글자 모양도 무시 {row.get('form_cer_percent', '-')}%) · {engines}",
+                  flush=True)
             if row["engine_seconds"]:
                 print("  엔진별 판독 시간(합): " + ", ".join(f"{k} {v}초" for k, v in row["engine_seconds"].items()), flush=True)
 
@@ -577,11 +589,11 @@ def main(argv=None):
     with (args.out / "summary.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["문서", "세트", "종료 코드", "쪽", "초", "쪽당 초", "읽은 쪽", "글자 수", "정답 글자", "오류", "CER %", "부호 제외 CER %",
-                         "문서 종류", "정답에서 인쇄", "선택 엔진", "엔진별 판독 초"])
+                         "모양 무시 CER %", "문서 종류", "정답에서 인쇄", "선택 엔진", "엔진별 판독 초"])
         for r in rows:
             writer.writerow([r["document"], r["set"], r["exit"], r["pages"], r["seconds"], r["seconds_per_page"], r["pages_read"],
                              r["characters"], r.get("reference_characters", ""), r.get("errors", ""), r.get("cer_percent", ""),
-                             r.get("content_cer_percent", ""),
+                             r.get("content_cer_percent", ""), r.get("form_cer_percent", ""),
                              r["profile"], "예" if r["printed_from_answer"] else "", " ".join(f"{k}:{v}" for k, v in r["engines"].items()),
                              " ".join(f"{k}:{v}" for k, v in (r.get("engine_seconds") or {}).items())])
     lines = ["| 문서 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
@@ -590,7 +602,8 @@ def main(argv=None):
         for name in names:
             r = next((r for r in rows if r["document"] == d["name"] and r["set"] == name), None)
             cells.append("—" if r is None else
-                         f"{r.get('cer_percent', '-')}% (부호 제외 {r.get('content_cer_percent', '-')}%) · {r['seconds_per_page']}초")
+                         f"{r.get('cer_percent', '-')}% (부호 제외 {r.get('content_cer_percent', '-')}%"
+                         + (f", 모양 무시 {r['form_cer_percent']}%" if "form_cer_percent" in r else "") + f") · {r['seconds_per_page']}초")
         lines.append(f"| {d['name']}{' (인쇄본)' if d['printed_from_answer'] else ''} | " + " | ".join(cells) + " |")
     table = "\n".join(lines)
     (args.out / "summary.md").write_text("# 로컬 우선 옵션 비교 (CER · 부호 제외 CER · 쪽당 초)\n\n" + table + "\n", encoding="utf-8")

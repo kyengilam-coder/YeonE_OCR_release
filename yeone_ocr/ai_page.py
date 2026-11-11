@@ -138,15 +138,36 @@ def read_page(image, *, direction, profile, client, model, cache_dir: Path | Non
     return {**result, "cached": False}
 
 
-def merge(base: str, ai: str, mode: str = "prefer"):
+def _punctuation(text: str) -> bool:
+    import unicodedata
+    return bool(text) and all(unicodedata.category(c).startswith(("P", "S")) for c in text)
+
+
+def _uncertain_indices(theirs: str, words) -> set:
+    """Positions in the AI's compact text covered by the words it listed as uncertain."""
+    marked = set()
+    for word in words or ():
+        needle = "".join(c for c in str(word) if not c.isspace())
+        start = theirs.find(needle) if needle else -1
+        while start >= 0:
+            marked.update(range(start, start + len(needle)))
+            start = theirs.find(needle, start + 1)
+    return marked
+
+
+def merge(base: str, ai: str, mode: str = "prefer", uncertain=()):
     """(document text, red spans, blue spans, summary). Spans are (start, end) in the document text.
 
     Line breaks and spaces come from ``base`` (the engine's layout), characters from the alignment.
+    Never taken from the AI (2026-11 vertical sample): punctuation-only differences (it wrote the
+    sentence-end dot of vertical print as · where the engine and the answer have .), and words the AI
+    itself listed as uncertain: those keep the engine's reading and are painted red, even where both agree.
     """
     positions = [i for i, c in enumerate(base) if not c.isspace()]
     mine = "".join(base[i] for i in positions)
     theirs = "".join(c for c in ai if not c.isspace())
-    summary = {"agreed": 0, "taken": 0, "kept_long": 0, "witness": 0, "used": False, "ratio": 0.0}
+    summary = {"agreed": 0, "taken": 0, "kept_long": 0, "witness": 0, "punctuation_kept": 0,
+               "uncertain_kept": 0, "used": False, "ratio": 0.0}
     if not mine or not theirs:
         return base, [], [], summary
     matcher = difflib.SequenceMatcher(None, mine, theirs, autojunk=False)
@@ -154,38 +175,52 @@ def merge(base: str, ai: str, mode: str = "prefer"):
     if summary["ratio"] < MIN_RATIO:
         return base, [], [], summary
     summary["used"] = True
-    pieces, red, blue = [], [], []          # build the document text left to right
-    cursor = 0                               # position in base already copied
-    length = 0
+    doubtful = _uncertain_indices(theirs, uncertain)
+    out, red, blue = [], [], []
+    where = {}                                   # base index -> index in out
+    cursor = 0
 
     def copy_to(end):
-        nonlocal cursor, length
-        pieces.append(base[cursor:end])
-        length += end - cursor
-        cursor = end
+        nonlocal cursor
+        for i in range(cursor, end):
+            where[i] = len(out)
+            out.append(base[i])
+        cursor = max(cursor, end)
 
     for tag, a0, a1, b0, b1 in matcher.get_opcodes():
         if tag == "equal":
             summary["agreed"] += a1 - a0
+            copy_to(positions[a1 - 1] + 1)
+            for b in range(b0, b1):
+                if b in doubtful:
+                    at = where[positions[a0 + b - b0]]
+                    red.append((at, at + 1))
             continue
         start = positions[a0] if a0 < len(positions) else len(base)
         end = positions[a1 - 1] + 1 if a1 > a0 else start
         short = max(a1 - a0, b1 - b0) <= MAX_TAKE
+        unsure = any(b in doubtful for b in range(b0, b1))
         copy_to(start)
-        if mode == "prefer" and short:
-            replacement = theirs[b0:b1]
-            pieces.append(replacement)
-            length += len(replacement)
+        if _punctuation(mine[a0:a1] + theirs[b0:b1]):
+            copy_to(end)
+            summary["punctuation_kept"] += 1
+            continue
+        if mode == "prefer" and short and not unsure:
+            out.extend(theirs[b0:b1])
             cursor = end
             summary["taken"] += 1
             continue
+        first = len(out)
         copy_to(end)
-        span = (length - (end - start), length) if end > start else (max(0, length - 1), length)
-        if short:
+        span = (first, len(out)) if len(out) > first else (max(0, first - 1), max(1, first))
+        if unsure:
+            red.append(span)
+            summary["uncertain_kept"] += 1
+        elif short:
             blue.append(span)
             summary["witness"] += 1
         else:
             red.append(span)
             summary["kept_long"] += 1
     copy_to(len(base))
-    return "".join(pieces), red, blue, summary
+    return "".join(out), red, blue, summary

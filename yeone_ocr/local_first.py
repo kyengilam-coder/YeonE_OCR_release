@@ -198,7 +198,8 @@ def _record(project, number, args, work, started, review, extras=None):
     page_ai = extras.get("ai_page")
     if page_ai and page_ai.get("text"):
         from .ai_page import merge
-        text, red, blue, ai_page_summary = merge(current, page_ai["text"], page_ai.get("mode", "prefer"))
+        text, red, blue, ai_page_summary = merge(current, page_ai["text"], page_ai.get("mode", "prefer"),
+                                                 uncertain=page_ai.get("uncertain") or ())
         ai_page_summary.update({k: page_ai[k] for k in ("mode", "model", "uncertain", "cached") if k in page_ai})
         if ai_page_summary["used"]:
             current = text
@@ -325,6 +326,9 @@ def _ai_page_reader(args, project, work, cli):
     client = subscription.SubscriptionClient()
     model = subscription.model(None)
     direction = "horizontal" if args.mode == "horizontal_zh" else "vertical"
+    import os
+    # Readings are keyed by page image, model and prompt; a shared folder (measurement sets) reuses them.
+    cache = Path(os.environ.get("YEONE_OCR_AI_PAGE_CACHE") or work.dir / "ai-page")
     cli.log(f"  AI 쪽 판독({mode}): Claude 구독 · 모델 {model} · 쪽을 원래 해상도 띠로 잘라 처음부터 읽고 엔진 판독과 맞춰 봄")
 
     def read(number):
@@ -333,7 +337,7 @@ def _ai_page_reader(args, project, work, cli):
         try:
             with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
                 result = read_page(image, direction=direction, profile=args.local_profile, client=client,
-                                   model=model, cache_dir=work.dir / "ai-page")
+                                   model=model, cache_dir=cache)
         except (subscription.SubscriptionError, TimeoutError, ValueError, OSError) as exc:
             cli.log(f"  {number}쪽: AI 쪽 판독 실패 — {exc} (엔진 판독만 씀)")
             return None

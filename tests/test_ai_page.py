@@ -56,3 +56,13 @@ def test_read_page_sends_overview_and_strips_and_caches(tmp_path):
     assert again["cached"] and len(calls) == 1                         # no second paid call for the same page
     request = calls[0]
     assert len(request["images"]) == len(first["strips"]) + 1 and "RIGHT side" in request["prompt"]
+
+
+def test_punctuation_and_uncertain_words_keep_the_engine_reading():
+    base = "것이다.分合을 取하여 用穿하고"
+    text, red, _blue, summary = ai_page.merge(base, "것이다·分合을 取하여 用夯하고", uncertain=["夯"])
+    assert text == base                                            # · for . not taken; uncertain 夯 not taken
+    assert summary["punctuation_kept"] == 1 and summary["uncertain_kept"] == 1
+    assert [text[a:b] for a, b in red] == ["穿"]                    # the doubted glyph is painted red
+    text, red, _blue, _summary = ai_page.merge("自薦之癖을", "自薦之癖을", uncertain=["自薦之癖"])
+    assert text == "自薦之癖을" and [text[a:b] for a, b in red] == ["自", "薦", "之", "癖"]   # agreed but doubted
