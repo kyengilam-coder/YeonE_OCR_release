@@ -75,6 +75,7 @@ SETS = {
     # ... with full-resolution detail tiles of large crops (models shrink a page-size image).
     "ai-subscription-tiles": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100",
                                "--local-ai-batch", "4", "--local-ai-detail-tile", "1024"], {}, False),
+    "no-korean-forms": (["--no-local-korean-forms"], {}, False),   # engine Hanja forms as read (before 2026-11)
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")
