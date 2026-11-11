@@ -336,11 +336,41 @@ def spec_of(pages: list[int]) -> str:
     return ",".join(out)
 
 
+class FolderBusy(RuntimeError):
+    pass
+
+
+def clear_folder(work: Path, *, attempts=5, sleep=time.sleep) -> None:
+    """Remove a previous set folder. On Windows another program (an open file, an Explorer or
+    PowerShell window inside it, an indexer or antivirus scan) can hold it for a moment:
+    retry, then move it aside, and only then give up with the reason in Korean."""
+    def writable(function, path, _info):
+        os.chmod(path, 0o700)                       # read-only files block deletion on Windows
+        function(path)
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(work, **({"onexc": writable} if sys.version_info >= (3, 12) else {"onerror": writable}))
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt + 1 < attempts:
+                sleep(1 + attempt)
+    aside = work.with_name(f"{work.name}.이전-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        work.rename(aside)
+        print(f"  이전 결과 폴더를 지우지 못해 옆으로 옮겼습니다: {aside.name} (나중에 지워도 됩니다)", flush=True)
+    except OSError as error:
+        raise FolderBusy(f"이전 결과 폴더를 지우지 못했습니다: {work}\n"
+                         "  그 폴더 안의 파일을 연 프로그램(메모장 등), 그 폴더를 연 탐색기·PowerShell 창을 닫고 다시 실행하세요. "
+                         f"({error})") from error
+
+
 def run_set(name, doc, args, out_dir):
     extra, env_extra, from_default = SETS[name]
     work = out_dir / name
     if work.exists():
-        shutil.rmtree(work)
+        clear_folder(work)
     if from_default:
         shutil.copytree(out_dir / "default", work, ignore=shutil.ignore_patterns("result.json"))
     argv = [sys.executable, "-m", "yeone_ocr", "run", str(doc["pdf"]), "--work", str(work), "--pdf-only",
@@ -490,7 +520,11 @@ def main(argv=None):
                     rows.append(previous)
                     continue
             print(f"▶ {d['name']} · {name} …", flush=True)
-            work, code, seconds = run_set(name, d, args, doc_dir)
+            try:
+                work, code, seconds = run_set(name, d, args, doc_dir)
+            except FolderBusy as error:
+                print(f"  {error}\n  이 세트는 건너뜁니다.", flush=True)
+                continue
             text, engines = recognized(Path(d["pdf"]), work, d["pages"])
             hyp = compact(text)
             row = {"document": d["name"], "set": name, "exit": code, "pages": len(d["pages"]), "pages_spec": d["pages_spec"],

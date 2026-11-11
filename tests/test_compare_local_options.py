@@ -167,3 +167,31 @@ def test_engine_seconds_sums_runs_of_measured_pages(tmp_path):
 def test_error_lines_show_answer_and_reading_with_context():
     lines = tool.error_lines("各己그貌樣이같지", "各已그貌様이같지", context=2)
     assert lines == ["各[己→已]그貌", "그貌[樣→様]이같"]
+
+
+def test_clear_folder_retries_then_moves_a_busy_folder_aside(tmp_path):
+    work = tmp_path / "ai-subscription"
+    (work / "sub").mkdir(parents=True)
+    (work / "sub" / "a.txt").write_text("x")
+    calls = []
+    real = tool.shutil.rmtree
+
+    def busy(path, **_handlers):
+        calls.append(path)
+        if len(calls) < 3:
+            raise PermissionError(32, "in use")
+        return real(path)
+    with mock.patch.object(tool.shutil, "rmtree", side_effect=busy):
+        tool.clear_folder(work, sleep=lambda _s: None)
+    assert len(calls) == 3 and not work.exists()
+
+    (work / "b").mkdir(parents=True)
+    with mock.patch.object(tool.shutil, "rmtree", side_effect=PermissionError(32, "in use")):
+        tool.clear_folder(work, sleep=lambda _s: None)
+    assert not work.exists() and len(list(tmp_path.glob("ai-subscription.이전-*"))) == 1
+
+    (work / "c").mkdir(parents=True)
+    with mock.patch.object(tool.shutil, "rmtree", side_effect=PermissionError(32, "in use")), \
+            mock.patch.object(Path, "rename", side_effect=PermissionError(32, "in use")):
+        with pytest.raises(tool.FolderBusy, match="닫고 다시 실행"):
+            tool.clear_folder(work, sleep=lambda _s: None)
