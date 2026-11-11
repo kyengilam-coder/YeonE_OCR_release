@@ -288,6 +288,22 @@ def error_lines(reference: str, hypothesis: str, context: int = 6) -> list[str]:
     return out
 
 
+def save_list(folder: Path, filename: str, text: str) -> None:
+    """A list file in the set folder, and a copy in <out>/보고/<document>/ named <set>-<file>.
+
+    Open or upload the copies: the set folders are deleted on the next run, and a Windows program
+    that opened a file there (a file dialog keeps that folder as its current directory) blocks it."""
+    data = "\ufeff" + text
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / filename).write_text(data, encoding="utf-8")
+    report = folder.parent.parent / "보고" / folder.parent.name
+    report.mkdir(parents=True, exist_ok=True)
+    try:
+        (report / f"{folder.name}-{filename}").write_text(data, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def write_lists(doc, work: Path, folder: Path) -> None:
     """errors.txt / ai_proposals.txt from an existing work folder, without reading anything again."""
     if not work.is_dir():
@@ -295,13 +311,11 @@ def write_lists(doc, work: Path, folder: Path) -> None:
     if doc.get("_reference") and not (folder / "errors.txt").is_file():
         hyp = compact(recognized(Path(doc["pdf"]), work, doc["pages"])[0])
         reference = crop_reference(doc["_reference"], hyp) if doc.get("_partial") else doc["_reference"]
-        (folder / "errors.txt").write_text("\ufeff정답 → 판독 차이 (공백 무시)\n" + "\n".join(error_lines(reference, hyp)) + "\n",
-                                           encoding="utf-8")
+        save_list(folder, "errors.txt", "정답 → 판독 차이 (공백 무시)\n" + "\n".join(error_lines(reference, hyp)) + "\n")
     if not (folder / "ai_proposals.txt").is_file():
         totals, lines = ai_review(Path(doc["pdf"]), work, doc["pages"])
         if totals["calls"] or lines:
-            (folder / "ai_proposals.txt").write_text("\ufeff쪽\t결정\t변경 전 → 변경 후\t보류 이유\n" + "\n".join(lines) + "\n",
-                                                     encoding="utf-8")
+            save_list(folder, "ai_proposals.txt", "쪽\t결정\t변경 전 → 변경 후\t보류 이유\n" + "\n".join(lines) + "\n")
             print(f"  {doc['name']} · {folder.name} AI 검증: 호출 {totals['calls']}회 · 반영 {totals['accepted']}개 · "
                   f"보류 {totals['held']}개", flush=True)
 
@@ -391,7 +405,12 @@ def run_set(name, doc, args, out_dir):
             if not (shared / old.name).exists():
                 shutil.copy2(old, shared / old.name)
     if work.exists():
-        clear_folder(work)
+        try:
+            clear_folder(work)
+        except FolderBusy as error:
+            fresh = out_dir / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}"
+            print(f"  {error}\n  대신 새 폴더 {fresh.name} 에서 읽습니다.", flush=True)
+            work = fresh
     if from_default:
         shutil.copytree(out_dir / "default", work, ignore=shutil.ignore_patterns("result.json"))
     argv = [sys.executable, "-m", "yeone_ocr", "run", str(doc["pdf"]), "--work", str(work), "--pdf-only",
@@ -543,7 +562,7 @@ def main(argv=None):
             print(f"▶ {d['name']} · {name} …", flush=True)
             try:
                 work, code, seconds = run_set(name, d, args, doc_dir)
-            except FolderBusy as error:
+            except FolderBusy as error:                          # not even a fresh folder could be used
                 print(f"  {error}\n  이 세트는 건너뜁니다.", flush=True)
                 continue
             text, engines = recognized(Path(d["pdf"]), work, d["pages"])
@@ -559,9 +578,8 @@ def main(argv=None):
                 errors = char_errors(reference, hyp)
                 letters = content(reference)
                 content_errors = char_errors(letters, content(hyp))
-                (result_path.parent / "errors.txt").parent.mkdir(parents=True, exist_ok=True)
-                (result_path.parent / "errors.txt").write_text(
-                    "\ufeff정답 → 판독 차이 (공백 무시)\n" + "\n".join(error_lines(reference, hyp)) + "\n", encoding="utf-8")
+                save_list(result_path.parent, "errors.txt",
+                          "정답 → 판독 차이 (공백 무시)\n" + "\n".join(error_lines(reference, hyp)) + "\n")
                 row.update(reference_characters=len(reference), errors=errors,
                            cer_percent=round(100 * errors / max(1, len(reference)), 2),
                            content_cer_percent=round(100 * content_errors / max(1, len(letters)), 2))
@@ -573,8 +591,8 @@ def main(argv=None):
             totals, proposal_lines = ai_review(Path(d["pdf"]), work, d["pages"])
             if totals["calls"] or proposal_lines:
                 row["ai"] = totals
-                (result_path.parent / "ai_proposals.txt").write_text(
-                    "\ufeff쪽\t결정\t변경 전 → 변경 후\t보류 이유\n" + "\n".join(proposal_lines) + "\n", encoding="utf-8")
+                save_list(result_path.parent, "ai_proposals.txt",
+                          "쪽\t결정\t변경 전 → 변경 후\t보류 이유\n" + "\n".join(proposal_lines) + "\n")
                 print(f"  AI 검증: 호출 {totals['calls']}회 · 반영 {totals['accepted']}개 · 보류 {totals['held']}개", flush=True)
             result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")

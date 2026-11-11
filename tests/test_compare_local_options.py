@@ -195,3 +195,10 @@ def test_clear_folder_retries_then_moves_a_busy_folder_aside(tmp_path):
             mock.patch.object(Path, "rename", side_effect=PermissionError(32, "in use")):
         with pytest.raises(tool.FolderBusy, match="닫고 다시 실행"):
             tool.clear_folder(work, sleep=lambda _s: None)
+
+
+def test_lists_are_copied_to_the_report_folder(tmp_path):
+    folder = tmp_path / "out" / "문서" / "ai-page"
+    tool.save_list(folder, "errors.txt", "정답 → 판독\n")
+    copy = tmp_path / "out" / "보고" / "문서" / "ai-page-errors.txt"
+    assert (folder / "errors.txt").read_text(encoding="utf-8-sig") == copy.read_text(encoding="utf-8-sig") == "정답 → 판독\n"
