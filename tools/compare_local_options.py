@@ -259,22 +259,41 @@ def run_set(name, doc, args, out_dir):
     env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
     started = time.perf_counter()
     total = len(doc["pages"])
-    # utf-8-sig: Windows PowerShell's Get-Content recognises the BOM and shows Korean correctly.
-    with (out_dir / f"{name}.log").open("w", encoding="utf-8-sig") as log, \
-            subprocess.Popen(argv, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, encoding="utf-8", errors="replace") as process:
-        done = 0
-        for line in process.stdout:
-            log.write(line)
-            log.flush()
-            text = line.strip()
-            # Show page progress and problems on screen; everything stays in the log.
-            if re.match(r"\d+쪽: ", text) and "오류" not in text:
-                done += 1
-                print(f"    [{done}/{total}쪽 · {time.perf_counter() - started:.0f}초] {text}", flush=True)
-            elif re.search(r"오류|실패|GPU|제외|Traceback|Error", text) and "MuPDF" not in text:
-                print(f"    {text}", flush=True)
-        code = process.wait()
+    # The recognizer writes straight into the log file and this process only reads it back.
+    # If the console stops printing (a click puts Windows PowerShell into selection mode),
+    # only the on-screen progress waits; recognition itself keeps running.
+    log_path = out_dir / f"{name}.log"
+    state = {"offset": 3, "pending": b"", "done": 0}
+
+    def show(text):
+        text = text.strip()
+        if re.match(r"\d+쪽: ", text) and "오류" not in text:
+            state["done"] += 1
+            print(f"    [{state['done']}/{total}쪽 · {time.perf_counter() - started:.0f}초] {text}", flush=True)
+        elif re.search(r"오류|실패|GPU|제외|Traceback|Error", text) and "MuPDF" not in text:
+            print(f"    {text}", flush=True)
+
+    def drain(final=False):
+        with log_path.open("rb") as reader:
+            reader.seek(state["offset"])
+            chunk = reader.read()
+        state["offset"] += len(chunk)
+        lines = (state["pending"] + chunk).split(b"\n")
+        state["pending"] = b"" if final else lines.pop()
+        for raw in lines:
+            show(raw.decode("utf-8", "replace"))
+
+    with log_path.open("wb") as sink:
+        sink.write(b"\xef\xbb\xbf")                                # BOM: PowerShell's Get-Content then shows Korean
+        sink.flush()
+        process = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=sink, stderr=subprocess.STDOUT)
+        try:
+            while process.poll() is None:
+                drain()
+                time.sleep(0.5)
+        finally:
+            code = process.wait()
+    drain(final=True)
     return work, code, time.perf_counter() - started
 
 
