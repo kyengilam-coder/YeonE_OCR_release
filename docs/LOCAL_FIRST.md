@@ -74,8 +74,9 @@ API 키가 없어도 로컬 인식·출력은 진행한다. AI 대상이 남거�
 - 가로쓰기 쪽만 해당합니다(세로쓰기는 아직 측정하지 않음). 한글·한자 혼용 문서는 지금까지 Tesseract만 읽었지만, Surya·GLM-OCR이 있으면 함께 읽고 점수로 고릅니다(PaddleOCR server는 한국어 모델이 없어 혼용에서 제외).
 - GPU 엔진은 상주 CUDA 세션으로 실행하고, PC 전체 GPU 대기열(한 번에 하나)을 그대로 씁니다. CPU 코어 몫을 차지하지 않으므로 CPU 엔진과 동시에 돕니다.
 - 세션을 시작하지 못하면(GPU 없음, 대기열 사용 불가) 한 번 알리고 그 실행의 나머지 쪽에서는 그 엔진을 빼고 CPU 엔진만 씁니다. 끄려면 `YEONE_OCR_GPU_ENGINES=0`.
-- 세로쓰기 쪽에는 GPU 엔진을 쓰지 않습니다(측정 전). 시험해 보려면 `YEONE_OCR_GPU_VERTICAL=1`(측정 도구 세트 `gpu-vertical`). 2026-11 한글·한자 세로쓰기 표본(6쪽): Tesseract 단독 CER 34.4%(쪽당 3.2초), Surya 함께(`gpu-vertical`, 6쪽 모두 Surya 선택) 2.39%(쪽당 11.7초).
-- 다른 엔진 시험 세트: `glmocr-vertical`(Surya 대신 GLM-OCR), `korean-models`(`YEONE_OCR_MIXED_KOREAN_MODELS=1`: 한글 전용 RapidOCR·EasyOCR 모델도 혼용 문서에 참여, 한자는 못 읽음), `all-vertical`(둘 다). `--local-exclude-engines`로 뺀 GPU 엔진 다음 순서의 GPU 엔진이 후보가 됩니다.
+- 세로쓰기 쪽에도 GPU 엔진을 씁니다(2026-11부터 기본). 끄려면 `YEONE_OCR_GPU_VERTICAL=0`(측정 세트 `no-gpu-vertical`).
+- 2026-11 한글·한자 세로쓰기 표본(6쪽, CER / 쪽당 시간): Tesseract 단독 34.44% / 3.2초, Surya 함께 **2.39%** / 11.7초(6쪽 모두 Surya), GLM-OCR 함께 15.19% / 14.2초, 한글 전용 CPU 모델 함께 52.72% / 26.3초(6쪽 모두 RapidOCR이 뽑혔지만 한자를 못 읽음: 자동 선택 점수가 한자 누락을 가려내지 못함), 모두 함께 2.39% / 27.7초.
+- 그래서 한글 전용 CPU 모델은 혼용 문서에서 계속 뺍니다(시험 세트 `korean-models`, `YEONE_OCR_MIXED_KOREAN_MODELS=1`). `glmocr-vertical`은 Surya 대신 GLM-OCR을 쓰는 시험 세트입니다.
 - 선택 점수식은 바꾸지 않았습니다. 정확도 이득은 같은 표본에서 측정해야 합니다.
 
 ## 시험 옵션(측정 전, 기본은 모두 꺼짐)

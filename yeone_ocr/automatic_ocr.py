@@ -17,7 +17,7 @@ POLICY = "local-auto-engine-quality-v1"
 PREFERENCE = ("ppocrv6", "rapidocr", "easyocr", "tesseract")
 # Engines that run on the GPU. They join automatic selection only when their
 # installation is CUDA-enabled and the caller can run them through resident
-# GPU sessions (engine_pool), on horizontal pages (the only measured direction).
+# GPU sessions (engine_pool); on vertical pages too unless YEONE_OCR_GPU_VERTICAL=0.
 # Surya and GLM-OCR also read Korean and Hanja together, which the CPU neural
 # models cannot. Score ties still prefer the original CPU order.
 GPU_ENGINES = ("surya", "glmocr", "paddle_server")
@@ -73,10 +73,11 @@ def mixed_korean_models() -> bool:
 
 
 def gpu_vertical_enabled() -> bool:
-    """Opt-in trial: let the GPU engine read vertical pages too. Off until vertical pages are
-    measured (2026-11: Tesseract alone, mixed vertical sample CER 34%)."""
+    """The GPU engine also reads vertical pages (default since 2026-11: on a mixed Korean-Hanja
+    vertical sample Tesseract alone measured 34.4% CER, with Surya 2.39%, with GLM-OCR 15.2%).
+    YEONE_OCR_GPU_VERTICAL=0 restores Tesseract-only vertical reading."""
     import os
-    return os.environ.get(GPU_VERTICAL_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+    return os.environ.get(GPU_VERTICAL_ENV, "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded, skip=()):

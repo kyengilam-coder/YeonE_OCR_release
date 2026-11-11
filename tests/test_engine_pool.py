@@ -220,9 +220,10 @@ def test_cuda_engines_join_automatic_selection_only_when_installed_with_cuda(tmp
         assert ready == ["glmocr"]                                   # one GPU engine per run
         assert "surya" not in excluded                               # not even inspected once one is chosen
         assert auto.available_engines("traditional", "horizontal")[0] == []          # off unless the caller can run GPU sessions
-        assert auto.available_engines("traditional", "vertical", gpu=True)[0] == []  # vertical not measured
-        with mock.patch.dict("os.environ", {auto.GPU_VERTICAL_ENV: "1"}):
-            assert auto.available_engines("traditional", "vertical", gpu=True)[0] == ["glmocr"]  # opt-in trial
+        with mock.patch.dict("os.environ", {auto.GPU_VERTICAL_ENV: "0"}):
+            assert auto.available_engines("traditional", "vertical", gpu=True)[0] == []  # switched off
+        with mock.patch.dict("os.environ", {auto.GPU_VERTICAL_ENV: ""}):
+            assert auto.available_engines("traditional", "vertical", gpu=True)[0] == ["glmocr"]  # default on
             devices["surya"] = "cuda"
             assert auto.available_engines("mixed", "vertical", gpu=True)[0] == ["surya"]
             ready, excluded = auto.available_engines("mixed", "vertical", gpu=True, exclude=("surya",))

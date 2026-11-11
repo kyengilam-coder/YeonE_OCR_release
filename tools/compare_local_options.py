@@ -64,7 +64,8 @@ SETS = {
     "verify": (["--local-line-verification"], {}, False),
     "no-easyocr": (["--local-exclude-engines", "easyocr"], {}, False),   # the horizontal default since 2026-11
     "with-easyocr": (["--local-easyocr"], {}, False),
-    "gpu-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),   # trial: Surya/GLM-OCR on vertical pages too
+    "gpu-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),   # the vertical default since 2026-11 measurements
+    "no-gpu-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "0"}, False),   # Tesseract-only vertical (the old default)
     "glmocr-vertical": (["--local-exclude-engines", "surya"], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),  # GLM-OCR instead of Surya
     "korean-models": ([], {"YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),   # trial: Korean-only CPU models on mixed pages
     "all-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1", "YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),
