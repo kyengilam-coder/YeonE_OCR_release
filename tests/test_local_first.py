@@ -129,11 +129,25 @@ class LocalFirstTests(unittest.TestCase):
 
     def test_options_are_recorded_and_ai_batch_reaches_the_plan(self):
         self.confidence = 20
-        self.assertEqual(command(self.args("--local-ai-batch", "3", "--local-columns")), 0)
+        self.assertEqual(command(self.args("--local-ai-batch", "3")), 0)
         rec = self.record()
-        self.assertEqual(rec["local_first"]["options"], {"columns": True, "ai_batch": 3})
+        self.assertEqual(rec["local_first"]["options"], {"ai_batch": 3})          # columns is the default now
         project = ComparisonProject.load(rec["local_first"]["project_path"])
         self.assertEqual(project.page(1)["ai_reviews"][0]["policy"]["batch_size"], 3)
+
+    def test_two_column_order_follows_the_switch(self):
+        from yeone_ocr import local_first
+        seen = []
+        real = local_first._record
+
+        def spy(project, number, args, work, started, review, extras=None):
+            seen.append((extras or {}).get("columns"))
+            return real(project, number, args, work, started, review, extras)
+        with patch.object(local_first, "_record", side_effect=spy):
+            command(self.args())
+            command(self.args("--no-local-columns", "--force"))
+        self.assertTrue(seen[0] is True and seen[-1] is False)
+        self.assertEqual(self.record()["local_first"]["options"], {"columns": False})
 
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20

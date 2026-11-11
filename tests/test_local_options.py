@@ -87,23 +87,35 @@ def region(i, x0, x1, y0):
 
 
 class Columns(unittest.TestCase):
+    ROWS = (100, 150, 200, 250, 300, 350)
+
     def test_two_columns_read_left_then_right_between_full_width_lines(self):
         regions = [region(1, 50, 950, 20)]
-        for k, y in enumerate((100, 150, 200)):
+        for k, y in enumerate(self.ROWS):
             regions += [region(10 + k, 50, 450, y), region(20 + k, 550, 950, y)]
-        regions.append(region(2, 50, 950, 300))
+        regions.append(region(2, 50, 950, 400))
         ordered = [r.id for r in column_order(regions)]
-        self.assertEqual(ordered, ["local-line-1", "local-line-10", "local-line-11", "local-line-12",
-                                   "local-line-20", "local-line-21", "local-line-22", "local-line-2"])
+        self.assertEqual(ordered, ["local-line-1"] + [f"local-line-{10 + k}" for k in range(6)]
+                         + [f"local-line-{20 + k}" for k in range(6)] + ["local-line-2"])
 
     def test_a_title_crossing_the_gutter_does_not_hide_the_columns(self):
         # 의방집해 p.2: a centred title box spans the gutter; lines alternate left/right in engine order.
         regions = [region(1, 300, 750, 20)]
-        for k, y in enumerate((100, 150, 200, 250)):
+        for k, y in enumerate(self.ROWS):
             regions += [region(20 + k, 520, 880, y), region(10 + k, 120, 480, y + 5)]
         ordered = [r.id for r in column_order(regions)]
-        self.assertEqual(ordered, ["local-line-1"] + [f"local-line-{10 + k}" for k in range(4)]
-                         + [f"local-line-{20 + k}" for k in range(4)])
+        self.assertEqual(ordered, ["local-line-1"] + [f"local-line-{10 + k}" for k in range(6)]
+                         + [f"local-line-{20 + k}" for k in range(6)])
+
+    def test_table_cells_and_photo_captions_keep_row_order(self):
+        # 대조도감: a six-column table, and captions under paired photos.
+        table = [region(100 * r + c, 80 + c * 140, 200 + c * 140, 100 + r * 40) for r in range(6) for c in range(6)]
+        self.assertEqual(column_order(table), table)
+        captions = []
+        for k, y in enumerate((300, 520, 740)):
+            captions += [region(10 + k, 80, 240, y), region(20 + k, 260, 330, y),
+                         region(30 + k, 420, 560, y), region(40 + k, 590, 700, y)]
+        self.assertEqual(column_order(captions), captions)
 
     def test_single_column_is_unchanged(self):
         regions = [region(i, 50, 950, 20 + 40 * i) for i in range(8)]

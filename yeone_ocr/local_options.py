@@ -109,6 +109,10 @@ COLUMN_MIN_LINES = 3            # lines needed on each side of the gutter
 COLUMN_MAX_WIDTH = 600          # a column line is narrower than 60% of the page (normalized 0-1000)
 
 
+COLUMN_BODY_WIDTH = 250        # a body-column line spans at least 25% of the page width (0-1000)
+COLUMN_BODY_FILL = 0.7         # ... and at least 70% of its column's width
+COLUMN_BODY_SHARE = 0.5        # at least half of each column's lines are such full lines
+COLUMN_BODY_LINES = 5          # and at least this many per column
 COLUMN_MAX_CROSSING = 0.15     # titles/running heads may cross the gutter: at most this share of the lines (always 2)
 
 
@@ -116,7 +120,9 @@ def column_order(regions):
     """Reorder line regions of a two-column horizontal page; unchanged if no clear gutter.
 
     The gutter is the vertical position crossed by the fewest lines with at
-    least COLUMN_MIN_LINES column lines on each side. A few lines may cross it
+    least COLUMN_MIN_LINES column lines on each side, and each side must look
+    like body text: mostly long lines filling the column (not table cells or
+    captions). A few lines may cross it
     (a centred title, a running head); like full-width lines they split the page
     into bands. Inside a band the left column is read top to bottom, then the
     right column.
@@ -137,6 +143,14 @@ def column_order(regions):
     if best is None:
         return list(regions)
     gutter = best[1]
+    # Body text, not a table or a grid of captions: in two-column body text each column is
+    # filled by long lines of about the column's width. Table cells and photo captions are
+    # short pieces (대조도감: tables, captions under paired photos); their row order is right.
+    for side in ([b for _, b in boxes if b[3] <= gutter], [b for _, b in boxes if b[1] >= gutter]):
+        extent = max(b[3] for b in side) - min(b[1] for b in side)
+        full = [b for b in side if b[3] - b[1] >= max(COLUMN_BODY_WIDTH, COLUMN_BODY_FILL * extent)]
+        if len(full) < COLUMN_BODY_LINES or len(full) < COLUMN_BODY_SHARE * len(side):
+            return list(regions)
     ordered, band = [], []
 
     def flush():

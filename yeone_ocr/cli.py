@@ -2775,7 +2775,9 @@ def build_parser():
     p.add_argument("--local-engine-plan", choices=("all", "fast"), default="all",
                    help="(시험) fast=처음 5쪽은 모든 엔진, 그 뒤로는 이긴 엔진 1~2개만 먼저 읽고 점수가 낮은 쪽만 모든 엔진으로 다시")
     p.add_argument("--local-vote", action="store_true", help="(시험) 엔진 3개 이상 중 과반이 같게 읽은 글자를 기준 판독 대신 채택(초록, 되돌릴 수 있음)")
-    p.add_argument("--local-columns", action="store_true", help="(시험) 가로쓰기 두 단 쪽을 문서에서 왼쪽 단·오른쪽 단 차례로 놓음(비교 프로젝트의 글 순서는 그대로)")
+    p.add_argument("--local-columns", action=argparse.BooleanOptionalAction, default=True,
+                   help="가로쓰기 두 단 본문 쪽을 문서에서 왼쪽 단·오른쪽 단 차례로 놓음(기본 켬). 표·사진 설명처럼 짧은 조각은 두 단으로 보지 않음. "
+                        "비교 프로젝트의 글 순서는 그대로. 끄려면 --no-local-columns")
     p.add_argument("--local-textlayer-witness", action="store_true", help="(시험) PDF에 있던 글자층이 다르게 읽은 글자를 파랑으로 표시")
     p.add_argument("--local-skip-blank", action="store_true", help="(시험) 어두운 화소가 거의 없는 빈 쪽은 엔진을 실행하지 않음")
     p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",

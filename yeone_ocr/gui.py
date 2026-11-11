@@ -30,7 +30,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
-            "simple_display": False}
+            "simple_display": False, "local_columns": True}
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 LOCAL_PROFILE_LABELS = {"traditional": "번체·한문", "simplified": "간체·중문", "mixed": "한글·한자 혼용"}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
@@ -2025,6 +2025,7 @@ class App(tk.Tk):
         self.v_ocr_strategy = tk.StringVar(value=OCR_STRATEGY_LABELS.get(self.cfg.get("ocr_strategy"), OCR_STRATEGY_LABELS["local-first"]))
         self.v_local_profile = tk.StringVar(value=LOCAL_PROFILE_LABELS.get(self.cfg.get("local_profile"), LOCAL_PROFILE_LABELS["traditional"]))
         self.v_local_ai_review = tk.BooleanVar(value=bool(self.cfg.get("local_ai_review", True)))
+        self.v_local_columns = tk.BooleanVar(value=bool(self.cfg.get("local_columns", True)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2136,6 +2137,14 @@ class App(tk.Tk):
             L(f, "회까지").pack(side="left")
             return f
         R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
+
+        def local_columns(parent):
+            cb = ttk.Checkbutton(parent, text="두 단 본문은 왼쪽 단 먼저", variable=self.v_local_columns)
+            Tip(cb, "가로쓰기 두 단 조판에서 엔진이 왼쪽·오른쪽 줄을 번갈아 내놓아 글이 섞이는 것을 바로잡습니다. 각 단이 단 폭을 채우는 "
+                    "긴 줄로 이루어진 쪽만 두 단으로 보며, 표 칸·사진 설명처럼 짧은 조각은 그대로 둡니다. 결과 문서의 순서만 바꾸고 비교·교정 창의 "
+                    "판독 순서는 그대로입니다.", self)
+            return cb
+        R["local_columns"] = row(b, "두 단 조판", "가로쓰기 두 단 쪽의 읽기 순서 정리(기본 켬)", local_columns)
 
         def provider(parent):
             cb = self.cb_provider = ttk.Combobox(parent, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=chars(220))
@@ -5657,6 +5666,9 @@ class App(tk.Tk):
         cap = variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20)
         options += ["--local-profile", profile, "--local-ai-max-calls", str(cap),
                     "--local-ai-review" if review else "--no-local-ai-review"]
+        variable = vars(self).get("v_local_columns")
+        if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_columns", True))):
+            options.append("--no-local-columns")
         root = cfg.get("local_engine_root")
         if root:
             options += ["--local-engine-root", str(root)]
@@ -6566,6 +6578,8 @@ class App(tk.Tk):
             value = self.v_local_profile.get()
             self.cfg["local_profile"] = next((key for key, label in LOCAL_PROFILE_LABELS.items() if value in (key, label)), "traditional")
             self.cfg["local_ai_review"] = bool(self.v_local_ai_review.get())
+            if vars(self).get("v_local_columns") is not None:
+                self.cfg["local_columns"] = bool(self.v_local_columns.get())
             cap = max_calls_value(self.v_local_ai_max_calls.get())
             if cap is not None and 1 <= cap <= 100:
                 self.cfg["local_ai_max_calls"] = cap

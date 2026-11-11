@@ -54,13 +54,14 @@ SETS = {
                    {"YEONE_OCR_RESIDENT_WORKERS": "0", "YEONE_OCR_GPU_ENGINES": "0"}, False),
     "default": ([], {}, False),
     "vote": (["--local-vote"], {}, True),
-    "columns": (["--local-columns"], {}, True),
+    "columns": (["--local-columns"], {}, True),          # the default since two-column order became automatic
+    "no-columns": (["--no-local-columns"], {}, True),
     "witness": (["--local-textlayer-witness"], {}, True),
     "vote+columns": (["--local-vote", "--local-columns"], {}, True),
     "enhance": (["--local-enhance", "contrast"], {}, False),
     "fast": (["--local-engine-plan", "fast"], {}, False),
 }
-DEFAULT_SETS = ("sequential", "default", "vote", "columns", "vote+columns")
+DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")
 ANSWER_SUFFIXES = (".hwpx", ".hwp", ".docx", ".txt")
 PRINTED_SIMILARITY = 0.9
 

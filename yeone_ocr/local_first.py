@@ -355,7 +355,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                                                                    memory=memory_status())}
         from .local_options import FastPlan, apply_votes, is_blank
         defaults = {"engine_plan": ("local_engine_plan", "all"), "vote": ("local_vote", False),
-                    "columns": ("local_columns", False), "textlayer_witness": ("local_textlayer_witness", False),
+                    "columns": ("local_columns", True), "textlayer_witness": ("local_textlayer_witness", False),
                     "skip_blank": ("local_skip_blank", False), "enhance": ("local_enhance", "none"),
                     "ai_batch": ("local_ai_batch", 1)}
         options = {}
@@ -379,7 +379,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             if cli.CANCEL.is_set():
                 return 130
             started = time.perf_counter()
-            extras = {"columns": options.get("columns", False), "options": options or None,
+            extras = {"columns": bool(getattr(args, "local_columns", True)), "options": options or None,
                       "witness": witness_text(number) if options.get("textlayer_witness") else None}
             old = work.load_record(number)
             if _protected_record(work, number, old) and not getattr(args, "force", False):
