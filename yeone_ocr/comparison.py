@@ -1692,7 +1692,7 @@ def _effective_device(run):
 
 def run_page(project, number, profile="traditional", direction="horizontal", dpi=300,
              should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
-              engines=None, primary_engine=None, recognizer=None, device=None, parallel=1):
+              engines=None, primary_engine=None, recognizer=None, device=None, parallel=1, input_enhancement=None):
     """Run an explicit local engine set; legacy callers still run three engines.
 
     A failed engine never removes successful raw results or human edits.  Model
@@ -1731,6 +1731,8 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
     request = _request(profile, direction, dpi, engine_root)
     if device is not None:
         request["device"] = device
+    if input_enhancement is not None:
+        request["input_enhancement"] = input_enhancement   # a different input: never reuse unenhanced runs
     outcome = {"completed": [], "errors": {}, "cancelled": False, "skipped": [], "unsupported": {}}
     with project._lock:
         page = project._page(number)

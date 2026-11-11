@@ -119,6 +119,22 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(self.record()["local_grades"],
                          [{"region_id": "local-line-1", "para": 0, "start": 0, "end": 4, "grade": "blue"}])
 
+    def test_skip_blank_reads_no_engine_and_saves_an_empty_record(self):
+        self.assertEqual(command(self.args("--local-skip-blank")), 0)
+        self.assertEqual(self.local_calls, [])
+        rec = self.record()
+        self.assertEqual((rec["model"], rec["local_first"]["review"]["status"]), ("blank-page", "blank-page"))
+        self.assertEqual(rec["merged"]["regions"], [])
+        self.assertEqual(self.calls, [])
+
+    def test_options_are_recorded_and_ai_batch_reaches_the_plan(self):
+        self.confidence = 20
+        self.assertEqual(command(self.args("--local-ai-batch", "3", "--local-columns")), 0)
+        rec = self.record()
+        self.assertEqual(rec["local_first"]["options"], {"columns": True, "ai_batch": 3})
+        project = ComparisonProject.load(rec["local_first"]["project_path"])
+        self.assertEqual(project.page(1)["ai_reviews"][0]["policy"]["batch_size"], 3)
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

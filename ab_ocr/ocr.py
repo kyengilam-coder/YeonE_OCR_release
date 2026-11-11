@@ -302,6 +302,42 @@ def _engine_metadata(info: dict, selected: list[str]) -> dict:
     return metadata
 
 
+ENHANCEMENTS = ("contrast",)
+_ENHANCEMENT = {"mode": None}
+
+
+@contextmanager
+def input_enhancement(mode):
+    """Apply one pixel enhancement to every page render inside the block.
+
+    "contrast": per-channel autocontrast with 0.5 % clipping (geometry and size
+    unchanged, so boxes stay valid). Engines, previews and review crops all
+    render through _render, so they see the same pixels; the mode is recorded
+    in each result's preprocessing details.
+    """
+    if mode not in (None, *ENHANCEMENTS):
+        raise ValueError("지원하지 않는 입력 보정입니다: " + str(mode))
+    with _RENDER_LOCK:
+        previous, _ENHANCEMENT["mode"] = _ENHANCEMENT["mode"], mode
+    try:
+        yield
+    finally:
+        with _RENDER_LOCK:
+            _ENHANCEMENT["mode"] = previous
+
+
+def _enhance(destination: Path, details: dict) -> None:
+    mode = _ENHANCEMENT["mode"]
+    if mode is None:
+        return
+    from PIL import Image, ImageOps
+    with Image.open(destination) as image:
+        enhanced = ImageOps.autocontrast(image.convert("RGB"), cutoff=0.5)
+        info = {"dpi": image.info["dpi"]} if "dpi" in image.info else {}
+    enhanced.save(destination, **info)
+    details["enhancement"] = {"mode": mode, "method": "PIL.ImageOps.autocontrast", "cutoff_percent": 0.5}
+
+
 _RENDER_CACHE = {"depth": 0, "folder": None, "items": {}}
 _RENDER_LOCK = threading.RLock()
 RENDER_CACHE_PAGES = 3
@@ -336,7 +372,7 @@ def _render(source: Path, destination: Path, page_number: int, dpi: int, *, deta
         if not _RENDER_CACHE["depth"] or type(page_number) is not int or type(dpi) is not int:
             return _render_uncached(source, destination, page_number, dpi, details=details)
         items, folder = _RENDER_CACHE["items"], Path(_RENDER_CACHE["folder"].name)
-        key = (stable_file_sha256(source), source.suffix.lower(), page_number, dpi)
+        key = (stable_file_sha256(source), source.suffix.lower(), page_number, dpi, _ENHANCEMENT["mode"])
         entry = items.get(key)
         if entry is not None and entry["path"].is_file():
             shutil.copyfile(entry["path"], destination)
@@ -381,6 +417,7 @@ def _render_uncached(source: Path, destination: Path, page_number: int, dpi: int
             pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
             pixmap.save(destination)
             details.update(input_type="pdf", render_dpi=dpi, colorspace="RGB", annotation_rendering=True)
+            _enhance(destination, details)
             return pixmap.width, pixmap.height
     with Image.open(source) as image:
         if page_number > getattr(image, "n_frames", 1):
@@ -408,6 +445,7 @@ def _render_uncached(source: Path, destination: Path, page_number: int, dpi: int
             image = Image.alpha_composite(background, rgba)
             details["alpha_background"] = "white"
         image.convert("RGB").save(destination, dpi=(dpi, dpi))
+        _enhance(destination, details)
         return image.width, image.height
 
 

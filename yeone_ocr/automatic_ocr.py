@@ -216,7 +216,8 @@ def assess_readings(runs, profile):
 
 def run_automatic_page(project, number, profile="traditional", direction="horizontal", dpi=300,
                        should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
-                       recognizer=None, parallel=1, resident=(), gpu_engines=False):
+                       recognizer=None, parallel=1, resident=(), gpu_engines=False, only=None,
+                       input_enhancement=None):
     from .comparison import ComparisonError, latest_runs, run_page
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ComparisonError("렌더링 DPI와 엔진 제한 시간을 확인하세요.")
@@ -232,10 +233,14 @@ def run_automatic_page(project, number, profile="traditional", direction="horizo
         return {"completed": [], "errors": {}, "cancelled": True, "skipped": [], "unsupported": {}}
     if not engines:
         raise ComparisonError("선택한 문서 종류를 읽을 로컬 엔진이 없습니다. 설치 확인에서 언어 모델을 확인하세요.")
+    if only:
+        narrowed = [engine for engine in engines if engine in only]
+        engines = narrowed or engines
     if callable(parallel):
         parallel = parallel(engines)
     outcome = run_page(project, number, profile, direction, dpi, should_stop, on_result, timeout,
-                       engine_root, force=force, engines=engines, recognizer=recognizer, parallel=parallel)
+                       engine_root, force=force, engines=engines, recognizer=recognizer, parallel=parallel,
+                       **({"input_enhancement": input_enhancement} if input_enhancement else {}))
     outcome["unavailable"] = excluded
     if outcome["cancelled"] or (should_stop and should_stop()):
         outcome["cancelled"] = True

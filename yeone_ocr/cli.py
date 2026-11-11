@@ -2772,6 +2772,16 @@ def build_parser():
     p.add_argument("--local-profile", choices=("traditional", "simplified", "mixed"), default="traditional")
     p.add_argument("--local-ai-review", action=argparse.BooleanOptionalAction, default=True,
                    help="로컬 인식의 불일치·어려운 구간만 선택한 AI로 검증(키가 없으면 대상으로 보관)")
+    p.add_argument("--local-engine-plan", choices=("all", "fast"), default="all",
+                   help="(시험) fast=처음 5쪽은 모든 엔진, 그 뒤로는 이긴 엔진 1~2개만 먼저 읽고 점수가 낮은 쪽만 모든 엔진으로 다시")
+    p.add_argument("--local-vote", action="store_true", help="(시험) 엔진 3개 이상 중 과반이 같게 읽은 글자를 기준 판독 대신 채택(초록, 되돌릴 수 있음)")
+    p.add_argument("--local-columns", action="store_true", help="(시험) 가로쓰기 두 단 쪽을 문서에서 왼쪽 단·오른쪽 단 차례로 놓음(비교 프로젝트의 글 순서는 그대로)")
+    p.add_argument("--local-textlayer-witness", action="store_true", help="(시험) PDF에 있던 글자층이 다르게 읽은 글자를 파랑으로 표시")
+    p.add_argument("--local-skip-blank", action="store_true", help="(시험) 어두운 화소가 거의 없는 빈 쪽은 엔진을 실행하지 않음")
+    p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",
+                   help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
+    p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=1,
+                   help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본 1). 늘리면 호출 수가 줄지만 정확도는 측정 전")
     p.add_argument("--local-engine-parallel", type=int, choices=range(0, 9), metavar="0-8", default=0,
                    help="로컬 우선 인식에서 한 쪽을 동시에 읽을 엔진 수(0=코어·메모리로 자동, 1=차례로)")
     p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,

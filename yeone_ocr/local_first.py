@@ -100,7 +100,7 @@ def _review_summary(project, number):
 GRADE_RANK = {"green": 1, "blue": 2, "red": 3}
 
 
-def _local_grades(project, number, run, current):
+def _local_grades(project, number, run, current, witness=None):
     """Per-character check grades for a local-first page (text coordinates of ``current``).
 
     red   = engines disagree on the glyphs (not whitespace only), an unknown
@@ -108,6 +108,8 @@ def _local_grades(project, number, run, current):
     blue  = the selected engine's own confidence is below its routing threshold
     green = the text differs from the selected engine's reading (an accepted
             candidate, AI proposal or human edit)
+    With ``witness`` (an existing PDF text layer, --local-textlayer-witness),
+    glyphs it reads differently are blue too.
     Stronger grades win. Spans that no longer map onto the current text are
     left unpainted rather than guessed.
     """
@@ -144,6 +146,10 @@ def _local_grades(project, number, run, current):
                     span = mapped(i, i + 1)
                     if span:
                         paint(*span, "blue")
+    if witness:
+        from .local_options import witness_spans
+        for start, end in witness_spans(current, witness):
+            paint(start, end, "blue")
     page = project.page(number)
     for suggestion in page.get("suggestions", []):
         if suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace":
@@ -176,8 +182,9 @@ def _local_grades(project, number, run, current):
     return out
 
 
-def _record(project, number, args, work, started, review):
+def _record(project, number, args, work, started, review, extras=None):
     from .local_reading import reading_from_run
+    extras = extras or {}
     run = _selected(project, number)
     if run is None:
         raise ValueError("로컬 기준 판독이 없습니다.")
@@ -185,6 +192,9 @@ def _record(project, number, args, work, started, review):
     raw = run["raw"]
     first = reading_from_run(raw, number, direction)
     merged = reading_from_run(raw, number, direction, text=project.text(number))
+    if extras.get("columns") and direction == "horizontal":
+        from .local_options import column_order
+        merged.regions = column_order(merged.regions)       # document order only; the project text keeps engine order
     offset = getattr(args, "print_offset", None)
     if offset is not None:
         merged.print_page = first.print_page = str(number + offset)
@@ -206,7 +216,7 @@ def _record(project, number, args, work, started, review):
                 usage[key] += value
     merged_data = merged.model_dump()
     try:
-        local_grades = _local_grades(project, number, run, project.text(number))
+        local_grades = _local_grades(project, number, run, project.text(number), witness=extras.get("witness"))
     except Exception:
         local_grades = []                                    # grades are display only; never lose the reading for them
     return {"file": Path(args.pdf).name, "pdf_page": number, "version": __version__,
@@ -219,10 +229,32 @@ def _record(project, number, args, work, started, review):
             "textlayer_diff": {}, "merge_stats": {}, "timings": {}, "crops": {}, "local_grades": local_grades,
             "local_first": {"project_path": str(project.project_path), "source_sha256": project.source_sha256,
                             "baseline_run_id": run["id"], "profile": args.local_profile,
-                            "review": copy.deepcopy(review), "ai_proposals": proposals}}
+                            "review": copy.deepcopy(review), "ai_proposals": proposals,
+                            **({"options": copy.deepcopy(extras["options"])} if extras.get("options") else {})}}
 
 
-def _save_record(project, number, args, work, started, review, *, render=True):
+def _blank_record(project, number, args, work, started):
+    """A page with (almost) no ink, read by no engine (--local-skip-blank)."""
+    from .schema import PageReading
+    reading = PageReading(pdf_page=number, page_note="빈 쪽으로 판정해 로컬 OCR을 건너뛰었습니다(--local-skip-blank). 글자가 있으면 이 옵션 없이 다시 인식하세요.")
+    offset = getattr(args, "print_offset", None)
+    if offset is not None:
+        reading.print_page = str(number + offset)
+    data = reading.model_dump()
+    return {"file": Path(args.pdf).name, "pdf_page": number, "version": __version__,
+            "pipeline": POLICY, "reader": "local", "model": "blank-page", "mode": args.mode,
+            "image_frame": "full-page", "image_source": "로컬 OCR 전체 쪽 렌더링", "upscale": 1,
+            "read_at": time.strftime("%Y-%m-%d %H:%M:%S"), "seconds": round(time.perf_counter() - started, 2),
+            "pass1": copy.deepcopy(data), "pass2": {}, "merged": data, "derived_reading_sha256": _digest(data),
+            "usage": {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}, "verify": [],
+            "coverage_notes": ["빈 쪽 판정: 어두운 화소가 거의 없어 엔진을 실행하지 않았습니다."],
+            "textlayer_diff": {}, "merge_stats": {}, "timings": {}, "crops": {}, "local_grades": [],
+            "local_first": {"project_path": str(project.project_path), "source_sha256": project.source_sha256,
+                            "baseline_run_id": None, "profile": args.local_profile, "blank_page": True,
+                            "review": {"status": "blank-page", "targets": 0, "calls": 0}, "ai_proposals": []}}
+
+
+def _save_record(project, number, args, work, started, review, *, render=True, extras=None):
     from ab_ocr.ocr import render_page
     from . import cli
     # The preview must use the same pixels and frame as local recognition.
@@ -230,7 +262,7 @@ def _save_record(project, number, args, work, started, review, *, render=True):
         with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
             cli._save_png_atomic(image, work.page_image_path(number))
         write_atomic(work.pages_dir / f"p{number:03d}.src.txt", "로컬 OCR 전체 쪽 렌더링")
-    record = _record(project, number, args, work, started, review)
+    record = _record(project, number, args, work, started, review, extras)
     if work.load_record(number):
         work.backup_record(number)
     work.save_record(number, record)
@@ -254,7 +286,10 @@ def command(args, *, work=None, doc=None):
     from .engine_pool import EnginePool
     # One page is rendered for every engine, the preview and the review crops;
     # engine workers stay loaded across pages.
-    with render_cache(), EnginePool(should_stop=cli.CANCEL.is_set, log=cli.log) as pool:
+    from ab_ocr.ocr import input_enhancement
+    enhancement = getattr(args, "local_enhance", "none")
+    enhancement = None if enhancement in (None, "none") else enhancement
+    with render_cache(), input_enhancement(enhancement), EnginePool(should_stop=cli.CANCEL.is_set, log=cli.log) as pool:
         return _command(args, work=work, doc=doc, pool=pool)
 
 
@@ -313,13 +348,39 @@ def _command(args, *, work=None, doc=None, pool=None):
             requested = getattr(args, "local_engine_parallel", 0) or 0
             resident = pool.resident()
             from .automatic_ocr import gpu_engines_enabled
+            mode = getattr(args, "local_enhance", "none")
             return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu_engines_enabled(),
+                    **({"input_enhancement": mode} if mode not in (None, "none") else {}),
                     "parallel": lambda engines: engine_parallelism(engines, requested, resident=resident,
                                                                    memory=memory_status())}
+        from .local_options import FastPlan, apply_votes, is_blank
+        defaults = {"engine_plan": ("local_engine_plan", "all"), "vote": ("local_vote", False),
+                    "columns": ("local_columns", False), "textlayer_witness": ("local_textlayer_witness", False),
+                    "skip_blank": ("local_skip_blank", False), "enhance": ("local_enhance", "none"),
+                    "ai_batch": ("local_ai_batch", 1)}
+        options = {}
+        for option, (name, default) in defaults.items():
+            value = getattr(args, name, default)
+            if value is not None and (type(value), value) != (type(default), default):
+                options[option] = value
+        if options:
+            cli.log("  선택 옵션(측정 전 시험 기능): " + ", ".join(f"{k}={v}" for k, v in options.items()))
+        fast = FastPlan() if options.get("engine_plan") == "fast" else None
+
+        def witness_text(number):
+            from .pdfio import text_layer
+            try:
+                with cli.DOC_LOCK:
+                    return text_layer(doc, number).plain()
+            except Exception:
+                return None
+
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
             started = time.perf_counter()
+            extras = {"columns": options.get("columns", False), "options": options or None,
+                      "witness": witness_text(number) if options.get("textlayer_witness") else None}
             old = work.load_record(number)
             if _protected_record(work, number, old) and not getattr(args, "force", False):
                 cli.log(f"  {number}쪽: 기존 판독·사람 교정 보존(다시 인식하려면 강제 재판독)")
@@ -332,10 +393,45 @@ def _command(args, *, work=None, doc=None, pool=None):
             try:
                 if not work.source_matches(args.dpi):
                     raise ComparisonError("처리 중 원본이 변경되었습니다. 다시 열어주세요.")
-                outcome = run_automatic_page(project, number, profile=args.local_profile,
-                    direction="horizontal" if args.mode == "horizontal_zh" else "vertical", dpi=args.dpi,
-                    engine_root=getattr(args, "local_engine_root", None), force=getattr(args, "force", False),
-                    should_stop=cli.CANCEL.is_set, on_result=saver.maybe, **engine_options())
+                if options.get("skip_blank"):
+                    from ab_ocr.ocr import render_page
+                    with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
+                        blank = is_blank(image)
+                        if blank:
+                            cli._save_png_atomic(image, work.page_image_path(number))
+                    if blank:
+                        write_atomic(work.pages_dir / f"p{number:03d}.src.txt", "로컬 OCR 전체 쪽 렌더링")
+                        if work.load_record(number):
+                            work.backup_record(number)
+                        work.save_record(number, _blank_record(project, number, args, work, started))
+                        work.set_status(number, "1차 OCR 완료")
+                        summaries[str(number)] = {"status": "blank-page", "targets": 0, "calls": 0}
+                        completed.append(number)
+                        cli.page_event(number, "done")
+                        cli.log(f"  {number}쪽: 빈 쪽 — 엔진 건너뜀")
+                        cli.progress("read", index, len(pages))
+                        continue
+
+                def read(only=None):
+                    return run_automatic_page(project, number, profile=args.local_profile,
+                        direction="horizontal" if args.mode == "horizontal_zh" else "vertical", dpi=args.dpi,
+                        engine_root=getattr(args, "local_engine_root", None), force=getattr(args, "force", False),
+                        should_stop=cli.CANCEL.is_set, on_result=saver.maybe, **engine_options(),
+                        **({"only": only} if only else {}))
+                only = fast.engines() if fast is not None else None
+                outcome = read(only)
+                if only and not outcome.get("cancelled") and FastPlan.needs_fallback(outcome.get("selection")):
+                    cli.log(f"  {number}쪽: 줄인 엔진({', '.join(only)})의 점수가 낮아 모든 엔진으로 다시 읽음")
+                    only = None
+                    outcome = read()
+                if fast is not None and not outcome.get("cancelled"):
+                    fast.observe(outcome.get("selection"), narrowed=bool(only))
+                    if fast.seen == fast.sample and not only and fast.engines():
+                        cli.log(f"  표본 {fast.sample}쪽 뒤로는 {', '.join(fast.engines())} 엔진만 먼저 읽습니다(--local-engine-plan fast)")
+                if options.get("vote") and not outcome.get("cancelled"):
+                    voted = apply_votes(project, number)
+                    if voted:
+                        cli.log(f"  {number}쪽: 엔진 다수결로 {voted}곳 채택(초록, 비교·교정 창에서 되돌릴 수 있음)")
                 saver.save()
                 if outcome.get("cancelled"):
                     return 130
@@ -347,10 +443,11 @@ def _command(args, *, work=None, doc=None, pool=None):
                         or _run_profile(selected) != expected or selected.get("request", {}).get("dpi") != args.dpi):
                     raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
                 # Checkpoint local output BEFORE preparing or sending any API call.
-                _save_record(project, number, args, work, started, review)
+                _save_record(project, number, args, work, started, review, extras=extras)
                 settings = _settings(args, cap)
                 try:
-                    plan = prepare_plan(project, [number], ReviewPolicy(selective=True), settings=settings,
+                    plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1),
+                                        settings=settings,
                                         should_stop=cli.CANCEL.is_set)
                 except AIReviewError as exc:
                     review.update(status="pending", error=str(exc))
@@ -375,7 +472,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                     else:
                         cli.log(f"  {number}쪽: 의심 구간 {plan.summary['targets']}개 · API 최대 {plan.summary['calls']}회")
                         review["status"] = "reviewing"
-                        _save_record(project, number, args, work, started, review, render=False)
+                        _save_record(project, number, args, work, started, review, render=False, extras=extras)
                         checkpoints = [0]
                         def checkpoint(_value):
                             project.save()
@@ -391,11 +488,11 @@ def _command(args, *, work=None, doc=None, pool=None):
                         project.save()
                         if result["cancelled"]:
                             review["status"] = "cancelled"
-                            _save_record(project, number, args, work, started, review, render=False)
+                            _save_record(project, number, args, work, started, review, render=False, extras=extras)
                             return 130
                 if not work.source_matches(args.dpi):
                     raise ComparisonError("처리 중 원본이 변경되어 출력 기록을 갱신하지 않았습니다.")
-                _save_record(project, number, args, work, started, review, render=False)
+                _save_record(project, number, args, work, started, review, render=False, extras=extras)
                 summaries[str(number)] = review
                 completed.append(number)
                 cli.page_event(number, "done")
