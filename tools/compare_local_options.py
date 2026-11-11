@@ -69,6 +69,8 @@ SETS = {
     "glmocr-vertical": (["--local-exclude-engines", "surya"], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),  # GLM-OCR instead of Surya
     "korean-models": ([], {"YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),   # trial: Korean-only CPU models on mixed pages
     "all-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1", "YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),
+    # Claude subscription review (claude -p) of the suspicious spans, its certain proposals applied.
+    "ai-subscription": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100"], {}, False),
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")
@@ -293,7 +295,7 @@ def run_set(name, doc, args, out_dir):
             "--local-profile", doc["profile"], "--mode", doc.get("mode", "auto"), "--pages", spec_of(doc["pages"]), *extra]
     if args.engine_root:
         argv += ["--local-engine-root", str(args.engine_root)]
-    if not args.ai:
+    if not args.ai and "--local-ai-auth" not in extra:
         argv.append("--no-local-ai-review")
     env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
     started = time.perf_counter()

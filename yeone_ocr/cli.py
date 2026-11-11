@@ -2782,6 +2782,11 @@ def build_parser():
     p.add_argument("--local-skip-blank", action="store_true", help="(시험) 어두운 화소가 거의 없는 빈 쪽은 엔진을 실행하지 않음")
     p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",
                    help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
+    p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
+                   help="Claude 검증 연결 방식. subscription=PC에 로그인된 Claude Code(claude -p)로 구독 사용량에서 차감(API 요금 없음, 개인 사용), "
+                        "api=API 키만, auto(기본)=Claude에 API 키가 없으면 로그인된 Claude Code. 환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
+    p.add_argument("--local-ai-accept", action="store_true",
+                   help="(시험) AI 검증이 확신한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 측정용")
     p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=1,
                    help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본 1). 늘리면 호출 수가 줄지만 정확도는 측정 전")
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,

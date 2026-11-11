@@ -1017,7 +1017,17 @@ def _gemini_thinking_level(settings):
 
 
 def create_client(settings, api_key):
-    """Existing SDK factories, with one explicit key/model and no probing."""
+    """Existing SDK factories, with one explicit key/model and no probing.
+
+    SUBSCRIPTION_KEY instead of a key: Claude through the signed-in Claude Code CLI (claude_subscription)."""
+    from .claude_subscription import SUBSCRIPTION_KEY, SubscriptionClient, SubscriptionError
+    if api_key == SUBSCRIPTION_KEY:
+        if settings.provider != "anthropic":
+            raise AIReviewError("구독 계정 연결은 Claude(Anthropic)에서만 쓸 수 있습니다.")
+        try:
+            return SubscriptionClient()
+        except SubscriptionError as exc:
+            raise AIReviewError(str(exc)) from exc
     if not isinstance(api_key, str) or not api_key.strip() or any(c.isspace() for c in api_key.strip()) or "," in api_key:
         raise AIReviewError("선택한 제공사의 API 키 하나를 명시하세요.")
     if settings.provider == "gemini":
@@ -1046,6 +1056,18 @@ def _request(client, settings, prompt, images, *, response_schema=None):
         complete = getattr(response, "status", "completed") == "completed" and not refusals
         finish_reason = getattr(response, "status", None)
         usage = getattr(response, "usage", None)
+    elif settings.provider == "anthropic" and getattr(client, "subscription", False):
+        from types import SimpleNamespace
+        from .claude_subscription import SubscriptionError
+        try:
+            text, complete, finish_reason, tokens, actual = client.request(
+                model_name=settings.model, system=SYSTEM, prompt=prompt, images=images, schema=response_schema)
+        except SubscriptionError as exc:
+            error = AIReviewError(str(exc))
+            error.fatal = True                      # not signed in, plan limit reached, CLI missing
+            raise error from exc
+        usage = SimpleNamespace(**tokens)
+        response = SimpleNamespace(model=actual)
     elif settings.provider == "anthropic":
         parts = [{"type": "text", "text": prompt + "\nJSON Schema:\n" + json.dumps(response_schema)}]
         parts += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(content).decode("ascii")}} for content in images]
@@ -1091,6 +1113,8 @@ def _request(client, settings, prompt, images, *, response_schema=None):
                 "response_schema_sha256": _hash(response_schema)}
     if isinstance(finish_reason, str) and len(finish_reason) <= 80:
         metadata["finish_reason"] = finish_reason
+    if getattr(client, "subscription", False):
+        metadata["transport"] = "claude-code-subscription"   # plan limits, no per-token charge
     if refusals:
         raw_refusal = "\n".join(refusals)
         metadata.update(refusal=True, refusal_text=raw_refusal[:64_000], refusal_text_sha256=_text_hash(raw_refusal),
@@ -1137,7 +1161,7 @@ def _assert_scope(project, plan):
 
 def _fatal_request_error(exc):
     code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    return code in (400, 401, 403, 404, 422, 429) or isinstance(exc, (OSError, TimeoutError, ConnectionError)) or type(exc).__module__.split(".")[0] in ("httpx", "httpcore")
+    return getattr(exc, "fatal", False) or code in (400, 401, 403, 404, 422, 429) or isinstance(exc, (OSError, TimeoutError, ConnectionError)) or type(exc).__module__.split(".")[0] in ("httpx", "httpcore")
 
 
 def run_plan(project, plan, *, api_key, should_stop=None, on_result=None, client_factory=None):

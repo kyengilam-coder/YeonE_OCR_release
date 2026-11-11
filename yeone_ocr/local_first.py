@@ -272,6 +272,27 @@ def _save_record(project, number, args, work, started, review, *, render=True, e
     return record
 
 
+def _accept_ai(project, number) -> dict:
+    """(Trial, --local-ai-accept) apply every applicable, certain AI proposal to the page text.
+    Recorded like a manual acceptance (reversible); for measuring what the review changes.
+    Proposals the safety checks hold (no engine or image support, uncertain) are counted, not applied."""
+    from .comparison import ComparisonError
+    accepted, held = 0, 0
+    for proposal in project.ai_proposals(number):
+        if not proposal.get("applicable") or proposal.get("uncertain"):
+            held += 1
+            continue
+        try:
+            project.accept_ai_proposal(number, proposal["review_id"], proposal["id"])
+        except ComparisonError:
+            held += 1
+            continue
+        accepted += 1
+    if accepted:
+        project.save()
+    return {"accepted": accepted, "held": held}
+
+
 def _settings(args, remaining):
     from .comparison_ai import AISettings
     from .providers import default_model
@@ -338,6 +359,21 @@ def _command(args, *, work=None, doc=None, pool=None):
         review_enabled = bool(getattr(args, "local_ai_review", True))
         keys = split_keys(args.reader, environment_key(args.reader)) if review_enabled else []
         key = keys[0] if keys else ""
+        if review_enabled:
+            # Claude through the signed-in Claude Code CLI (personal plan, no API charge): claude_subscription.
+            from . import claude_subscription as subscription
+            requested = getattr(args, "local_ai_auth", None)
+            provider = "anthropic" if subscription.auth_mode(requested) == "subscription" else args.reader
+            use, note = subscription.choose(requested, provider, key if provider == args.reader else "")
+            if use:
+                chosen = getattr(args, "model", None) or ""
+                args.reader = "anthropic"
+                args.model = subscription.model(chosen if chosen.startswith("claude") or chosen in ("opus", "sonnet", "haiku") else None)
+                key = subscription.SUBSCRIPTION_KEY
+            elif provider != args.reader or subscription.auth_mode(requested) == "subscription":
+                key = ""                    # asked for the plan: never fall back to a paid API key
+            if note:
+                cli.log("  " + note + (f" · 모델 {args.model}" if use else ""))
         calls, failed, incomplete, completed = 0, [], [], []
         cli.LOCAL_API_CALLS = 0
         summaries = {}
@@ -374,7 +410,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                     "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", False),
                     "exclude_engines": ("local_exclude_engines", []), "easyocr": ("local_easyocr", None),
                     "easyocr_threads": ("local_easyocr_threads", 2),
-                    "easyocr_batch": ("local_easyocr_batch", 1)}
+                    "easyocr_batch": ("local_easyocr_batch", 1), "ai_accept": ("local_ai_accept", False)}
         options = {}
         for option, (name, default) in defaults.items():
             value = getattr(args, name, default)
@@ -498,6 +534,9 @@ def _command(args, *, work=None, doc=None, pool=None):
                         result = run_plan(project, plan, api_key=key, should_stop=cli.CANCEL.is_set,
                                           on_result=checkpoint)
                         calls += result["calls"]
+                        if getattr(args, "local_ai_accept", False):
+                            review["ai_accept"] = _accept_ai(project, number)
+                            cli.log(f"  {number}쪽: AI 제안 반영 {review['ai_accept']['accepted']}개 · 보류 {review['ai_accept']['held']}개")
                         cli.LOCAL_API_CALLS = calls
                         review.update(status="failed" if result["failed"] else "reviewed", outcome=result)
                         if result["failed"] or unresolved:

@@ -162,6 +162,41 @@ class LocalFirstTests(unittest.TestCase):
             command(self.args("--local-exclude-engines", "tesseract", "--force"))
         self.assertEqual(seen, [("easyocr",), (), ("easyocr", "tesseract")])
 
+    def test_subscription_review_runs_through_the_signed_in_cli(self):
+        from yeone_ocr import claude_subscription as subscription
+        self.confidence = 20
+        seen = []
+        harness = self
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                harness.calls.append(model_name)
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "end_turn", {"input_tokens": 3}, model_name
+
+        def factory(settings, key):
+            seen.append((settings.provider, settings.model, key))
+            return FakeCLI()
+        with patch("yeone_ocr.comparison_ai.create_client", side_effect=factory), \
+                patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept")), 0)
+        self.assertEqual(seen[0], ("anthropic", "opus", subscription.SUBSCRIPTION_KEY))
+        self.assertEqual(self.calls, ["opus"])
+        rec = self.record()
+        self.assertEqual(rec["local_first"]["review"]["ai_accept"], {"accepted": 0, "held": 0})
+        self.assertEqual(rec["local_first"]["options"], {"ai_accept": True})
+
+    def test_subscription_mode_without_sign_in_keeps_the_review_pending(self):
+        from yeone_ocr import claude_subscription as subscription
+        self.confidence = 20
+        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):  # OpenAI key present
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription")), 4)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

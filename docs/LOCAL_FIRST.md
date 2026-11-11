@@ -144,3 +144,27 @@ EasyOCR은 예전 엔진 비교에서 번체의 **문장부호까지 포함한**
 - 세로쓰기는 EasyOCR 전용 처리(열 재배열·보조 모델)가 있고 아직 측정하지 않아 지금처럼 씁니다. `--no-local-easyocr`로 뺄 수 있습니다.
 - 측정 문서는 모두 PDF 글자층이 정답과 거의 같은 깨끗한 문서였습니다.
 - EasyOCR 스레드·묶음 조정(`--local-easyocr-threads 6 --local-easyocr-batch 8`)은 결과가 같고 5% 빨라지는 데 그쳐 기본값을 바꾸지 않았습니다.
+
+## Claude 구독 계정으로 의심 구간 검증 (2026-11)
+
+연어 포토 에디터(docs/07-claude-subscription.md)와 같은 방식입니다. 이 PC에 설치된 공식 Claude Code에 사용자가 직접 로그인해 두면, 연어OCR은 `claude -p`를 실행만 합니다. 토큰을 읽거나 저장하지 않고, 사용량은 Pro/Max 요금제 한도(5시간·주간)에서 차감됩니다(API 요금 없음). **개인 사용 전용**입니다. 남에게 배포하는 프로그램이라면 API 키를 쓰세요.
+
+준비(한 번):
+
+```powershell
+irm https://claude.ai/install.ps1 | iex     # 공식 설치본 claude.exe (npm의 claude.cmd는 명령줄 길이 제한으로 안 됨)
+claude auth login                           # 브라우저에서 Claude 계정 로그인
+claude auth status                          # "authMethod": "claude.ai", "subscriptionType": "max" 확인
+```
+
+- `--local-ai-auth subscription`: 로그인된 Claude Code로만 검증합니다. 로그인이 안 되어 있으면 이유를 알리고 검증을 보류하며, 유료 API 키로 넘어가지 않습니다.
+- `--local-ai-auth auto`(기본): `--reader anthropic`인데 API 키가 없으면 로그인된 Claude Code를 씁니다. 다른 제공사는 그대로입니다.
+- `--local-ai-auth api`: API 키만 씁니다.
+- 모델은 `YEONE_OCR_CLAUDE_MODEL`(기본 `opus`), 생각 수준은 `YEONE_OCR_CLAUDE_EFFORT`(기본 `medium`), 호출 제한 시간은 `YEONE_OCR_CLAUDE_CLI_TIMEOUT`(기본 300초)로 바꿉니다.
+- 이 앱만 따로 로그인하려면 `YEONE_OCR_CLAUDE_CONFIG_DIR`을 지정하고 같은 폴더로 `claude auth login`을 합니다.
+- Claude Code에는 도구·MCP·사용자 설정·세션 기록을 모두 끄고 빈 작업 폴더에서 실행합니다. 환경의 `ANTHROPIC_API_KEY`는 자식 프로세스에 넘기지 않습니다(-p 모드에서는 키가 로그인보다 우선하기 때문).
+- 로그인 만료·한도 도달처럼 다시 해도 안 되는 오류는 그 쪽의 남은 호출을 멈추고, 쪽은 "확인 필요"로 남깁니다.
+
+시험 반영 `--local-ai-accept`: AI 제안은 원래 비교·교정 창에서 사람이 고르는 "제안"입니다. 이 옵션은 확신한 제안 가운데 안전 검사(엔진·이미지 근거)를 통과한 것만 본문에 바로 반영해(초록, 되돌릴 수 있음) 측정할 수 있게 합니다. 쪽 기록 `local_first.review.ai_accept`에 반영·보류 개수가 남습니다.
+
+측정 세트 `ai-subscription` = `--local-ai-auth subscription --local-ai-accept --local-ai-max-calls 100`.
