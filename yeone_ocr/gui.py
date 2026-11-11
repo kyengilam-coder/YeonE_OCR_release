@@ -554,6 +554,7 @@ TAG_TIP = "[아니요]면 뺌: 실행 전 비용 창에서 [아니요]를 누르
 LEDGER_GROUPS = (("판독", "1차·2차", ("read1", "read2")), ("모델 단계", "", ("glyph", "suspect", "choice")))   # 장부 묶음(비용 창의 run 묶음과 같은 단계)
 PAGE_CMDS = ("run", "run-pdf", "read")       # 쪽 띠를 쪽 알림(cli.PAGE_EVENT)으로 움직이는 명령 — 이 탭 원본의 쪽을 판독한다
 # 설정 탭(디자인 명세 §6.3): 바닥 알림 줄의 평소 글 · 문서 짜임에 따라 바뀌는 줄 설명 · 책별 설정의 저장 상태(이 책의 설정 판과 같은 말)
+PKG_OK = ("패키지 모두 있음", "설치 구성요소 모두 있음")              # 명령 띠에 적지 않는 정상 상태(_fit_pkg)
 SETTINGS_NOTE = "바꾼 설정은 다음 실행에 적용됩니다. [설정 저장]으로 다음 시작에도 유지할 수 있습니다."
 PB_DESC = {False: "원본 쪽대로 만들 때 원본 한 쪽마다 한글 쪽을 나눔", True: "원본 쪽대로 만들 때만 · 이 책은 내용별이라 쓰지 않음"}
 TPL_DESC = "내용별 문서를 채울 양식 · 비우면 기본 모양 · 이름에 마우스를 올리면 전체 경로"
@@ -3169,6 +3170,12 @@ class App(tk.Tk):
             return
         w["stacked"] = stacked; body, P = w["body"], self.px
         sp = w.get("simple_pages")
+        tg = w.get("row_toggle")                                      # 실행 중 접힌 줄의 '이 책의 설정 · 잠김 ▸' — 판이 없는 간단히 보기에서는 뺀다
+        if tg is not None:
+            if simple:
+                tg.pack_forget()
+            elif not tg.winfo_manager():
+                tg.pack(side="right", padx=(0, P(12)))
         if simple:
             body.columnconfigure(0, weight=1, uniform=""); body.columnconfigure(1, weight=0, uniform="")
             w["ident"].grid(row=0, column=0, sticky="nsew"); w["panel"].grid_remove()
@@ -7387,6 +7394,11 @@ class App(tk.Tk):
         """머리띠의 패키지 상태 글을 남은 너비에 맞춘다: 전체 → ' → ' 앞 → 그 앞을 '…' 로 줄임(상태와 수가 남게). 풍선 도움말은 늘 전체 글."""
         full = self.v_pkg.get(); lab = self._pkg_label
         self._pkg_tip.text = full
+        if full in PKG_OK:                                              # 문제가 없으면 명령 띠를 비워 둔다(점검 중·오류·업데이트만 보인다)
+            if lab.cget("text"):
+                lab.configure(text="")
+            self._pkg_tip.text = ""
+            return
         try:
             room = lab.winfo_width()
         except tk.TclError:

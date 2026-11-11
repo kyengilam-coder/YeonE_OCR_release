@@ -295,6 +295,9 @@ class SettingsTabRealTk(unittest.TestCase):
             with mock.patch.object(lab, "winfo_width", return_value=f.measure("…오류 2개") + 1):
                 app._fit_pkg()
                 self.assertEqual(lab.cget("text"), "…오류 2개")                                   # 상태와 수가 남는다(안내 꼬리 '…다시 설치'가 아니라)
+            for ok in self.gui.PKG_OK:                                                             # 정상 상태는 명령 띠에 적지 않는다(오류·점검 중만 보인다)
+                app.v_pkg.set(ok)
+                self.assertEqual((lab.cget("text"), app._pkg_tip.text), ("", ""))
         finally:
             app.v_pkg.set(old)
 

@@ -297,6 +297,7 @@ class ProgressCardRealTk(unittest.TestCase):
                         self.assertEqual(app._log_card.grid_info().get("in"), app._work_left)
                 self.assertEqual(w["panel"].winfo_manager(), ""); self.assertEqual(w["out_row"].winfo_manager(), "")
                 self.assertEqual(w["simple_pages"].winfo_manager(), "pack")
+                self.assertEqual(w["row_toggle"].winfo_manager(), "")                              # 판이 없으니 실행 중 '이 책의 설정 · 잠김 ▸'도 없다
                 entry = next(c for c in w["simple_pages"].winfo_children() if c.winfo_class() == "TEntry")
                 self.assertEqual(str(entry.cget("textvariable")), str(app.v_pages))                # 판의 칸과 같은 변수
                 self.assertIn(entry, app._lock_entries)                                            # 실행 중에는 함께 잠긴다
@@ -308,6 +309,7 @@ class ProgressCardRealTk(unittest.TestCase):
                 self.assertFalse(app.cfg["simple_view"]); self.assertEqual(saved.call_count, 1 if simple else 2)
                 self.assertEqual(w["panel"].winfo_manager(), "grid"); self.assertEqual(w["out_row"].winfo_manager(), "grid")
                 self.assertEqual(w["simple_pages"].winfo_manager(), "")
+                self.assertEqual(w["row_toggle"].winfo_manager(), "pack")
                 self.assertEqual(w["pages_parts"][0].get(), "2-3")
                 self.assertTrue(any(c["lines"].winfo_children() for c in app._band_cols))
                 self.assertEqual(app._led_card.winfo_manager(), "grid"); self.assertEqual(app.b_adv.winfo_manager(), "pack")
