@@ -369,7 +369,36 @@ def line_verification_enabled() -> bool:
 
 
 def _verification_args(engine) -> list[str]:
-    return [] if _LINE_VERIFICATION["enabled"] or engine not in VERIFYING_ENGINES else ["--no-line-verification"]
+    extra = [] if _LINE_VERIFICATION["enabled"] or engine not in VERIFYING_ENGINES else ["--no-line-verification"]
+    return extra + (_easyocr_args() if engine == "easyocr" else [])
+
+
+# EasyOCR runtime: CPU threads and recognition batch (worker defaults 2 and 1).
+EASYOCR_DEFAULTS = {"threads": 2, "batch": 1}
+_EASYOCR = dict(EASYOCR_DEFAULTS)
+
+
+@contextmanager
+def easyocr_runtime(threads=2, batch=1):
+    if type(threads) is not int or not 1 <= threads <= 32 or type(batch) is not int or not 1 <= batch <= 64:
+        raise ValueError("EasyOCR 스레드는 1~32, 묶음은 1~64입니다.")
+    previous = dict(_EASYOCR)
+    _EASYOCR.update(threads=threads, batch=batch)
+    try:
+        yield
+    finally:
+        _EASYOCR.update(previous)
+
+
+def easyocr_runtime_changes() -> dict:
+    """Non-default EasyOCR settings (empty when the defaults are in use)."""
+    return {key: value for key, value in _EASYOCR.items() if value != EASYOCR_DEFAULTS[key]}
+
+
+def _easyocr_args() -> list[str]:
+    changes = easyocr_runtime_changes()
+    return ((["--threads", str(changes["threads"])] if "threads" in changes else [])
+            + (["--batch-size", str(changes["batch"])] if "batch" in changes else []))
 
 
 def _device(info, requested=None):

@@ -165,7 +165,7 @@ def test_easyocr_session_mode_pins_direction_and_loads_once(tmp_path):
     created = []
 
     class Worker:
-        def __init__(self, model_dir, threads, verify_lines=True):
+        def __init__(self, model_dir, threads, verify_lines=True, batch_size=1):
             created.append(threads)
 
         def recognize(self, source, languages, direction):

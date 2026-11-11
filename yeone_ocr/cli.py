@@ -2787,6 +2787,13 @@ def build_parser():
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
                    help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
                         "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
+    p.add_argument("--local-exclude-engines", nargs="+", default=[], metavar="ENGINE",
+                   choices=("ppocrv6", "rapidocr", "easyocr", "tesseract", "surya", "glmocr", "paddle_server"),
+                   help="(시험) 자동 선택에서 뺄 엔진. 예: --local-exclude-engines easyocr")
+    p.add_argument("--local-easyocr-threads", type=int, choices=range(1, 33), metavar="1-32", default=2,
+                   help="(시험) EasyOCR CPU 스레드 수(기본 2). 결과 글자는 같고 속도만 달라지는 설정")
+    p.add_argument("--local-easyocr-batch", type=int, choices=range(1, 65), metavar="1-64", default=1,
+                   help="(시험) EasyOCR가 한 번에 읽는 줄 수(기본 1). 늘리면 빨라질 수 있으나 글자가 조금 달라질 수 있음")
     p.add_argument("--local-engine-parallel", type=int, choices=range(0, 9), metavar="0-8", default=0,
                    help="로컬 우선 인식에서 한 쪽을 동시에 읽을 엔진 수(0=코어·메모리로 자동, 1=차례로)")
     p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,

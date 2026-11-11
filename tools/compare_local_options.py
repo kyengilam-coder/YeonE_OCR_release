@@ -62,6 +62,8 @@ SETS = {
     "fast": (["--local-engine-plan", "fast"], {}, False),
     "no-verify": (["--no-local-line-verification"], {}, False),   # the default since 2026-11 measurements
     "verify": (["--local-line-verification"], {}, False),
+    "no-easyocr": (["--local-exclude-engines", "easyocr"], {}, False),
+    "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")
 ANSWER_SUFFIXES = (".hwpx", ".hwp", ".docx", ".txt")

@@ -287,10 +287,11 @@ def command(args, *, work=None, doc=None):
     # One page is rendered for every engine, the preview and the review crops;
     # engine workers stay loaded across pages.
     from ab_ocr.ocr import input_enhancement
-    from ab_ocr.local_engines import line_verification
+    from ab_ocr.local_engines import easyocr_runtime, line_verification
     enhancement = getattr(args, "local_enhance", "none")
     enhancement = None if enhancement in (None, "none") else enhancement
     with render_cache(), input_enhancement(enhancement), line_verification(getattr(args, "local_line_verification", False)), \
+            easyocr_runtime(getattr(args, "local_easyocr_threads", 2) or 2, getattr(args, "local_easyocr_batch", 1) or 1), \
             EnginePool(should_stop=cli.CANCEL.is_set, log=cli.log) as pool:
         return _command(args, work=work, doc=doc, pool=pool)
 
@@ -351,7 +352,9 @@ def _command(args, *, work=None, doc=None, pool=None):
             resident = pool.resident()
             from .automatic_ocr import gpu_engines_enabled
             mode = getattr(args, "local_enhance", "none")
+            exclude = tuple(getattr(args, "local_exclude_engines", None) or ())
             return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu_engines_enabled(),
+                    **({"exclude": exclude} if exclude else {}),
                     **({"input_enhancement": mode} if mode not in (None, "none") else {}),
                     "parallel": lambda engines: engine_parallelism(engines, requested, resident=resident,
                                                                    memory=memory_status())}
@@ -359,7 +362,9 @@ def _command(args, *, work=None, doc=None, pool=None):
         defaults = {"engine_plan": ("local_engine_plan", "all"), "vote": ("local_vote", False),
                     "columns": ("local_columns", True), "textlayer_witness": ("local_textlayer_witness", False),
                     "skip_blank": ("local_skip_blank", False), "enhance": ("local_enhance", "none"),
-                    "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", False)}
+                    "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", False),
+                    "exclude_engines": ("local_exclude_engines", []), "easyocr_threads": ("local_easyocr_threads", 2),
+                    "easyocr_batch": ("local_easyocr_batch", 1)}
         options = {}
         for option, (name, default) in defaults.items():
             value = getattr(args, name, default)

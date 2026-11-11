@@ -224,7 +224,7 @@ def assess_readings(runs, profile):
 def run_automatic_page(project, number, profile="traditional", direction="horizontal", dpi=300,
                        should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
                        recognizer=None, parallel=1, resident=(), gpu_engines=False, only=None,
-                       input_enhancement=None):
+                       input_enhancement=None, exclude=()):
     from .comparison import ComparisonError, latest_runs, run_page
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ComparisonError("렌더링 DPI와 엔진 제한 시간을 확인하세요.")
@@ -238,6 +238,10 @@ def run_automatic_page(project, number, profile="traditional", direction="horizo
         engines, excluded = available_engines(profile, direction, engine_root, should_stop, **extra)
     except ocr.OCRCancelled:
         return {"completed": [], "errors": {}, "cancelled": True, "skipped": [], "unsupported": {}}
+    if exclude:
+        for engine in [e for e in engines if e in exclude]:
+            engines.remove(engine)
+            excluded[engine] = "사용자 설정으로 이번 실행에서 뺐습니다."
     if not engines:
         raise ComparisonError("선택한 문서 종류를 읽을 로컬 엔진이 없습니다. 설치 확인에서 언어 모델을 확인하세요.")
     if only:
