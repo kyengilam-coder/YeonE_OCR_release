@@ -97,6 +97,85 @@ def _review_summary(project, number):
                                      "decision", "stale", "blocked_reason")} for item in views], page["ai_reviews"]
 
 
+GRADE_RANK = {"green": 1, "blue": 2, "red": 3}
+
+
+def _local_grades(project, number, run, current):
+    """Per-character check grades for a local-first page (text coordinates of ``current``).
+
+    red   = engines disagree on the glyphs (not whitespace only), an unknown
+            glyph remains, or a pending AI review proposes a different reading
+    blue  = the selected engine's own confidence is below its routing threshold
+    green = the text differs from the selected engine's reading (an accepted
+            candidate, AI proposal or human edit)
+    Stronger grades win. Spans that no longer map onto the current text are
+    left unpainted rather than guessed.
+    """
+    import difflib
+    from .comparison import ComparisonError
+    from .comparison_ai import LOW_CONFIDENCE_THRESHOLDS, _word_spans
+    raw = run["raw"]
+    base = raw["text"]
+    grade = [None] * len(current)
+
+    def paint(start, end, kind):
+        if start == end:                       # an insertion point: paint the neighbouring glyph
+            start, end = (start, start + 1) if start < len(current) else (start - 1, start)
+        for i in range(max(0, start), min(len(current), end)):
+            if not current[i].isspace() and GRADE_RANK[kind] > GRADE_RANK.get(grade[i], 0):
+                grade[i] = kind
+
+    def mapped(start, end, origin=base):
+        try:
+            return project._mapped_span(origin, current, start, end)
+        except ComparisonError:
+            return None
+
+    if base != current:
+        for tag, _a0, _a1, b0, b1 in difflib.SequenceMatcher(None, base, current, autojunk=False).get_opcodes():
+            if tag != "equal":
+                paint(b0, b1, "green")
+    threshold = LOW_CONFIDENCE_THRESHOLDS.get(run["engine"])
+    if threshold is not None:
+        for start, end, word in _word_spans(raw):
+            confidence = word.get("confidence")
+            if type(confidence) in (int, float) and confidence < threshold:
+                for i in range(start, end):            # per glyph: an edited glyph is green, its neighbours stay blue
+                    span = mapped(i, i + 1)
+                    if span:
+                        paint(*span, "blue")
+    page = project.page(number)
+    for suggestion in page.get("suggestions", []):
+        if suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace":
+            span = mapped(suggestion["start"], suggestion["end"])
+            if span:
+                paint(*span, "red")
+    for proposal in project.ai_proposals(number):
+        if proposal.get("stale") or proposal.get("superseded"):
+            continue
+        review = next((r for r in page.get("ai_reviews", []) if r["id"] == proposal["review_id"]), None)
+        snapshot = (review or {}).get("request", {}).get("snapshot_text")
+        span = mapped(proposal["start"], proposal["end"], snapshot) if isinstance(snapshot, str) else None
+        if span:
+            paint(*span, "red")
+    for i, char in enumerate(current):
+        if char in "\ufffd\u25a1":
+            paint(i, i + 1, "red")
+    out, offset = [], 0
+    for index, line in enumerate(current.split("\n")):
+        i = 0
+        while i < len(line):
+            kind = grade[offset + i]
+            j = i + 1
+            while j < len(line) and grade[offset + j] == kind:
+                j += 1
+            if kind:
+                out.append({"region_id": f"local-line-{index + 1}", "para": 0, "start": i, "end": j, "grade": kind})
+            i = j
+        offset += len(line) + 1
+    return out
+
+
 def _record(project, number, args, work, started, review):
     from .local_reading import reading_from_run
     run = _selected(project, number)
@@ -126,6 +205,10 @@ def _record(project, number, args, work, started, review):
             if type(value) in (int, float):
                 usage[key] += value
     merged_data = merged.model_dump()
+    try:
+        local_grades = _local_grades(project, number, run, project.text(number))
+    except Exception:
+        local_grades = []                                    # grades are display only; never lose the reading for them
     return {"file": Path(args.pdf).name, "pdf_page": number, "version": __version__,
             "pipeline": POLICY, "reader": "local", "model": run["engine"], "mode": args.mode,
             "image_frame": "full-page", "image_source": "로컬 OCR 전체 쪽 렌더링", "upscale": 1,
@@ -133,7 +216,7 @@ def _record(project, number, args, work, started, review):
             "pass1": first.model_dump(), "pass2": {}, "merged": merged_data,
             "derived_reading_sha256": _digest(merged_data), "usage": usage, "verify": [],
             "coverage_notes": ["로컬 줄 좌표를 사용합니다. 제목·도판·다단 구조는 원본과 대조하세요."],
-            "textlayer_diff": {}, "merge_stats": {}, "timings": {}, "crops": {},
+            "textlayer_diff": {}, "merge_stats": {}, "timings": {}, "crops": {}, "local_grades": local_grades,
             "local_first": {"project_path": str(project.project_path), "source_sha256": project.source_sha256,
                             "baseline_run_id": run["id"], "profile": args.local_profile,
                             "review": copy.deepcopy(review), "ai_proposals": proposals}}

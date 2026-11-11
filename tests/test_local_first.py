@@ -112,6 +112,13 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(ComparisonProject.load(project.project_path).page(1)["runs"][0]["raw"]["text"], "天地玄黃")
 
+    def test_record_carries_per_glyph_grades_for_document_colours(self):
+        self.confidence = 20
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            command(self.args())
+        self.assertEqual(self.record()["local_grades"],
+                         [{"region_id": "local-line-1", "para": 0, "start": 0, "end": 4, "grade": "blue"}])
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

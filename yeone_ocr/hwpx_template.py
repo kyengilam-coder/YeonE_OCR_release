@@ -15,9 +15,10 @@ __all__ = ["HH", "HP", "HC", "OPF", "HWPUNIT_PER_MM", "HEADING_ROLES", "COLOR_NO
 
 
 def build_hwpx_template(blocks: list[Block], out_path: str, template: str, min_mm: float = 70, large_min_mm: float = 120,
-                        highlight: bool = True, memos: bool = True, author: str = "YeonE_OCR", preset: Preset | None = None) -> dict:
+                        highlight: bool = True, memos: bool = True, author: str = "YeonE_OCR", preset: Preset | None = None,
+                        simple: bool = False) -> dict:
     """blocks(쓰임이 붙은 내용별 블록)를 양식 template 의 스타일로 out_path 에 쓴다. 돌려주는 값은 hwpx_builder.build_hwpx 와 같은 꼴에
     styles(쓰임 → 쓴 스타일 이름)·missing(양식에 없어 바탕글로 쓴 쓰임)·template_dropped(양식에서 뺀 구역·머리말·꼬리말)·page_number_from_template 를 더한 것.
     preset: 쓰임 → 스타일 이름을 줄 짜임 규칙(None = kaibao 이름 — 예전 그대로)."""
     return write_hwpx(blocks, out_path, TemplateLook(template, preset=preset, author=author), min_mm=min_mm, large_min_mm=large_min_mm,
-                      highlight=highlight, memos=memos)
+                      highlight=highlight, memos=memos, simple=simple)

@@ -29,7 +29,8 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "none", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
-            "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20}
+            "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
+            "simple_display": False}
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 LOCAL_PROFILE_LABELS = {"traditional": "번체·한문", "simplified": "간체·중문", "mixed": "한글·한자 혼용"}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
@@ -2040,6 +2041,7 @@ class App(tk.Tk):
         self.v_punctuation = tk.BooleanVar(value=bool(self.cfg.get("normalize_punctuation", True)))
         self.v_punctuation_rules = tk.StringVar(value=str(self.cfg.get("punctuation_rules", "") or ""))
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
+        self.v_simple = tk.BooleanVar(value=bool(self.cfg.get("simple_display", False)))
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
         self.v_memo = tk.StringVar(value=GENERAL_MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), GENERAL_MEMO_LABELS["notice"]))
@@ -2329,6 +2331,10 @@ class App(tk.Tk):
         checks = (("hl", "확인 등급 색 (초록·파랑·빨강)", self.v_hl, grades,
                    "글자를 얼마나 믿어도 되는지 색과 밑줄로: 초록 = 1차·2차가 갈려 3차 자형 판별로 고름(훑어 확인) · 파랑 = 골랐지만 근거가 약하거나 다른 대목과 "
                    "어긋남(확인 권장) · 빨강 〔 〕 = 정하지 못함, 원본 확인 필수(지침 19). 끄면 색 없이 〔 〕 표기만 남습니다."),
+                  ("simple", "단순 표시 (메모·괄호 없이 색만)", self.v_simple, "형광 바탕 + 빨강·파랑·초록 글자 · 쪽 기록 줄 대신 책갈피",
+                   "결과 HWPX 를 단순하게 만듭니다: 불확실한 글자는 노랑 바탕 빨강(원본 확인 필수)·하늘 바탕 파랑(확인 권장)·연두 바탕 초록(기계가 고친 글자)으로만 "
+                   "보이고, 한컴 메모·〔a/b〕 괄호(첫 후보만 남기고 빨강)·쪽 기록 줄·작업 표시·확인 목록을 넣지 않습니다. 원본 쪽은 책갈피로 남고 문단은 제목·문단 "
+                   "스타일을 씁니다. 다른 후보와 근거는 검수 화면(review.html)과 보고에 있습니다. 서식을 지우면 불확실 표시도 사라지므로 검수용 원본은 끈 상태로 만드세요."),
                   ("ctx", "문맥 추정 밑줄 (확정 아님)", self.v_ctx, "〔a/b〕 안에서 더 많이 쓰는 후보에 실선 밑줄 · 글자는 그대로",
                    "빨간 〔a/b〕 안에서, 이 판독의 다른 대목(1차·2차가 같게 읽은 글)이 더 많이 쓰는 후보에 실선 밑줄을 긋습니다. 글자는 바꾸지 않고 두 후보도 "
                    "그대로 둡니다(지침 2·7·19·21). 숫자·이체자·판독불명·자형이 다른 쌍에는 긋지 않습니다. 이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
@@ -5708,6 +5714,7 @@ class App(tk.Tk):
                     o.append("--no-bold")
         if not self.v_join.get(): o.append("--no-join-pages")
         if not self.v_hl.get(): o.append("--no-highlight")
+        if getattr(self, "v_simple", None) is not None and self.v_simple.get(): o += ["--display", "simple"]
         if not self.v_ctx.get(): o.append("--no-context")
         if not self.v_pb.get(): o.append("--no-page-breaks")
         if not App._context_model_enabled(self): o.append("--no-context-model")
@@ -6543,6 +6550,8 @@ class App(tk.Tk):
                          "page_thinking": self.page_think_key(), "page_media_res": self.page_mres_key()})
         if getattr(self, "v_suspects", None) is not None:
             self.cfg["suspects"] = self.v_suspects.get()
+        if getattr(self, "v_simple", None) is not None:
+            self.cfg["simple_display"] = bool(self.v_simple.get())
         if getattr(self, "v_skipany", None) is not None:
             self.cfg["skip_any_model"] = bool(self.v_skipany.get())
         if getattr(self, "v_tlpdf", None) is not None:

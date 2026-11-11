@@ -1906,11 +1906,13 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         bold, binfo = measure_bold(pages_for_bold(), log=log)
         log(f"획 굵기: {binfo['pages']}쪽 {binfo['chars']:,}자 · 중앙값 {binfo['median']} · 굵은 글자가 있는 문단 {binfo['bold_paragraphs']}개 ({time.time() - t0:.0f}초)")
         bold_measured = bool(bold) and binfo.get("chars", 0) > 0        # 재지 못했으면(글자층 없음 등) '굵은 글자 없음' 을 본경 아님으로 읽지 않는다
+    simple_display = getattr(args, "display", "standard") == "simple" and not interim
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
                                  context=ctx, memo_mode=getattr(args, "memo", "notice") or "notice",
-                                 legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold)
+                                 legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold,
+                                 display=simple_display and "simple" or "standard")
         if layout == "flow" and not interim:
             from .structure import apply_structure
             blocks, roles = apply_structure(blocks, preset, bold_measured=bold_measured)
@@ -1924,7 +1926,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 from collections import Counter
                 top = Counter(t for _, t in heads).most_common(6)
                 log("뺀 머리말 글: " + " · ".join(f"{t}×{c}" if c > 1 else t for t, c in top) + (" …" if len(set(t for _, t in heads)) > 6 else ""))
-        if not interim and args.append_report and ci == len(chunks) - 1:
+        if not interim and args.append_report and ci == len(chunks) - 1 and not simple_display:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
             stem = f"{Path(args.pdf).stem}_진행중"
@@ -1954,7 +1956,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             from .hwpx_template import build_hwpx_template
             try:
                 st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline", preset=preset)
+                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline", preset=preset,
+                                         simple=simple_display)
             except Exception as e:
                 log(f"오류: 양식 HWPX 를 쓸 수 없습니다({type(e).__name__}: {str(e)[:120]}) — 양식 없이 만듭니다"); ok = False
             else:
@@ -1966,8 +1969,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         all_tpl = all_tpl and st is not None
         if st is None:
             st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline",
-                            preset=preset if layout == "flow" else None)
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks and not simple_display,
+                            memos=getattr(args, "memo", "notice") != "inline",
+                            preset=preset if layout == "flow" else None, simple=simple_display)
         fissues = check_hwpx_file(str(out_h))
         vi = st.get("validate_issues")
         if isinstance(vi, int) and vi > 0:                              # python-hwpx 스키마·꾸러미 검증(양식으로 만든 파일만 값이 있음)
@@ -2690,6 +2694,8 @@ def build_parser():
         p.add_argument("--whole-offset", type=int, default=None, help="분할 전 전체 PDF 쪽수 = PDF 쪽수 + N 을 기록에 함께 적음")
         p.add_argument("--append-report", action="store_true", help="문서 끝에 〔작업 기록〕 덧붙임")
         p.add_argument("--no-highlight", action="store_true", help="확인 등급 색·밑줄·범례를 넣지 않음(〔〕 표기와 고지 메모는 그대로)")
+        p.add_argument("--display", choices=["standard", "simple"], default="standard",
+                       help="문서 표시: standard=색·밑줄·〔〕·메모(검수용, 기본) / simple=단순 표시(형광 바탕 + 빨강·파랑·초록 글자만, 메모·괄호·쪽 기록 줄 없음, 제목·문단 스타일)")
         p.add_argument("--memo", choices=["notice", "all", "inline"], default="notice",
                        help="한컴 메모: notice=고지 사항만(기본) / all=등급 근거까지 / inline=메모 없이 고지를 글 속 회색 〔고지: …〕 로")
         p.add_argument("--no-context", action="store_true", help="문맥 추정(이 판독의 다른 대목이 가리키는 후보에 밑줄)을 하지 않음")
