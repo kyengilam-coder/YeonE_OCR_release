@@ -149,6 +149,19 @@ class LocalFirstTests(unittest.TestCase):
         self.assertTrue(seen[0] is True and seen[-1] is False)
         self.assertEqual(self.record()["local_first"]["options"], {"columns": False})
 
+    def test_easyocr_left_out_of_horizontal_pages_unless_asked(self):
+        seen = []
+        original = self.recognize
+
+        def capture(project, number, **kwargs):
+            seen.append(kwargs.get("exclude", ()))
+            return original(project, number, **kwargs)
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=capture):
+            command(self.args())
+            command(self.args("--local-easyocr", "--force"))
+            command(self.args("--local-exclude-engines", "tesseract", "--force"))
+        self.assertEqual(seen, [("easyocr",), (), ("easyocr", "tesseract")])
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

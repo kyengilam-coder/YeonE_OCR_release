@@ -2790,6 +2790,9 @@ def build_parser():
     p.add_argument("--local-exclude-engines", nargs="+", default=[], metavar="ENGINE",
                    choices=("ppocrv6", "rapidocr", "easyocr", "tesseract", "surya", "glmocr", "paddle_server"),
                    help="(시험) 자동 선택에서 뺄 엔진. 예: --local-exclude-engines easyocr")
+    p.add_argument("--local-easyocr", action=argparse.BooleanOptionalAction, default=None,
+                   help="EasyOCR도 함께 읽음. 기본: 가로쓰기는 끔(측정한 4개 문서에서 빼는 편이 한자가 더 정확하고 27~35%% 빠름, "
+                        "문장부호 대조는 약해짐), 세로쓰기는 켬(측정 전)")
     p.add_argument("--local-easyocr-threads", type=int, choices=range(1, 33), metavar="1-32", default=2,
                    help="(시험) EasyOCR CPU 스레드 수(기본 2). 결과 글자는 같고 속도만 달라지는 설정")
     p.add_argument("--local-easyocr-batch", type=int, choices=range(1, 65), metavar="1-64", default=1,

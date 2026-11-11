@@ -342,6 +342,12 @@ def _command(args, *, work=None, doc=None, pool=None):
         cli.LOCAL_API_CALLS = 0
         summaries = {}
         saver = _Checkpoint(project)
+        def easyocr_wanted():
+            """EasyOCR: off on horizontal pages by default (2026-11 measurements: Han characters more
+            accurate without it on 4 documents, 27-35% faster), kept on vertical pages (not measured)."""
+            choice = getattr(args, "local_easyocr", None)
+            return (args.mode != "horizontal_zh") if choice is None else bool(choice)
+
         def engine_options():
             """Per page: workers resident so far, and how many engines may run at once."""
             if pool is None:
@@ -352,7 +358,10 @@ def _command(args, *, work=None, doc=None, pool=None):
             resident = pool.resident()
             from .automatic_ocr import gpu_engines_enabled
             mode = getattr(args, "local_enhance", "none")
-            exclude = tuple(getattr(args, "local_exclude_engines", None) or ())
+            exclude = set(getattr(args, "local_exclude_engines", None) or ())
+            if not easyocr_wanted():
+                exclude.add("easyocr")
+            exclude = tuple(sorted(exclude))
             return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu_engines_enabled(),
                     **({"exclude": exclude} if exclude else {}),
                     **({"input_enhancement": mode} if mode not in (None, "none") else {}),
@@ -363,7 +372,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                     "columns": ("local_columns", True), "textlayer_witness": ("local_textlayer_witness", False),
                     "skip_blank": ("local_skip_blank", False), "enhance": ("local_enhance", "none"),
                     "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", False),
-                    "exclude_engines": ("local_exclude_engines", []), "easyocr_threads": ("local_easyocr_threads", 2),
+                    "exclude_engines": ("local_exclude_engines", []), "easyocr": ("local_easyocr", None),
+                    "easyocr_threads": ("local_easyocr_threads", 2),
                     "easyocr_batch": ("local_easyocr_batch", 1)}
         options = {}
         for option, (name, default) in defaults.items():
