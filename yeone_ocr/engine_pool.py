@@ -78,7 +78,23 @@ class EnginePool:
         self._locks: dict[tuple, threading.Lock] = {}
         self._one_shot: set[str] = set()
         self._gpu_failed: dict[str, str] = {}
+        self._gpu_threads: dict[str, object] = {}      # engine -> single-thread executor
         self._guard = threading.Lock()
+
+    def _on_gpu_thread(self, engine, function, *args, **kwargs):
+        """Run on this GPU engine's own thread.
+
+        The PC-wide GPU lease is a Windows mutex: it must be released by the
+        thread that took it. run_page uses a fresh thread pool for every page,
+        so every start, request and close of a CUDA session goes through one
+        thread that lives as long as the pool.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        with self._guard:
+            executor = self._gpu_threads.get(engine)
+            if executor is None:
+                executor = self._gpu_threads[engine] = ThreadPoolExecutor(1, thread_name_prefix=f"yeone-gpu-{engine}")
+        return executor.submit(function, *args, **kwargs).result()
 
     def __enter__(self):
         return self
@@ -157,7 +173,7 @@ class EnginePool:
             lock = self._locks[key]
         with lock:
             try:
-                return session.recognize_file(path, page_number=page_number, dpi=dpi, psm=psm)
+                return self._on_gpu_thread(engine, session.recognize_file, path, page_number=page_number, dpi=dpi, psm=psm)
             except ocr.OCRCancelled:
                 raise
             except (ocr.OCRError, OSError) as error:
@@ -182,12 +198,19 @@ class EnginePool:
 
     def close(self):
         with self._guard:
-            sessions, self._sessions, self._locks = list(self._sessions.values()), {}, {}
+            sessions, self._sessions, self._locks = list(self._sessions.items()), {}, {}
         failures = 0
-        for session in sessions:
+        for key, session in sessions:
             try:
-                session.close()
+                if key[0] in self._gpu_threads:
+                    self._on_gpu_thread(key[0], session.close)       # release the GPU lease on its owning thread
+                else:
+                    session.close()
             except Exception:
                 failures += 1
+        with self._guard:
+            executors, self._gpu_threads = list(self._gpu_threads.values()), {}
+        for executor in executors:
+            executor.shutdown(wait=True)
         if failures and self.log:
             self.log(f"  상주 작업자 {failures}개의 임시 파일 정리를 확인하지 못했습니다. 판독 결과는 저장되었습니다.")

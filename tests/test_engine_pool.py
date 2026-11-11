@@ -280,3 +280,26 @@ def test_a_second_gpu_engine_is_refused_instead_of_waiting_forever():
                 pool.recognize("a.pdf", engine="surya", languages="chi_tra")
             pool.recognize("a.pdf", engine="glmocr", languages="chi_tra", page_number=2)
     assert [s.engine for s in FakeSession.instances] == ["glmocr"]
+
+
+def test_gpu_session_work_and_close_stay_on_one_thread_across_page_threads():
+    from concurrent.futures import ThreadPoolExecutor
+    threads = []
+
+    class Owned(FakeSession):
+        def recognize_file(self, *a, **k):
+            threads.append(threading.get_ident())
+            return {"engine": self.engine}
+
+        def close(self):
+            threads.append(threading.get_ident())
+            self.closed = True
+
+    with mock.patch("ab_ocr.local_engines.RecognitionSession", Owned):
+        with EnginePool(enabled=True) as pool:
+            for page in (1, 2, 3):                                     # run_page: a new thread pool per page
+                with ThreadPoolExecutor(1) as page_threads:
+                    page_threads.submit(pool.recognize, "a.pdf", engine="surya", languages="kor+chi_tra",
+                                        page_number=page).result()
+    assert len(threads) == 4 and len(set(threads)) == 1             # 3 requests + close, one owner thread
+    assert threads[0] != threading.get_ident()
