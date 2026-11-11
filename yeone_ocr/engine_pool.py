@@ -130,6 +130,11 @@ class EnginePool:
         from ab_ocr.local_engines import RecognitionSession
         if engine in self._gpu_failed:
             raise ocr.OCRError(f"{engine} GPU 실행을 이번 실행에서 제외했습니다: {self._gpu_failed[engine]}")
+        with self._guard:
+            other = next((key[0] for key in self._sessions if key[0] in GPU_SESSION_ENGINES and key[0] != engine), None)
+        if other is not None:
+            # Its resident session holds the PC-wide GPU queue until closed: waiting would never end.
+            raise ocr.OCRError(f"{engine}: 이 실행은 이미 {other} 가 그래픽카드를 쓰고 있어 함께 실행하지 않습니다.")
         key = self._key(engine, languages, engine_root, "horizontal", timeout)
         notices = {"at": None}
 

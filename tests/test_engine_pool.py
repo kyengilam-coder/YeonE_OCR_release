@@ -206,9 +206,10 @@ def test_cuda_engines_join_automatic_selection_only_when_installed_with_cuda(tmp
     for engine in ("surya", "glmocr", "paddle_server"):
         _install(tmp_path, engine)
     devices = {"surya": "cpu", "glmocr": "cuda", "paddle_server": "cuda"}
+    broken = set()
 
     def doctor(*, engine, engine_root=None, should_stop=None):
-        if engine in auto.PREFERENCE:
+        if engine in auto.PREFERENCE or engine in broken:
             return {"available": False, "message": "not installed"}
         return {"available": True, "engine": engine, "languages": ["chi_tra", "kor+chi_tra"],
                 "installation": {"backend_device": devices[engine], "execution_provider": devices[engine]}}
@@ -216,13 +217,17 @@ def test_cuda_engines_join_automatic_selection_only_when_installed_with_cuda(tmp
     with mock.patch.object(auto.ocr, "doctor", side_effect=doctor), mock.patch.object(auto, "memory_status", return_value=None), \
             mock.patch("yeone_ocr.automatic_ocr.engine_root_for", return_value=tmp_path):
         ready, excluded = auto.available_engines("traditional", "horizontal", gpu=True)
-        assert ready == ["glmocr", "paddle_server"]
-        assert "CUDA" in excluded["surya"]
+        assert ready == ["glmocr"]                                   # one GPU engine per run
+        assert "surya" not in excluded                               # not even inspected once one is chosen
         assert auto.available_engines("traditional", "horizontal")[0] == []          # off unless the caller can run GPU sessions
         assert auto.available_engines("traditional", "vertical", gpu=True)[0] == []  # vertical not measured
         devices["surya"] = "cuda"
         ready, _ = auto.available_engines("mixed", "horizontal", gpu=True)
-        assert ready == ["surya", "glmocr"]                                          # paddle_server has no Korean model
+        assert ready == ["surya"]                                                    # mixed: Surya first
+        devices["surya"] = "cpu"
+        broken.add("glmocr")                                                         # GLM-OCR is CUDA-only; make it unavailable
+        ready, _ = auto.available_engines("traditional", "horizontal", gpu=True)
+        assert ready == ["paddle_server"]                                            # next usable CUDA engine
 
 
 def test_gpu_engines_take_no_cpu_slot():
@@ -264,3 +269,14 @@ def test_gpu_queue_wait_is_reported_every_30_seconds():
         with EnginePool(enabled=True, log=seen.append) as pool:
             pool.recognize("a.pdf", engine="surya", languages="kor+chi_tra")
     assert len(seen) == 3 and all("GPU 대기 중" in line for line in seen)
+
+
+def test_a_second_gpu_engine_is_refused_instead_of_waiting_forever():
+    FakeSession.instances = []
+    with mock.patch("ab_ocr.local_engines.RecognitionSession", FakeSession):
+        with EnginePool(enabled=True) as pool:
+            pool.recognize("a.pdf", engine="glmocr", languages="chi_tra")
+            with pytest.raises(ocr.OCRError):
+                pool.recognize("a.pdf", engine="surya", languages="chi_tra")
+            pool.recognize("a.pdf", engine="glmocr", languages="chi_tra", page_number=2)
+    assert [s.engine for s in FakeSession.instances] == ["glmocr"]

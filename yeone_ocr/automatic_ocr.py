@@ -62,7 +62,13 @@ def gpu_engines_enabled() -> bool:
 
 
 def _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded):
-    """Installed CUDA engines usable for this profile; uninstalled ones are skipped silently."""
+    """The first installed CUDA engine usable for this profile (registry order: Surya for mixed,
+    GLM-OCR for Chinese); uninstalled ones are skipped silently.
+
+    At most one: a CUDA session holds the PC-wide GPU queue for its whole batch,
+    so a second GPU engine in the same run would wait for it forever, and an
+    8 GB card cannot hold two of these models anyway.
+    """
     from ab_ocr.engine_registry import RECOMMENDED_ENGINES
     from ab_ocr.local_engines import _device
     if direction != "horizontal":
@@ -102,6 +108,7 @@ def _gpu_candidates(profile, direction, engine_root, should_stop, memory, reside
             excluded[engine] = "메모리 할당 여유 부족으로 이번 쪽에서 제외했습니다."
             continue
         ready.append(engine)
+        break
     return ready
 
 
