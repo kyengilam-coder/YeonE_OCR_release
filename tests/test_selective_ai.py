@@ -123,6 +123,34 @@ class SelectiveReviewTests(unittest.TestCase):
         self.assertEqual(plan.summary["targets"], 2)
         self.assertEqual(plan.summary["unlocalized_targets"], {})
 
+    def test_large_crops_get_full_resolution_detail_tiles(self):
+        with Image.new("RGB", (2400, 1600), "white") as image:
+            ImageDraw.Draw(image).rectangle((100, 100, 2300, 1500), outline="black")
+            image.save(self.source)
+        self.project = ComparisonProject.open(self.source)
+        words = [{"text": "甲乙丙", "bbox": [150, 150, 2250, 1350], "confidence": None}]
+        raw = RecognitionResult("甲乙丙", words, str(self.source), self.project.source_sha256,
+                                1, 2400, 1600, "synthetic", "kor+chi_tra", None, 0, engine="surya")
+        self.project.add_result(raw, request={"profile": "mixed", "direction": "horizontal", "dpi": 300,
+                                              "engine_root": None, "policy": "local-three-engine-v1"})
+        plain = self.plan()
+        self.assertNotIn("detail_images", plain.batches[0]["targets"][0])
+        plan = self.plan(policy=ReviewPolicy(selective=True, detail_tile=1024))
+        target = plan.batches[0]["targets"][0]
+        tiles = target["detail_images"]
+        self.assertEqual(len(tiles), 6)                                     # 3 across × 2 down
+        for tile in tiles:
+            box = tile["image"]["source_bbox"]
+            self.assertLessEqual(max(box[2] - box[0], box[3] - box[1]), 1024)
+            self.assertEqual((tile["image"]["width"], tile["image"]["height"]), (box[2] - box[0], box[3] - box[1]))  # not shrunk
+        self.assertEqual(len(plan.batches[0]["images"]), 7)                # overview + tiles all sent
+        result, calls = self.fake_run(plan)
+        self.assertEqual(result["failed"], 0)
+        self.assertIn("DETAIL TILES", calls[0]["input"][0]["content"][0]["text"])
+        self.assertEqual(len(calls[0]["input"][0]["content"]), 8)         # prompt + 7 images
+        with self.assertRaises(AIReviewError):
+            ReviewPolicy(detail_tile=100)
+
     def test_explicit_unknown_markers_route_to_local_review(self):
         for text in ("甲□乙", "甲〔판독불명〕乙"):
             with self.subTest(text=text):

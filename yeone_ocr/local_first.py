@@ -192,6 +192,8 @@ def _record(project, number, args, work, started, review, extras=None):
     raw = run["raw"]
     first = reading_from_run(raw, number, direction)
     merged = reading_from_run(raw, number, direction, text=project.text(number))
+    from .local_options import mark_folios
+    mark_folios(merged)                                     # a printed page number is not body text
     if extras.get("columns") and direction == "horizontal":
         from .local_options import column_order
         merged.regions = column_order(merged.regions)       # document order only; the project text keeps engine order
@@ -410,7 +412,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                     "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", False),
                     "exclude_engines": ("local_exclude_engines", []), "easyocr": ("local_easyocr", None),
                     "easyocr_threads": ("local_easyocr_threads", 2),
-                    "easyocr_batch": ("local_easyocr_batch", 1), "ai_accept": ("local_ai_accept", False)}
+                    "easyocr_batch": ("local_easyocr_batch", 1), "ai_accept": ("local_ai_accept", False),
+                    "ai_detail_tile": ("local_ai_detail_tile", 0)}
         options = {}
         for option, (name, default) in defaults.items():
             value = getattr(args, name, default)
@@ -499,7 +502,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                 _save_record(project, number, args, work, started, review, extras=extras)
                 settings = _settings(args, cap)
                 try:
-                    plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1),
+                    plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
+                                                                        detail_tile=getattr(args, "local_ai_detail_tile", 0) or 0),
                                         settings=settings,
                                         should_stop=cli.CANCEL.is_set)
                 except AIReviewError as exc:

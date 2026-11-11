@@ -201,3 +201,18 @@ class RequestKey(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_page_number_lines_leave_the_body():
+    from yeone_ocr.local_options import mark_folios
+    from yeone_ocr.schema import Column, PageReading, Paragraph, Region
+
+    def line(text, y0, y1):
+        return Region(id=text, kind="본문", bbox=[y0, 100, y1, 900],
+                      paragraphs=[Paragraph(columns=[Column(col_from_right=1, text=text)])])
+    page = PageReading(pdf_page=1, regions=[line("本文", 100, 800), line("-185-", 930, 960)])
+    assert mark_folios(page) == 1 and [r.kind for r in page.regions] == ["본문", "쪽번호"]
+    middle = PageReading(pdf_page=1, regions=[line("本文", 100, 400), line("185", 450, 480), line("本文", 500, 800)])
+    assert mark_folios(middle) == 0                                   # not first/last, not at an edge
+    words = PageReading(pdf_page=1, regions=[line("本文", 100, 800), line("185쪽 참조", 930, 960)])
+    assert mark_folios(words) == 0                                    # not a bare number

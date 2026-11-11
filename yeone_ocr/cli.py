@@ -2785,6 +2785,9 @@ def build_parser():
     p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
                    help="Claude 검증 연결 방식. subscription=PC에 로그인된 Claude Code(claude -p)로 구독 사용량에서 차감(API 요금 없음, 개인 사용), "
                         "api=API 키만, auto(기본)=Claude에 API 키가 없으면 로그인된 Claude Code. 환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
+    p.add_argument("--local-ai-detail-tile", type=int, default=0, metavar="화소",
+                   help="(시험) AI 검증 이미지가 이 크기(512~2048 화소)보다 크면 원래 해상도 조각도 함께 보냄(0=끔). "
+                        "AI는 큰 이미지를 줄여서 보기 때문에 쪽 크기의 글 덩어리에서 작은 한글이 흐려짐. 예: 1024")
     p.add_argument("--local-ai-accept", action="store_true",
                    help="(시험) AI 검증이 확신한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 측정용")
     p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=1,

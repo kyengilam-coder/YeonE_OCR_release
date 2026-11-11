@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import Counter
 import difflib
+import re
 
 # ---------------------------------------------------------------- blank pages
 BLANK_DARK_LEVEL = 160          # 0-255 gray; darker counts as ink
@@ -208,3 +209,27 @@ def witness_spans(current: str, witness: str):
             a0, a1 = max(0, a0 - 1), max(1, a0)
         out.append((positions[a0], positions[a1 - 1] + 1))
     return out
+
+
+# --------------------------------------------------------------- page numbers
+FOLIO = re.compile(r"^[\s\-–—~·.()\[\]［］（）]*\d{1,4}[\s\-–—~·.()\[\]［］（）]*$")
+FOLIO_EDGE = 150               # within this distance (0-1000) of the top or bottom edge
+
+
+def mark_folios(reading) -> int:
+    """Mark a printed page number ("-185-", "185", "(185)") as 쪽번호 so it leaves the body text.
+
+    Only the first or last text line of the page, only near the top or bottom edge, and only
+    a bare number with dashes or brackets. Engines read the folio as an ordinary line; the AI
+    reader and the answer files keep it out of the body (2026-11 vertical sample: 5 pages × 5 characters).
+    """
+    lines = [r for r in reading.regions if r.kind == "본문" and "".join(
+        c.text for p in r.paragraphs for c in p.columns).strip()]
+    marked = 0
+    for region in {id(r): r for r in (lines[:1] + lines[-1:])}.values():
+        text = "".join(c.text for p in region.paragraphs for c in p.columns).strip()
+        y0, _x0, y1, _x1 = region.bbox
+        if FOLIO.match(text) and (y0 >= 1000 - FOLIO_EDGE or y1 <= FOLIO_EDGE):
+            region.kind = "쪽번호"
+            marked += 1
+    return marked

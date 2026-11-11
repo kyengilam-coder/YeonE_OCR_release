@@ -6,7 +6,7 @@ No automatic retry, provider probing, environment key lookup or human-text edit.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace as _replace
 import base64
 import copy
 import difflib
@@ -89,6 +89,10 @@ class ReviewPolicy:
     selective: bool = False
     visual_scope: str = "auto"
     refinement_image_limit: int = 2
+    # 0 = off. Otherwise a target crop larger than this (pixels per side) also gets full-resolution
+    # detail tiles: vision models shrink a large image (Claude: long edge 1568), and a page-size
+    # block of small Hangul then becomes too blurry to tell 나/냐, 터/더 (2026-11 vertical sample).
+    detail_tile: int = 0
 
     def __post_init__(self):
         if any(type(v) is not bool for v in (self.traditional, self.punctuation, self.preserve_variants, self.selective)):
@@ -102,6 +106,8 @@ class ReviewPolicy:
             raise AIReviewError("이미지 검증 범위는 auto 또는 page로 지정하세요.")
         if type(self.refinement_image_limit) is not int or not 0 <= self.refinement_image_limit <= 4:
             raise AIReviewError("영역 재판독 근거 이미지는 대상마다 0~4개로 지정하세요.")
+        if type(self.detail_tile) is not int or not (self.detail_tile == 0 or 512 <= self.detail_tile <= 2048):
+            raise AIReviewError("세부 조각 크기는 0(끔) 또는 512~2048 화소로 지정하세요.")
 
 
 @dataclass(frozen=True)
@@ -444,6 +450,40 @@ def _attach_image(target, image, policy):
             "source_width": width, "source_height": height, "source_bbox": crop, "png_bytes": len(content)}
 
 
+DETAIL_OVERLAP = 48            # pixels shared by neighbouring tiles, so no glyph is cut in every tile
+DETAIL_MAX_TILES = 12
+
+
+def _attach_detail_tiles(target, image, policy, *, vertical=False):
+    """Full-resolution tiles of a large target crop, in reading order (vertical: right to left)."""
+    crop = target.get("bbox")
+    edge = policy.detail_tile
+    if not edge or crop is None:
+        return
+    left, top = max(0, math.floor(crop[0])), max(0, math.floor(crop[1]))
+    right, bottom = min(image.width, math.ceil(crop[2])), min(image.height, math.ceil(crop[3]))
+    width, height = right - left, bottom - top
+    if width <= edge and height <= edge:
+        return
+    step = edge - DETAIL_OVERLAP
+    columns = max(1, math.ceil((width - DETAIL_OVERLAP) / step))
+    rows = max(1, math.ceil((height - DETAIL_OVERLAP) / step))
+    if columns * rows > DETAIL_MAX_TILES:
+        return                                   # too large to tile sensibly: the overview alone
+    xs = [left + round(i * (width - edge) / (columns - 1)) if columns > 1 else left for i in range(columns)]
+    ys = [top + round(j * (height - edge) / (rows - 1)) if rows > 1 else top for j in range(rows)]
+    if vertical:
+        xs.reverse()
+    tiles = []
+    for x in xs:
+        for y in ys:
+            box = [x, y, min(right, x + edge), min(bottom, y + edge)]
+            region = {"bbox": box}
+            descriptor = _attach_image(region, image, _replace(policy, crop_padding=0))
+            tiles.append({"tile": len(tiles) + 1, "of": columns * rows, "image": descriptor})
+    target["detail_images"] = tiles
+
+
 def _attach_refinement_images(target, scope, image, policy):
     """Add original-image crops for completed, in-scope region readings only."""
     if not policy.refinement_image_limit:
@@ -578,6 +618,9 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                         reason = target["difficulty_reason"]
                         difficulty_reasons[reason] = difficulty_reasons.get(reason, 0) + 1
                     _attach_refinement_images(target, scope, image, policy)
+                    if phase == "visual" and policy.detail_tile:
+                        _attach_detail_tiles(target, image, policy,
+                                             vertical=project.page(scope["page_number"]).get("direction") == "vertical")
                     target["context_before"] = scope["snapshot_text"][max(0, target["start"] - policy.context_chars):target["start"]]
                     target["context_after"] = scope["snapshot_text"][target["end"]:target["end"] + policy.context_chars]
                     target_count += 1
@@ -611,7 +654,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                 batch_id = _hash([fingerprint, phase, scope["page_number"], [t["id"] for t, _ in group]])[:32]
                 images = {image["id"]: image for _, image in group}
                 for target, _ in group:
-                    for supplemental in target.get("supplemental_images", []):
+                    for supplemental in (*target.get("supplemental_images", []), *target.get("detail_images", [])):
                         descriptor = supplemental["image"]
                         images[descriptor["id"]] = descriptor
                 batch = {**copy.deepcopy(scope), "phase": phase, "scope_fingerprint": fingerprint,
@@ -693,6 +736,11 @@ def _prompt(batch, policy, visual):
     instruction = ("VISUAL PHASE: read the source image and compare the independent engine candidates. Propose recognition changes only when strokes support them. Unsupported-language candidates are not votes. Do not convert simplified/traditional forms or edit punctuation style."
                    if batch["phase"] == "visual" else
                    "EDITORIAL PHASE: examine ALL target text, including places where the engines agreed. Traditional conversion and punctuation editing are allowed only by enabled policy. Visual proposals below are PROVISIONAL evidence, not accepted text. Return MINIMAL, NONOVERLAPPING patches against ORIGINAL snapshot offsets. A punctuation patch must contain ONLY punctuation or whitespace in both before and after: for 我,你 → 我，你 return only , → ，, never include unchanged words or Han characters. Traditional patches must have the same length, change only known simplified-to-traditional correspondences, and preserve all other characters. Use SEPARATE patches for punctuation and traditional changes. A combined visual+traditional patch may retain the ORIGINAL before and its final traditional after, using a fully contained provisional visual proposal as its basis; include the complete final intended replacement and explain both steps. Preserve meaning and unknown glyphs; do not general-rewrite or modernize.")
+    if any(t.get("detail_images") for t in batch["targets"]):
+        instruction += (" DETAIL TILES: a target's first image is a reduced overview; its detail_images are the same area at"
+                        " full resolution (overlapping tiles in reading order, source_bbox gives each tile's place). Judge"
+                        " every glyph from the tiles. When the strokes in a tile clearly show the character, set"
+                        " uncertain=false; set uncertain=true only when even the tile does not settle it.")
     data = {"phase": batch["phase"], "policy": asdict(policy), "targets": batch["targets"], "images": batch["images"],
             "snapshot_length": len(batch["snapshot_text"]), "visual_proposals_provisional": visual,
             "target_codepoints": [{"target_id": t["id"], "end_offset": t["end"],
