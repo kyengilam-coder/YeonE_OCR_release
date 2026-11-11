@@ -165,7 +165,7 @@ def test_easyocr_session_mode_pins_direction_and_loads_once(tmp_path):
     created = []
 
     class Worker:
-        def __init__(self, model_dir, threads):
+        def __init__(self, model_dir, threads, verify_lines=True):
             created.append(threads)
 
         def recognize(self, source, languages, direction):
@@ -183,7 +183,7 @@ def test_ppocrv6_session_mode_pins_direction_and_loads_once(tmp_path):
     created = []
 
     class Worker:
-        def __init__(self, model_dir):
+        def __init__(self, model_dir, verify_lines=True):
             created.append(model_dir)
 
         def recognize(self, source, languages, direction):

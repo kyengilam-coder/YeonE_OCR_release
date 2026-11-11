@@ -1793,6 +1793,9 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
             from ab_ocr.glyph_verifier import font_sources
             engine_request["recognition_policy"] = HORIZONTAL_RECOGNITION_POLICY
             engine_request["glyph_font_sources"] = font_sources()
+        from ab_ocr.local_engines import VERIFYING_ENGINES, line_verification_enabled
+        if engine in VERIFYING_ENGINES and not line_verification_enabled():
+            engine_request["line_verification"] = "off"         # a different reading: never reuse verified runs
         manifest = resolved_root / "tools" / engine / "installation.json"
         engine_request["installation_sha256"] = ocr.file_sha256(manifest) if manifest.is_file() else None
         existing = _latest_runs(project.page(number)).get(engine)

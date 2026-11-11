@@ -81,8 +81,9 @@ def verify_models(model_dir, languages):
 
 
 class Worker:
-    def __init__(self, model_dir):
+    def __init__(self, model_dir, verify_lines=True):
         self.model_dir = model_dir.resolve()
+        self.verify_lines = verify_lines
         self.engines = {}
         self.glyph_verifier = None
 
@@ -217,7 +218,10 @@ class Worker:
         metadata = dict(metadata, requested_languages=languages,
             stage_seconds=[None if value is None else float(value) for value in (result.elapse_list or [])],
             detection_resize_policy="RapidOCR 3.10 PP-OCRv6 medium defaults")
-        if direction == "horizontal" and languages.startswith("chi_tra"):
+        if direction == "horizontal" and languages.startswith("chi_tra") and not self.verify_lines:
+            metadata.update(recognition_policy="ppocrv6-traditional-native-lines-unverified-v1",
+                recognition_pipeline="PP-OCRv6 medium native lines (recrop re-reading switched off)")
+        elif direction == "horizontal" and languages.startswith("chi_tra"):
             native = {"text": text, "words": words}
             words, evidence, sources = self.refine_horizontal(engine, image_path, result.boxes, words)
             text = "\n".join(word["text"] for word in words)
@@ -258,17 +262,21 @@ def main():
     parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
     parser.add_argument("--session-root", type=Path)
     parser.add_argument("--max-requests", type=int, default=8)
+    parser.add_argument("--no-line-verification", action="store_true",
+                        help="skip the per-line recrop re-reading and glyph proof (traditional horizontal)")
     args = parser.parse_args()
     _shared.block_network()
     try:
         if args.session_root:
             # Resident worker: the model loads once for up to --max-requests pages.
             protocol = _load_session_protocol()
-            return protocol.serve_requests(_Directed(Worker(args.model_dir), args.direction), args.session_root,
+            return protocol.serve_requests(_Directed(Worker(args.model_dir, not args.no_line_verification), args.direction),
+                                           args.session_root,
                                            args.languages, _shared.atomic_output, max_requests=args.max_requests)
         if args.input is None or args.output is None:
             parser.error("Use --input and --output, or --session-root")
-        _shared.atomic_output(args.output, Worker(args.model_dir).recognize(args.input, args.languages, args.direction))
+        _shared.atomic_output(args.output, Worker(args.model_dir, not args.no_line_verification).recognize(
+            args.input, args.languages, args.direction))
         return 0
     except Exception as exc:
         print("PP-OCRv6 worker failed (" + type(exc).__name__ + "). Check local runtime and models.", file=sys.stderr)

@@ -345,9 +345,10 @@ def write_result(path: Path, result: dict) -> None:
 
 
 class EasyOCRWorker:
-    def __init__(self, model_dir: Path, threads: int = 2):
+    def __init__(self, model_dir: Path, threads: int = 2, verify_lines: bool = True):
         self.model_dir = model_dir.resolve()
         self.threads = threads
+        self.verify_lines = verify_lines
         self.readers = {}
         self.models = {}
         self.glyph_verifier = None
@@ -390,7 +391,7 @@ class EasyOCRWorker:
             used_models.extend(m for m in auxiliary_models if m["filename"] != "craft_mlt_25k.pth")
             auxiliary = lambda: self.reader("chi_sim", detector=False)
         if ((direction == "vertical" and language == "chi_tra")
-                or (direction == "horizontal" and language in ("chi_sim", "chi_tra"))):
+                or (direction == "horizontal" and language in ("chi_sim", "chi_tra") and self.verify_lines)):
             module = _glyph_module()
             if self.glyph_verifier is None:
                 self.glyph_verifier = module.GlyphVerifier(module.font_sources())
@@ -401,6 +402,9 @@ class EasyOCRWorker:
                 "glyph_verification_thresholds": {"min_similarity": module.MIN_SIMILARITY,
                                                    "min_margin": module.MIN_MARGIN},
                 "glyph_verification_status": "enabled" if glyph_verifier.sources else "disabled: no installed font sources"})
+        if direction == "horizontal" and language in ("chi_sim", "chi_tra") and not self.verify_lines:
+            layout_metadata.update({"recognition_policy": "easyocr-horizontal-native-unverified-v1",
+                                    "glyph_verification_status": "disabled: line verification switched off"})
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             if direction == "vertical":
                 import numpy as np
@@ -476,6 +480,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
     parser.add_argument("--session-root", type=Path)
     parser.add_argument("--max-requests", type=int, default=8)
+    parser.add_argument("--no-line-verification", action="store_true",
+                        help="skip font glyph matching of horizontal Chinese lines")
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be positive")
@@ -485,7 +491,8 @@ def main(argv: list[str] | None = None) -> int:
         spec = importlib.util.spec_from_file_location("yeone_worker_protocol", Path(__file__).with_name("worker_sessions.py"))
         protocol = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(protocol)
-        return protocol.serve_requests(_Directed(EasyOCRWorker(args.model_dir, args.threads), args.direction),
+        return protocol.serve_requests(_Directed(EasyOCRWorker(args.model_dir, args.threads, not args.no_line_verification),
+                                                 args.direction),
                                        args.session_root, args.languages, write_result, max_requests=args.max_requests)
     if args.batch:
         data = json.loads(args.batch.read_text(encoding="utf-8-sig"))
@@ -494,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
         jobs = [{"input": str(args.input), "output": str(args.output), "languages": args.languages}]
     else:
         parser.error("Provide input/output/languages, or batch")
-    worker = EasyOCRWorker(args.model_dir, args.threads)
+    worker = EasyOCRWorker(args.model_dir, args.threads, not args.no_line_verification)
     for job in jobs:
         source, output = Path(job["input"]), Path(job["output"])
         if source.resolve() == output.resolve():
