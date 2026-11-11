@@ -45,7 +45,7 @@ def language_options(engine, profile, direction):
     return languages
 
 
-def available_engines(profile, direction, engine_root=None, should_stop=None):
+def available_engines(profile, direction, engine_root=None, should_stop=None, resident=()):
     from .comparison import ComparisonError, PROFILES
     if profile not in PROFILES or direction not in ("horizontal", "vertical"):
         raise ComparisonError("문서 종류 또는 읽기 방향을 확인하세요.")
@@ -59,7 +59,9 @@ def available_engines(profile, direction, engine_root=None, should_stop=None):
         if profile == "mixed" and engine != "tesseract":
             excluded[engine] = "한글·한자를 함께 지원하는 모델이 필요합니다."
             continue
-        if memory and min(memory["available_commit_mb"], memory["available_physical_mb"]) < MEMORY_BUDGET_MB[engine]:
+        # A resident worker (engine_pool) already holds its memory; free memory says nothing about it.
+        if (memory and engine not in resident
+                and min(memory["available_commit_mb"], memory["available_physical_mb"]) < MEMORY_BUDGET_MB[engine]):
             excluded[engine] = "메모리 할당 여유 부족으로 이번 쪽에서 제외했습니다."
             continue
         root = engine_root_for(engine, engine_root)
@@ -151,7 +153,8 @@ def assess_readings(runs, profile):
 
 
 def run_automatic_page(project, number, profile="traditional", direction="horizontal", dpi=300,
-                       should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False):
+                       should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
+                       recognizer=None, parallel=1, resident=()):
     from .comparison import ComparisonError, latest_runs, run_page
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ComparisonError("렌더링 DPI와 엔진 제한 시간을 확인하세요.")
@@ -161,13 +164,16 @@ def run_automatic_page(project, number, profile="traditional", direction="horizo
     preserve_baseline = bool(previous["reviewed"] or previous.get("baseline_choice") == "manual"
                              or previous["corrected_text"] is not None or previous["edits"])
     try:
-        engines, excluded = available_engines(profile, direction, engine_root, should_stop)
+        engines, excluded = (available_engines(profile, direction, engine_root, should_stop, resident=resident)
+                             if resident else available_engines(profile, direction, engine_root, should_stop))
     except ocr.OCRCancelled:
         return {"completed": [], "errors": {}, "cancelled": True, "skipped": [], "unsupported": {}}
     if not engines:
         raise ComparisonError("선택한 문서 종류를 읽을 로컬 엔진이 없습니다. 설치 확인에서 언어 모델을 확인하세요.")
+    if callable(parallel):
+        parallel = parallel(engines)
     outcome = run_page(project, number, profile, direction, dpi, should_stop, on_result, timeout,
-                       engine_root, force=force, engines=engines)
+                       engine_root, force=force, engines=engines, recognizer=recognizer, parallel=parallel)
     outcome["unavailable"] = excluded
     if outcome["cancelled"] or (should_stop and should_stop()):
         outcome["cancelled"] = True

@@ -233,16 +233,41 @@ class Worker:
                 "engine_version": importlib.metadata.version("rapidocr"), "engine_metadata": metadata}
 
 
+class _Directed:
+    """Session requests carry no direction; the session pins one at start."""
+    def __init__(self, worker, direction):
+        self.worker, self.direction = worker, direction
+
+    def recognize(self, source, languages):
+        return self.worker.recognize(source, languages, self.direction)
+
+
+def _load_session_protocol():
+    spec = importlib.util.spec_from_file_location("yeone_worker_protocol", Path(__file__).with_name("worker_sessions.py"))
+    protocol = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(protocol)
+    return protocol
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--languages", choices=SUPPORTED_LANGUAGES, required=True)
     parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
+    parser.add_argument("--session-root", type=Path)
+    parser.add_argument("--max-requests", type=int, default=8)
     args = parser.parse_args()
     _shared.block_network()
     try:
+        if args.session_root:
+            # Resident worker: the model loads once for up to --max-requests pages.
+            protocol = _load_session_protocol()
+            return protocol.serve_requests(_Directed(Worker(args.model_dir), args.direction), args.session_root,
+                                           args.languages, _shared.atomic_output, max_requests=args.max_requests)
+        if args.input is None or args.output is None:
+            parser.error("Use --input and --output, or --session-root")
         _shared.atomic_output(args.output, Worker(args.model_dir).recognize(args.input, args.languages, args.direction))
         return 0
     except Exception as exc:

@@ -2772,6 +2772,8 @@ def build_parser():
     p.add_argument("--local-profile", choices=("traditional", "simplified", "mixed"), default="traditional")
     p.add_argument("--local-ai-review", action=argparse.BooleanOptionalAction, default=True,
                    help="로컬 인식의 불일치·어려운 구간만 선택한 AI로 검증(키가 없으면 대상으로 보관)")
+    p.add_argument("--local-engine-parallel", type=int, choices=range(0, 9), metavar="0-8", default=0,
+                   help="로컬 우선 인식에서 한 쪽을 동시에 읽을 엔진 수(0=코어·메모리로 자동, 1=차례로)")
     p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,
                    help="이번 실행 전체의 선택 구간 API 호출 상한(기본20, --max-calls도 함께 적용)")
     p.add_argument("--pdf-only", action="store_true", help="판독·3차 판별 뒤 검색 가능한 PDF만 만듦(문서 조립·자동 교정·HWPX 중간 저장 생략)")

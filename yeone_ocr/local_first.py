@@ -250,12 +250,15 @@ def _settings(args, remaining):
 
 def command(args, *, work=None, doc=None):
     from ab_ocr.ocr import render_cache
-    # One page is rendered for every engine, the preview and the review crops.
-    with render_cache():
-        return _command(args, work=work, doc=doc)
+    from . import cli
+    from .engine_pool import EnginePool
+    # One page is rendered for every engine, the preview and the review crops;
+    # engine workers stay loaded across pages.
+    with render_cache(), EnginePool(should_stop=cli.CANCEL.is_set, log=cli.log) as pool:
+        return _command(args, work=work, doc=doc, pool=pool)
 
 
-def _command(args, *, work=None, doc=None):
+def _command(args, *, work=None, doc=None, pool=None):
     from . import cli
     from .automatic_ocr import run_automatic_page
     from .comparison import ComparisonError
@@ -301,6 +304,17 @@ def _command(args, *, work=None, doc=None):
         cli.LOCAL_API_CALLS = 0
         summaries = {}
         saver = _Checkpoint(project)
+        def engine_options():
+            """Per page: workers resident so far, and how many engines may run at once."""
+            if pool is None:
+                return {}
+            from .automatic_ocr import memory_status
+            from .engine_pool import engine_parallelism
+            requested = getattr(args, "local_engine_parallel", 0) or 0
+            resident = pool.resident()
+            return {"recognizer": pool.recognize if pool.enabled else None, "resident": resident,
+                    "parallel": lambda engines: engine_parallelism(engines, requested, resident=resident,
+                                                                   memory=memory_status())}
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -320,7 +334,7 @@ def _command(args, *, work=None, doc=None):
                 outcome = run_automatic_page(project, number, profile=args.local_profile,
                     direction="horizontal" if args.mode == "horizontal_zh" else "vertical", dpi=args.dpi,
                     engine_root=getattr(args, "local_engine_root", None), force=getattr(args, "force", False),
-                    should_stop=cli.CANCEL.is_set, on_result=saver.maybe)
+                    should_stop=cli.CANCEL.is_set, on_result=saver.maybe, **engine_options())
                 saver.save()
                 if outcome.get("cancelled"):
                     return 130

@@ -471,6 +471,8 @@ class RecognitionSession:
                 args = ["--profile", "server", "--provider", selected_device]
             elif self.engine in ("surya", "glmocr"):
                 args += ["--device", selected_device]
+            elif self.engine in ("easyocr", "ppocrv6", "rapidocr"):
+                args += ["--direction", self.direction]
             if self.engine == "glmocr":
                 args += ["--timeout", str(self.timeout)]
             argv = [info["executable"], "-I", "-B", "-X", "utf8", info["worker"], "--model-dir", info["model_dir"],
@@ -490,7 +492,8 @@ class RecognitionSession:
             raise OCRError("이전 OCR 세션 정리가 실패해 새 요청을 시작하지 않습니다. "
                            "완료 원시 결과는 보존되며 자동 재시도하지 않습니다.")
         _cancelled(self.should_stop)
-        if self.engine in ("tesseract", "easyocr", "ppocrv6") or (self.engine == "rapidocr" and self.direction == "vertical"):
+        # Vertical pages need one-shot post-processing (reading order, auxiliary model records).
+        if self.engine == "tesseract" or (self.engine in ("easyocr", "ppocrv6", "rapidocr") and self.direction == "vertical"):
             if self.device == "cuda":
                 raise OCRError("이 엔진은 현재 CPU 환경입니다.")
             before = self.condition_snapshot()

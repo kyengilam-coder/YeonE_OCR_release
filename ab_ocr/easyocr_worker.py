@@ -456,6 +456,15 @@ class EasyOCRWorker:
                                     "unicode_normalization": "none", **layout_metadata}}
 
 
+class _Directed:
+    """Session requests carry no direction; the session pins one at start."""
+    def __init__(self, worker, direction):
+        self.worker, self.direction = worker, direction
+
+    def recognize(self, source, languages):
+        return self.worker.recognize(source, languages, self.direction)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path)
@@ -465,9 +474,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch", type=Path)
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
+    parser.add_argument("--session-root", type=Path)
+    parser.add_argument("--max-requests", type=int, default=8)
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be positive")
+    if args.session_root:
+        # Resident worker: models are verified and loaded once for up to --max-requests pages.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("yeone_worker_protocol", Path(__file__).with_name("worker_sessions.py"))
+        protocol = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(protocol)
+        return protocol.serve_requests(_Directed(EasyOCRWorker(args.model_dir, args.threads), args.direction),
+                                       args.session_root, args.languages, write_result, max_requests=args.max_requests)
     if args.batch:
         data = json.loads(args.batch.read_text(encoding="utf-8-sig"))
         jobs = data.get("items", data.get("jobs")) if isinstance(data, dict) else data
