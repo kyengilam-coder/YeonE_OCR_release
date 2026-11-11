@@ -221,7 +221,7 @@ class ChangeReviewDialog(tk.Toplevel):
         text.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y"); text.pack(side="left", fill="both", expand=True)
         text.tag_configure("head", font=("Malgun Gothic", 10, "bold"), foreground=parent.colors["ACCENT"])
-        text.tag_configure("before", foreground="#867b70")
+        text.tag_configure("before", foreground="#6b7790")
         for index, value in changes.items():
             text.insert("end", f"문단 {index + 1}\n", "head")
             text.insert("end", f"수정 전\n{baseline[index]}\n\n", "before")
@@ -561,8 +561,8 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.pdf_pages = first, last
         self.can_write = can_write or (lambda: True)
         self.on_saved = on_saved
-        self.colors = {"BG": "#f5f2eb", "PANEL": "#fffefa", "INK": "#302b26", "MUTED": "#827970",
-                       "LINE": "#e6dfd4", "ACCENT": "#a53c29", "BLUE": "#2c5e87"}
+        self.colors = {"BG": "#eef1f6", "PANEL": "#ffffff", "INK": "#0e1525", "MUTED": "#4d586e",
+                       "LINE": "#dde2ec", "ACCENT": "#4f46e5", "BLUE": "#1f5fd0"}
         inherited = getattr(parent, "colors", {})
         for key in ("BG", "PANEL", "INK", "MUTED", "LINE"):
             if key in inherited:
@@ -654,7 +654,7 @@ class BookmarkSectionEditor(tk.Toplevel):
 
     def _tool_button(self, parent, text, command, *, width=None):
         options = {"text": text, "command": command, "font": ("Malgun Gothic", 9),
-                   "bg": self.colors["PANEL"], "fg": self.colors["INK"], "activebackground": "#eee9df",
+                   "bg": self.colors["PANEL"], "fg": self.colors["INK"], "activebackground": "#e9edf3",
                    "relief": "solid", "borderwidth": 1, "padx": 6, "pady": 5, "cursor": "hand2",
                    "highlightthickness": 0}
         if width is not None:
@@ -748,7 +748,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         heading.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 9))
         self._label(heading, self._source_title, bold=True, size=11).pack(anchor="w")
         self._label(heading, Path(self.pdf_path).name, muted=True, size=9).pack(anchor="w", pady=(3, 0))
-        tools = tk.Frame(panel, bg="#fcfaf5")
+        tools = tk.Frame(panel, bg="#f7f9fc")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
         self.previous_button = self._tool_button(tools, "‹", lambda: self.change_page(-1), width=2)
         self.previous_button.pack(side="left")
@@ -762,12 +762,12 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._tool_button(tools, "맞춤", lambda: self.set_zoom(None)).pack(side="right")
         self._tool_button(tools, "+", lambda: self.change_zoom(1), width=2).pack(side="right", padx=2)
         self.v_zoom = tk.StringVar(value="너비 맞춤")
-        self._label(tools, textvariable=self.v_zoom, size=9, muted=True, bg="#fcfaf5").pack(side="right", padx=3)
+        self._label(tools, textvariable=self.v_zoom, size=9, muted=True, bg="#f7f9fc").pack(side="right", padx=3)
         self._tool_button(tools, "−", lambda: self.change_zoom(-1), width=2).pack(side="right", padx=2)
-        area = tk.Frame(panel, bg="#e8e4dc")
+        area = tk.Frame(panel, bg="#e4e8ef")
         area.grid(row=2, column=0, sticky="nsew")
         area.columnconfigure(0, weight=1); area.rowconfigure(0, weight=1)
-        self.pdf_canvas = tk.Canvas(area, bg="#e8e4dc", highlightthickness=0, width=360, height=300)
+        self.pdf_canvas = tk.Canvas(area, bg="#e4e8ef", highlightthickness=0, width=360, height=300)
         y = ttk.Scrollbar(area, orient="vertical", command=self.pdf_canvas.yview)
         x = ttk.Scrollbar(area, orient="horizontal", command=self.pdf_canvas.xview)
         self.pdf_canvas.configure(yscrollcommand=y.set, xscrollcommand=x.set)
@@ -825,28 +825,28 @@ class BookmarkSectionEditor(tk.Toplevel):
             self.scope_next.pack(side="left")
             self._label(scope, "원본 쪽 기준", size=9, muted=True).pack(side="left", padx=7)
             self._sync_generated_controls()
-        tools = tk.Frame(panel, bg="#fcfaf5")
+        tools = tk.Frame(panel, bg="#f7f9fc")
         tools.grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 7))
-        font_tools = tk.Frame(tools, bg="#fcfaf5")
+        font_tools = tk.Frame(tools, bg="#f7f9fc")
         font_tools.pack(fill="x")
         self.v_match_pdf_font = tk.BooleanVar(value=True)
         self.font_check = tk.Checkbutton(font_tools, text="원본 글자 크기 맞춤" if self._generated else "PDF 글자 크기 맞춤", variable=self.v_match_pdf_font,
-                                        command=self._sync_text_size, bg="#fcfaf5", activebackground="#fcfaf5",
+                                        command=self._sync_text_size, bg="#f7f9fc", activebackground="#f7f9fc",
                                         fg=self.colors["INK"], font=("Malgun Gothic", 9), highlightthickness=0)
         self.font_check.pack(side="left")
         self._tool_button(font_tools, "가+", self.toggle_text_size, width=2).pack(side="right")
         self._tool_button(font_tools, "가−", lambda: self.change_text_size(-1), width=2).pack(side="right", padx=2)
-        mark_tools = tk.Frame(tools, bg="#fcfaf5")
+        mark_tools = tk.Frame(tools, bg="#f7f9fc")
         mark_tools.pack(fill="x", pady=(4, 0))
         self.marks_button = self._tool_button(mark_tools, "교정 표시 켜짐", self.toggle_marks)
         self.marks_button.pack(side="left")
-        self._label(mark_tools, "파일에 저장된 표시", muted=True, size=9, bg="#fcfaf5").pack(side="left", padx=8)
-        legend = tk.Frame(tools, bg="#fcfaf5")
+        self._label(mark_tools, "파일에 저장된 표시", muted=True, size=9, bg="#f7f9fc").pack(side="left", padx=8)
+        legend = tk.Frame(tools, bg="#f7f9fc")
         legend.pack(fill="x", pady=(4, 0))
         self.mark_legend = []
         for label, color in (("초록 · 자형 확정", "#0B7A3B"), ("파랑 · 자동 교정\n(확인 권장)", "#1F4FBF"),
                              ("빨강 · 확인 필요", "#C00000")):
-            item = self._label(legend, label, size=8, bg="#fcfaf5")
+            item = self._label(legend, label, size=8, bg="#f7f9fc")
             item.configure(fg=color)
             item.pack(side="left", anchor="n", padx=(0, 9))
             self.mark_legend.append(item)
@@ -863,16 +863,16 @@ class BookmarkSectionEditor(tk.Toplevel):
         self.document.bind("<Configure>", lambda _event: self.doc_canvas.configure(scrollregion=self.doc_canvas.bbox("all")))
         self.doc_canvas.bind("<Configure>", self._document_resized)
         self.doc_canvas.bind("<MouseWheel>", lambda event: self._wheel(self.doc_canvas, event))
-        self.compare = tk.Frame(panel, bg="#faf7f0", highlightthickness=1, highlightbackground=self.colors["LINE"])
+        self.compare = tk.Frame(panel, bg="#f3f5fa", highlightthickness=1, highlightbackground=self.colors["LINE"])
         self.compare.grid(row=3, column=0, sticky="ew")
         self.compare.columnconfigure(0, weight=1)
-        top = tk.Frame(self.compare, bg="#faf7f0")
+        top = tk.Frame(self.compare, bg="#f3f5fa")
         top.grid(row=0, column=0, sticky="ew", padx=12, pady=(7, 4))
         self.v_compare = tk.StringVar(value="선택 문단")
-        self._label(top, textvariable=self.v_compare, size=9, muted=True, bg="#faf7f0").pack(side="left")
+        self._label(top, textvariable=self.v_compare, size=9, muted=True, bg="#f3f5fa").pack(side="left")
         self.original_button = self._tool_button(top, "원문 접기", self.toggle_original)
         self.original_button.pack(side="right")
-        self.original_text = tk.Text(self.compare, height=2, wrap="word", bg="#faf7f0", fg="#7d6e5f", relief="flat",
+        self.original_text = tk.Text(self.compare, height=2, wrap="word", bg="#f3f5fa", fg="#5b667c", relief="flat",
                                      font=("Malgun Gothic", 10), padx=12, pady=6)
         self.original_text.grid(row=1, column=0, sticky="ew")
         self.original_text.tag_configure("changed", background="#f7e4dc", foreground="#903d28")
@@ -1318,7 +1318,7 @@ class BookmarkSectionEditor(tk.Toplevel):
         self._active = index
         if previous in self._cards:
             self._cards[previous].configure(highlightbackground=self.colors["PANEL"])
-        self._cards[index].configure(highlightbackground="#c9b395")
+        self._cards[index].configure(highlightbackground="#8b93f0")
         origin = "인식 결과 HWPX" if self._generated else "원본 HWPX"
         self.v_compare.set(f"문단 {index + 1} · {origin} (차이 표시)")
         self._update_original()

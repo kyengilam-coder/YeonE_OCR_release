@@ -77,6 +77,8 @@ class SettingsTabRealTk(unittest.TestCase):
         def column(name):
             col = app._set_cols[name]
             return [k for k in ("read", "book", "collate", "docs", "auto", "model") if S[k]["card"].grid_info().get("in") == col]
+        simple = app.v_simple.get()
+        app.set_simple_view(False, save=False)                                        # 두 열·한 열은 자세히 보기의 배치(간단히 보기는 갈래 하나씩 — test_1b)
         try:
             gui.App._layout_settings(app, int(1300 * app.scale))
             self.assertEqual((column("left"), column("right")), (["read", "book", "collate"], ["docs", "auto", "model"]))
@@ -87,6 +89,41 @@ class SettingsTabRealTk(unittest.TestCase):
             self.assertEqual(app._set_cols["right"].winfo_manager(), "")
         finally:
             gui.App._layout_settings(app, int(1300 * app.scale))
+            app.set_simple_view(simple, save=False)
+
+    def test_1b_simple_view_shows_one_section_at_a_time(self):
+        """간단히 보기(기본): 왼쪽 갈래 줄에서 고른 섹션 하나만 보이고, 자세히 보기로 바꾸면 여섯 섹션이 모두 돌아온다. 값(변수)은 그대로다."""
+        app = self.app; gui = self.gui; S = app._set_sections
+        shown = lambda: sorted(k for k, sec in S.items() if sec["card"].winfo_manager() == "grid")
+        simple = app.v_simple.get()
+        try:
+            app.set_simple_view(True, save=False); app.select_tab(3); self.settle()
+            self.assertTrue(gui.DEFAULTS["simple_view"])                               # 새 설치의 기본은 간단히 보기
+            self.assertEqual(app._set_rail.winfo_manager(), "grid")
+            self.assertEqual([text for _key, text in gui.App.SET_RAIL], ["판독", "이 책", "문서 만들기", "자동 교정", "모델 단계", "책갈피 교정"])
+            self.assertEqual(sorted(app._rail_buttons), sorted(S))                     # 갈래마다 섹션이 하나씩
+            for key, _text in gui.App.SET_RAIL:
+                app._rail_buttons[key].invoke(); self.settle()
+                self.assertEqual(shown(), [key])
+                self.assertEqual(S[key]["card"].grid_info().get("in"), app._set_cols["left"])
+            self.assertTrue(app.v_collate_set.get())                                   # 책갈피 교정 갈래는 접힌 몸통을 펼쳐 둔다
+            self.assertEqual(S["collate"]["body"].winfo_manager(), "pack")
+            model = app.v_model.get()
+            app.set_simple_view(False, save=False); self.settle()
+            self.assertEqual(app._set_rail.winfo_manager(), "")
+            self.assertEqual(shown(), sorted(S)); self.assertEqual(app.v_model.get(), model)
+            self.assertFalse(app.v_simple.get()); self.assertTrue(app.v_detail.get())
+            gui.App._goto_print_offset(app); self.settle()                             # 자세히 보기에서는 갈래를 바꿔도 섹션이 모두 남는다
+            self.assertEqual(shown(), sorted(S))
+            app.set_simple_view(True, save=False); self.settle()
+            self.assertEqual(shown(), ["book"])                                        # 인쇄 쪽수 칸으로 갈 때 고른 '이 책' 갈래
+        finally:
+            app.v_set_rail.set("read")
+            if app.v_collate_set.get():
+                app.toggle_collate_settings()
+            if app.v_book_adv.get():
+                app.toggle_book_adv()
+            app.set_simple_view(simple, save=False); app.select_tab(0); self.settle()
 
     def test_2_every_setting_stays_wired_to_its_variable(self):
         """자리만 옮겼다: 설정 탭(접힌 세부 설정·고급·책갈피 섹션 포함)과 바닥 줄에 지난 판의 설정 변수가 모두 칸으로 남아 있다."""

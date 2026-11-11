@@ -272,7 +272,7 @@ class SmallAnnotationDialog(tk.Toplevel):
         picture.pack(fill="both", expand=True, pady=5)
         picture.rowconfigure(0, weight=1)
         picture.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(picture, background="#eeeae1", highlightthickness=0)
+        self.canvas = tk.Canvas(picture, background="#e4e8ef", highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         sx = ttk.Scrollbar(picture, orient="horizontal", command=self.canvas.xview)
         sy = ttk.Scrollbar(picture, orient="vertical", command=self.canvas.yview)
