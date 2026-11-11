@@ -182,7 +182,8 @@ class LocalFirstTests(unittest.TestCase):
             return FakeCLI()
         with patch("yeone_ocr.comparison_ai.create_client", side_effect=factory), \
                 patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
-            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept")), 0)
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept",
+                                               "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
         self.assertEqual(seen[0], ("anthropic", "opus", subscription.SUBSCRIPTION_KEY))
         self.assertEqual(self.calls, ["opus"])
         rec = self.record()
@@ -225,6 +226,27 @@ class LocalFirstTests(unittest.TestCase):
         with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):
             self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
         self.assertNotIn("ai_page", self.record()["local_first"])
+
+    def test_signed_in_subscription_turns_on_page_reading_and_tiled_review_by_default(self):
+        from yeone_ocr import claude_subscription as subscription, local_first
+        args = self.args()
+        with patch.dict(os.environ, {"YEONE_OCR_CLAUDE_AUTH": ""}), \
+                patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            resolved = local_first._resolve_ai_defaults(args, cli)
+        self.assertEqual((args.local_ai_page, args.local_ai_accept, args.local_ai_detail_tile, args.local_ai_batch,
+                          args.local_ai_auth), ("prefer", True, 1024, 4, "subscription"))
+        self.assertEqual(resolved["ai_page"], "prefer")
+        args = self.args("--local-ai-page", "off")
+        with patch.dict(os.environ, {"YEONE_OCR_CLAUDE_AUTH": ""}), \
+                patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            local_first._resolve_ai_defaults(args, cli)
+        self.assertEqual(args.local_ai_page, "off")                                   # explicit choice wins
+        args = self.args()
+        with patch.dict(os.environ, {"YEONE_OCR_CLAUDE_AUTH": ""}), \
+                patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):
+            local_first._resolve_ai_defaults(args, cli)
+        self.assertEqual((args.local_ai_page, args.local_ai_accept, args.local_ai_batch), ("off", False, 1))
+        self.assertIsNone(args.local_ai_auth)
 
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20

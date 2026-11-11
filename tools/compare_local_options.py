@@ -71,12 +71,14 @@ SETS = {
     "all-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1", "YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),
     # Claude subscription review (claude -p) of the suspicious spans, its certain proposals applied.
     "ai-subscription": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100",
-                         "--local-ai-batch", "4"], {}, False),
+                         "--local-ai-batch", "4", "--local-ai-detail-tile", "0"], {}, False),
     # ... with full-resolution detail tiles of large crops (models shrink a page-size image).
     "ai-subscription-tiles": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100",
                                "--local-ai-batch", "4", "--local-ai-detail-tile", "1024"], {}, False),
     # Claude (subscription) reads each whole page from full-resolution strips as a second reading.
     "ai-page": (["--local-ai-page", "prefer"], {}, False),
+    # The default when signed in to Claude Code (2026-11): page reading + span review with tiles.
+    "auto": (["--local-ai-page", "auto"], {}, False),
     "ai-page-witness": (["--local-ai-page", "witness"], {}, False),
     # Both: the suspicious-span review with detail tiles corrects the engine reading, then the page reading is merged.
     "ai-page+review": (["--local-ai-page", "prefer", "--local-ai-auth", "subscription", "--local-ai-accept",
@@ -419,6 +421,8 @@ def run_set(name, doc, args, out_dir):
         argv += ["--local-engine-root", str(args.engine_root)]
     if not args.ai and "--local-ai-auth" not in extra:
         argv.append("--no-local-ai-review")
+    if "--local-ai-page" not in extra:
+        argv += ["--local-ai-page", "off"]         # the Claude page reading is automatic when signed in; sets name it
     env = {**os.environ, "PYTHONUTF8": "1", "YEONE_OCR_AI_PAGE_CACHE": str(shared), **env_extra}
     started = time.perf_counter()
     total = len(doc["pages"])

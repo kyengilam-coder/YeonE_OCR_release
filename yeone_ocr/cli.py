@@ -2785,20 +2785,23 @@ def build_parser():
     p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
                    help="Claude 검증 연결 방식. subscription=PC에 로그인된 Claude Code(claude -p)로 구독 사용량에서 차감(API 요금 없음, 개인 사용), "
                         "api=API 키만, auto(기본)=Claude에 API 키가 없으면 로그인된 Claude Code. 환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
-    p.add_argument("--local-ai-page", choices=("off", "witness", "prefer"), default="off",
-                   help="(시험) Claude 구독(로그인된 Claude Code)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
+    p.add_argument("--local-ai-page", choices=("auto", "off", "witness", "prefer"), default="auto",
+                   help="Claude 구독(로그인된 Claude Code)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
+                        "auto(기본)=Claude 구독에 로그인되어 있으면 prefer, 아니면 off. "
                         "prefer=짧게 다른 곳은 AI 글자를 문서에 넣음(초록), witness=엔진 글자를 두고 다른 곳만 파랑. 긴 차이는 빨강. "
                         "비교·교정 창의 엔진 판독은 그대로")
     p.add_argument("--local-korean-forms", action=argparse.BooleanOptionalAction, default=True,
                    help="한글·한자 혼용 문서(--local-profile mixed)의 한자를 한국 표준 모양(KS X 1001)으로 맞춤(기본 켬): "
                         "説→說, 真→眞, 絕→絶, 緒→緖 등 KS X 1001에 없는 모양만. 비교·교정 창의 엔진 판독은 그대로. 끄려면 --no-local-korean-forms")
-    p.add_argument("--local-ai-detail-tile", type=int, default=0, metavar="화소",
-                   help="(시험) AI 검증 이미지가 이 크기(512~2048 화소)보다 크면 원래 해상도 조각도 함께 보냄(0=끔). "
+    p.add_argument("--local-ai-detail-tile", type=int, default=None, metavar="화소",
+                   help="AI 검증 이미지가 이 크기(512~2048 화소)보다 크면 원래 해상도 조각도 함께 보냄(0=끔, 기본: Claude 구독이면 1024, 아니면 끔). "
                         "AI는 큰 이미지를 줄여서 보기 때문에 쪽 크기의 글 덩어리에서 작은 한글이 흐려짐. 예: 1024")
-    p.add_argument("--local-ai-accept", action="store_true",
-                   help="(시험) AI 검증이 확신한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 측정용")
-    p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=1,
-                   help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본 1). 늘리면 호출 수가 줄지만 정확도는 측정 전")
+    p.add_argument("--local-ai-accept", action=argparse.BooleanOptionalAction, default=None,
+                   help="AI 검증이 확신하고 안전 검사를 통과한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 기본: Claude 구독이면 켬, 아니면 끔")
+    p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=None,
+                   help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본: Claude 구독이면 4, 아니면 1)")
+    p.add_argument("--local-ai-subscription-calls", type=int, default=1000, metavar="N",
+                   help="Claude 구독으로 검증할 때 이번 실행의 호출 상한(기본 1000). 구독은 호출마다 요금이 없어 API 호출 상한 대신 이 값을 씀")
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
                    help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
                         "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")

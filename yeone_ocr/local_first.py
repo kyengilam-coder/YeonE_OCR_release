@@ -312,6 +312,36 @@ def _accept_ai(project, number) -> dict:
     return {"accepted": accepted, "held": held}
 
 
+SUBSCRIPTION_DEFAULTS = {"local_ai_page": "prefer", "local_ai_accept": True, "local_ai_detail_tile": 1024, "local_ai_batch": 4}
+PLAIN_DEFAULTS = {"local_ai_page": "off", "local_ai_accept": False, "local_ai_detail_tile": 0, "local_ai_batch": 1}
+
+
+def _resolve_ai_defaults(args, cli):
+    """Default (2026-11, chosen after the vertical measurements): when the signed-in Claude Code
+    (subscription) is usable, read each page with Claude as well (--local-ai-page prefer), review the
+    suspicious spans through it with detail tiles, four spans a call, and apply its certain, checked
+    proposals. Without it, the earlier defaults. Options given explicitly always win.
+    Returns the values the options were resolved to, for the option record."""
+    from . import claude_subscription as subscription
+    if getattr(args, "local_ai_page", "auto") in (None, "auto") or any(
+            getattr(args, name, None) is None for name in SUBSCRIPTION_DEFAULTS):
+        mode = subscription.auth_mode(getattr(args, "local_ai_auth", None))
+        use = mode != "api" and subscription.choose("subscription", "anthropic", "")[0]
+    else:
+        use = False
+    chosen = SUBSCRIPTION_DEFAULTS if use else PLAIN_DEFAULTS
+    for name, value in chosen.items():
+        current = getattr(args, name, None)
+        if current is None or current == "auto":
+            setattr(args, name, value)
+    if use and getattr(args, "local_ai_auth", None) in (None, "auto"):
+        args.local_ai_auth = "subscription"
+    if use:
+        cli.log("  Claude 구독에 로그인되어 있어 AI 판독을 함께 합니다(쪽 판독 + 의심 구간 검증, 구독 사용량에서 차감). "
+                "끄려면 --local-ai-page off --local-ai-auth api")
+    return {name.removeprefix("local_"): value for name, value in chosen.items()}
+
+
 def _ai_page_reader(args, project, work, cli):
     """(Trial, --local-ai-page) a function number -> AI page reading for extras, or None.
     Through the signed-in Claude Code (subscription) only; failures leave the engine reading alone."""
@@ -350,8 +380,8 @@ def _settings(args, remaining):
     from .comparison_ai import AISettings
     from .providers import default_model
     return AISettings(args.reader, getattr(args, "model", None) or default_model(args.reader),
-                      max_calls=max(1, remaining), max_output_tokens=4096,
-                      max_total_output_tokens=max(1, remaining) * 4096)
+                      max_calls=max(1, min(100, remaining)), max_output_tokens=4096,     # per page plan
+                      max_total_output_tokens=max(1, min(100, remaining)) * 4096)
 
 
 def command(args, *, work=None, doc=None):
@@ -384,12 +414,15 @@ def _command(args, *, work=None, doc=None, pool=None):
     if bad:
         cli.log(bad)
         return 2
+    resolved = _resolve_ai_defaults(args, cli)
     cap = getattr(args, "local_ai_max_calls", 20)
     if type(cap) is not int or not 1 <= cap <= 100:
         cli.log("의심 구간 API 호출 상한은 1~100이어야 합니다.")
         return 2
     command_cap = getattr(args, "max_calls", 0)
     cap = min(cap, command_cap) if command_cap else cap
+    if getattr(args, "local_ai_auth", None) == "subscription":
+        cap = max(1, int(getattr(args, "local_ai_subscription_calls", 1000) or 1000))   # no per-call charge
     owned_doc = doc is None
     doc = doc or open_pdf(args.pdf)
     try:
@@ -468,6 +501,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                     "ai_page": ("local_ai_page", "off")}
         options = {}
         for option, (name, default) in defaults.items():
+            default = resolved.get(option, default)                 # automatic choices are not trial options
             value = getattr(args, name, default)
             if value is not None and (type(value), value) != (type(default), default):
                 options[option] = value
