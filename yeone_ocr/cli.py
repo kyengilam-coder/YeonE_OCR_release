@@ -2785,6 +2785,10 @@ def build_parser():
     p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
                    help="Claude 검증 연결 방식. subscription=PC에 로그인된 Claude Code(claude -p)로 구독 사용량에서 차감(API 요금 없음, 개인 사용), "
                         "api=API 키만, auto(기본)=Claude에 API 키가 없으면 로그인된 Claude Code. 환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
+    p.add_argument("--local-ai-page", choices=("off", "witness", "prefer"), default="off",
+                   help="(시험) Claude 구독(로그인된 Claude Code)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
+                        "prefer=짧게 다른 곳은 AI 글자를 문서에 넣음(초록), witness=엔진 글자를 두고 다른 곳만 파랑. 긴 차이는 빨강. "
+                        "비교·교정 창의 엔진 판독은 그대로")
     p.add_argument("--local-korean-forms", action=argparse.BooleanOptionalAction, default=True,
                    help="한글·한자 혼용 문서(--local-profile mixed)의 한자를 한국 표준 모양(KS X 1001)으로 맞춤(기본 켬): "
                         "説→說, 真→眞, 絕→絶, 緒→緖 등 KS X 1001에 없는 모양만. 비교·교정 창의 엔진 판독은 그대로. 끄려면 --no-local-korean-forms")

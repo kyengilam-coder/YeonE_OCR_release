@@ -197,6 +197,35 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
 
+    def test_ai_page_reading_goes_into_the_document_not_the_engine_reading(self):
+        from yeone_ocr import ai_page, claude_subscription as subscription
+        self.recognized_text = "天地玄黄宇宙洪荒"
+        sent = []
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, **kwargs):
+                sent.append(kwargs)
+                return json.dumps({"lines": ["天地玄黃宇宙洪荒"], "uncertain": []}), True, "end_turn", {}, "opus"
+        with patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
+                patch.object(subscription, "SubscriptionClient", return_value=FakeCLI()):
+            self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
+        rec = self.record()
+        self.assertIn("天地玄黃宇宙洪荒", json.dumps(rec["merged"], ensure_ascii=False))
+        self.assertEqual(rec["local_first"]["ai_page"]["taken"], 1)
+        self.assertIn("green", {g["grade"] for g in rec["local_grades"]})
+        project = ComparisonProject.load(rec["local_first"]["project_path"])
+        self.assertEqual(project.text(1), "天地玄黄宇宙洪荒")                  # engine reading kept for the editor
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(rec["local_first"]["options"], {"ai_page": "prefer"})
+
+    def test_ai_page_without_sign_in_keeps_the_engine_reading(self):
+        from yeone_ocr import claude_subscription as subscription
+        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):
+            self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
+        self.assertNotIn("ai_page", self.record()["local_first"])
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

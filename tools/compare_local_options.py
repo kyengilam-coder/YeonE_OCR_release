@@ -75,6 +75,9 @@ SETS = {
     # ... with full-resolution detail tiles of large crops (models shrink a page-size image).
     "ai-subscription-tiles": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100",
                                "--local-ai-batch", "4", "--local-ai-detail-tile", "1024"], {}, False),
+    # Claude (subscription) reads each whole page from full-resolution strips as a second reading.
+    "ai-page": (["--local-ai-page", "prefer"], {}, False),
+    "ai-page-witness": (["--local-ai-page", "witness"], {}, False),
     "no-korean-forms": (["--no-local-korean-forms"], {}, False),   # engine Hanja forms as read (before 2026-11)
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
@@ -257,6 +260,13 @@ def ai_review(source: Path, work: Path, pages: list[int]) -> tuple[dict, list[st
         accept = (local.get("review") or {}).get("ai_accept") or {}
         totals["accepted"] += accept.get("accepted", 0)
         totals["held"] += accept.get("held", 0)
+        page = local.get("ai_page")
+        if page:
+            for key in ("taken", "witness", "kept_long"):
+                totals[f"page_{key}"] = totals.get(f"page_{key}", 0) + page.get(key, 0)
+            lines.append(f"{number}쪽\tAI 쪽 판독\t유사도 {page.get('ratio')} · 채택 {page.get('taken', 0)} · "
+                         f"파랑 {page.get('witness', 0)} · 빨강(긴 차이) {page.get('kept_long', 0)}\t"
+                         + ("쓰지 않음(엔진 판독과 너무 다름)" if not page.get("used") else ", ".join(page.get("uncertain") or [])))
         for item in local.get("ai_proposals") or []:
             state = item.get("decision") or "?"
             why = item.get("blocked_reason") or ("AI 불확실" if item.get("uncertain") else "")

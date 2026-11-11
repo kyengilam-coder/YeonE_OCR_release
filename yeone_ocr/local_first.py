@@ -100,7 +100,7 @@ def _review_summary(project, number):
 GRADE_RANK = {"green": 1, "blue": 2, "red": 3}
 
 
-def _local_grades(project, number, run, current, witness=None):
+def _local_grades(project, number, run, current, witness=None, marks=()):
     """Per-character check grades for a local-first page (text coordinates of ``current``).
 
     red   = engines disagree on the glyphs (not whitespace only), an unknown
@@ -150,6 +150,8 @@ def _local_grades(project, number, run, current, witness=None):
         from .local_options import witness_spans
         for start, end in witness_spans(current, witness):
             paint(start, end, "blue")
+    for start, end, kind in marks:                 # AI page reading: kept differences (blue / red)
+        paint(start, end, kind)
     page = project.page(number)
     for suggestion in page.get("suggestions", []):
         if suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace":
@@ -191,7 +193,17 @@ def _record(project, number, args, work, started, review, extras=None):
     direction = "horizontal" if args.mode == "horizontal_zh" else "vertical"
     raw = run["raw"]
     first = reading_from_run(raw, number, direction)
-    merged = reading_from_run(raw, number, direction, text=project.text(number))
+    current = project.text(number)
+    marks, ai_page_summary = [], None
+    page_ai = extras.get("ai_page")
+    if page_ai and page_ai.get("text"):
+        from .ai_page import merge
+        text, red, blue, ai_page_summary = merge(current, page_ai["text"], page_ai.get("mode", "prefer"))
+        ai_page_summary.update({k: page_ai[k] for k in ("mode", "model", "uncertain", "cached") if k in page_ai})
+        if ai_page_summary["used"]:
+            current = text
+            marks = [(a, b, "red") for a, b in red] + [(a, b, "blue") for a, b in blue]
+    merged = reading_from_run(raw, number, direction, text=current)
     from .local_options import mark_folios
     mark_folios(merged)                                     # a printed page number is not body text
     if getattr(args, "local_profile", None) == "mixed" and getattr(args, "local_korean_forms", True):
@@ -221,7 +233,7 @@ def _record(project, number, args, work, started, review, extras=None):
                 usage[key] += value
     merged_data = merged.model_dump()
     try:
-        local_grades = _local_grades(project, number, run, project.text(number), witness=extras.get("witness"))
+        local_grades = _local_grades(project, number, run, current, witness=extras.get("witness"), marks=marks)
     except Exception:
         local_grades = []                                    # grades are display only; never lose the reading for them
     return {"file": Path(args.pdf).name, "pdf_page": number, "version": __version__,
@@ -235,6 +247,7 @@ def _record(project, number, args, work, started, review, extras=None):
             "local_first": {"project_path": str(project.project_path), "source_sha256": project.source_sha256,
                             "baseline_run_id": run["id"], "profile": args.local_profile,
                             "review": copy.deepcopy(review), "ai_proposals": proposals,
+                            **({"ai_page": ai_page_summary} if ai_page_summary else {}),
                             **({"options": copy.deepcopy(extras["options"])} if extras.get("options") else {})}}
 
 
@@ -296,6 +309,37 @@ def _accept_ai(project, number) -> dict:
     if accepted:
         project.save()
     return {"accepted": accepted, "held": held}
+
+
+def _ai_page_reader(args, project, work, cli):
+    """(Trial, --local-ai-page) a function number -> AI page reading for extras, or None.
+    Through the signed-in Claude Code (subscription) only; failures leave the engine reading alone."""
+    mode = getattr(args, "local_ai_page", "off") or "off"
+    if mode == "off":
+        return None
+    from . import claude_subscription as subscription
+    use, note = subscription.choose("subscription", "anthropic", "")
+    if not use:
+        cli.log("  AI 쪽 판독을 하지 않습니다: " + (note or "Claude 구독 연결을 확인하세요."))
+        return None
+    client = subscription.SubscriptionClient()
+    model = subscription.model(None)
+    direction = "horizontal" if args.mode == "horizontal_zh" else "vertical"
+    cli.log(f"  AI 쪽 판독({mode}): Claude 구독 · 모델 {model} · 쪽을 원래 해상도 띠로 잘라 처음부터 읽고 엔진 판독과 맞춰 봄")
+
+    def read(number):
+        from ab_ocr.ocr import render_page
+        from .ai_page import read_page
+        try:
+            with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
+                result = read_page(image, direction=direction, profile=args.local_profile, client=client,
+                                   model=model, cache_dir=work.dir / "ai-page")
+        except (subscription.SubscriptionError, TimeoutError, ValueError, OSError) as exc:
+            cli.log(f"  {number}쪽: AI 쪽 판독 실패 — {exc} (엔진 판독만 씀)")
+            return None
+        cli.log(f"  {number}쪽: AI 쪽 판독 {len(result['text'])}자" + (" (저장된 판독)" if result.get("cached") else ""))
+        return {**result, "mode": mode}
+    return read
 
 
 def _settings(args, remaining):
@@ -416,7 +460,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                     "exclude_engines": ("local_exclude_engines", []), "easyocr": ("local_easyocr", None),
                     "easyocr_threads": ("local_easyocr_threads", 2),
                     "easyocr_batch": ("local_easyocr_batch", 1), "ai_accept": ("local_ai_accept", False),
-                    "ai_detail_tile": ("local_ai_detail_tile", 0), "korean_forms": ("local_korean_forms", True)}
+                    "ai_detail_tile": ("local_ai_detail_tile", 0), "korean_forms": ("local_korean_forms", True),
+                    "ai_page": ("local_ai_page", "off")}
         options = {}
         for option, (name, default) in defaults.items():
             value = getattr(args, name, default)
@@ -434,6 +479,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             except Exception:
                 return None
 
+        page_reader = _ai_page_reader(args, project, work, cli)
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -503,6 +549,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                     raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
                 # Checkpoint local output BEFORE preparing or sending any API call.
                 _save_record(project, number, args, work, started, review, extras=extras)
+                if page_reader is not None:
+                    extras["ai_page"] = page_reader(number)
                 settings = _settings(args, cap)
                 try:
                     plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
