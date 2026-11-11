@@ -270,6 +270,24 @@ def error_lines(reference: str, hypothesis: str, context: int = 6) -> list[str]:
     return out
 
 
+def write_lists(doc, work: Path, folder: Path) -> None:
+    """errors.txt / ai_proposals.txt from an existing work folder, without reading anything again."""
+    if not work.is_dir():
+        return
+    if doc.get("_reference") and not (folder / "errors.txt").is_file():
+        hyp = compact(recognized(Path(doc["pdf"]), work, doc["pages"])[0])
+        reference = crop_reference(doc["_reference"], hyp) if doc.get("_partial") else doc["_reference"]
+        (folder / "errors.txt").write_text("\ufeff정답 → 판독 차이 (공백 무시)\n" + "\n".join(error_lines(reference, hyp)) + "\n",
+                                           encoding="utf-8")
+    if not (folder / "ai_proposals.txt").is_file():
+        totals, lines = ai_review(Path(doc["pdf"]), work, doc["pages"])
+        if totals["calls"] or lines:
+            (folder / "ai_proposals.txt").write_text("\ufeff쪽\t결정\t변경 전 → 변경 후\t보류 이유\n" + "\n".join(lines) + "\n",
+                                                     encoding="utf-8")
+            print(f"  {doc['name']} · {folder.name} AI 검증: 호출 {totals['calls']}회 · 반영 {totals['accepted']}개 · "
+                  f"보류 {totals['held']}개", flush=True)
+
+
 def engine_seconds(work: Path, pages: list[int]) -> dict:
     """Seconds each engine spent recognizing the measured pages (from the comparison project).
 
@@ -465,6 +483,7 @@ def main(argv=None):
             if args.resume and result_path.is_file() and name not in redo:
                 previous = json.loads(result_path.read_text(encoding="utf-8"))
                 if previous.get("pages_spec") == d["pages_spec"]:          # same pages only
+                    write_lists(d, doc_dir / name, result_path.parent)    # lists for runs made before they existed
                     rows.append(previous)
                     continue
             print(f"▶ {d['name']} · {name} …", flush=True)
