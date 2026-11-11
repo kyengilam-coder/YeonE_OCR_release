@@ -131,12 +131,22 @@ class EnginePool:
         if engine in self._gpu_failed:
             raise ocr.OCRError(f"{engine} GPU 실행을 이번 실행에서 제외했습니다: {self._gpu_failed[engine]}")
         key = self._key(engine, languages, engine_root, "horizontal", timeout)
+        notices = {"at": None}
+
+        def waiting(event):
+            """The PC-wide GPU queue is held by another process: say so every 30 s."""
+            elapsed = event.get("elapsed_seconds", 0)
+            if self.log and (notices["at"] is None or elapsed - notices["at"] >= 30):
+                notices["at"] = elapsed
+                self.log(f"  {engine}: GPU 대기 중(앞 순서 {event.get('position', '?')}, {elapsed:.0f}초) — "
+                         "다른 프로그램이 그래픽카드 엔진을 쓰고 있습니다")
         with self._guard:
             session = self._sessions.get(key)
             first = session is None
             if first:
                 session = RecognitionSession(engine, languages, engine_root=engine_root, device="cuda", timeout=timeout,
-                                             should_stop=should_stop or self.should_stop, max_requests=self.max_requests)
+                                             should_stop=should_stop or self.should_stop, max_requests=self.max_requests,
+                                             on_wait=waiting)
                 session.__enter__()
                 self._sessions[key], self._locks[key] = session, threading.Lock()
             lock = self._locks[key]

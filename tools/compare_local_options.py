@@ -259,7 +259,8 @@ def run_set(name, doc, args, out_dir):
     env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
     started = time.perf_counter()
     total = len(doc["pages"])
-    with (out_dir / f"{name}.log").open("w", encoding="utf-8") as log, \
+    # utf-8-sig: Windows PowerShell's Get-Content recognises the BOM and shows Korean correctly.
+    with (out_dir / f"{name}.log").open("w", encoding="utf-8-sig") as log, \
             subprocess.Popen(argv, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, encoding="utf-8", errors="replace") as process:
         done = 0

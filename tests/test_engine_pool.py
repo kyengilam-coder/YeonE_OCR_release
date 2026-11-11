@@ -249,3 +249,18 @@ def test_gpu_session_failure_is_reported_once_then_refused(tmp_path):
                 pool.recognize("a.pdf", engine="glmocr", languages="chi_tra")
     assert starts == ["cuda"]
     assert len(logs) == 1
+
+
+def test_gpu_queue_wait_is_reported_every_30_seconds():
+    seen = []
+
+    class Waiting(FakeSession):
+        def recognize_file(self, *a, **k):
+            for elapsed in (0.1, 5, 31, 40, 62):
+                self.kwargs["on_wait"]({"phase": "gpu_wait", "position": 1, "elapsed_seconds": elapsed})
+            return {"engine": self.engine}
+
+    with mock.patch("ab_ocr.local_engines.RecognitionSession", Waiting):
+        with EnginePool(enabled=True, log=seen.append) as pool:
+            pool.recognize("a.pdf", engine="surya", languages="kor+chi_tra")
+    assert len(seen) == 3 and all("GPU 대기 중" in line for line in seen)
