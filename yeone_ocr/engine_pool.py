@@ -18,6 +18,7 @@ import threading
 from ab_ocr import ocr
 
 SESSION_ENGINES = ("ppocrv6", "rapidocr", "easyocr")
+GPU_SESSION_ENGINES = ("surya", "glmocr", "paddle_server")   # always through a CUDA session (FIFO GPU lease)
 PARALLEL_ENV = "YEONE_OCR_ENGINE_PARALLEL"
 SESSION_ENV = "YEONE_OCR_RESIDENT_WORKERS"
 CORES_PER_ENGINE = 4            # each CPU engine already uses several threads (ONNX intra-op ≤ 8, OMP ≤ 8)
@@ -36,6 +37,7 @@ def engine_parallelism(engines, requested=0, *, resident=(), memory=None, cpu_co
     engines = list(engines)
     if not engines:
         return 1
+    gpu = [e for e in engines if e in GPU_SESSION_ENGINES]
     if not requested:
         try:
             requested = int(os.environ.get(PARALLEL_ENV, "0") or 0)
@@ -44,7 +46,10 @@ def engine_parallelism(engines, requested=0, *, resident=(), memory=None, cpu_co
     if requested > 0:
         return max(1, min(requested, len(engines)))
     cores = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
-    count = max(1, min(len(engines), cores // CORES_PER_ENGINE))
+    # GPU engines need no CPU slot (one GPU lease at a time serializes them on the GPU).
+    cpu_engines = len(engines) - len(gpu)
+    count = max(1, min(cpu_engines, cores // CORES_PER_ENGINE) + len(gpu)) if cpu_engines else max(1, len(gpu))
+    count = min(count, len(engines))
     if memory:
         free = min(memory["available_commit_mb"], memory["available_physical_mb"]) * MEMORY_HEADROOM
         budgets = sorted((MEMORY_BUDGET_MB.get(e, 1024) for e in engines if e not in resident), reverse=True)
@@ -72,6 +77,7 @@ class EnginePool:
         self._sessions: dict[tuple, object] = {}
         self._locks: dict[tuple, threading.Lock] = {}
         self._one_shot: set[str] = set()
+        self._gpu_failed: dict[str, str] = {}
         self._guard = threading.Lock()
 
     def __enter__(self):
@@ -89,6 +95,9 @@ class EnginePool:
 
     def recognize(self, path, *, engine, page_number=1, languages="chi_tra", psm=None, dpi=300, timeout=300.0,
                   should_stop=None, engine_root=None, direction=None, **options):
+        if engine in GPU_SESSION_ENGINES:
+            return self._recognize_gpu(path, engine=engine, page_number=page_number, languages=languages, psm=psm,
+                                       dpi=dpi, timeout=timeout, should_stop=should_stop, engine_root=engine_root)
         if (not self.enabled or engine not in SESSION_ENGINES or direction != "horizontal"
                 or engine in self._one_shot or options):
             kwargs = dict(options)
@@ -114,6 +123,34 @@ class EnginePool:
                                       dpi=dpi, timeout=timeout, should_stop=should_stop, engine_root=engine_root,
                                       direction=direction)
             return session.recognize_file(path, page_number=page_number, dpi=dpi, psm=psm)
+
+    def _recognize_gpu(self, path, *, engine, page_number, languages, psm, dpi, timeout, should_stop, engine_root):
+        """A GPU engine whose session cannot start (no CUDA device, GPU queue unavailable)
+        is reported once and then refused quickly for the rest of the run."""
+        from ab_ocr.local_engines import RecognitionSession
+        if engine in self._gpu_failed:
+            raise ocr.OCRError(f"{engine} GPU 실행을 이번 실행에서 제외했습니다: {self._gpu_failed[engine]}")
+        key = self._key(engine, languages, engine_root, "horizontal", timeout)
+        with self._guard:
+            session = self._sessions.get(key)
+            first = session is None
+            if first:
+                session = RecognitionSession(engine, languages, engine_root=engine_root, device="cuda", timeout=timeout,
+                                             should_stop=should_stop or self.should_stop, max_requests=self.max_requests)
+                session.__enter__()
+                self._sessions[key], self._locks[key] = session, threading.Lock()
+            lock = self._locks[key]
+        with lock:
+            try:
+                return session.recognize_file(path, page_number=page_number, dpi=dpi, psm=psm)
+            except ocr.OCRCancelled:
+                raise
+            except (ocr.OCRError, OSError) as error:
+                if first:
+                    self._gpu_failed[engine] = type(error).__name__
+                    if self.log:
+                        self.log(f"  {engine}: GPU 실행을 시작하지 못해 이번 실행에서는 CPU 엔진만 씁니다({type(error).__name__}).")
+                raise
 
     def _retire(self, key, engine):
         with self._guard:

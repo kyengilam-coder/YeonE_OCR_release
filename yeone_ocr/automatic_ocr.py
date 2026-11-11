@@ -15,9 +15,17 @@ from ab_ocr.runtime import engine_root_for
 
 POLICY = "local-auto-engine-quality-v1"
 PREFERENCE = ("ppocrv6", "rapidocr", "easyocr", "tesseract")
+# Engines that run on the GPU. They join automatic selection only when their
+# installation is CUDA-enabled and the caller can run them through resident
+# GPU sessions (engine_pool), on horizontal pages (the only measured direction).
+# Surya and GLM-OCR also read Korean and Hanja together, which the CPU neural
+# models cannot. Score ties still prefer the original CPU order.
+GPU_ENGINES = ("surya", "glmocr", "paddle_server")
+SELECTION_ORDER = PREFERENCE + GPU_ENGINES
 # Conservative scheduling estimates, not model specifications. Free commit is
 # often the limiting resource even when physical RAM is plentiful on Windows.
-MEMORY_BUDGET_MB = {"ppocrv6": 640, "rapidocr": 640, "easyocr": 2048, "tesseract": 128}
+MEMORY_BUDGET_MB = {"ppocrv6": 640, "rapidocr": 640, "easyocr": 2048, "tesseract": 128,
+                    "surya": 4096, "glmocr": 4096, "paddle_server": 1024}
 
 
 def memory_status():
@@ -38,6 +46,9 @@ def memory_status():
 
 
 def language_options(engine, profile, direction):
+    if engine in GPU_ENGINES:
+        from ab_ocr.engine_registry import language_for
+        return language_for(engine, profile, direction)
     languages = ("kor+chi_tra" if engine == "tesseract" else "kor") if profile == "mixed" else (
         "chi_sim" if profile == "simplified" else "chi_tra")
     if engine == "tesseract" and direction == "vertical":
@@ -45,7 +56,56 @@ def language_options(engine, profile, direction):
     return languages
 
 
-def available_engines(profile, direction, engine_root=None, should_stop=None, resident=()):
+def gpu_engines_enabled() -> bool:
+    import os
+    return os.environ.get("YEONE_OCR_GPU_ENGINES", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded):
+    """Installed CUDA engines usable for this profile; uninstalled ones are skipped silently."""
+    from ab_ocr.engine_registry import RECOMMENDED_ENGINES
+    from ab_ocr.local_engines import _device
+    if direction != "horizontal":
+        return []
+    order = [e for e in RECOMMENDED_ENGINES[profile] if e in GPU_ENGINES] + [e for e in GPU_ENGINES if e not in RECOMMENDED_ENGINES[profile]]
+    ready = []
+    for engine in order:
+        if should_stop and should_stop():
+            raise ocr.OCRCancelled("자동 선택을 중지했습니다.")
+        if profile == "mixed" and engine == "paddle_server":
+            continue                                   # no Korean recognition model
+        root = engine_root_for(engine, engine_root)
+        if not (root / "tools" / engine / "installation.json").is_file():
+            continue
+        try:
+            info = ocr.doctor(engine=engine, engine_root=root, should_stop=should_stop)
+        except ocr.OCRCancelled:
+            raise
+        except (ocr.OCRError, OSError, ValueError):
+            excluded[engine] = "설치 상태를 확인하지 못했습니다."
+            continue
+        if not info.get("available"):
+            excluded[engine] = info.get("message", "설치 상태를 확인하지 못했습니다.")
+            continue
+        try:
+            device = _device(info)
+        except (ocr.OCRError, ValueError):
+            device = "cpu"
+        if device != "cuda":
+            excluded[engine] = "CUDA 설치가 아니어서 자동 선택에서 뺐습니다(CPU에서는 너무 느림)."
+            continue
+        if language_options(engine, profile, direction) not in set(info.get("languages", [])):
+            excluded[engine] = "선택 언어 모델이 없습니다."
+            continue
+        if (memory and engine not in resident
+                and min(memory["available_commit_mb"], memory["available_physical_mb"]) < MEMORY_BUDGET_MB[engine]):
+            excluded[engine] = "메모리 할당 여유 부족으로 이번 쪽에서 제외했습니다."
+            continue
+        ready.append(engine)
+    return ready
+
+
+def available_engines(profile, direction, engine_root=None, should_stop=None, resident=(), gpu=False):
     from .comparison import ComparisonError, PROFILES
     if profile not in PROFILES or direction not in ("horizontal", "vertical"):
         raise ComparisonError("문서 종류 또는 읽기 방향을 확인하세요.")
@@ -79,6 +139,8 @@ def available_engines(profile, direction, engine_root=None, should_stop=None, re
             ready.append(engine)
         else:
             excluded[engine] = info.get("message", "선택 언어 모델이 없습니다.") if not info.get("available") else "선택 언어 모델이 없습니다."
+    if gpu:
+        ready += _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded)
     return ready, excluded
 
 
@@ -140,7 +202,7 @@ def assess_readings(runs, profile):
                         "agreement": round(agreement, 6), "completeness": round(completeness, 6),
                         "spatial_coverage": round(spatial_coverage, 6),
                         "script_fit": round(script_fit, 6), "duplicate_detections": round(duplicates, 6)})
-    records.sort(key=lambda r: (-r["score"], PREFERENCE.index(r["engine"])))
+    records.sort(key=lambda r: (-r["score"], SELECTION_ORDER.index(r["engine"]) if r["engine"] in SELECTION_ORDER else len(SELECTION_ORDER)))
     usable = [r for r in records if r["characters"] and r["score"] > 0]
     selected = usable[0] if usable else None
     disagreement = len({text for text in texts.values() if text}) > 1
@@ -154,7 +216,7 @@ def assess_readings(runs, profile):
 
 def run_automatic_page(project, number, profile="traditional", direction="horizontal", dpi=300,
                        should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
-                       recognizer=None, parallel=1, resident=()):
+                       recognizer=None, parallel=1, resident=(), gpu_engines=False):
     from .comparison import ComparisonError, latest_runs, run_page
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ComparisonError("렌더링 DPI와 엔진 제한 시간을 확인하세요.")
@@ -164,8 +226,8 @@ def run_automatic_page(project, number, profile="traditional", direction="horizo
     preserve_baseline = bool(previous["reviewed"] or previous.get("baseline_choice") == "manual"
                              or previous["corrected_text"] is not None or previous["edits"])
     try:
-        engines, excluded = (available_engines(profile, direction, engine_root, should_stop, resident=resident)
-                             if resident else available_engines(profile, direction, engine_root, should_stop))
+        extra = {k: v for k, v in (("resident", resident), ("gpu", gpu_engines)) if v}
+        engines, excluded = available_engines(profile, direction, engine_root, should_stop, **extra)
     except ocr.OCRCancelled:
         return {"completed": [], "errors": {}, "cancelled": True, "skipped": [], "unsupported": {}}
     if not engines:

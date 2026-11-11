@@ -312,7 +312,8 @@ def _command(args, *, work=None, doc=None, pool=None):
             from .engine_pool import engine_parallelism
             requested = getattr(args, "local_engine_parallel", 0) or 0
             resident = pool.resident()
-            return {"recognizer": pool.recognize if pool.enabled else None, "resident": resident,
+            from .automatic_ocr import gpu_engines_enabled
+            return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu_engines_enabled(),
                     "parallel": lambda engines: engine_parallelism(engines, requested, resident=resident,
                                                                    memory=memory_status())}
         for index, number in enumerate(pages, 1):

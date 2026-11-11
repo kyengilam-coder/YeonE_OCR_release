@@ -193,3 +193,59 @@ def test_ppocrv6_session_mode_pins_direction_and_loads_once(tmp_path):
         code, root = _serve(v6, ["--model-dir", str(tmp_path), "--direction", "horizontal"], tmp_path, Worker)
     assert code == 0 and len(created) == 1
     assert json.loads((root / "out.json").read_text(encoding="utf-8"))["text"] == "horizontal"
+
+
+def _install(root, engine):
+    folder = root / "tools" / engine
+    folder.mkdir(parents=True)
+    (folder / "installation.json").write_text("{}", encoding="utf-8")
+
+
+def test_cuda_engines_join_automatic_selection_only_when_installed_with_cuda(tmp_path):
+    from yeone_ocr import automatic_ocr as auto
+    for engine in ("surya", "glmocr", "paddle_server"):
+        _install(tmp_path, engine)
+    devices = {"surya": "cpu", "glmocr": "cuda", "paddle_server": "cuda"}
+
+    def doctor(*, engine, engine_root=None, should_stop=None):
+        if engine in auto.PREFERENCE:
+            return {"available": False, "message": "not installed"}
+        return {"available": True, "engine": engine, "languages": ["chi_tra", "kor+chi_tra"],
+                "installation": {"backend_device": devices[engine], "execution_provider": devices[engine]}}
+
+    with mock.patch.object(auto.ocr, "doctor", side_effect=doctor), mock.patch.object(auto, "memory_status", return_value=None), \
+            mock.patch("yeone_ocr.automatic_ocr.engine_root_for", return_value=tmp_path):
+        ready, excluded = auto.available_engines("traditional", "horizontal", gpu=True)
+        assert ready == ["glmocr", "paddle_server"]
+        assert "CUDA" in excluded["surya"]
+        assert auto.available_engines("traditional", "horizontal")[0] == []          # off unless the caller can run GPU sessions
+        assert auto.available_engines("traditional", "vertical", gpu=True)[0] == []  # vertical not measured
+        devices["surya"] = "cuda"
+        ready, _ = auto.available_engines("mixed", "horizontal", gpu=True)
+        assert ready == ["surya", "glmocr"]                                          # paddle_server has no Korean model
+
+
+def test_gpu_engines_take_no_cpu_slot():
+    with mock.patch.dict("os.environ", {engine_pool.PARALLEL_ENV: ""}):
+        assert engine_parallelism(["ppocrv6", "tesseract", "glmocr"], cpu_count=4) == 2
+        assert engine_parallelism(["glmocr"], cpu_count=1) == 1
+        assert engine_parallelism(["ppocrv6", "rapidocr", "glmocr"], cpu_count=8) == 3
+
+
+def test_gpu_session_failure_is_reported_once_then_refused(tmp_path):
+    starts = []
+
+    class Failing(FakeSession):
+        def recognize_file(self, *a, **k):
+            starts.append(self.kwargs["device"])
+            raise OSError("no GPU queue")
+
+    logs = []
+    with mock.patch("ab_ocr.local_engines.RecognitionSession", Failing):
+        with EnginePool(enabled=True, log=logs.append) as pool:
+            with pytest.raises(OSError):
+                pool.recognize("a.pdf", engine="glmocr", languages="chi_tra")
+            with pytest.raises(ocr.OCRError):
+                pool.recognize("a.pdf", engine="glmocr", languages="chi_tra")
+    assert starts == ["cuda"]
+    assert len(logs) == 1
