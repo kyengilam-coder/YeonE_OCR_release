@@ -60,7 +60,8 @@ SETS = {
     "vote+columns": (["--local-vote", "--local-columns"], {}, True),
     "enhance": (["--local-enhance", "contrast"], {}, False),
     "fast": (["--local-engine-plan", "fast"], {}, False),
-    "no-verify": (["--no-local-line-verification"], {}, False),
+    "no-verify": (["--no-local-line-verification"], {}, False),   # the default since 2026-11 measurements
+    "verify": (["--local-line-verification"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")
 ANSWER_SUFFIXES = (".hwpx", ".hwp", ".docx", ".txt")

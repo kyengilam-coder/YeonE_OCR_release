@@ -290,7 +290,7 @@ def command(args, *, work=None, doc=None):
     from ab_ocr.local_engines import line_verification
     enhancement = getattr(args, "local_enhance", "none")
     enhancement = None if enhancement in (None, "none") else enhancement
-    with render_cache(), input_enhancement(enhancement), line_verification(getattr(args, "local_line_verification", True)), \
+    with render_cache(), input_enhancement(enhancement), line_verification(getattr(args, "local_line_verification", False)), \
             EnginePool(should_stop=cli.CANCEL.is_set, log=cli.log) as pool:
         return _command(args, work=work, doc=doc, pool=pool)
 
@@ -359,7 +359,7 @@ def _command(args, *, work=None, doc=None, pool=None):
         defaults = {"engine_plan": ("local_engine_plan", "all"), "vote": ("local_vote", False),
                     "columns": ("local_columns", True), "textlayer_witness": ("local_textlayer_witness", False),
                     "skip_blank": ("local_skip_blank", False), "enhance": ("local_enhance", "none"),
-                    "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", True)}
+                    "ai_batch": ("local_ai_batch", 1), "line_verification": ("local_line_verification", False)}
         options = {}
         for option, (name, default) in defaults.items():
             value = getattr(args, name, default)

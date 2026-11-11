@@ -30,7 +30,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
-            "simple_display": False, "local_columns": True}
+            "simple_display": False, "local_columns": True, "local_line_verification": False}
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 LOCAL_PROFILE_LABELS = {"traditional": "번체·한문", "simplified": "간체·중문", "mixed": "한글·한자 혼용"}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
@@ -2026,6 +2026,7 @@ class App(tk.Tk):
         self.v_local_profile = tk.StringVar(value=LOCAL_PROFILE_LABELS.get(self.cfg.get("local_profile"), LOCAL_PROFILE_LABELS["traditional"]))
         self.v_local_ai_review = tk.BooleanVar(value=bool(self.cfg.get("local_ai_review", True)))
         self.v_local_columns = tk.BooleanVar(value=bool(self.cfg.get("local_columns", True)))
+        self.v_local_line_verification = tk.BooleanVar(value=bool(self.cfg.get("local_line_verification", False)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2145,6 +2146,13 @@ class App(tk.Tk):
                     "판독 순서는 그대로입니다.", self)
             return cb
         R["local_columns"] = row(b, "두 단 조판", "가로쓰기 두 단 쪽의 읽기 순서 정리(기본 켬)", local_columns)
+
+        def local_line_verification(parent):
+            cb = ttk.Checkbutton(parent, text="줄마다 다시 확인 (느림)", variable=self.v_local_line_verification)
+            Tip(cb, "PP-OCRv6가 번체 가로쓰기 줄을 잘라 다시 읽고, EasyOCR가 글꼴로 글자 모양을 대조합니다. 측정한 4개 문서 19쪽에서는 "
+                    "결과 글자가 같았고 번체 쪽당 시간만 30~37% 늘었습니다. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켜십시오.", self)
+            return cb
+        R["local_line_verification"] = row(b, "줄 다시 확인", "PP-OCRv6·EasyOCR 추가 검증(기본 끔, 느림)", local_line_verification)
 
         def provider(parent):
             cb = self.cb_provider = ttk.Combobox(parent, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=chars(220))
@@ -5669,6 +5677,9 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_columns")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_columns", True))):
             options.append("--no-local-columns")
+        variable = vars(self).get("v_local_line_verification")
+        if bool(variable.get()) if variable is not None else bool(cfg.get("local_line_verification", False)):
+            options.append("--local-line-verification")
         root = cfg.get("local_engine_root")
         if root:
             options += ["--local-engine-root", str(root)]
@@ -6580,6 +6591,8 @@ class App(tk.Tk):
             self.cfg["local_ai_review"] = bool(self.v_local_ai_review.get())
             if vars(self).get("v_local_columns") is not None:
                 self.cfg["local_columns"] = bool(self.v_local_columns.get())
+            if vars(self).get("v_local_line_verification") is not None:
+                self.cfg["local_line_verification"] = bool(self.v_local_line_verification.get())
             cap = max_calls_value(self.v_local_ai_max_calls.get())
             if cap is not None and 1 <= cap <= 100:
                 self.cfg["local_ai_max_calls"] = cap

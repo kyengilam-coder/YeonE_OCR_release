@@ -2784,8 +2784,9 @@ def build_parser():
                    help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
     p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=1,
                    help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본 1). 늘리면 호출 수가 줄지만 정확도는 측정 전")
-    p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=True,
-                   help="(시험) 끄면 PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 건너뜀. 빠르지만 정확도는 측정 전")
+    p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
+                   help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
+                        "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
     p.add_argument("--local-engine-parallel", type=int, choices=range(0, 9), metavar="0-8", default=0,
                    help="로컬 우선 인식에서 한 쪽을 동시에 읽을 엔진 수(0=코어·메모리로 자동, 1=차례로)")
     p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,

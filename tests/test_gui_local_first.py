@@ -48,6 +48,13 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertIn("--no-local-columns", self.gui.App._strategy_opts(app))
         self.assertIs(self.gui.DEFAULTS["local_columns"], True)
 
+    def test_line_verification_is_off_by_default_and_switching_it_on_adds_a_flag(self):
+        app = self.app()
+        self.assertNotIn("--local-line-verification", self.gui.App._strategy_opts(app))
+        app.v_local_line_verification = Var(True)
+        self.assertIn("--local-line-verification", self.gui.App._strategy_opts(app))
+        self.assertIs(self.gui.DEFAULTS["local_line_verification"], False)
+
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()
         app._env_optional_key = True
