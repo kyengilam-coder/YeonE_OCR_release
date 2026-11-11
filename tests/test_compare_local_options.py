@@ -50,6 +50,13 @@ def test_answers_from_txt_hwpx_docx(tmp_path):
     assert tool.compact(tool.reference_text(tmp_path / "a.docx")) == "宇宙洪荒"
 
 
+def test_printed_detection_on_a_few_pages_of_a_long_answer():
+    answer = "".join(chr(0x4E00 + i % 3000) for i in range(24000))
+    assert tool.printed_from_answer(answer[5000:5800], answer) is True
+    assert tool.printed_from_answer("".join(chr(0x9000 + i) for i in range(800)), answer) is False
+    assert tool.printed_from_answer("短", answer) is False
+
+
 def test_profile_guess():
     assert tool.guess_profile("天地玄黃宇宙洪荒" * 5) == "traditional"
     assert tool.guess_profile("药方集解说这个问题" * 5) == "simplified"
@@ -88,6 +95,10 @@ def test_folder_discovery_pairs_answers_and_marks_printed_pdfs(tmp_path):
     (tmp_path / "out" / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     again = tool.discover(args)[0]
     assert (again["profile"], again["profile_source"]) == ("mixed", "manifest")
+    args.max_pages = 1                                               # the command, not the last run, picks pages
+    assert tool.discover(args)[0]["pages"] == [1]
+    args.max_pages = 0
+    assert tool.discover(args)[0]["pages"] == [1, 2, 3]
 
 
 def test_main_runs_sets_in_order_skips_witness_on_printed_and_resumes(tmp_path):
@@ -109,6 +120,8 @@ def test_main_runs_sets_in_order_skips_witness_on_printed_and_resumes(tmp_path):
         assert calls == ["sequential", "default", "vote"]              # witness skipped: printed from the answer
         assert tool.main([str(folder), "--out", str(out), "--sets", "vote,sequential", "--resume"]) == 0
         assert calls == ["sequential", "default", "vote"]
+        assert tool.main([str(folder), "--out", str(out), "--sets", "default", "--resume", "--max-pages", "1"]) == 0
+        assert calls == ["sequential", "default", "vote", "default"]   # other pages: measured again
     summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
     assert [r["cer_percent"] for r in summary["rows"]] == [0.0, 0.0, 0.0]
     assert "| doc (인쇄본) |" in (out / "summary.md").read_text(encoding="utf-8")

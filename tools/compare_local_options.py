@@ -192,8 +192,16 @@ def text_layer(pdf: Path, pages: list[int]) -> str:
 
 
 def printed_from_answer(layer: str, reference: str) -> bool:
-    a, b = compact(layer)[:20000], reference[:20000]
-    return bool(a and b) and difflib.SequenceMatcher(None, b, a, autojunk=False).ratio() >= PRINTED_SIMILARITY
+    """Most of the PDF's own text (for the measured pages) is found in the answer, in order.
+
+    Measured against the text layer's length, so a few pages of a long answer still count.
+    """
+    a = compact(layer)[:20000]
+    if len(a) < 20 or not reference:
+        return False
+    matcher = difflib.SequenceMatcher(None, a, reference, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(a) >= PRINTED_SIMILARITY
 
 
 def recognized(source: Path, work: Path, pages: list[int]) -> tuple[str, dict]:
@@ -274,7 +282,8 @@ def discover(args) -> list[dict]:
         answer = Path(entry["answer"]) if entry.get("answer") else (args.reference if not source.is_dir() else pick_answer(pdf))
         with pymupdf.open(pdf) as document:
             count = len(document)
-        pages = page_list(entry.get("pages_spec") or args.pages, count, args.max_pages)
+        # The command decides the pages each run; "pages_override" in manifest.json pins one document.
+        pages = page_list(entry.get("pages_override") or args.pages, count, args.max_pages)
         reference = compact(reference_text(answer)) if answer else None
         if args.profile:
             entry["profile"], entry["profile_source"] = args.profile, "option"
@@ -283,7 +292,9 @@ def discover(args) -> list[dict]:
             entry["profile_source"] = "answer" if reference else "default"
         elif entry.get("profile_confirmed"):
             entry["profile_source"] = "manifest"
-        if "printed_from_answer" not in entry:
+        if "printed_override" in entry:                         # set by hand in manifest.json
+            entry["printed_from_answer"] = bool(entry["printed_override"])
+        else:
             entry["printed_from_answer"] = bool(reference) and printed_from_answer(text_layer(pdf, pages), reference)
         entry.update(pdf=key, name=pdf.stem, answer=str(answer) if answer else None, page_count=count,
                      pages_spec=spec_of(pages), mode=entry.get("mode", args.mode), skip=entry.get("skip", False))
@@ -291,8 +302,9 @@ def discover(args) -> list[dict]:
         docs.append(entry)
     args.out.mkdir(parents=True, exist_ok=True)
     public = [{k: v for k, v in d.items() if not k.startswith("_") and k != "pages"} for d in docs]
-    manifest_path.write_text(json.dumps({"note": "profile(traditional/simplified/mixed)·mode(auto/vertical/horizontal_zh)·"
-                                                 "pages_spec·answer·skip 을 고쳐 다시 실행하면 그대로 씁니다.",
+    manifest_path.write_text(json.dumps({"note": "profile(+profile_confirmed)·mode(auto/vertical/horizontal_zh)·answer·skip·"
+                                                 "pages_override(예 \"2-8\")·printed_override(true/false) 를 고쳐 다시 실행하면 그대로 씁니다. "
+                                                 "pages_spec 은 마지막 실행의 쪽(참고용).",
                                          "documents": public}, ensure_ascii=False, indent=2), encoding="utf-8")
     return docs
 
@@ -342,13 +354,16 @@ def main(argv=None):
                 continue                                         # its text layer is the answer itself
             result_path = doc_dir / name / "result.json"
             if args.resume and result_path.is_file():
-                rows.append(json.loads(result_path.read_text(encoding="utf-8")))
-                continue
+                previous = json.loads(result_path.read_text(encoding="utf-8"))
+                if previous.get("pages_spec") == d["pages_spec"]:          # same pages only
+                    rows.append(previous)
+                    continue
             print(f"▶ {d['name']} · {name} …", flush=True)
             work, code, seconds = run_set(name, d, args, doc_dir)
             text, engines = recognized(Path(d["pdf"]), work, d["pages"])
             hyp = compact(text)
-            row = {"document": d["name"], "set": name, "exit": code, "pages": len(d["pages"]), "seconds": round(seconds, 1),
+            row = {"document": d["name"], "set": name, "exit": code, "pages": len(d["pages"]), "pages_spec": d["pages_spec"],
+                   "seconds": round(seconds, 1),
                    "seconds_per_page": round(seconds / max(1, len(d["pages"])), 1), "pages_read": sum(engines.values()),
                    "engines": engines, "characters": len(hyp), "profile": d["profile"],
                    "printed_from_answer": d["printed_from_answer"]}
