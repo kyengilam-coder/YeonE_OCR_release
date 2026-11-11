@@ -64,6 +64,7 @@ SETS = {
     "verify": (["--local-line-verification"], {}, False),
     "no-easyocr": (["--local-exclude-engines", "easyocr"], {}, False),   # the horizontal default since 2026-11
     "with-easyocr": (["--local-easyocr"], {}, False),
+    "gpu-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1"}, False),   # trial: Surya/GLM-OCR on vertical pages too
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")

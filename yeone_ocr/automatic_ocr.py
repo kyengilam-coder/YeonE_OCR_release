@@ -61,6 +61,16 @@ def gpu_engines_enabled() -> bool:
     return os.environ.get("YEONE_OCR_GPU_ENGINES", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+GPU_VERTICAL_ENV = "YEONE_OCR_GPU_VERTICAL"
+
+
+def gpu_vertical_enabled() -> bool:
+    """Opt-in trial: let the GPU engine read vertical pages too. Off until vertical pages are
+    measured (2026-11: Tesseract alone, mixed vertical sample CER 34%)."""
+    import os
+    return os.environ.get(GPU_VERTICAL_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded):
     """The first installed CUDA engine usable for this profile (registry order: Surya for mixed,
     GLM-OCR for Chinese); uninstalled ones are skipped silently.
@@ -71,7 +81,7 @@ def _gpu_candidates(profile, direction, engine_root, should_stop, memory, reside
     """
     from ab_ocr.engine_registry import RECOMMENDED_ENGINES
     from ab_ocr.local_engines import _device
-    if direction != "horizontal":
+    if direction != "horizontal" and not gpu_vertical_enabled():
         return []
     order = [e for e in RECOMMENDED_ENGINES[profile] if e in GPU_ENGINES] + [e for e in GPU_ENGINES if e not in RECOMMENDED_ENGINES[profile]]
     ready = []
