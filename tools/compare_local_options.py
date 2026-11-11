@@ -1,21 +1,33 @@
-"""Measure local-first option sets on a small sample: seconds per page and CER.
+"""Measure local-first option sets on test documents: seconds per page and CER.
 
-Run from a source checkout on the PC that has the local engines installed:
+Run from a source checkout on the PC that has the local engines installed.
+Give one PDF, or a folder of test files:
 
-    python tools/compare_local_options.py 원본.pdf --reference 정답.hwp ^
-        --out D:\\측정\\의방집해 --engine-root "C:\\Program Files\\YeonE_OCR"
+    python tools/compare_local_options.py "C:\\Projects\\YeonE_OCR\\TEST용 파일들" ^
+        --out "C:\\Projects\\YeonE_OCR\\측정" --engine-root "<엔진 설치 폴더>"
+
+Folder mode pairs every PDF with the answer file of the same name
+(.hwpx > .hwp > .docx > .txt; .BAK is ignored). A PDF without an answer is
+measured for speed only. On the first run the folder's guesses are written to
+<out>/manifest.json (document type from the answer's script, printed-from-
+answer detection); edit it and run again to correct them.
 
 Each option set reads the same pages in its own work folder. Sets that only
 change post-processing (vote, columns, text-layer witness) start from a copy
-of the "default" folder, so the engines are not run again and they finish in
-seconds. Error rate = document-level character error rate of the recognized
-text against the reference, whitespace removed, aligned with difflib (an upper
-bound close to edit distance; identical for every set, so fit for comparing
-sets). Running heads and page numbers that the reference omits count as
-errors equally in every set.
+of the "default" folder, so engines are not run again. --resume skips
+(document, set) pairs that already finished.
 
-The reference may be .txt, .hwpx or .hwp (HWP 5, needs `pip install olefile`).
-It should cover the same pages as --pages. No API is called unless --ai.
+Error rate: document-level character error rate against the answer,
+whitespace removed, aligned with difflib (a close upper bound of edit
+distance, the same for every set, so fit for comparing sets). Running heads
+and page numbers the answer omits count equally in every set. With --pages or
+--max-pages the answer is cut to the stretch the reading aligns with.
+
+A PDF whose own text layer already matches its answer was printed from the
+answer: its pixels are cleaner than a scan, so its error rates flatter real
+scans, and the text-layer witness set is skipped for it.
+
+No API is called unless --ai.
 """
 from __future__ import annotations
 
@@ -49,26 +61,27 @@ SETS = {
     "fast": (["--local-engine-plan", "fast"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "columns", "vote+columns")
+ANSWER_SUFFIXES = (".hwpx", ".hwp", ".docx", ".txt")
+PRINTED_SIMILARITY = 0.9
 
 
-# ------------------------------------------------------------------ reference
+# ------------------------------------------------------------------ answers
 def hwp5_text(path: Path) -> str:
     """Body text of an HWP 5 file (paragraph text records only)."""
     try:
         import olefile
     except ImportError as error:
         raise SystemExit("HWP 정답을 읽으려면 olefile 이 필요합니다: pip install olefile "
-                         "(또는 한글에서 HWPX·TXT 로 저장해 주세요)") from error
+                         "(또는 한글에서 HWPX 로 저장해 주세요)") from error
     with olefile.OleFileIO(str(path)) as ole:
-        header = ole.openstream("FileHeader").read()
-        compressed = bool(struct.unpack("<I", header[36:40])[0] & 1)
-        if struct.unpack("<I", header[36:40])[0] & 2:
-            raise SystemExit("암호가 걸린 HWP 입니다. 암호를 푼 사본을 주세요.")
+        flags = struct.unpack("<I", ole.openstream("FileHeader").read()[36:40])[0]
+        if flags & 2:
+            raise SystemExit(f"암호가 걸린 HWP 입니다: {path.name}")
         sections = sorted((e for e in ole.listdir() if e[0] == "BodyText"), key=lambda e: int(e[1][7:]))
         paragraphs = []
         for entry in sections:
             data = ole.openstream(entry).read()
-            if compressed:
+            if flags & 1:
                 data = zlib.decompress(data, -15)
             i = 0
             while i + 4 <= len(data):
@@ -84,11 +97,8 @@ def hwp5_text(path: Path) -> str:
                 units, j = bytearray(), 0
                 while j + 2 <= len(record):
                     code = struct.unpack("<H", record[j:j + 2])[0]
-                    if code < 32:
-                        # extended/inline controls occupy 8 code units
+                    if code < 32:                                # controls; inline/extended ones span 8 units
                         j += 16 if code in (1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23) else 2
-                        if code == 9:
-                            units += "\t".encode("utf-16-le")
                         continue
                     units += record[j:j + 2]
                     j += 2
@@ -97,16 +107,28 @@ def hwp5_text(path: Path) -> str:
 
 
 def hwpx_text(path: Path) -> str:
+    """Body text of an HWPX file; memo contents (inside field controls) are left out."""
+    from html import unescape
     with zipfile.ZipFile(path) as package:
         names = sorted((n for n in package.namelist() if re.fullmatch(r"Contents/section\d+\.xml", n)),
                        key=lambda n: int(re.search(r"\d+", n.rsplit("/", 1)[1]).group()))
-        text = []
+        parts = []
         for name in names:
             xml = package.read(name).decode("utf-8")
-            for paragraph in re.findall(r"<hp:p\b.*?</hp:p>", xml, flags=re.S):
-                text.append("".join(re.findall(r"<hp:t\b[^>]*>(.*?)</hp:t>", paragraph, flags=re.S)))
-    from html import unescape
-    return unescape(re.sub(r"<[^>]+>", "", "\n".join(text)))
+            xml = re.sub(r"<hp:fieldBegin\b.*?</hp:fieldBegin>", "", xml, flags=re.S)
+            xml = xml.replace("</hp:p>", "\n")
+            pieces = re.findall(r"<hp:t\b[^>]*>(.*?)</hp:t>|(\n)", xml, flags=re.S)
+            parts.append("".join(text or newline for text, newline in pieces))
+    return unescape(re.sub(r"<[^>]+>", "", "".join(parts)))
+
+
+def docx_text(path: Path) -> str:
+    import docx
+    document = docx.Document(str(path))
+    lines = [p.text for p in document.paragraphs]
+    for table in document.tables:
+        lines.extend(cell.text for row in table.rows for cell in row.cells)
+    return "\n".join(lines)
 
 
 def reference_text(path: Path) -> str:
@@ -115,7 +137,33 @@ def reference_text(path: Path) -> str:
         return hwp5_text(path)
     if suffix == ".hwpx":
         return hwpx_text(path)
+    if suffix == ".docx":
+        return docx_text(path)
     return path.read_text(encoding="utf-8-sig")
+
+
+def guess_profile(text: str) -> str:
+    """mixed if Hangul is a real share of the letters, else simplified/traditional by OpenCC."""
+    letters = [c for c in text if c.isalpha()]
+    hangul = sum(1 for c in letters if "\uac00" <= c <= "\ud7a3")
+    if letters and hangul / len(letters) > 0.1:
+        return "mixed"
+    try:
+        import opencc
+    except ImportError:
+        return "traditional"
+    han = "".join(c for c in letters if "\u3400" <= c <= "\u9fff")[:20000]
+    simplified = sum(a != b for a, b in zip(han, opencc.OpenCC("s2t").convert(han)))
+    traditional = sum(a != b for a, b in zip(han, opencc.OpenCC("t2s").convert(han)))
+    return "simplified" if simplified > traditional else "traditional"
+
+
+def pick_answer(pdf: Path) -> Path | None:
+    for suffix in ANSWER_SUFFIXES:
+        candidate = pdf.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 # ------------------------------------------------------------------- measure
@@ -126,6 +174,26 @@ def compact(text: str) -> str:
 def char_errors(reference: str, hypothesis: str) -> int:
     matcher = difflib.SequenceMatcher(None, reference, hypothesis, autojunk=False)
     return sum(max(a1 - a0, b1 - b0) for tag, a0, a1, b0, b1 in matcher.get_opcodes() if tag != "equal")
+
+
+def crop_reference(reference: str, hypothesis: str, anchor: int = 8) -> str:
+    """The stretch of the answer that a partial reading aligns with (outermost long matches)."""
+    blocks = [b for b in difflib.SequenceMatcher(None, reference, hypothesis, autojunk=False).get_matching_blocks()
+              if b.size >= anchor]
+    if not blocks:
+        return reference
+    return reference[blocks[0].a:blocks[-1].a + blocks[-1].size]
+
+
+def text_layer(pdf: Path, pages: list[int]) -> str:
+    import pymupdf
+    with pymupdf.open(pdf) as document:
+        return "".join(document[n - 1].get_text() for n in pages)
+
+
+def printed_from_answer(layer: str, reference: str) -> bool:
+    a, b = compact(layer)[:20000], reference[:20000]
+    return bool(a and b) and difflib.SequenceMatcher(None, b, a, autojunk=False).ratio() >= PRINTED_SIMILARITY
 
 
 def recognized(source: Path, work: Path, pages: list[int]) -> tuple[str, dict]:
@@ -144,62 +212,107 @@ def recognized(source: Path, work: Path, pages: list[int]) -> tuple[str, dict]:
     return "\n".join(texts), engines
 
 
-def page_list(spec: str | None, count: int) -> list[int]:
+def page_list(spec: str | None, count: int, limit: int = 0) -> list[int]:
     if not spec:
-        return list(range(1, count + 1))
-    out = []
-    for part in spec.split(","):
-        a, _, b = part.partition("-")
-        out.extend(range(int(a), int(b or a) + 1))
-    return [p for p in out if 1 <= p <= count]
+        pages = list(range(1, count + 1))
+    else:
+        pages = []
+        for part in spec.split(","):
+            a, _, b = part.partition("-")
+            pages.extend(range(int(a), int(b or a) + 1))
+        pages = [p for p in pages if 1 <= p <= count]
+    return pages[:limit] if limit else pages
 
 
-def run_set(name, args, source, pages, out_dir):
+def spec_of(pages: list[int]) -> str:
+    out, i = [], 0
+    while i < len(pages):
+        j = i
+        while j + 1 < len(pages) and pages[j + 1] == pages[j] + 1:
+            j += 1
+        out.append(str(pages[i]) if i == j else f"{pages[i]}-{pages[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def run_set(name, doc, args, out_dir):
     extra, env_extra, from_default = SETS[name]
     work = out_dir / name
     if work.exists():
         shutil.rmtree(work)
     if from_default:
-        base = out_dir / "default"
-        if not (base / "readings").exists():
-            raise SystemExit(f"{name}: default 를 먼저 실행해야 합니다(--sets 에 default 포함)")
-        shutil.copytree(base, work)
-    argv = [sys.executable, "-m", "yeone_ocr", "run", str(source), "--work", str(work), "--pdf-only",
-            "--local-profile", args.profile, *extra]
-    if args.pages:
-        argv += ["--pages", args.pages]
-    if args.mode:
-        argv += ["--mode", args.mode]
+        shutil.copytree(out_dir / "default", work, ignore=shutil.ignore_patterns("result.json"))
+    argv = [sys.executable, "-m", "yeone_ocr", "run", str(doc["pdf"]), "--work", str(work), "--pdf-only",
+            "--local-profile", doc["profile"], "--mode", doc.get("mode", "auto"), "--pages", spec_of(doc["pages"]), *extra]
     if args.engine_root:
         argv += ["--local-engine-root", str(args.engine_root)]
     if not args.ai:
         argv.append("--no-local-ai-review")
     env = {**os.environ, "PYTHONUTF8": "1", **env_extra}
     started = time.perf_counter()
-    log = (out_dir / f"{name}.log").open("w", encoding="utf-8")
-    try:
+    with (out_dir / f"{name}.log").open("w", encoding="utf-8") as log:
         code = subprocess.run(argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
-    finally:
-        log.close()
     return work, code, time.perf_counter() - started
+
+
+# --------------------------------------------------------------- documents
+def discover(args) -> list[dict]:
+    import pymupdf
+    source = args.source
+    pdfs = sorted(source.glob("*.pdf")) if source.is_dir() else [source]
+    manifest_path = args.out / "manifest.json"
+    saved = {}
+    if manifest_path.is_file():
+        saved = {d["pdf"]: d for d in json.loads(manifest_path.read_text(encoding="utf-8"))["documents"]}
+    docs = []
+    for pdf in pdfs:
+        key = str(pdf)
+        entry = dict(saved.get(key, {}))
+        if entry.get("skip"):
+            docs.append(entry)
+            continue
+        answer = Path(entry["answer"]) if entry.get("answer") else (args.reference if not source.is_dir() else pick_answer(pdf))
+        with pymupdf.open(pdf) as document:
+            count = len(document)
+        pages = page_list(entry.get("pages_spec") or args.pages, count, args.max_pages)
+        reference = compact(reference_text(answer)) if answer else None
+        if args.profile:
+            entry["profile"], entry["profile_source"] = args.profile, "option"
+        elif "profile" not in entry:
+            entry["profile"] = guess_profile(reference) if reference else "traditional"
+            entry["profile_source"] = "answer" if reference else "default"
+        elif entry.get("profile_confirmed"):
+            entry["profile_source"] = "manifest"
+        if "printed_from_answer" not in entry:
+            entry["printed_from_answer"] = bool(reference) and printed_from_answer(text_layer(pdf, pages), reference)
+        entry.update(pdf=key, name=pdf.stem, answer=str(answer) if answer else None, page_count=count,
+                     pages_spec=spec_of(pages), mode=entry.get("mode", args.mode), skip=entry.get("skip", False))
+        entry["pages"], entry["_reference"], entry["_partial"] = pages, reference, len(pages) < count
+        docs.append(entry)
+    args.out.mkdir(parents=True, exist_ok=True)
+    public = [{k: v for k, v in d.items() if not k.startswith("_") and k != "pages"} for d in docs]
+    manifest_path.write_text(json.dumps({"note": "profile(traditional/simplified/mixed)·mode(auto/vertical/horizontal_zh)·"
+                                                 "pages_spec·answer·skip 을 고쳐 다시 실행하면 그대로 씁니다.",
+                                         "documents": public}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return docs
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("source", type=Path, help="원본 PDF")
-    parser.add_argument("--reference", type=Path, help="정답 .hwp/.hwpx/.txt (없으면 속도만)")
-    parser.add_argument("--out", type=Path, required=True, help="측정 폴더(세트마다 하위 폴더)")
+    parser.add_argument("source", type=Path, help="원본 PDF 하나, 또는 시험 파일 폴더")
+    parser.add_argument("--reference", type=Path, help="(PDF 하나일 때) 정답 .hwpx/.hwp/.docx/.txt")
+    parser.add_argument("--out", type=Path, required=True, help="측정 폴더(문서·세트마다 하위 폴더)")
     parser.add_argument("--pages", help="예: 2-12 (기본 전체)")
+    parser.add_argument("--max-pages", type=int, default=0, help="문서마다 앞에서부터 이 쪽수까지만(0=전부)")
     parser.add_argument("--sets", default=",".join(DEFAULT_SETS), help="쉼표로: " + ", ".join(SETS))
-    parser.add_argument("--profile", choices=("traditional", "simplified", "mixed"), default="traditional")
-    parser.add_argument("--mode", choices=("auto", "vertical", "horizontal_zh"), default="horizontal_zh")
-    parser.add_argument("--engine-root", type=Path, help="tools 폴더가 있는 엔진 설치 위치(예: 설치한 연어OCR 폴더)")
+    parser.add_argument("--profile", choices=("traditional", "simplified", "mixed"), help="모든 문서에 강제(기본: 정답 글로 추정)")
+    parser.add_argument("--mode", choices=("auto", "vertical", "horizontal_zh"), default="auto")
+    parser.add_argument("--engine-root", type=Path, help="tools 폴더가 있는 엔진 설치 위치")
     parser.add_argument("--ai", action="store_true", help="의심 구간 AI 검증도 실행(API 비용 발생)")
+    parser.add_argument("--resume", action="store_true", help="이미 끝난 (문서, 세트)는 건너뜀")
+    parser.add_argument("--only", help="이 글자가 이름에 든 문서만(쉼표로 여러 개)")
     args = parser.parse_args(argv)
 
-    import pymupdf
-    with pymupdf.open(args.source) as document:
-        pages = page_list(args.pages, len(document))
     names = [n.strip() for n in args.sets.split(",") if n.strip()]
     unknown = [n for n in names if n not in SETS]
     if unknown:
@@ -207,39 +320,67 @@ def main(argv=None):
     if any(SETS[n][2] for n in names) and "default" not in names:
         names.insert(0, "default")
     names.sort(key=lambda n: (SETS[n][2], n != "sequential", n != "default"))   # fresh runs first, default before copies
-    args.out.mkdir(parents=True, exist_ok=True)
-    reference = compact(reference_text(args.reference)) if args.reference else None
+
+    docs = [d for d in discover(args) if not d.get("skip")]
+    if args.only:
+        wanted = [w.strip() for w in args.only.split(",") if w.strip()]
+        docs = [d for d in docs if any(w in d["name"] for w in wanted)]
+    print(f"문서 {len(docs)}개 · 세트 {', '.join(names)} · 측정 폴더 {args.out}", flush=True)
+    for d in docs:
+        print(f"  {d['name']}: {len(d['pages'])}쪽 · {d['profile']} · 정답 {Path(d['answer']).name if d['answer'] else '없음(속도만)'}"
+              + (" · 정답에서 인쇄한 PDF(스캔보다 쉬움)" if d["printed_from_answer"] else ""), flush=True)
+        if d.get("profile_source") == "default":
+            print(f"    ⚠ 정답이 없어 문서 종류를 추정하지 못해 traditional 로 둠 — {args.out / 'manifest.json'} 에서 "
+                  f"profile 을 고치고 \"profile_confirmed\": true 를 넣은 뒤 다시 실행하세요", flush=True)
 
     rows = []
-    for name in names:
-        print(f"▶ {name} …", flush=True)
-        work, code, seconds = run_set(name, args, args.source, pages, args.out)
-        text, engines = recognized(args.source, work, pages)
-        row = {"set": name, "exit": code, "seconds": round(seconds, 1),
-               "seconds_per_page": round(seconds / max(1, len(pages)), 1),
-               "pages_read": sum(engines.values()), "engines": engines, "characters": len(compact(text))}
-        if reference is not None:
-            errors = char_errors(reference, compact(text))
-            row.update(errors=errors, cer_percent=round(100 * errors / max(1, len(reference)), 2))
-        rows.append(row)
-        print(f"  {row}", flush=True)
+    for d in docs:
+        doc_dir = args.out / re.sub(r'[<>:"/\\|?*]', "_", d["name"])
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            if name == "witness" and d["printed_from_answer"]:
+                continue                                         # its text layer is the answer itself
+            result_path = doc_dir / name / "result.json"
+            if args.resume and result_path.is_file():
+                rows.append(json.loads(result_path.read_text(encoding="utf-8")))
+                continue
+            print(f"▶ {d['name']} · {name} …", flush=True)
+            work, code, seconds = run_set(name, d, args, doc_dir)
+            text, engines = recognized(Path(d["pdf"]), work, d["pages"])
+            hyp = compact(text)
+            row = {"document": d["name"], "set": name, "exit": code, "pages": len(d["pages"]), "seconds": round(seconds, 1),
+                   "seconds_per_page": round(seconds / max(1, len(d["pages"])), 1), "pages_read": sum(engines.values()),
+                   "engines": engines, "characters": len(hyp), "profile": d["profile"],
+                   "printed_from_answer": d["printed_from_answer"]}
+            if d["_reference"]:
+                reference = crop_reference(d["_reference"], hyp) if d["_partial"] else d["_reference"]
+                errors = char_errors(reference, hyp)
+                row.update(reference_characters=len(reference), errors=errors,
+                           cer_percent=round(100 * errors / max(1, len(reference)), 2))
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
+            rows.append(row)
+            print(f"  쪽당 {row['seconds_per_page']}초 · CER {row.get('cer_percent', '-')}% · {engines}", flush=True)
 
-    (args.out / "summary.json").write_text(json.dumps({"source": str(args.source), "pages": pages,
-        "reference": str(args.reference) if args.reference else None,
-        "reference_characters": len(reference) if reference is not None else None,
-        "rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (args.out / "summary.json").write_text(json.dumps({"sets": names, "rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     with (args.out / "summary.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["세트", "종료 코드", "초", "쪽당 초", "읽은 쪽", "글자 수", "오류", "CER %", "선택 엔진"])
+        writer.writerow(["문서", "세트", "종료 코드", "쪽", "초", "쪽당 초", "읽은 쪽", "글자 수", "정답 글자", "오류", "CER %",
+                         "문서 종류", "정답에서 인쇄", "선택 엔진"])
         for r in rows:
-            writer.writerow([r["set"], r["exit"], r["seconds"], r["seconds_per_page"], r["pages_read"], r["characters"],
-                             r.get("errors", ""), r.get("cer_percent", ""),
-                             " ".join(f"{k}:{v}" for k, v in r["engines"].items())])
-    print("\n세트          쪽당 초   CER %   선택 엔진")
-    for r in rows:
-        print(f"{r['set']:<13} {r['seconds_per_page']:>7}  {str(r.get('cer_percent', '-')):>6}   "
-              + " ".join(f"{k}:{v}" for k, v in r["engines"].items()))
-    print(f"\n결과: {args.out / 'summary.csv'}")
+            writer.writerow([r["document"], r["set"], r["exit"], r["pages"], r["seconds"], r["seconds_per_page"], r["pages_read"],
+                             r["characters"], r.get("reference_characters", ""), r.get("errors", ""), r.get("cer_percent", ""),
+                             r["profile"], "예" if r["printed_from_answer"] else "", " ".join(f"{k}:{v}" for k, v in r["engines"].items())])
+    lines = ["| 문서 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    for d in docs:
+        cells = []
+        for name in names:
+            r = next((r for r in rows if r["document"] == d["name"] and r["set"] == name), None)
+            cells.append("—" if r is None else f"{r.get('cer_percent', '-')}% · {r['seconds_per_page']}초")
+        lines.append(f"| {d['name']}{' (인쇄본)' if d['printed_from_answer'] else ''} | " + " | ".join(cells) + " |")
+    table = "\n".join(lines)
+    (args.out / "summary.md").write_text("# 로컬 우선 옵션 비교 (CER · 쪽당 초)\n\n" + table + "\n", encoding="utf-8")
+    print("\n" + table + f"\n\n결과: {args.out / 'summary.csv'} · {args.out / 'summary.md'}")
     return 0 if all(r["exit"] in (0, 4) for r in rows) else 1
 
 
