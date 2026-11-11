@@ -127,8 +127,10 @@ def test_main_runs_sets_in_order_skips_witness_on_printed_and_resumes(tmp_path):
         summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
         assert [r["cer_percent"] for r in summary["rows"]] == [0.0, 0.0, 0.0]
         assert "| doc (인쇄본) |" in (out / "summary.md").read_text(encoding="utf-8")
+        assert tool.main([str(folder), "--out", str(out), "--sets", "vote", "--resume", "--redo", "vote"]) == 0
+        assert calls == ["sequential", "default", "vote", "vote"]       # default reused, vote measured again
         assert tool.main([str(folder), "--out", str(out), "--sets", "default", "--resume", "--max-pages", "1"]) == 0
-        assert calls == ["sequential", "default", "vote", "default"]   # other pages: measured again
+        assert calls == ["sequential", "default", "vote", "vote", "default"]   # other pages: measured again
 
 
 def test_run_set_streams_page_progress_and_keeps_full_log(tmp_path, capsys):

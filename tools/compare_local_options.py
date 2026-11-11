@@ -384,6 +384,8 @@ def main(argv=None):
     parser.add_argument("--engine-root", type=Path, help="tools 폴더가 있는 엔진 설치 위치")
     parser.add_argument("--ai", action="store_true", help="의심 구간 AI 검증도 실행(API 비용 발생)")
     parser.add_argument("--resume", action="store_true", help="이미 끝난 (문서, 세트)는 건너뜀")
+    parser.add_argument("--redo", default="", help="--resume 이어도 다시 계산할 세트(쉼표로). 예: columns,vote+columns — "
+                                                    "코드를 고친 뒤 후처리 세트만 새로 잴 때(default 의 엔진 결과는 재사용)")
     parser.add_argument("--only", help="이 글자가 이름에 든 문서만(쉼표로 여러 개)")
     args = parser.parse_args(argv)
 
@@ -415,7 +417,8 @@ def main(argv=None):
             if name == "witness" and d["printed_from_answer"]:
                 continue                                         # its text layer is the answer itself
             result_path = doc_dir / name / "result.json"
-            if args.resume and result_path.is_file():
+            redo = {n.strip() for n in args.redo.split(",") if n.strip()}
+            if args.resume and result_path.is_file() and name not in redo:
                 previous = json.loads(result_path.read_text(encoding="utf-8"))
                 if previous.get("pages_spec") == d["pages_spec"]:          # same pages only
                     rows.append(previous)
