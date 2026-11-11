@@ -70,7 +70,8 @@ SETS = {
     "korean-models": ([], {"YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),   # trial: Korean-only CPU models on mixed pages
     "all-vertical": ([], {"YEONE_OCR_GPU_VERTICAL": "1", "YEONE_OCR_MIXED_KOREAN_MODELS": "1"}, False),
     # Claude subscription review (claude -p) of the suspicious spans, its certain proposals applied.
-    "ai-subscription": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100"], {}, False),
+    "ai-subscription": (["--local-ai-auth", "subscription", "--local-ai-accept", "--local-ai-max-calls", "100",
+                         "--local-ai-batch", "4"], {}, False),
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
 DEFAULT_SETS = ("sequential", "default", "vote", "no-columns")

@@ -505,6 +505,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                 except AIReviewError as exc:
                     review.update(status="pending", error=str(exc))
                     if review_enabled:
+                        cli.log(f"  {number}쪽: AI 검증 보류 — {exc}")
+                    if review_enabled:
                         incomplete.append(number)
                 else:
                     review.update(copy.deepcopy(plan.summary))
@@ -520,6 +522,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                     elif not review_enabled or not key or plan.summary["calls"] > cap - calls:
                         review["status"] = "pending"
                         review["reason"] = ("AI 검증 꺼짐" if not review_enabled else "API 키 없음" if not key else "이번 실행 호출 상한 도달")
+                        if review_enabled:
+                            cli.log(f"  {number}쪽: AI 검증 보류 — {review['reason']} (이 쪽 {plan.summary['calls']}회 필요)")
                         if review_enabled:
                             incomplete.append(number)
                     else:

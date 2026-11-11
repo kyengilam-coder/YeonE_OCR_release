@@ -109,6 +109,20 @@ class SelectiveReviewTests(unittest.TestCase):
         self.add(confidence=None)
         self.assertEqual(self.plan().summary["difficulty_reasons"], {"confidence-unavailable": 1})
 
+    def test_confidence_free_baseline_reviews_blocks_once_not_every_disagreement(self):
+        words = [{"text": "甲乙", "bbox": [40, 20, 90, 45], "confidence": None},
+                 {"text": "丙丁", "bbox": [40, 60, 90, 85], "confidence": None}]
+        self.add("surya", text="甲乙\n丙丁", words=words)
+        self.add("tesseract", text="甲己\n丙了", confidence=40,
+                 words=[{"text": "甲己", "bbox": [40, 20, 90, 45], "confidence": 40},
+                        {"text": "丙了", "bbox": [40, 60, 90, 85], "confidence": 40}])
+        self.project.compare_page(1, baseline="surya")
+        self.assertTrue(self.project.page(1)["suggestions"])
+        plan = self.plan()
+        self.assertEqual(plan.summary["difficulty_reasons"], {"confidence-unavailable": 2})   # the two blocks
+        self.assertEqual(plan.summary["targets"], 2)
+        self.assertEqual(plan.summary["unlocalized_targets"], {})
+
     def test_explicit_unknown_markers_route_to_local_review(self):
         for text in ("甲□乙", "甲〔판독불명〕乙"):
             with self.subTest(text=text):

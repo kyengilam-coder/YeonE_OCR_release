@@ -167,4 +167,6 @@ claude auth status                          # "authMethod": "claude.ai", "subscr
 
 시험 반영 `--local-ai-accept`: AI 제안은 원래 비교·교정 창에서 사람이 고르는 "제안"입니다. 이 옵션은 확신한 제안 가운데 안전 검사(엔진·이미지 근거)를 통과한 것만 본문에 바로 반영해(초록, 되돌릴 수 있음) 측정할 수 있게 합니다. 쪽 기록 `local_first.review.ai_accept`에 반영·보류 개수가 남습니다.
 
-측정 세트 `ai-subscription` = `--local-ai-auth subscription --local-ai-accept --local-ai-max-calls 100`.
+측정 세트 `ai-subscription` = `--local-ai-auth subscription --local-ai-accept --local-ai-max-calls 100 --local-ai-batch 4`.
+
+Surya·GLM-OCR처럼 확신도가 없는 엔진이 기준이면 그 블록 전체가 검증 대상이 되므로, 블록 안에서 다른 엔진과 어긋난 곳을 따로 보내지 않습니다(같은 글을 두 번 보내지 않음). 처음 측정(2026-11)에서는 세로쓰기 Tesseract와의 불일치가 너무 많아 호출 상한을 넘어 AI 검증이 전부 보류됐습니다. 보류되면 이제 쪽마다 이유를 로그에 남깁니다.

@@ -294,9 +294,15 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
             target["difficulty_reason"] = reason
             result.append(target)
 
+    # A baseline without confidence (Surya, GLM-OCR) sends every one of its blocks for review below,
+    # so each disagreement inside them would only repeat a span already sent: with a weak second
+    # engine (Tesseract on vertical pages, 34% CER) that is hundreds of calls for the same text.
+    blocks_cover_all = LOW_CONFIDENCE_THRESHOLDS[baseline["engine"]] is None and requested_ids is None
     for item in page.get("suggestions", []):
         if requested_ids is not None and item["id"] not in requested_ids:
             continue
+        if blocks_cover_all:
+            continue                     # covered, not unlocalized: never counted as an unresolved target
         if item["baseline_run_id"] != baseline["id"] or any(
             e["engine"] not in runs or e["run_id"] != runs[e["engine"]]["id"] for e in item["evidence"]):
             if requested_ids is not None:
