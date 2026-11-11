@@ -37,15 +37,42 @@ def _source(work, doc):
 
 
 def _project(source, work):
-    from ab_ocr.ocr import file_sha256
+    from ab_ocr.ocr import stable_file_sha256
     from .comparison import ComparisonProject
-    path = work.dir / "comparison" / ("local-first-" + file_sha256(source)[:24] + ".yeone-compare.json")
+    path = work.dir / "comparison" / ("local-first-" + stable_file_sha256(source)[:24] + ".yeone-compare.json")
     if path.exists():
         return ComparisonProject.load(path, source_path=source)
     project = ComparisonProject.open(source)
     path.parent.mkdir(parents=True, exist_ok=True)
     project.save(path)
     return project
+
+
+class _Checkpoint:
+    """Mid-page project saves, spaced out once a save itself becomes slow.
+
+    The whole project is rewritten on every save, so on a long book a save
+    after each engine costs more than the engine result it protects. Cheap
+    saves stay immediate; slow ones are at most CHECKPOINT_SECONDS apart.
+    The page-end save is unconditional, so at most one page of engine
+    output can be lost to a crash.
+    """
+    SLOW_SAVE_SECONDS, CHECKPOINT_SECONDS = 0.5, 30.0
+
+    def __init__(self, project, clock=time.monotonic):
+        self.project, self.clock = project, clock
+        self.last_cost, self.last_at = 0.0, None
+
+    def save(self):
+        started = self.clock()
+        self.project.save()
+        self.last_at = self.clock()
+        self.last_cost = self.last_at - started
+
+    def maybe(self, _value=None):
+        if (self.last_at is None or self.last_cost < self.SLOW_SAVE_SECONDS
+                or self.clock() - self.last_at >= self.CHECKPOINT_SECONDS):
+            self.save()
 
 
 def _protected_record(work, number, old):
@@ -139,6 +166,13 @@ def _settings(args, remaining):
 
 
 def command(args, *, work=None, doc=None):
+    from ab_ocr.ocr import render_cache
+    # One page is rendered for every engine, the preview and the review crops.
+    with render_cache():
+        return _command(args, work=work, doc=doc)
+
+
+def _command(args, *, work=None, doc=None):
     from . import cli
     from .automatic_ocr import run_automatic_page
     from .comparison import ComparisonError
@@ -183,6 +217,7 @@ def command(args, *, work=None, doc=None):
         calls, failed, incomplete, completed = 0, [], [], []
         cli.LOCAL_API_CALLS = 0
         summaries = {}
+        saver = _Checkpoint(project)
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -202,8 +237,8 @@ def command(args, *, work=None, doc=None):
                 outcome = run_automatic_page(project, number, profile=args.local_profile,
                     direction="horizontal" if args.mode == "horizontal_zh" else "vertical", dpi=args.dpi,
                     engine_root=getattr(args, "local_engine_root", None), force=getattr(args, "force", False),
-                    should_stop=cli.CANCEL.is_set, on_result=lambda _value: project.save())
-                project.save()
+                    should_stop=cli.CANCEL.is_set, on_result=saver.maybe)
+                saver.save()
                 if outcome.get("cancelled"):
                     return 130
                 from .comparison import _run_profile

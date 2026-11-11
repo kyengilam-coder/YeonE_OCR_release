@@ -247,7 +247,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
         _cancelled,
         _render,
         _run,
-        file_sha256,
+        stable_file_sha256,
     )
     from .runtime import subprocess_environment
     start = time.monotonic()
@@ -275,7 +275,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
             raise OCRError("EasyOCR 번체 세로쓰기의 보조 인식 모델이 없습니다. EasyOCR 설치를 완료하세요: " + auxiliary)
         if auxiliary not in model_names:
             model_names.append(auxiliary)
-    original_hash = file_sha256(source)
+    original_hash = stable_file_sha256(source)
     info["used_model_names"] = model_names
     with tempfile.TemporaryDirectory(prefix=f"abocr-{engine}-") as folder:
         image_path, output = Path(folder) / "input.png", Path(folder) / "reading.json"
@@ -309,7 +309,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
             payload = parse_worker_result(output, width, height, engine=engine)
         if engine in VERTICAL_RTL_ENGINES and direction == "vertical":
             payload = order_vertical_payload(payload)
-    if file_sha256(source) != original_hash:
+    if stable_file_sha256(source) != original_hash:
         raise OCRError("인식 중 원본 파일이 변경되어 결과를 적용하지 않습니다.")
     _cancelled(should_stop)
     return _recognition_result(payload, info, source, original_hash, page_number, dpi, width, height,
@@ -483,7 +483,7 @@ class RecognitionSession:
 
     def recognize_file(self, path, *, page_number=1, dpi=300, psm=None):
         from dataclasses import replace
-        from .ocr import OCRCancelled, OCRError, _cancelled, _render, file_sha256, recognize_file
+        from .ocr import OCRCancelled, OCRError, _cancelled, _render, stable_file_sha256, recognize_file
         if not self.active:
             raise OCRError("with RecognitionSession 문 안에서 인식하세요.")
         if self.cleanup_failures:
@@ -509,7 +509,7 @@ class RecognitionSession:
                 "engine_root": before["engine_root"], "session_conditions": before["pin"]})
         started = time.monotonic()
         source = Path(path).expanduser().resolve(strict=True)
-        original_hash = file_sha256(source)
+        original_hash = stable_file_sha256(source)
         try:
             self._inspection()
             if self.worker is None:
@@ -548,7 +548,7 @@ class RecognitionSession:
                                            "request_ordinal": self.count + 1}),
                         "text_policy": "failed raw model response preserved; no accepted OCR text"}}
             _cancelled(self.should_stop)
-            if file_sha256(source) != original_hash:
+            if stable_file_sha256(source) != original_hash:
                 raise OCRError("인식 중 원본이 변경되어 결과를 적용하지 않습니다.")
             self._inspection()
             payload["engine_metadata"]["session_conditions"] = self.pin

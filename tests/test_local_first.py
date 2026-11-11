@@ -23,7 +23,7 @@ class LocalFirstTests(unittest.TestCase):
         self.source = self.root / "source.png"
         Image.new("RGB", (400, 200), "white").save(self.source)
         self.work = self.root / "work"
-        self.confidence = .99
+        self.confidence = 99
         self.omit_geometry = False
         self.calls = []
         self.local_calls = []
@@ -100,7 +100,7 @@ class LocalFirstTests(unittest.TestCase):
         self.make_textlayer.assert_called_once()
 
     def test_low_confidence_single_v6_review_crops_and_resume_skips_paid_call(self):
-        self.confidence = .2
+        self.confidence = 20
         self.assertEqual(command(self.args()), 0)
         self.assertEqual(len(self.calls), 1)
         rec = self.record()
@@ -113,7 +113,7 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(ComparisonProject.load(project.project_path).page(1)["runs"][0]["raw"]["text"], "天地玄黃")
 
     def test_missing_key_saves_local_and_pending_review(self):
-        self.confidence = .2
+        self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
             self.assertEqual(command(self.args()), 4)
         self.assertEqual(self.calls, [])
@@ -121,13 +121,13 @@ class LocalFirstTests(unittest.TestCase):
         self.make_textlayer.assert_called_once()
 
     def test_disabled_review_has_no_external_call(self):
-        self.confidence = .2
+        self.confidence = 20
         self.assertEqual(command(self.args("--no-local-ai-review")), 0)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.record()["local_first"]["review"]["reason"], "AI 검증 꺼짐")
 
     def test_api_failure_keeps_raw_and_builds_local_output(self):
-        self.confidence = .2
+        self.confidence = 20
         self.api_failure = True
         self.assertEqual(command(self.args()), 4)
         rec = self.record()
@@ -166,7 +166,7 @@ class LocalFirstTests(unittest.TestCase):
             document.new_page(width=96, height=48)
             document.new_page(width=96, height=48)
             document.save(self.source)
-        self.confidence = .2
+        self.confidence = 20
         self.assertEqual(command(self.args("--local-ai-max-calls", "1")), 4)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.record(2)["local_first"]["review"]["status"], "pending")
@@ -178,7 +178,7 @@ class LocalFirstTests(unittest.TestCase):
             document.new_page(width=96, height=48)
             document.new_page(width=96, height=48)
             document.save(self.source)
-        self.confidence = .2
+        self.confidence = 20
         self.assertEqual(command(self.args("--local-ai-max-calls", "3")), 0)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(command(self.args("--local-ai-max-calls", "3")), 0)
@@ -193,7 +193,7 @@ class LocalFirstTests(unittest.TestCase):
     def test_relative_source_and_work_paths_resume_without_duplicate_review(self):
         original_cwd = Path.cwd()
         original_source, original_work = self.source, self.work
-        self.confidence = .2
+        self.confidence = 20
         try:
             os.chdir(self.root)
             self.source, self.work = Path("source.png"), Path("work")
@@ -230,7 +230,7 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_cancel_after_paid_response_checkpoints_and_resumes_without_resend(self):
-        self.confidence = .2
+        self.confidence = 20
         self.transport_callback = cli.CANCEL.set
         self.assertEqual(command(self.args()), 130)
         self.assertEqual(len(self.calls), 1)
@@ -256,7 +256,7 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(rec["local_first"]["review"]["status"], "no-api-needed")
 
     def test_source_change_during_transport_blocks_document_output(self):
-        self.confidence = .2
+        self.confidence = 20
         def replace_source():
             with Image.new("RGB", (400, 200), "black") as changed:
                 changed.save(self.source)
@@ -269,7 +269,7 @@ class LocalFirstTests(unittest.TestCase):
 
     def test_review_and_report_display_pending_without_injecting_html(self):
         from yeone_ocr.review_html import make_review
-        self.confidence = .2
+        self.confidence = 20
         command(self.args("--no-local-ai-review"))
         work = Work(str(self.source), str(self.work), initialize=False)
         rec = self.record()

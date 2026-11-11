@@ -19,6 +19,9 @@ FONT_NAMES = ("simsun.ttc", "msjh.ttc")
 CJK_RANGES = ((0x3400, 0x4dc0), (0x4e00, 0xa000))
 
 
+_FONT_HASHES: dict[tuple, str] = {}
+
+
 def font_sources():
     """Pure stdlib dependency fingerprints, also used in host cache requests."""
     if os.name != "nt":
@@ -28,8 +31,13 @@ def font_sources():
     for name in FONT_NAMES:
         path = directory / name
         if path.is_file() and path.stat().st_size <= 128_000_000:
-            sources.append({"path": str(path.resolve()), "face_index": 0,
-                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+            stat = path.stat()
+            # System fonts are hashed once per unchanged file, not per engine and page.
+            key = (str(path), stat.st_size, stat.st_mtime_ns)
+            if key not in _FONT_HASHES:
+                _FONT_HASHES.clear() if len(_FONT_HASHES) > 16 else None
+                _FONT_HASHES[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+            sources.append({"path": str(path.resolve()), "face_index": 0, "sha256": _FONT_HASHES[key]})
     return sources
 
 

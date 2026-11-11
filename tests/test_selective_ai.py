@@ -29,7 +29,7 @@ class SelectiveReviewTests(unittest.TestCase):
                 ImageDraw.Draw(image).rectangle((40, 20, 90, 45), fill="black")
             image.save(self.source)
 
-    def add(self, engine="ppocrv6", text="甲乙丙", confidence=.99, *, words=None, dpi=300, active=True):
+    def add(self, engine="ppocrv6", text="甲乙丙", confidence=99, *, words=None, dpi=300, active=True):
         words = [{"text": text, "bbox": [40, 20, 90, 45], "confidence": confidence}] if words is None else words
         raw = RecognitionResult(text, words, str(self.source), self.project.source_sha256,
                                 1, 400, 200, "synthetic", "chi_tra", 6 if engine == "tesseract" else None,
@@ -65,9 +65,9 @@ class SelectiveReviewTests(unittest.TestCase):
         forbidden.assert_not_called()
 
     def test_single_v6_low_confidence_crop_and_context(self):
-        words = [{"text": "甲", "bbox": [40, 20, 55, 45], "confidence": .99},
-                 {"text": "乙", "bbox": [55, 20, 70, 45], "confidence": .40},
-                 {"text": "丙", "bbox": [70, 20, 90, 45], "confidence": .99}]
+        words = [{"text": "甲", "bbox": [40, 20, 55, 45], "confidence": 99},
+                 {"text": "乙", "bbox": [55, 20, 70, 45], "confidence": 40},
+                 {"text": "丙", "bbox": [70, 20, 90, 45], "confidence": 99}]
         self.add(words=words)
         plan = self.plan()
         target = plan.batches[0]["targets"][0]
@@ -90,6 +90,17 @@ class SelectiveReviewTests(unittest.TestCase):
         self.add("tesseract", confidence=90)
         self.assertEqual(self.plan().summary["calls"], 0)
 
+    def test_neural_engine_thresholds_use_the_worker_percent_scale(self):
+        # Workers store 0-100 (rapidocr/ppocrv6/easyocr multiply the native score by 100).
+        from yeone_ocr.comparison_ai import LOW_CONFIDENCE_THRESHOLDS
+        for engine, limit in LOW_CONFIDENCE_THRESHOLDS.items():
+            if limit is not None:
+                self.assertGreater(limit, 1.0, engine)
+        self.add(confidence=84.9)
+        self.assertEqual(self.plan().summary["difficulty_reasons"], {"low-confidence-ppocrv6": 1})
+        self.add(confidence=85.0)
+        self.assertEqual(self.plan().summary["calls"], 0)
+
     def test_unknown_character_with_high_confidence_is_localized(self):
         self.add(text="甲\ufffd乙")
         self.assertEqual(self.plan().summary["difficulty_reasons"], {"unknown-glyph": 1})
@@ -105,7 +116,7 @@ class SelectiveReviewTests(unittest.TestCase):
                 self.assertEqual(self.plan().summary["difficulty_reasons"], {"unknown-glyph": 1})
 
     def test_changed_scheduling_caps_reuse_completed_selective_review(self):
-        self.add(confidence=.4)
+        self.add(confidence=40)
         plan = self.plan()
         outcome, calls = self.fake_run(plan)
         self.assertEqual((outcome["completed"], len(calls)), (1, 1))
@@ -118,7 +129,7 @@ class SelectiveReviewTests(unittest.TestCase):
         self.assertNotEqual(resumed._integrity, plan._integrity)
 
     def test_compatible_subset_excludes_other_dpi_and_inactive_history(self):
-        self.add(confidence=.4)
+        self.add(confidence=40)
         self.add("tesseract", confidence=90, dpi=150)
         self.add("easyocr", active=False)
         plan = self.plan()
@@ -140,9 +151,9 @@ class SelectiveReviewTests(unittest.TestCase):
         self.assertTrue(self.project.ai_proposals(1)[0]["stale"])
 
     def test_new_current_reading_invalidates_frozen_plan(self):
-        self.add(confidence=.4)
+        self.add(confidence=40)
         plan = self.plan()
-        self.add(confidence=.3)
+        self.add(confidence=30)
         with self.assertRaises(AIReviewError):
             self.fake_run(plan)
 
@@ -194,9 +205,9 @@ class SelectiveReviewTests(unittest.TestCase):
         self.assertEqual((target["start"], target["end"], target["bbox"]), (3, 3, [40, 90, 91, 116]))
 
     def test_editorial_phase_stays_in_difficult_span(self):
-        words = [{"text": "甲", "bbox": [40, 20, 55, 45], "confidence": .99},
-                 {"text": "汉", "bbox": [55, 20, 70, 45], "confidence": .40},
-                 {"text": "丙", "bbox": [70, 20, 90, 45], "confidence": .99}]
+        words = [{"text": "甲", "bbox": [40, 20, 55, 45], "confidence": 99},
+                 {"text": "汉", "bbox": [55, 20, 70, 45], "confidence": 40},
+                 {"text": "丙", "bbox": [70, 20, 90, 45], "confidence": 99}]
         self.add(text="甲汉丙", words=words)
         plan = self.plan(policy=ReviewPolicy(selective=True, traditional=True))
         self.assertEqual(plan.summary["editorial_calls"], 1)
@@ -219,7 +230,7 @@ class SelectiveReviewTests(unittest.TestCase):
         text = "\n".join(chr(0x4e00 + i) + "ABCDE" for i in range(30))
         other = "\n".join(chr(0x4f00 + i) + "ABCDE" for i in range(30))
         def words(value):
-            return [{"text": line, "bbox": [40, 5 + i * 5, 110, 9 + i * 5], "confidence": .99}
+            return [{"text": line, "bbox": [40, 5 + i * 5, 110, 9 + i * 5], "confidence": 99}
                     for i, line in enumerate(value.splitlines())]
         self.add(text=text, words=words(text))
         self.add("rapidocr", text=other, words=words(other))

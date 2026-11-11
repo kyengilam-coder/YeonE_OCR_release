@@ -254,6 +254,10 @@ def _word_spans(raw):
             yield start, position, word
 
 
+LOW_CONFIDENCE_THRESHOLDS = {"tesseract": 70.0, "rapidocr": 85.0, "easyocr": 55.0, "ppocrv6": 85.0,
+                             "paddle_server": 85.0, "glmocr": None, "surya": None}
+
+
 def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids):
     """Local-only risk detection; all returned targets have image coordinates."""
     snapshot, raw = scope["snapshot_text"], baseline["raw"]
@@ -320,8 +324,9 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
         return result, seen, skipped
     # Thresholds are engine-specific routing hints, never cross-engine votes or
     # measured accuracy. A null score cannot establish a clean single reading.
-    threshold = {"tesseract": 70.0, "rapidocr": .85, "easyocr": .55, "ppocrv6": .85,
-                 "paddle_server": .85, "glmocr": None, "surya": None}[baseline["engine"]]
+    # Every local worker stores confidence on the validated 0-100 scale
+    # (ab_ocr.local_engines), so the routing hints use the same unit.
+    threshold = LOW_CONFIDENCE_THRESHOLDS[baseline["engine"]]
     spans = list(_word_spans(raw))
     for start, end, word in spans:
         value, confidence = word["text"], word.get("confidence")

@@ -1017,7 +1017,7 @@ class ComparisonProject:
 
     def validate_source(self):
         try:
-            current = ocr.file_sha256(self.source_path)
+            current = ocr.stable_file_sha256(self.source_path)
         except OSError as exc:
             raise SourceChangedError("원본을 읽을 수 없습니다. 원래 원본을 다시 연결하세요.") from exc
         if current != self.source_sha256:
@@ -1323,7 +1323,7 @@ class ComparisonProject:
                 if isinstance(proposal, dict):
                     proposal.setdefault("id", uuid.uuid4().hex)
         try:
-            current_hash = ocr.file_sha256(self.source_path)
+            current_hash = ocr.stable_file_sha256(self.source_path)
             source_state = "verified" if current_hash == self.source_sha256 else "changed"
         except OSError:
             source_state = "unavailable"
