@@ -125,3 +125,23 @@ def test_main_runs_sets_in_order_skips_witness_on_printed_and_resumes(tmp_path):
         assert "| doc (인쇄본) |" in (out / "summary.md").read_text(encoding="utf-8")
         assert tool.main([str(folder), "--out", str(out), "--sets", "default", "--resume", "--max-pages", "1"]) == 0
         assert calls == ["sequential", "default", "vote", "default"]   # other pages: measured again
+
+
+def test_run_set_streams_page_progress_and_keeps_full_log(tmp_path, capsys):
+    script = tmp_path / "fake.py"
+    script.write_text('print("  1쪽: no-api-needed · 로컬 ppocrv6")\nprint("MuPDF error: font")\n'
+                      'print("  glmocr: GPU 실행을 시작하지 못해")\nprint("detail line")\n', encoding="utf-8")
+    doc = {"pdf": "x.pdf", "profile": "traditional", "pages": [1, 2]}
+    args = tool.argparse.Namespace(engine_root=None, ai=False)
+    real_popen = tool.subprocess.Popen
+
+    def fake(argv, **kwargs):
+        return real_popen([tool.sys.executable, str(script)], **{k: v for k, v in kwargs.items() if k != "cwd"})
+    with mock.patch.object(tool, "SETS", {"default": ([], {}, False)}), \
+            mock.patch.object(tool.subprocess, "Popen", side_effect=fake):
+        _work, code, _seconds = tool.run_set("default", doc, args, tmp_path)
+    shown = capsys.readouterr().out
+    assert code == 0
+    assert "[1/2쪽" in shown and "GPU" in shown
+    assert "MuPDF" not in shown and "detail line" not in shown
+    assert "detail line" in (tmp_path / "default.log").read_text(encoding="utf-8")
