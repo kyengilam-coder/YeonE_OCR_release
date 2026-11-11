@@ -120,8 +120,8 @@ def test_main_runs_sets_in_order_skips_witness_on_printed_and_resumes(tmp_path):
         assert calls == ["sequential", "default", "vote"]              # witness skipped: printed from the answer
         assert tool.main([str(folder), "--out", str(out), "--sets", "vote,sequential", "--resume"]) == 0
         assert calls == ["sequential", "default", "vote"]
+        summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+        assert [r["cer_percent"] for r in summary["rows"]] == [0.0, 0.0, 0.0]
+        assert "| doc (인쇄본) |" in (out / "summary.md").read_text(encoding="utf-8")
         assert tool.main([str(folder), "--out", str(out), "--sets", "default", "--resume", "--max-pages", "1"]) == 0
         assert calls == ["sequential", "default", "vote", "default"]   # other pages: measured again
-    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
-    assert [r["cer_percent"] for r in summary["rows"]] == [0.0, 0.0, 0.0]
-    assert "| doc (인쇄본) |" in (out / "summary.md").read_text(encoding="utf-8")
