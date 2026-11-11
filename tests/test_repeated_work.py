@@ -1,4 +1,5 @@
 """Repeated per-page work is reused without weakening source-change checks."""
+import os
 import tempfile
 import time
 import unittest
@@ -43,6 +44,10 @@ class StableHash(unittest.TestCase):
 
     def test_same_size_rewrite_is_detected(self):
         self.path.write_bytes(b"abc")
+        # The first version is old; the rewrite below gets the current time.
+        # (Windows timestamps tick every ~15 ms, so two writes in a row may share one.)
+        old = time.time() - 60
+        os.utime(self.path, (old, old))
         self.settle()
         before = ocr.stable_file_sha256(self.path)
         self.path.write_bytes(b"abd")
