@@ -78,6 +78,9 @@ SETS = {
     # Claude (subscription) reads each whole page from full-resolution strips as a second reading.
     "ai-page": (["--local-ai-page", "prefer"], {}, False),
     "ai-page-witness": (["--local-ai-page", "witness"], {}, False),
+    # Both: the suspicious-span review with detail tiles corrects the engine reading, then the page reading is merged.
+    "ai-page+review": (["--local-ai-page", "prefer", "--local-ai-auth", "subscription", "--local-ai-accept",
+                        "--local-ai-max-calls", "100", "--local-ai-batch", "4", "--local-ai-detail-tile", "1024"], {}, False),
     "no-korean-forms": (["--no-local-korean-forms"], {}, False),   # engine Hanja forms as read (before 2026-11)
     "easyocr-fast": (["--local-easyocr-threads", "6", "--local-easyocr-batch", "8"], {}, False),
 }
@@ -262,6 +265,7 @@ def ai_review(source: Path, work: Path, pages: list[int]) -> tuple[dict, list[st
         totals["held"] += accept.get("held", 0)
         page = local.get("ai_page")
         if page:
+            totals["calls"] += 0 if page.get("cached") else 1          # one AI page reading per page
             for key in ("taken", "witness", "kept_long"):
                 totals[f"page_{key}"] = totals.get(f"page_{key}", 0) + page.get(key, 0)
             lines.append(f"{number}쪽\tAI 쪽 판독\t유사도 {page.get('ratio')} · 채택 {page.get('taken', 0)} · "
