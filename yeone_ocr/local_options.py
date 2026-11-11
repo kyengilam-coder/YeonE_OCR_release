@@ -113,7 +113,24 @@ COLUMN_BODY_WIDTH = 250        # a body-column line spans at least 25% of the pa
 COLUMN_BODY_FILL = 0.7         # ... and at least 70% of its column's width
 COLUMN_BODY_SHARE = 0.5        # at least half of each column's lines are such full lines
 COLUMN_BODY_LINES = 5          # and at least this many per column
+COLUMN_JOIN_GAP = 12           # pieces of one printed line closer than this (0-1000) are one line
 COLUMN_MAX_CROSSING = 0.15     # titles/running heads may cross the gutter: at most this share of the lines (always 2)
+
+
+def _joined_lines(side):
+    """Rejoin pieces of one printed line: EasyOCR splits lines at commas (gaps ~0.5-1% of
+    the page width). Pieces that share most of their height and nearly touch become one."""
+    rows = []
+    for box in sorted(side, key=lambda b: (b[0], b[1])):
+        for row in rows:
+            overlap = min(row[2], box[2]) - max(row[0], box[0])
+            if (overlap >= 0.5 * min(row[2] - row[0], box[2] - box[0])
+                    and -COLUMN_JOIN_GAP <= box[1] - row[3] <= COLUMN_JOIN_GAP):
+                row[:] = [min(row[0], box[0]), row[1], max(row[2], box[2]), max(row[3], box[3])]
+                break
+        else:
+            rows.append(list(box))
+    return rows
 
 
 def column_order(regions):
@@ -147,6 +164,7 @@ def column_order(regions):
     # filled by long lines of about the column's width. Table cells and photo captions are
     # short pieces (대조도감: tables, captions under paired photos); their row order is right.
     for side in ([b for _, b in boxes if b[3] <= gutter], [b for _, b in boxes if b[1] >= gutter]):
+        side = _joined_lines(side)
         extent = max(b[3] for b in side) - min(b[1] for b in side)
         full = [b for b in side if b[3] - b[1] >= max(COLUMN_BODY_WIDTH, COLUMN_BODY_FILL * extent)]
         if len(full) < COLUMN_BODY_LINES or len(full) < COLUMN_BODY_SHARE * len(side):

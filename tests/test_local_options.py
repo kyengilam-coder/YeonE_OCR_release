@@ -107,6 +107,18 @@ class Columns(unittest.TestCase):
         self.assertEqual(ordered, ["local-line-1"] + [f"local-line-{10 + k}" for k in range(6)]
                          + [f"local-line-{20 + k}" for k in range(6)])
 
+    def test_lines_split_into_pieces_at_commas_still_count_as_body_lines(self):
+        # 의방집해 p.3 read by EasyOCR: every printed line comes in 2-4 pieces a few units apart.
+        regions, n = [], 100
+        for k, y in enumerate(self.ROWS):
+            for x0, x1 in ((120, 225), (234, 342), (350, 483)):
+                regions.append(region(n, x0, x1, y)); n += 1
+            for x0, x1 in ((516, 634), (641, 790), (796, 883)):
+                regions.append(region(n, x0, x1, y + 4)); n += 1
+        ordered = column_order(regions)
+        left_first = [r.bbox[1] < 500 for r in ordered]
+        self.assertEqual(left_first, [True] * 18 + [False] * 18)
+
     def test_table_cells_and_photo_captions_keep_row_order(self):
         # 대조도감: a six-column table, and captions under paired photos.
         table = [region(100 * r + c, 80 + c * 140, 200 + c * 140, 100 + r * 40) for r in range(6) for c in range(6)]
