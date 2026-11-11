@@ -96,6 +96,15 @@ class Columns(unittest.TestCase):
         self.assertEqual(ordered, ["local-line-1", "local-line-10", "local-line-11", "local-line-12",
                                    "local-line-20", "local-line-21", "local-line-22", "local-line-2"])
 
+    def test_a_title_crossing_the_gutter_does_not_hide_the_columns(self):
+        # 의방집해 p.2: a centred title box spans the gutter; lines alternate left/right in engine order.
+        regions = [region(1, 300, 750, 20)]
+        for k, y in enumerate((100, 150, 200, 250)):
+            regions += [region(20 + k, 520, 880, y), region(10 + k, 120, 480, y + 5)]
+        ordered = [r.id for r in column_order(regions)]
+        self.assertEqual(ordered, ["local-line-1"] + [f"local-line-{10 + k}" for k in range(4)]
+                         + [f"local-line-{20 + k}" for k in range(4)])
+
     def test_single_column_is_unchanged(self):
         regions = [region(i, 50, 950, 20 + 40 * i) for i in range(8)]
         self.assertEqual(column_order(regions), regions)

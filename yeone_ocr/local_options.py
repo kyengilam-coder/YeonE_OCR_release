@@ -109,26 +109,31 @@ COLUMN_MIN_LINES = 3            # lines needed on each side of the gutter
 COLUMN_MAX_WIDTH = 600          # a column line is narrower than 60% of the page (normalized 0-1000)
 
 
+COLUMN_MAX_CROSSING = 0.15     # titles/running heads may cross the gutter: at most this share of the lines (always 2)
+
+
 def column_order(regions):
     """Reorder line regions of a two-column horizontal page; unchanged if no clear gutter.
 
-    Full-width lines split the page into bands; inside a band the left column is
-    read top to bottom, then the right column.
+    The gutter is the vertical position crossed by the fewest lines with at
+    least COLUMN_MIN_LINES column lines on each side. A few lines may cross it
+    (a centred title, a running head); like full-width lines they split the page
+    into bands. Inside a band the left column is read top to bottom, then the
+    right column.
     """
     boxes = [(r, r.bbox) for r in regions]                    # bbox: [y0, x0, y1, x1] on 0-1000
-    narrow = [b for _, b in boxes if b[3] - b[1] < COLUMN_MAX_WIDTH]
-    if len(narrow) < 2 * COLUMN_MIN_LINES:
+    if len(boxes) < 2 * COLUMN_MIN_LINES:
         return list(regions)
     best = None
-    for gutter in range(300, 701, 10):
-        if any(b[1] < gutter < b[3] for b in narrow):
+    for gutter in range(300, 701, 5):
+        crossing = sum(1 for _, b in boxes if b[1] < gutter < b[3])
+        left = sum(1 for _, b in boxes if b[3] <= gutter and b[3] - b[1] < COLUMN_MAX_WIDTH)
+        right = sum(1 for _, b in boxes if b[1] >= gutter and b[3] - b[1] < COLUMN_MAX_WIDTH)
+        if left < COLUMN_MIN_LINES or right < COLUMN_MIN_LINES or crossing > max(2, COLUMN_MAX_CROSSING * len(boxes)):
             continue
-        left = sum(1 for b in narrow if b[3] <= gutter)
-        right = sum(1 for b in narrow if b[1] >= gutter)
-        if left >= COLUMN_MIN_LINES and right >= COLUMN_MIN_LINES:
-            balance = min(left, right)
-            if best is None or balance > best[0]:
-                best = (balance, gutter)
+        key = (crossing, -min(left, right))
+        if best is None or key < best[0]:
+            best = (key, gutter)
     if best is None:
         return list(regions)
     gutter = best[1]
@@ -139,8 +144,7 @@ def column_order(regions):
         ordered.extend(r for r, _ in band)
         band.clear()
     for region, box in sorted(boxes, key=lambda item: (item[1][0], item[1][1])):
-        spans_gutter = box[1] < gutter < box[3]
-        if spans_gutter:
+        if box[1] < gutter < box[3]:
             flush()
             ordered.append(region)
         else:

@@ -21,6 +21,10 @@ def test_page_list_spec_and_compact():
     assert tool.compact(" 天 地\n玄\t黃 ") == "天地玄黃"
 
 
+def test_content_ignores_punctuation_width():
+    assert tool.content("天地，玄黃．「宇宙」") == tool.content("天地,玄黃.宇宙") == "天地玄黃宇宙"
+
+
 def test_char_errors_and_crop():
     assert tool.char_errors("天地玄黃", "天地玄黄") == 1
     assert tool.char_errors("甲乙丙丁戊己", "丁戊己甲乙丙") == 6       # swapped halves: every character counts once

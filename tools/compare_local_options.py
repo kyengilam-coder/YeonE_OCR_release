@@ -171,6 +171,12 @@ def compact(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def content(text: str) -> str:
+    """Letters and digits only: punctuation width/kind (，/, ．/.) and symbols are not counted."""
+    import unicodedata
+    return "".join(c for c in text if not unicodedata.category(c).startswith(("P", "S")))
+
+
 def char_errors(reference: str, hypothesis: str) -> int:
     matcher = difflib.SequenceMatcher(None, reference, hypothesis, autojunk=False)
     return sum(max(a1 - a0, b1 - b0) for tag, a0, a1, b0, b1 in matcher.get_opcodes() if tag != "equal")
@@ -427,23 +433,28 @@ def main(argv=None):
             if d["_reference"]:
                 reference = crop_reference(d["_reference"], hyp) if d["_partial"] else d["_reference"]
                 errors = char_errors(reference, hyp)
+                letters = content(reference)
+                content_errors = char_errors(letters, content(hyp))
                 row.update(reference_characters=len(reference), errors=errors,
-                           cer_percent=round(100 * errors / max(1, len(reference)), 2))
+                           cer_percent=round(100 * errors / max(1, len(reference)), 2),
+                           content_cer_percent=round(100 * content_errors / max(1, len(letters)), 2))
             result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
             rows.append(row)
-            print(f"  쪽당 {row['seconds_per_page']}초 · CER {row.get('cer_percent', '-')}% · {engines}", flush=True)
+            print(f"  쪽당 {row['seconds_per_page']}초 · CER {row.get('cer_percent', '-')}% "
+                  f"(부호 제외 {row.get('content_cer_percent', '-')}%) · {engines}", flush=True)
             if row["engine_seconds"]:
                 print("  엔진별 판독 시간(합): " + ", ".join(f"{k} {v}초" for k, v in row["engine_seconds"].items()), flush=True)
 
     (args.out / "summary.json").write_text(json.dumps({"sets": names, "rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
     with (args.out / "summary.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["문서", "세트", "종료 코드", "쪽", "초", "쪽당 초", "읽은 쪽", "글자 수", "정답 글자", "오류", "CER %",
+        writer.writerow(["문서", "세트", "종료 코드", "쪽", "초", "쪽당 초", "읽은 쪽", "글자 수", "정답 글자", "오류", "CER %", "부호 제외 CER %",
                          "문서 종류", "정답에서 인쇄", "선택 엔진", "엔진별 판독 초"])
         for r in rows:
             writer.writerow([r["document"], r["set"], r["exit"], r["pages"], r["seconds"], r["seconds_per_page"], r["pages_read"],
                              r["characters"], r.get("reference_characters", ""), r.get("errors", ""), r.get("cer_percent", ""),
+                             r.get("content_cer_percent", ""),
                              r["profile"], "예" if r["printed_from_answer"] else "", " ".join(f"{k}:{v}" for k, v in r["engines"].items()),
                              " ".join(f"{k}:{v}" for k, v in (r.get("engine_seconds") or {}).items())])
     lines = ["| 문서 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
@@ -451,10 +462,11 @@ def main(argv=None):
         cells = []
         for name in names:
             r = next((r for r in rows if r["document"] == d["name"] and r["set"] == name), None)
-            cells.append("—" if r is None else f"{r.get('cer_percent', '-')}% · {r['seconds_per_page']}초")
+            cells.append("—" if r is None else
+                         f"{r.get('cer_percent', '-')}% (부호 제외 {r.get('content_cer_percent', '-')}%) · {r['seconds_per_page']}초")
         lines.append(f"| {d['name']}{' (인쇄본)' if d['printed_from_answer'] else ''} | " + " | ".join(cells) + " |")
     table = "\n".join(lines)
-    (args.out / "summary.md").write_text("# 로컬 우선 옵션 비교 (CER · 쪽당 초)\n\n" + table + "\n", encoding="utf-8")
+    (args.out / "summary.md").write_text("# 로컬 우선 옵션 비교 (CER · 부호 제외 CER · 쪽당 초)\n\n" + table + "\n", encoding="utf-8")
     print("\n" + table + f"\n\n결과: {args.out / 'summary.csv'} · {args.out / 'summary.md'}")
     return 0 if all(r["exit"] in (0, 4) for r in rows) else 1
 
