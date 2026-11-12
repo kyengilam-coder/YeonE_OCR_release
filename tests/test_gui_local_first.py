@@ -122,6 +122,79 @@ class LocalFirstGuiTests(unittest.TestCase):
         gui.App.test_plans(app)                                                         # 시험 중에는 다시 시작하지 않는다
         self.assertTrue(app.q.empty())
 
+    def _partial_app(self, **extra):
+        seen = {}
+
+        def prepare():
+            seen["need_key"] = vars(app).pop("_env_need_key", True)
+            return True
+        app = SimpleNamespace(running=False, _need_records=lambda what: True, pdf=lambda: "book.pdf", work=lambda: "work-folder",
+                              _prepare_env=prepare, _pages=lambda: ["--pages", "1-200"], _build_opts=lambda: ["--layout", "page"],
+                              _answered_opts=lambda: ["--skip-answered", "same-model"], v_reader=Var("gemini"),
+                              nb=mock.Mock(), _save_book=mock.Mock(), start=mock.Mock(), **extra)
+        return app, seen
+
+    def test_partial_document_is_built_from_the_pages_read_so_far_without_calling_a_model(self):
+        gui = self.gui
+        app, seen = self._partial_app()
+        with mock.patch.object(gui.App, "_result_editors_ready", return_value=True), \
+                mock.patch.object(gui.App, "_corrections_ok", return_value=True), \
+                mock.patch.object(gui, "template_ok", return_value=True), mock.patch.object(gui, "preset_ok", return_value=True):
+            gui.App.do_partial(app)
+            argv, label = app.start.call_args.args
+            self.assertEqual(argv, ["build", "book.pdf", "--work", "work-folder", "--pages", "1-200", "--layout", "page",
+                                    "--reader", "gemini", "--no-context-model", "--skip-answered", "same-model"])
+            self.assertEqual(label, gui.PARTIAL_LABEL)
+            self.assertIs(seen["need_key"], False)                                      # 모델을 부르지 않으니 키를 묻지 않는다
+            app.start.reset_mock(); app.running = True
+            gui.App.do_partial(app)                                                     # 실행 중에는 시작하지 않는다
+            app.start.assert_not_called()
+
+    def test_partial_button_shows_only_for_a_book_read_part_way(self):
+        gui = self.gui
+        app = SimpleNamespace(pdf=lambda: "book.pdf", _counts={"target": 462, "records": 193, "to_read": 269})
+        with mock.patch.object(gui.App, "_n_records", return_value=193):
+            self.assertTrue(gui.App._partial_wanted(app))
+            app._counts = {"target": 462, "records": 462, "to_read": 0}
+            self.assertFalse(gui.App._partial_wanted(app))                              # 다 읽은 책
+            self.assertTrue(gui.App._partial_wanted(app, {"kind": "stopped"}))          # 방금 중지: 엔진만 읽고 AI를 기다리던 쪽이 있을 수 있다
+            app._counts = None
+            self.assertTrue(gui.App._partial_wanted(app))                               # 아직 세는 중
+        with mock.patch.object(gui.App, "_n_records", return_value=0):
+            self.assertFalse(gui.App._partial_wanted(app, {"kind": "stopped"}))         # 판독 기록이 없으면 만들 것이 없다
+
+    def test_stopping_a_run_offers_a_document_of_the_pages_read_so_far(self):
+        import queue
+        gui = self.gui
+        var = lambda: SimpleNamespace(set=lambda v: None, get=lambda: "")
+
+        def finish(rc, label, answer, records=193):
+            later = []
+            app = SimpleNamespace(_set_running=lambda on, command="": None, _closing=False, v_status=var(), v_prog=var(), _append=lambda s: None,
+                                  tracker=SimpleNamespace(t0=0.0, frac=0.4, finish=lambda: None, command="run"),
+                                  progress=SimpleNamespace(configure=lambda **k: None), refresh_table=lambda: None, open_after=None,
+                                  _last_writer=gui.QueueWriter(queue.Queue()), pdf=lambda: "book.pdf", open_hwpx=mock.Mock(),
+                                  after=lambda _ms, call: later.append(call))
+            with mock.patch.object(gui, "messagebox") as box, mock.patch.object(gui.App, "_n_records", return_value=records), \
+                    mock.patch.object(gui.App, "_request_counts"), mock.patch.object(gui.App, "do_partial") as partial:
+                box.askyesno.return_value = answer
+                gui.App._finish(app, rc, label)
+                for call in later:
+                    call()
+            return box, partial, app
+        box, partial, _ = finish(130, "한 번에 인식 (전체 → HWPX)", True)
+        self.assertIn("판독 기록이 있는 193쪽으로 HWPX를 만들까요", box.askyesno.call_args.args[1])
+        partial.assert_called_once()
+        box, partial, _ = finish(130, "한 번에 인식 (전체 → HWPX)", False)
+        partial.assert_not_called()                                                     # 아니요: 나중에 단추로
+        box, partial, _ = finish(130, "한 번에 인식 (전체 → HWPX)", True, records=0)
+        box.askyesno.assert_not_called()                                                # 읽은 쪽이 없으면 묻지 않는다
+        box, partial, _ = finish(130, "한 번에 인식 (문자 PDF 만들기)", True)
+        box.askyesno.assert_not_called()                                                # 문자 PDF 실행은 묻지 않는다
+        box, partial, app = finish(0, gui.PARTIAL_LABEL, True)
+        self.assertIn("지금까지 읽은 쪽으로 HWPX를 만들었습니다", box.askyesno.call_args.args[1])
+        app.open_hwpx.assert_called_once()
+
     def test_resume_choice_adds_a_flag_only_when_not_the_default(self):
         gui = self.gui
         app = self.app()

@@ -599,6 +599,10 @@ RUN_TIP = ("준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 
            "먼저 판독·모델 단계의 예상 비용을 한 창에 보여 주고 묻습니다.")
 RUN_PDF_TIP = ("판독(1차·2차) → 3차 글자 판별 → 원본 모양 그대로 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)까지 이어서 합니다. "
                "양식·짜임·HWPX 자동 교정은 쓰지 않습니다. 먼저 예상 비용을 한 창에 보여 주고 묻습니다.")
+PARTIAL_TEXT = PARTIAL_LABEL = "읽은 쪽까지 HWPX 만들기"
+PARTIAL_TIP = ("중간에 멈춘 실행에서, 지금까지 판독 기록이 있는 쪽만으로 HWPX를 만듭니다(모델을 부르지 않음 · 요금·사용량 없음). "
+               "엔진만 읽고 AI 검증 차례를 기다리던 쪽은 엔진 판독 그대로 들어갑니다. 쪽 범위를 적었으면 그 범위 안의 읽은 쪽만. "
+               "남은 쪽은 [한 번에 인식]을 다시 누르면 이어서 읽고, 끝나면 전체 문서로 바뀝니다.")
 STOP_TIP = "두 실행 모두 같은 단추로 멈춥니다 — 지금 쪽이 끝나면 멈춥니다. 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다."
 READY_CAP = "누르면 먼저 예상 비용을 보여 주고 묻습니다. 멈춰도 끝난 쪽은 남고, 다시 누르면 남은 쪽부터 이어서 합니다."
 RUN_CAP = "지금 쪽이 끝나면 멈춥니다 · 끝난 쪽은 남습니다."
@@ -3819,10 +3823,13 @@ class App(tk.Tk):
         self.b_run.grid(row=2, column=0, sticky="ew", pady=(P(8), 0))
         self.b_run_pdf = self._btn(b, RUN_PDF_TEXT, self.do_run_pdf, style="SealOut.TButton", tip=RUN_PDF_TIP)
         self.b_run_pdf.grid(row=3, column=0, sticky="ew", pady=(P(6), 0))
-        self.b_stop = ttk.Button(b, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
-        self.b_stop.grid(row=4, column=0, sticky="ew", pady=(P(6), 0))
+        stops = tk.Frame(b, bg=C["PANEL"]); stops.grid(row=4, column=0, sticky="ew", pady=(P(6), 0))
+        self.b_stop = ttk.Button(stops, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
+        self.b_stop.pack(fill="x")
         Tip(self.b_stop, STOP_TIP, self)
-        for btn in (self.b_run, self.b_run_pdf, self.b_stop):
+        # 중간에 멈춘 책에서만 보인다(_sync_run_card): 지금까지 읽은 쪽으로 문서
+        self.b_partial = self._btn(stops, PARTIAL_TEXT, lambda: App.do_partial(self), tip=PARTIAL_TIP)
+        for btn in (self.b_run, self.b_run_pdf, self.b_stop, self.b_partial):
             btn.configure(width=1)                                          # 글 길이로 오른쪽 단(340)을 넓히지 않는다 — 단 너비를 다 쓰고, 긴 글(실행 중)은 끝을 줄임
         self.t_run_status = App._rich_line(self, b)                        # 중지를 누른 뒤·끝난 뒤(·입력을 비운 뒤의 안내)만 — v_status
         self.l_run_cap = L(b, "", "CAP", "MUTED", wrap=True); self.l_run_cap.grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
@@ -3912,6 +3919,13 @@ class App(tk.Tk):
                 row.pack(fill="x")
             elif not records and row.winfo_manager():
                 row.pack_forget()
+        partial = d.get("b_partial")
+        if partial is not None:                                         # 읽다 만 책(판독 기록은 있고 남은 쪽이 있거나 방금 중지함)에서만
+            want = has and App._partial_wanted(self, res)
+            if want and not partial.winfo_manager():
+                partial.pack(fill="x", pady=(P(6), 0))
+            elif not want and partial.winfo_manager():
+                partial.pack_forget()
         parts = []
         if running and d.get("_stop_requested"):
             parts = [(self.v_status.get(), "plain")]
@@ -3936,7 +3950,7 @@ class App(tk.Tk):
         self.l_run_cap.configure(text=cap)
         target = None
         if not running and res and res.get("kind") in ("ok", "partial"):
-            if res.get("cmd") == "run":
+            if res.get("cmd") in ("run", "build"):
                 target = self.b_open_work if res.get("rc") == 5 else self.b_open_hwpx
             elif res.get("cmd") == "run-pdf":
                 target = self.b_open_pdf
@@ -3948,6 +3962,16 @@ class App(tk.Tk):
             self.l_copy_note.grid(row=8, column=0, sticky="ew", pady=(P(6), 0))
         else:
             self.l_copy_note.grid_remove()
+
+    def _partial_wanted(self, res=None) -> bool:
+        """[읽은 쪽까지 HWPX 만들기]를 보일지: 이 원본에 판독 기록이 있고, 아직 읽을 쪽이 남았거나(셈을 모르면 남았다고 봄) 방금 실행을 중지했을 때."""
+        d = vars(self)
+        if not App._n_records(self.pdf()):
+            return False
+        if res and res.get("kind") == "stopped":
+            return True
+        counts = d.get("_counts")
+        return not counts or bool(counts.get("to_read"))
 
     def _rich_line(self, parent, font: str = "BODY", fg: str = "INK") -> tk.Text:
         """굵은 글·빨강·주의 글을 한 문단에 섞어 차지한 너비대로 줄을 바꾸는 읽기 전용 글줄(높이는 줄 수에 맞춤). 설정 줄 설명은 font='CAP'·fg='MUTED'
@@ -6918,6 +6942,17 @@ class App(tk.Tk):
         elif (ok or partial) and ("HWPX" in label and "인식" in label):
             if messagebox.askyesno(APP_NAME, "끝났습니다. 검수 화면(review.html)을 열까요?"):
                 self.do_review()
+        elif (ok or partial) and label == PARTIAL_LABEL:
+            if messagebox.askyesno(APP_NAME, "지금까지 읽은 쪽으로 HWPX를 만들었습니다. 열까요?\n\n"
+                                   "남은 쪽은 [한 번에 인식]을 다시 누르면 이어서 읽고, 끝나면 전체 문서로 바뀝니다."):
+                self.open_hwpx()
+        elif kind == "stopped" and "HWPX" in label and "인식" in label:
+            n = App._n_records(self.pdf())
+            if n and messagebox.askyesno(APP_NAME, f"중지했습니다. 지금까지 판독 기록이 있는 {n:,}쪽으로 HWPX를 만들까요?\n\n"
+                                         "모델을 부르지 않고 읽은 쪽만 문서로 만듭니다(AI 검증 차례를 기다리던 쪽은 엔진 판독 그대로). "
+                                         "남은 쪽은 [한 번에 인식]을 다시 누르면 이어서 읽습니다.\n\n"
+                                         f"지금 만들지 않아도 실행 카드의 [{PARTIAL_TEXT}]로 나중에 만들 수 있습니다."):
+                self.after(50, lambda: App.do_partial(self))
         self.open_after = None
 
     # ---------- 단추 동작 ----------
@@ -7583,6 +7618,21 @@ class App(tk.Tk):
                 self._save_book(create=True)                               # 실행 직전(비용 확인을 받은 뒤): 이 책의 설정을 결과 폴더에
                 self.start(["build", self.pdf(), "--work", str(self.work())] + self._pages() + self._build_opts() + opts + self._cap_opts(), "④ 문서 만들기·문맥 교정")
             self._with_plan("build", go)                                   # 문서 만들기도 문맥 교정으로 모델을 부른다
+
+    def do_partial(self):
+        """[읽은 쪽까지 HWPX 만들기]: 중간에 멈춘 실행의 판독 기록만으로 문서를 만든다 — 모델을 부르지 않는다(문맥 교정 없음).
+        기록이 있는 쪽만 문서에 들어가고(cli.cmd_build), 남은 쪽은 [한 번에 인식]을 다시 누르면 이어서 읽는다."""
+        if self.running:
+            return
+        if (not self._need_records(PARTIAL_LABEL) or not App._result_editors_ready(self, self.pdf())
+                or not App._corrections_ok(self)):
+            return
+        self._env_need_key = False                                         # 모델을 부르지 않는다 — 키를 묻지 않는다
+        if self._prepare_env() and template_ok(self) and preset_ok(self):
+            self.nb.select(0)
+            self._save_book(create=True)
+            opts = ["--reader", self.v_reader.get(), "--no-context-model"] + self._answered_opts()
+            self.start(["build", self.pdf(), "--work", str(self.work())] + self._pages() + self._build_opts() + opts, PARTIAL_LABEL)
 
     def do_review(self):
         if not self._need_records("검수 화면"): return
