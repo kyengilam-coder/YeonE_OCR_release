@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: 1.2.8 쪽 나눠 보내기
+
+`local_first._command`의 쪽 반복에서 엔진 뒤 AI 부분(체크포인트 기록·AI 쪽 판독·prepare_plan·run_plan·제안 반영·기록)을 `ai_stage`로 옮겼다. 선택을 끄면 반복 안에서 그대로 부른다. `--local-ai-split`이고 구독 세션이 있으면 `_SplitPlans`가 로그인된 구독마다 `Session`(record_provider는 실행의 제공사)·쪽 판독기·작업자 1개를 두고, 엔진을 마친 쪽을 빈 작업자에 맡긴다. 프로젝트 저장·상태 파일·쪽 그림 그리기는 각자 잠금이 있어 쪽마다 다른 스레드가 써도 된다. 호출 수는 `tally`(잠금). 중지·반환 때 `finally`에서 작업자를 기다린다. `Session.request`는 받은 모델 이름이 그 계정 것이 아니면 계정의 모델을, `_as_first`는 기록 제공사 기준 완료 표시를 쓴다.
+
 ## 2026-11-12: 1.2.7 동시 AI 요청
 
 `comparison_ai.run_plan(parallel=N)`: 묶음 처리를 prepare(계획 차례·주 스레드: 이미지·프롬프트·기록 틀) → start(클라이언트·중지/범위 확인·호출 수) → send(요청만, N>1이면 작업 스레드) → finish(계획 차례·주 스레드: 응답 검증·기록·checkpoint)로 나눴다. N=1은 예전과 같은 차례로 같은 함수를 부른다. 치명적 실패·중지·상한 오류는 새 요청 없이 이미 보낸 답을 기록한 뒤 처리한다. editorial 묶음이 있으면 늘 1. `local_first`는 구독 세션이면 `--local-ai-parallel`(기본 3), API 키면 1을 넘긴다. 창 설정 `local_ai_parallel`.
