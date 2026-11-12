@@ -4886,13 +4886,13 @@ class App(tk.Tk):
         self._strip_dirty = True
 
     def _draw_strip(self) -> None:
-        """칸(높이 18 · 사이 2 · 최소 12)과 눈금. 다섯 상태는 모양과 밝기로 갈린다: 끝남 먹 채움 · 지금 굵은 먹 테 · 실패 RED 테 + '!' ·
-        기록 있음 LINE 속 + MUTED 점선(손으로 그은 조각) · 남음 EDGE 가는 테. 칸이 모자라면 여러 쪽을 한 칸에(gui_progress.strip_layout)."""
+        """칸(높이 18 · 사이 2 · 최소 12)과 눈금. 다섯 상태는 모양과 밝기로 갈린다: 끝남 먹(강조색) 채움 · 지금 굵은 먹 테 · 실패 RED 테 + '!' ·
+        기록 있음 옅은 파랑(SEAL_LINE) 채움 — 앞선 실행에서 끝난 쪽 · 남음 EDGE 가는 테. 칸이 모자라면 여러 쪽을 한 칸에(gui_progress.strip_layout)."""
         d = vars(self); cv = d.get("c_strip")
         if cv is None:
             return
         from .gui_progress import strip_layout, cell_kind, strip_ticks
-        from .gui_preview import rounded_path, dash_segments, clip_x
+        from .gui_preview import rounded_path, clip_x
         C, P = self.colors, self.px
         cv.delete("all")
         pages, marks = d.get("_strip_pages") or [], d.get("_strip_marks") or {}
@@ -4921,13 +4921,8 @@ class App(tk.Tk):
                         poly(part, C["SEAL"])
                 if kind == "fail":
                     cv.create_text((x0 + x1) / 2, ch / 2, text="!", fill=C["RED"], font=self.fonts["CAP_B"])
-            else:                                                       # 기록 있음 · 건너뜀
-                poly(outer, C["LINE"])
-                lw = max(1, int(1.5 * self.scale))
-                path = rounded_path(x0 + lw / 2, lw / 2, x1 - lw / 2, ch - lw / 2, max(0, r - lw / 2))
-                for seg in dash_segments(path, P(3), P(2)):
-                    if len(seg) >= 4:
-                        cv.create_line(*seg, fill=C["MUTED"], width=lw)
+            else:                                                       # 기록 있음 · 건너뜀: 앞선 실행에서 끝난 쪽 — 끝남과 같은 계열의 옅은 파랑
+                poly(outer, C["SEAL_LINE"])
         font = self._font("CAP"); y = ch + gap + P(8)
         placed: list[tuple[float, float, int]] = []
         ticks = strip_ticks(pages, per, cells)
@@ -4947,7 +4942,7 @@ class App(tk.Tk):
         d = vars(self); cv = d.get("c_legend")
         if cv is None:
             return
-        from .gui_preview import rounded_path, dash_segments
+        from .gui_preview import rounded_path
         C, P = self.colors, self.px
         cv.delete("all")
         marks = d.get("_strip_marks") or {}
@@ -4964,11 +4959,7 @@ class App(tk.Tk):
             if kind == "done":
                 cv.create_polygon(flat(box), fill=C["SEAL"], outline="")
             elif kind == "record":
-                cv.create_polygon(flat(box), fill=C["LINE"], outline="")
-                lw = max(1, int(1.5 * self.scale))
-                for seg in dash_segments(rounded_path(x + lw / 2, y0 + lw / 2, x + s - lw / 2, y0 + s - lw / 2, 1), P(3), P(2)):
-                    if len(seg) >= 4:
-                        cv.create_line(*seg, fill=C["MUTED"], width=lw)
+                cv.create_polygon(flat(box), fill=C["SEAL_LINE"], outline="")
             else:
                 bw = {"now": max(2, P(2)), "fail": max(1, int(1.5 * self.scale)) + 0, "remain": max(1, int(self.scale))}[kind]
                 cv.create_polygon(flat(box), fill={"now": C["SEAL"], "fail": C["RED"], "remain": C["RULE"]}[kind], outline="")
