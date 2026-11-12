@@ -37,6 +37,8 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
                   "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Gemini CLI)"}
+AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
+AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Gemini 구독", "api": "API 키"}
 
 
 def _label_key(labels: dict, shown: str):
@@ -4364,7 +4366,54 @@ class App(tk.Tk):
         self.c_legend.bind("<Configure>", lambda _e: App._draw_legend(self), add="+")
         self.c_strip.bind("<Motion>", lambda e: App._strip_hover(self, e.x), add="+")
         self.c_strip.bind("<Button-1>", lambda e: App._strip_click(self, e.x), add="+")
+        # AI 연결 줄(실행 중 구독 계정으로 연결됐을 때만): 지금 연결 · 넘길 곳 · [다음 구독으로 넘기기]
+        link = self._ai_link_row = tk.Frame(b, bg=C["PANEL"])
+        L(link, "AI 연결", "CAP", "MUTED").pack(side="left")
+        self.l_ai_link = L(link, "", "BODY_B"); self.l_ai_link.pack(side="left", padx=(P(8), 0))
+        self.b_ai_switch = self._btn(link, "다음 구독으로 넘기기", lambda: App.switch_subscription(self), lock=False,
+                                     tip="지금 쓰는 구독 계정을 멈추고(답을 기다리던 요청은 다시 보냄) 옆에서 고른 계정에 연결합니다. "
+                                         "고르지 않으면(자동) 정해진 순서(Claude → ChatGPT → Gemini, 남은 구독이 없으면 API 키)로 다음 계정에 연결합니다. "
+                                         "넘긴 계정은 이번 실행에서 다시 쓰지 않습니다(직접 고르면 다시 씀).")
+        self.b_ai_switch.pack(side="right")
+        self.v_ai_next = tk.StringVar(value=AI_NEXT_AUTO)
+        self.cb_ai_next = ttk.Combobox(link, textvariable=self.v_ai_next, values=[AI_NEXT_AUTO], state="readonly", width=30)
+        self.cb_ai_next.pack(side="right", padx=(0, P(8)))
+        L(link, "넘길 곳", "CAP", "MUTED").pack(side="right", padx=(0, P(6)))
+        self._ai_targets: dict[str, str | None] = {AI_NEXT_AUTO: None}
         return card
+
+    def _show_ai_link(self, state):
+        """subscriptions.ON_CHANGE 로 온 연결 상태(None=연결 없음)를 AI 연결 줄에 보인다."""
+        row = vars(self).get("_ai_link_row")
+        if row is None:
+            return
+        if not state:
+            row.grid_remove()
+            return
+        row.grid(row=5, column=0, sticky="ew", pady=(self.px(10), 0))
+        self.l_ai_link.configure(text=state["label"] if state["available"] else "없음 — AI 판독·검증을 멈춤")
+        following = state.get("next")
+        auto = AI_NEXT_AUTO + (f" (다음: {AI_TARGET_LABELS[following]})" if following else " (넘길 곳 없음)")
+        targets = {auto: None}
+        targets.update({AI_TARGET_LABELS[t]: t for t in state["targets"]})
+        self._ai_targets = targets
+        self.cb_ai_next.configure(values=list(targets))
+        if self.v_ai_next.get() not in targets:
+            self.v_ai_next.set(auto)
+        self.b_ai_switch.configure(state="normal" if state["available"] and (following or state["targets"]) else "disabled")
+
+    def switch_subscription(self):
+        """[다음 구독으로 넘기기]: 고른 곳(없으면 정해진 순서의 다음)으로 실행 중인 연결을 옮긴다.
+        상태 확인(로그인 여부)이 잠깐 걸릴 수 있어 창이 멈추지 않게 뒤에서 한다."""
+        target = vars(self).get("_ai_targets", {}).get(self.v_ai_next.get())
+        self.b_ai_switch.configure(state="disabled")
+        def work():
+            from . import subscriptions
+            message = subscriptions.switch(target)
+            self.q.put(("log", "  " + message + "\n"))
+            session = subscriptions.active()
+            self.q.put(("ai_link", session.state() if session is not None else None))
+        threading.Thread(target=work, daemon=True, name="ai-switch").start()
 
     STRIP_LABEL = {"record": "판독 기록 있음 · 건너뜀", "remain": "남음", "done": "끝남", "now": "판독 중", "fail": "판독 실패(다시 시도 가능)"}
     LEGEND = (("done", "끝남"), ("now", "지금"), ("fail", "실패"), ("record", "기록 있음 · 건너뜀"), ("remain", "남음"))
@@ -6406,6 +6455,9 @@ class App(tk.Tk):
                 with contextlib.redirect_stdout(w), contextlib.redirect_stderr(w):
                     from . import cli
                     cli.CANCEL.clear()
+                    if self._run_local_first:                                   # 구독 연결이 생기면 진행 카드에 AI 연결 줄
+                        from . import subscriptions
+                        subscriptions.ON_CHANGE = lambda state: self.q.put(("ai_link", state))
                     cli.PROGRESS = lambda st, d, t: self.q.put(("progress", st, d, t, App._call_count()))    # 그때의 호출 수 — 단계 몫을 정확히
                     if pages:
                         cli.PAGE_EVENT = lambda n, st: self.q.put(("page", n, st))                     # 쪽 띠의 칸(판독의 쪽마다)
@@ -6413,6 +6465,9 @@ class App(tk.Tk):
                         rc = cli.main(argv)
                     finally:
                         cli.PROGRESS = None; cli.PAGE_EVENT = None
+                        from . import subscriptions
+                        subscriptions.ON_CHANGE = None
+                        self.q.put(("ai_link", None))
             except SystemExit as e:
                 rc = e.code if isinstance(e.code, int) else 1
                 if e.code and not isinstance(e.code, int): self.q.put(("log", str(e.code) + "\n"))
@@ -6445,6 +6500,8 @@ class App(tk.Tk):
                     same_source = len(item) < 3 or item[2] == os.path.normcase(str(Path(self.v_hwpx.get().strip()).resolve()))
                     if same_source and not self.v_hstyles.get().strip():
                         self.v_hstyles.set(item[1])
+                elif item[0] == "ai_link":
+                    App._show_ai_link(self, item[1])
                 elif item[0] == "progress":
                     self._on_progress(*item[1:])                       # (단계, 끝난 수, 전체 수[, 그때의 호출 수])
                 elif item[0] == "plan_progress":
