@@ -167,8 +167,11 @@ class Session:
 
     subscription = True
 
-    def __init__(self, plan, requested=None, *, api=None, log=print, factory=None):
+    def __init__(self, plan, requested=None, *, api=None, log=print, factory=None, record_provider=None):
         self.first = self.plan = plan
+        # The provider the review records name (the run's plan settings); answers from another provider
+        # report their finish reason in its terms. Split runs give every plan's session the run's provider.
+        self.record_provider = record_provider or PROVIDERS[plan]
         self.requested = requested
         self.api = api
         self.log = log
@@ -254,7 +257,7 @@ class Session:
                                                            images=images, schema=schema))
                 finally:
                     _notify(self)                         # the window shows the calls left
-            name = model_name if plan == self.first else model(plan)
+            name = model_name if plan == self.first and accepts_model(plan, model_name) else model(plan)
             try:
                 return self._as_first(current.request(model_name=name, system=system, prompt=prompt,
                                                       images=images, schema=schema))
@@ -271,8 +274,9 @@ class Session:
         (the review record and its checks name that one); the actual model and transport stay in
         the metadata."""
         text, complete, finish, tokens, actual = result
-        if complete and self.plan != self.first:
-            finish = FINISHED[PROVIDERS[self.first]]
+        answered = PROVIDERS[self.plan] if self.plan is not None else getattr(self.api, "provider", None)
+        if complete and answered != self.record_provider:
+            finish = FINISHED[self.record_provider]
         return text, complete, finish, tokens, actual
 
     def _fail(self, plan, exc):

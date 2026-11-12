@@ -440,6 +440,83 @@ def _ai_page_reader(args, project, work, cli, session=None, api=None):
     return read
 
 
+class _SplitPlans:
+    """--local-ai-split: every signed-in plan gets its own session and one worker; the AI part of each
+    page (ai_stage) goes to a free plan while the engines read the next page, so plans answer pages
+    side by side. A page is answered by one plan only (its review stays consistent). Records keep the
+    run's provider and model settings, so a page sent to another plan next time resumes the same plan
+    of batches; the actual plan and model are in each review's metadata."""
+
+    def __init__(self, workers, stage, failed_page, log):
+        self.workers, self.stage, self.failed_page, self.log = workers, stage, failed_page, log
+        self.stopped = False
+
+    @classmethod
+    def start(cls, args, session, api, project, work, cli, stage, failed_page, review_enabled):
+        if not getattr(args, "local_ai_split", False) or session is None or not review_enabled:
+            return None
+        from concurrent.futures import ThreadPoolExecutor
+        from . import subscriptions
+        plans = [session.plan] + [plan for plan in subscriptions.order(getattr(args, "local_ai_plan", None))
+                                  if plan != session.plan and plan not in subscriptions.exhausted()
+                                  and subscriptions.status(plan)["usable"]]
+        if len(plans) < 2:
+            cli.log("  쪽 나눠 보내기: 로그인된 구독 계정이 하나뿐이라 한 계정으로 진행합니다.")
+            return None
+        workers = []
+        for plan in plans:
+            plan_session = session if plan == session.plan else subscriptions.Session(
+                plan, plan, api=api, log=cli.log, record_provider=session.record_provider)
+            reader = _ai_page_reader(args, project, work, cli, plan_session, api)
+            workers.append({"plan": plan, "session": plan_session, "reader": reader, "future": None,
+                            "pool": ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ai-{plan}")})
+        cli.log("  쪽 나눠 보내기: " + " · ".join(subscriptions.NAMES[p] for p in plans)
+                + " 구독이 쪽을 나눠 맡습니다(한 쪽은 한 계정이 끝까지 검증)")
+        return cls(workers, stage, failed_page, cli.log)
+
+    def _collect(self, worker):
+        future, worker["future"] = worker["future"], None
+        try:
+            if future.result() == 130:
+                self.stopped = True
+        except Exception as exc:                     # the page's own failure, as the inline loop reports it
+            number = getattr(future, "page_number", None)
+            from ab_ocr.ocr import OCRCancelled
+            from .comparison_ai import AIReviewCancelled
+            if isinstance(exc, (OCRCancelled, AIReviewCancelled, KeyboardInterrupt)):
+                self.stopped = True
+            else:
+                self.failed_page(number, exc)
+
+    def _free(self):
+        """A worker with no page (finished pages collected); waits for one when all are busy."""
+        from concurrent.futures import FIRST_COMPLETED, wait
+        while True:
+            for worker in self.workers:
+                if worker["future"] is not None and worker["future"].done():
+                    self._collect(worker)
+            free = [w for w in self.workers if w["future"] is None]
+            if free:
+                usable = [w for w in free if w["session"].available]
+                return (usable or free)[0]
+            wait([w["future"] for w in self.workers if w["future"] is not None], return_when=FIRST_COMPLETED)
+
+    def dispatch(self, number, started, review, extras):
+        worker = self._free()
+        future = worker["pool"].submit(self.stage, number, started, review, extras, worker["session"], worker["reader"])
+        future.page_number = number
+        worker["future"] = future
+
+    def finish(self):
+        """Wait for every page in flight; 130 when one was stopped."""
+        for worker in self.workers:
+            if worker["future"] is not None:
+                worker["future"].exception()             # wait
+                self._collect(worker)
+            worker["pool"].shutdown(wait=True)
+        return 130 if self.stopped else None
+
+
 def _settings(args, remaining):
     from .comparison_ai import AISettings
     from .providers import default_model
@@ -490,6 +567,7 @@ def _command(args, *, work=None, doc=None, pool=None):
         cap = max(1, int(getattr(args, "local_ai_subscription_calls", 1000) or 1000))   # no per-call charge
     owned_doc = doc is None
     doc = doc or open_pdf(args.pdf)
+    split = None
     try:
         work = work or Work(args.pdf, getattr(args, "work", None))
         work.ensure_source(args.dpi)
@@ -534,7 +612,9 @@ def _command(args, *, work=None, doc=None, pool=None):
                     key = ""
             if note:
                 cli.log("  " + note + (f" · 모델 {args.model}" if plan else ""))
-        calls, failed, incomplete, completed = 0, [], [], []
+        failed, incomplete, completed = [], [], []
+        import threading
+        tally, tally_lock = {"calls": 0}, threading.Lock()                # AI calls this run (split runs add from workers)
         cli.LOCAL_API_CALLS = 0
         summaries = {}
         saver = _Checkpoint(project)
@@ -592,6 +672,91 @@ def _command(args, *, work=None, doc=None, pool=None):
                 return None
 
         page_reader = _ai_page_reader(args, project, work, cli, session, api)
+        def ai_stage(number, started, review, extras, stage_session, stage_reader):
+            """The AI part of one page after the engines: checkpoint, AI page reading, review plan, review,
+            accepted proposals, record. Inline, or (--local-ai-split) on the worker of one signed-in plan
+            while the engines read the next page. Returns 130 when stopped."""
+            # Checkpoint local output BEFORE preparing or sending any API call.
+            _save_record(project, number, args, work, started, review, extras=extras)
+            if stage_reader is not None:
+                extras["ai_page"] = stage_reader(number)
+            settings = _settings(args, cap)
+            try:
+                plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
+                                                                    detail_tile=getattr(args, "local_ai_detail_tile", 0) or 0),
+                                    settings=settings,
+                                    should_stop=cli.CANCEL.is_set)
+            except AIReviewError as exc:
+                review.update(status="pending", error=str(exc))
+                if review_enabled:
+                    cli.log(f"  {number}쪽: AI 검증 보류 — {exc}")
+                if review_enabled:
+                    incomplete.append(number)
+            else:
+                review.update(copy.deepcopy(plan.summary))
+                plan_path = work.dir / "local-first-review" / f"p{number:03d}-{plan.fingerprint[:24]}.json"
+                plan_path.parent.mkdir(exist_ok=True)
+                write_atomic(plan_path, json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+                review["plan_path"] = str(plan_path)
+                unresolved = bool(plan.summary.get("unlocalized_targets"))
+                if plan.summary["calls"] == 0:
+                    review["status"] = "needs-local-review" if unresolved else "no-api-needed"
+                    if unresolved and review_enabled:
+                        incomplete.append(number)
+                elif not review_enabled or not key or plan.summary["calls"] > cap - tally["calls"] or (
+                        stage_session is not None and not stage_session.available):
+                    review["status"] = "pending"
+                    review["reason"] = ("AI 검증 꺼짐" if not review_enabled else "API 키 없음" if not key else
+                                        stage_session.stop_reason() if stage_session is not None and not stage_session.available
+                                        else "이번 실행 호출 상한 도달")
+                    if review_enabled:
+                        cli.log(f"  {number}쪽: AI 검증 보류 — {review['reason']} (이 쪽 {plan.summary['calls']}회 필요)")
+                    if review_enabled:
+                        incomplete.append(number)
+                else:
+                    cli.log(f"  {number}쪽: 의심 구간 {plan.summary['targets']}개 · "
+                            + (f"AI 호출 최대 {plan.summary['calls']}회({stage_session.short()})" if stage_session is not None
+                               else f"API 최대 {plan.summary['calls']}회"))
+                    review["status"] = "reviewing"
+                    _save_record(project, number, args, work, started, review, render=False, extras=extras)
+                    checkpoints = [0]
+                    def checkpoint(_value):
+                        project.save()
+                        checkpoints[0] += 1
+                        cli.LOCAL_API_CALLS = tally["calls"] + checkpoints[0]
+                    result = run_plan(project, plan, api_key=key, should_stop=cli.CANCEL.is_set, on_result=checkpoint,
+                                      client_factory=(lambda _settings, _key: stage_session) if stage_session is not None else None,
+                                      parallel=(getattr(args, "local_ai_parallel", 3) or 1) if stage_session is not None else 1)
+                    with tally_lock:
+                        tally["calls"] += result["calls"]
+                    if getattr(args, "local_ai_accept", False):
+                        review["ai_accept"] = _accept_ai(project, number)
+                        cli.log(f"  {number}쪽: AI 제안 반영 {review['ai_accept']['accepted']}개 · 보류 {review['ai_accept']['held']}개")
+                    cli.LOCAL_API_CALLS = tally["calls"]
+                    review.update(status="failed" if result["failed"] else "reviewed", outcome=result)
+                    if result["failed"] or unresolved:
+                        incomplete.append(number)
+                    project.save()
+                    if result["cancelled"]:
+                        review["status"] = "cancelled"
+                        _save_record(project, number, args, work, started, review, render=False, extras=extras)
+                        return 130
+            if not work.source_matches(args.dpi):
+                raise ComparisonError("처리 중 원본이 변경되어 출력 기록을 갱신하지 않았습니다.")
+            _save_record(project, number, args, work, started, review, render=False, extras=extras)
+            summaries[str(number)] = review
+            completed.append(number)
+            cli.page_event(number, "done")
+            cli.log(f"  {number}쪽: {REVIEW_STATUS_LABELS.get(review['status'], review['status'])} · "
+                    f"로컬 엔진 {(_selected(project, number) or {}).get('engine', '')}")
+            return None
+
+        def page_failed(number, exc):
+            failed.append(number)
+            cli.page_event(number, "fail")
+            cli.log(f"  {number}쪽 오류: {exc}")
+
+        split = _SplitPlans.start(args, session, api, project, work, cli, ai_stage, page_failed, review_enabled)
         resume = getattr(args, "local_resume", "unfinished") or "unfinished"
         if resume != "unfinished":
             cli.log("  이어서 할 때: " + {"continue": "앞선 쪽은 점검하지 않고 바로 이어갑니다",
@@ -690,86 +855,19 @@ def _command(args, *, work=None, doc=None, pool=None):
                     cli.log(f"  {number}쪽: 끝난 쪽 — 같은 조건이라 건너뜀 · {REVIEW_STATUS_LABELS.get(done.get('status'), done.get('status'))}")
                     cli.progress("read", index, len(pages))
                     continue
-                # Checkpoint local output BEFORE preparing or sending any API call.
-                _save_record(project, number, args, work, started, review, extras=extras)
-                if page_reader is not None:
-                    extras["ai_page"] = page_reader(number)
-                settings = _settings(args, cap)
-                try:
-                    plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
-                                                                        detail_tile=getattr(args, "local_ai_detail_tile", 0) or 0),
-                                        settings=settings,
-                                        should_stop=cli.CANCEL.is_set)
-                except AIReviewError as exc:
-                    review.update(status="pending", error=str(exc))
-                    if review_enabled:
-                        cli.log(f"  {number}쪽: AI 검증 보류 — {exc}")
-                    if review_enabled:
-                        incomplete.append(number)
-                else:
-                    review.update(copy.deepcopy(plan.summary))
-                    plan_path = work.dir / "local-first-review" / f"p{number:03d}-{plan.fingerprint[:24]}.json"
-                    plan_path.parent.mkdir(exist_ok=True)
-                    write_atomic(plan_path, json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
-                    review["plan_path"] = str(plan_path)
-                    unresolved = bool(plan.summary.get("unlocalized_targets"))
-                    if plan.summary["calls"] == 0:
-                        review["status"] = "needs-local-review" if unresolved else "no-api-needed"
-                        if unresolved and review_enabled:
-                            incomplete.append(number)
-                    elif not review_enabled or not key or plan.summary["calls"] > cap - calls or (
-                            session is not None and not session.available):
-                        review["status"] = "pending"
-                        review["reason"] = ("AI 검증 꺼짐" if not review_enabled else "API 키 없음" if not key else
-                                            session.stop_reason() if session is not None and not session.available
-                                            else "이번 실행 호출 상한 도달")
-                        if review_enabled:
-                            cli.log(f"  {number}쪽: AI 검증 보류 — {review['reason']} (이 쪽 {plan.summary['calls']}회 필요)")
-                        if review_enabled:
-                            incomplete.append(number)
-                    else:
-                        cli.log(f"  {number}쪽: 의심 구간 {plan.summary['targets']}개 · "
-                                + (f"AI 호출 최대 {plan.summary['calls']}회({session.short()})" if session is not None
-                                   else f"API 최대 {plan.summary['calls']}회"))
-                        review["status"] = "reviewing"
-                        _save_record(project, number, args, work, started, review, render=False, extras=extras)
-                        checkpoints = [0]
-                        def checkpoint(_value):
-                            project.save()
-                            checkpoints[0] += 1
-                            cli.LOCAL_API_CALLS = calls + checkpoints[0]
-                        result = run_plan(project, plan, api_key=key, should_stop=cli.CANCEL.is_set, on_result=checkpoint,
-                                          client_factory=(lambda _settings, _key: session) if session is not None else None,
-                                          parallel=(getattr(args, "local_ai_parallel", 3) or 1) if session is not None else 1)
-                        calls += result["calls"]
-                        if getattr(args, "local_ai_accept", False):
-                            review["ai_accept"] = _accept_ai(project, number)
-                            cli.log(f"  {number}쪽: AI 제안 반영 {review['ai_accept']['accepted']}개 · 보류 {review['ai_accept']['held']}개")
-                        cli.LOCAL_API_CALLS = calls
-                        review.update(status="failed" if result["failed"] else "reviewed", outcome=result)
-                        if result["failed"] or unresolved:
-                            incomplete.append(number)
-                        project.save()
-                        if result["cancelled"]:
-                            review["status"] = "cancelled"
-                            _save_record(project, number, args, work, started, review, render=False, extras=extras)
-                            return 130
-                if not work.source_matches(args.dpi):
-                    raise ComparisonError("처리 중 원본이 변경되어 출력 기록을 갱신하지 않았습니다.")
-                _save_record(project, number, args, work, started, review, render=False, extras=extras)
-                summaries[str(number)] = review
-                completed.append(number)
-                cli.page_event(number, "done")
-                cli.log(f"  {number}쪽: {REVIEW_STATUS_LABELS.get(review['status'], review['status'])} · "
-                        f"로컬 엔진 {(_selected(project, number) or {}).get('engine', '')}")
+                if split is not None:
+                    split.dispatch(number, started, review, extras)
+                elif ai_stage(number, started, review, extras, session, page_reader) == 130:
+                    return 130
             except (OCRCancelled, AIReviewCancelled, KeyboardInterrupt):
                 return 130
             except (OCRError, ComparisonError, AIReviewError, OSError, ValueError) as exc:
-                failed.append(number)
-                cli.page_event(number, "fail")
-                cli.log(f"  {number}쪽 오류: {exc}")
+                page_failed(number, exc)
             cli.progress("read", index, len(pages))
         state = work.load_state()
+        if split is not None and split.finish() == 130:
+            return 130
+        calls = tally["calls"]
         state["local_first_last_run"] = {"calls": calls, "cap": cap, "failed_pages": failed,
                                          "incomplete_review_pages": incomplete, "pages": summaries}
         work.save_state(state)
@@ -792,6 +890,8 @@ def _command(args, *, work=None, doc=None, pool=None):
         cli.log("AI 수정 제안은 비교·교정 창에서 채택·기각합니다. 원시 판독과 사람 교정은 보존됩니다.")
         return rc or (3 if failed else 4 if incomplete else 0)
     finally:
+        if split is not None:
+            split.finish()                                   # pages in flight on the plans' workers (they stop at [중지])
         from . import subscriptions
         subscriptions.deactivate()
         if owned_doc:
