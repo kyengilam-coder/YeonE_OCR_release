@@ -1,10 +1,12 @@
 # 연어OCR 개발 인수인계
 
-## 2026-11-12: ChatGPT·Gemini 구독 계정 연결 (1.2.1 뒤, 미배포)
+## 2026-11-12: 1.2.2 ChatGPT·Gemini 구독 계정 연결, 한도 시 다른 구독 → API 키
 
 `yeone_ocr/subscriptions.py`가 구독 계정을 고른다: claude(Claude Code `claude -p`), chatgpt(OpenAI Codex CLI `codex exec`, Sign in with ChatGPT), gemini(Gemini CLI `gemini -p`, Login with Google). 각 전송은 `claude_subscription.py`와 같은 계약(`status`, `SubscriptionClient.request(...) -> (text, complete, finish_reason, tokens, model)`)이고, 구독 표지 키(`subscriptions.KEYS`)로 `comparison_ai.create_client`가 고른다. `local_first`의 기본값 판단·쪽 판독·의심 구간 검증이 모두 이 선택을 따른다. 자동 순서는 Claude → ChatGPT → Gemini(기본 설정을 Claude로 쟀으므로).
 
 원칙은 Claude와 같다: 공식 프로그램만 실행하고 토큰 파일은 읽지 않는다(Gemini는 로그인 방식 확인에 settings.json만 읽음), 자식 프로그램 환경에서 API 키를 뺀다, 요청마다 빈 임시 폴더. Codex 옵션 조합과 Gemini 옵션(`-o json --approval-mode plan -e none --allowed-mcp-server-names none --skip-trust`, `GEMINI_SYSTEM_MD`)은 codex-cli 0.167.2·gemini-cli 0.68.0 실물로 인자 해석과 로그인 단계 도달까지 확인했다. 개발 환경의 네트워크 제한으로 실제 로그인 호출은 하지 못했으므로, Windows에서 `yeone-ocr plans` 뒤 한 쪽으로 첫 실측이 필요하다. 테스트는 `tests/conftest.py`가 세 CLI 경로를 모두 없는 파일로 돌려 실제 프로그램을 띄우지 않는다. 안내: `docs/SUBSCRIPTION_PLANS.md`.
+
+실행 중 실패(한도·로그인 만료·CLI 없음)는 `subscriptions.Session`이 받아 다음 구독으로 같은 요청을 다시 보내고, 남은 구독이 없으면 `comparison_ai.ApiTransport`(설정의 제공사·모델·키, `--local-ai-max-calls` 상한)로 넘긴다. 다른 제공사로 넘어간 완료 응답의 finish_reason은 첫 구독 제공사의 값으로 맞춘다(검토 기록의 위치 복원 검사가 기록의 provider로 대조하므로). 실제 모델과 전송 경로는 metadata의 actual_model·transport에 남는다.
 
 ## 2026-10-21: 1.0.6 교정본 파일 교체 잠금 처리
 

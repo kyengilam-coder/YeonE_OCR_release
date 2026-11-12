@@ -1,3 +1,13 @@
+# Windows 1.2.2 설치판
+
+1.2.2는 1.2.1의 설치 구성(내장 PP-OCRv6 환경, 로컬 우선 인식, GPU 엔진·Claude 구독 판독)을 그대로 쓰고 ChatGPT(Codex CLI)·Gemini(Gemini CLI) 구독 계정과, 한도에 닿을 때 다른 구독 → API 키로 넘어가는 동작을 더한 판이다. Codex CLI·Gemini CLI는 설치판에 들어 있지 않으며 사용자가 npm으로 설치하고 로그인한다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.2**로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.2`으로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
+
+배포 전 설치본에서 확인할 것: 버전 표시(1.2.2), 설정 「구독 계정 판독」의 계정 선택, `yeone-ocr plans`, 구독 없이 API 키만 있는 실행, 키 없는 실행, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.2 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.2)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.1 설치판
 
 1.2.1은 1.2.0의 설치 구성(내장 PP-OCRv6 환경, 로컬 우선 인식, GPU 엔진·Claude 구독 판독)을 그대로 쓰고 화면 · 문서 메모 기본값 · 결과 폴더 짜임 · 저신뢰 구간 검증 · 비교 프로젝트 저장을 고친 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
