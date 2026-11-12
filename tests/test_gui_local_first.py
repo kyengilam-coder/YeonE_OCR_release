@@ -144,6 +144,46 @@ class LocalFirstGuiTests(unittest.TestCase):
                                   {"local_ai_split": False, "local_ai_split_version": 1})
         self.assertIs(kept["local_ai_split"], False)                                  # 1.2.9 에서 직접 끈 값
 
+    def test_install_button_asks_first_runs_the_official_command_and_guides_without_node(self):
+        import queue
+        gui = self.gui
+        app = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["gemini"]), q=queue.Queue(), v_status=Var(""))
+        with mock.patch("yeone_ocr.plan_setup.find_npm", return_value=None), \
+                mock.patch("yeone_ocr.plan_setup.find_winget", return_value=None), \
+                mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask, \
+                mock.patch("webbrowser.open") as browser:
+            gui.App.install_plan(app)
+        self.assertIn("Node.js", ask.call_args.args[0]); browser.assert_called_once_with("https://nodejs.org/")
+        ran = []
+        with mock.patch("yeone_ocr.plan_setup.find_npm", return_value="npm"), \
+                mock.patch("yeone_ocr.plan_setup.run", side_effect=lambda command, log: ran.append(command) or 0), \
+                mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask:
+            gui.App.install_plan(app)
+            self.assertIn("npm install -g @google/gemini-cli", ask.call_args.args[1])
+            self.assertEqual(app.q.get(timeout=5)[0], "log")
+            self.assertEqual(app.q.get(timeout=5), ("setup_done", "Gemini (Gemini CLI) 설치", 0))
+        self.assertEqual(ran, [["npm", "install", "-g", "@google/gemini-cli"]])
+        app._setup_busy = False
+        with mock.patch("yeone_ocr.plan_setup.find_npm", return_value="npm"), \
+                mock.patch("yeone_ocr.plan_setup.run") as run, \
+                mock.patch.object(gui.messagebox, "askyesno", return_value=False):
+            gui.App.install_plan(app)                                                  # 아니요: 아무것도 하지 않음
+        run.assert_not_called()
+
+    def test_login_button_needs_the_program_and_opens_its_window(self):
+        gui = self.gui
+        app = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["chatgpt"]))
+        with mock.patch("yeone_ocr.chatgpt_subscription.find_cli", return_value=None), \
+                mock.patch.object(gui.messagebox, "showinfo") as info:
+            gui.App.open_plan_login(app)
+        self.assertIn("먼저 [설치]", info.call_args.args[1])
+        with mock.patch("yeone_ocr.chatgpt_subscription.find_cli", return_value="codex"), \
+                mock.patch("yeone_ocr.plan_setup.open_login", return_value=None) as opened, \
+                mock.patch.object(gui.messagebox, "showinfo") as info:
+            gui.App.open_plan_login(app)
+        opened.assert_called_once_with("chatgpt", "codex")
+        self.assertIn("Sign in with ChatGPT", info.call_args.args[1])
+
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()
         app._env_optional_key = True
