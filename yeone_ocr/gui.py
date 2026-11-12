@@ -32,11 +32,17 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
-            "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True,
+            "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
                   "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Gemini CLI)"}
+RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
+                 "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
+RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
+              "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
+              "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
+              "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Gemini 구독", "api": "API 키"}
 
@@ -2168,8 +2174,8 @@ class App(tk.Tk):
         first = "구독 계정(자동)" if plan == "auto" else AI_TARGET_LABELS.get(plan, plan)
         fallback = d.get("v_local_ai_api_fallback")
         if fallback is not None and not fallback.get():
-            return f"{first} 먼저 · API 키로 넘어가지 않음"
-        return f"{first} 먼저 → {api}"
+            return f"AI: {first} · API 키는 쓰지 않음"
+        return f"AI: {first} · 안 되면 {self.v_provider.get()} API 키({self.v_model.get().strip() or '모델 없음'})"
 
     def _sync_settings_summary(self, *_):
         document = "HWPX + DOCX" if self.v_docx.get() else "HWPX"
@@ -2203,7 +2209,12 @@ class App(tk.Tk):
         # 판 번호: 이름 바로 옆 작은 알약(누르면 업데이트 확인) — 어느 판이 떠 있는지 바로 보이게
         self.l_version = tk.Label(name, text=f"v{__version__}", font=self.fonts["CAP_B"], bg=C["NAV_HI"], fg=C["NAV_INK"],
                                   bd=0, padx=P(7), pady=P(1), cursor="hand2")
-        self.l_version.pack(side="left", padx=(P(10), 0))
+        # 알약의 아래 끝을 '연어OCR' 글자의 바닥선(밑줄 자리)에 맞춘다: 큰 글꼴의 descent 만큼 띄워 아래에 붙인다
+        try:
+            base = max(0, int(App._font(self, "APP").metrics("descent")))
+        except tk.TclError:
+            base = 0
+        self.l_version.pack(side="left", anchor="s", padx=(P(10), 0), pady=(0, base))
         self.l_version.bind("<Button-1>", lambda _e: None if self.running else self.check_updates())
         Tip(self.l_version, f"연어OCR {__version__} · 누르면 새 판이 있는지 확인합니다", self)
         self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])     # 탭 소개는 탭마다 풍선 도움말로
@@ -2294,6 +2305,7 @@ class App(tk.Tk):
         self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
+        self.v_local_resume = tk.StringVar(value=RESUME_LABELS.get(self.cfg.get("local_resume"), RESUME_LABELS["unfinished"]))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2446,6 +2458,12 @@ class App(tk.Tk):
         R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
 
         R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
+
+        def resume(parent):
+            cb = ttk.Combobox(parent, textvariable=self.v_local_resume, values=list(RESUME_LABELS.values()), state="readonly", width=chars(280))
+            Tip(cb, RESUME_TIP, self)
+            return cb
+        R["resume"] = row(b, "이어서 할 때", "판독 기록이 있는 쪽을 어떻게 지날지 · 실행 카드에서도 고름", resume)
 
         # ---- AI 판독기(모든 책 공통): 실제로 연결하는 차례대로 ① 구독 계정 → ② API 키 → ③ 검증 횟수·넘김, 세부 설정(접힘), 판독 뒤 모델 단계 ----
         s = S["ai"] = self._settings_section(common, "AI 판독기", "위에서부터 차례로 연결 — ① 구독 계정 → ② API 키 · 둘 다 없으면 로컬 결과만 · 모든 책 공통",
@@ -3723,7 +3741,18 @@ class App(tk.Tk):
         App._detail_only(self, cap)
         self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton",
                   tip="판독기·모델·자동 교정·문서 옵션(모든 책 공통)과 이 책의 설정을 설정 탭에서 고칩니다.").pack(side="right")
-        self.l_run_summary = L(b, "", "BODY_B", wrap=True); self.l_run_summary.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
+        top = tk.Frame(b, bg=C["PANEL"]); top.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
+        self.l_run_summary = L(top, "", "BODY_B", wrap=True); self.l_run_summary.pack(fill="x")
+        Tip(self.l_run_summary, "AI 판독·검증에 연결하는 차례입니다. 구독 계정(자동)은 이 PC에 로그인된 구독을 Claude → ChatGPT → Gemini 순으로 "
+                                "쓰고(API 요금 없음), 구독을 쓸 수 없으면(한도·로그인 풀림) 설정 「AI 판독기」 ② 의 API 키와 모델로 넘어갑니다"
+                                "(한 실행 「로컬 뒤 AI 검증」 횟수까지). 지금 실제로 쓰는 연결은 진행 카드 아래의 'AI 연결' 줄에 나옵니다.", self)
+        # 이어서 할 때: 이 책에 판독 기록이 있을 때만(중간에 멈춘 실행) — 설정 「인식」의 같은 칸
+        self._resume_row = tk.Frame(top, bg=C["PANEL"])
+        L(self._resume_row, "이어서 할 때", "CAP", "MUTED").pack(anchor="w", pady=(P(6), P(2)))
+        self.cb_resume = ttk.Combobox(self._resume_row, textvariable=self.v_local_resume, values=list(RESUME_LABELS.values()),
+                                      state="readonly", width=1)
+        self.cb_resume.pack(fill="x")
+        Tip(self.cb_resume, RESUME_TIP, self)
         self.b_run = self._btn(b, RUN_TEXT, self.do_run, style="Seal.TButton", tip=RUN_TIP)
         self.b_run.grid(row=2, column=0, sticky="ew", pady=(P(8), 0))
         self.b_run_pdf = self._btn(b, RUN_PDF_TEXT, self.do_run_pdf, style="SealOut.TButton", tip=RUN_PDF_TIP)
@@ -3813,6 +3842,14 @@ class App(tk.Tk):
         P = self.px
         running = bool(self.running); has = bool(self.pdf()); res = d.get("_run_result")
         self.l_run_summary.configure(text=App._ai_summary(self))
+        row = d.get("_resume_row")
+        if row is not None:
+            self.cb_resume.configure(state="disabled" if running else "readonly")      # 실행 중에는 잠근다(읽기 전용 칸)
+            records = App._n_records(self.pdf()) if has and App._local_first(self) else 0
+            if records and not row.winfo_manager():
+                row.pack(fill="x")
+            elif not records and row.winfo_manager():
+                row.pack_forget()
         parts = []
         if running and d.get("_stop_requested"):
             parts = [(self.v_status.get(), "plain")]
@@ -6177,6 +6214,10 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_easyocr")
         if bool(variable.get()) if variable is not None else bool(cfg.get("local_easyocr", False)):
             options.append("--local-easyocr")
+        variable = vars(self).get("v_local_resume")
+        resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
+        if resume in RESUME_LABELS and resume != "unfinished":
+            options += ["--local-resume", resume]
         variable = vars(self).get("v_local_ai_subscription")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))):
             options += ["--local-ai-auth", "api", "--local-ai-page", "off"]
@@ -7125,6 +7166,8 @@ class App(tk.Tk):
                 self.cfg["local_ai_plan"] = _label_key(AI_PLAN_LABELS, self.v_local_ai_plan.get()) or "auto"
             if vars(self).get("v_local_ai_api_fallback") is not None:
                 self.cfg["local_ai_api_fallback"] = bool(self.v_local_ai_api_fallback.get())
+            if vars(self).get("v_local_resume") is not None:
+                self.cfg["local_resume"] = _label_key(RESUME_LABELS, self.v_local_resume.get()) or "unfinished"
             cap = max_calls_value(self.v_local_ai_max_calls.get())
             if cap is not None and 1 <= cap <= 100:
                 self.cfg["local_ai_max_calls"] = cap

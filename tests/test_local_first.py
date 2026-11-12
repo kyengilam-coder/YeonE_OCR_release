@@ -53,8 +53,9 @@ class LocalFirstTests(unittest.TestCase):
 
     def recognize(self, project, number, **kwargs):
         self.local_calls.append(number)
-        # Reuse completed readings just as the actual engine wrapper does.
-        if not project.page(number)["runs"]:
+        # Reuse completed readings just as the actual engine wrapper does (reported as skipped).
+        added = not project.page(number)["runs"]
+        if added:
             raw = {"kind": "recognition", "schema_version": 1, "engine": "ppocrv6",
                 "coordinate_system": "rendered-image pixels, xyxy", "text": self.recognized_text,
                 "words": ([{"text": self.recognized_text, "bbox": [40, 20, 160, 70], "confidence": self.confidence,
@@ -67,7 +68,7 @@ class LocalFirstTests(unittest.TestCase):
                                              "engine_root": None, "policy": "local-three-engine-v1"})
             project.choose_baseline(number, "ppocrv6", automatic=True)
         kwargs["on_result"](None)
-        return {"cancelled": False, "completed": ["ppocrv6"], "skipped": [],
+        return {"cancelled": False, "completed": ["ppocrv6"] if added else [], "skipped": [] if added else ["ppocrv6"],
                 "selection": {"selected_engine": "ppocrv6"}}
 
     def client(self, *_args):
@@ -346,6 +347,72 @@ class LocalFirstTests(unittest.TestCase):
             local_first._resolve_ai_defaults(args, cli)
         self.assertEqual((args.local_ai_page, args.local_ai_accept, args.local_ai_batch), ("off", False, 1))
         self.assertIsNone(args.local_ai_auth)
+
+    def test_finished_page_is_passed_over_on_the_next_run_without_cropping_planning_or_writing(self):
+        from yeone_ocr import local_first
+        self.confidence = 20
+        self.assertEqual(command(self.args()), 0)                                       # reviewed through the API
+        self.assertEqual(len(self.calls), 1)
+        record = self.record()
+        self.assertEqual(record["local_first"]["review"]["status"], "reviewed")
+        logs = []
+        forbidden = AssertionError("끝난 쪽을 다시 계획함")
+        with patch("yeone_ocr.comparison_ai.prepare_plan", side_effect=forbidden), \
+                patch.object(local_first, "_save_record", side_effect=AssertionError("끝난 쪽 기록을 다시 씀")), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            self.assertEqual(command(self.args()), 0)
+        self.assertEqual(len(self.calls), 1)                                            # no new call
+        self.assertTrue(any("1쪽: 끝난 쪽 — 같은 조건이라 건너뜀 · AI 검증 끝" in line for line in logs))
+        self.assertEqual(self.record()["read_at"], record["read_at"])                   # the record is left as it was
+
+    def test_a_changed_page_text_or_setting_or_an_unfinished_review_is_processed_again(self):
+        from yeone_ocr import local_first
+        self.confidence = 20
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            self.assertEqual(command(self.args()), 4)                                   # review pending: no key
+        planned = []
+        real = local_first._save_record
+
+        def save(*args, **kwargs):
+            planned.append(1)
+            return real(*args, **kwargs)
+        with patch.object(local_first, "_save_record", side_effect=save):
+            self.assertEqual(command(self.args()), 0)                                   # pending → reviewed now
+        self.assertTrue(planned); self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
+        project = ComparisonProject.load(self.record()["local_first"]["project_path"])
+        project.set_text(1, "天地玄黃宇", reason="manual")                                 # a person corrected the page
+        project.save()
+        planned.clear()
+        with patch.object(local_first, "_save_record", side_effect=save):
+            command(self.args())
+        self.assertTrue(planned)                                                        # text changed: not passed over
+        planned.clear()
+        with patch.object(local_first, "_save_record", side_effect=save):
+            command(self.args("--no-local-columns"))
+        self.assertTrue(planned)                                                        # a setting changed: not passed over
+
+    def test_resume_choice_continue_leaves_earlier_pages_unchecked_and_all_checks_them_again(self):
+        from yeone_ocr import local_first
+        self.confidence = 20
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            self.assertEqual(command(self.args()), 4)                                   # review pending (no key)
+        engines = len(self.local_calls)
+        logs = []
+        with patch("yeone_ocr.comparison_ai.prepare_plan", side_effect=AssertionError("앞선 쪽을 점검함")), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            self.assertEqual(command(self.args("--local-resume", "continue")), 4)       # still incomplete: left as it was
+        self.assertEqual(len(self.local_calls), engines)                                # not even the engine step
+        self.assertEqual(self.calls, [])
+        self.assertTrue(any("1쪽: 앞선 기록 그대로 — 바로 이어가기(점검 안 함) · AI 검증 보류" in line for line in logs))
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
+        self.assertEqual(command(self.args()), 0)                                       # unfinished (default): sent now
+        self.assertEqual(len(self.calls), 1)
+        planned = []
+        real = local_first._save_record
+        with patch.object(local_first, "_save_record", side_effect=lambda *a, **k: planned.append(1) or real(*a, **k)):
+            self.assertEqual(command(self.args("--local-resume", "all")), 0)            # finished, but checked again
+        self.assertTrue(planned)
+        self.assertEqual(len(self.calls), 1)                                            # finished review not bought again
 
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20

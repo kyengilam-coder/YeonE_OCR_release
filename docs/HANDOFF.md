@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: 1.2.6 빠른 이어하기 · 「이어서 할 때」
+
+`local_first._record`가 `local_first.resume_key`(`_resume_key`: 판독 조건·기준 run id·`project.text` 지문·AI 설정)를 남긴다. 쪽 반복에서 엔진이 하나도 다시 돌지 않았고(`outcome["completed"]` 비어 있음) 열쇠가 같고 검증 상태가 `RESUME_DONE`이면(AI 쪽 판독이 켜져 있으면 그 요약도 있어야) 계획·쪽 판독·기록 쓰기 없이 넘어간다. `--local-resume continue`는 local-first 기록이 있는 쪽을 엔진 단계 전에 그대로 넘기고, `all`은 빠른 길을 끈다. `_save_record`는 이전 local-first 실행의 쪽 그림이 있으면(입력 보정 없음) 다시 그리지 않는다. 창: `RESUME_LABELS`, 실행 카드 `cb_resume`(기록 있는 책에서만, 실행 중 잠김), 설정 「인식」의 `resume` 줄.
+
 ## 2026-11-12: 1.2.5 설정 탭을 기능별로 재배치 · 판 번호 · [업데이트 확인]
 
 설정 갈래(`App.SET_RAIL`)를 작업 차례대로 바꿨다: 인식(인식 방식·로컬 문서 종류·두 단·줄 다시 확인·EasyOCR·기록 있는 쪽 다시 판독) · AI 판독기(① 구독 계정·로그인 상태 → ② 판독기·모델·API 키 → ③ 로컬 뒤 AI 검증·API 키로 넘어가기, 세부 설정(접힘), 판독 뒤 모델 단계 — 이전 '모델 단계' 섹션) · 이 책 · 문서 만들기(만들 파일 · 표시 · 쪽·문단 묶음) · 자동 교정 · 책갈피 교정. 행 열쇠(`_set_rows`)와 변수·설정 열쇠는 그대로이고 만드는 차례와 섹션만 바뀌었다. 묶음 머리는 `_build_settings_tab`의 `subhead`. 두 열은 왼쪽 인식·AI 판독기·이 책 | 오른쪽 문서 만들기·자동 교정·책갈피 교정. 새 설정 `local_ai_api_fallback`(끄면 `--no-local-ai-api-fallback`). 로그인 상태(`App.refresh_plans`)는 설정 탭을 처음 열 때와 [상태 확인]으로 뒤에서 확인한다. 실행 카드·설정 요약의 AI 표시는 `App._ai_summary`(구독 → API 차례). 명령 띠의 이름 옆에 판 번호 알약(`l_version`, 누르면 업데이트 확인), 설정 바닥 줄에 [업데이트 확인](`b_update`).

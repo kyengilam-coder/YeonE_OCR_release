@@ -184,6 +184,36 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
     return out
 
 
+# Review states a page can be left in when nothing more is to be done for it under the same conditions.
+RESUME_DONE = {"no-api-needed", "reviewed", "needs-local-review", "blank-page"}
+
+
+def _resume_key(args, run_id, text, options):
+    """What a finished page depends on besides the engine readings (those are compared engine by engine
+    in run_automatic_page): reading conditions, the baseline reading, the page text (human and accepted
+    AI corrections) and the AI settings. Same key and a finished review: the page needs no work."""
+    fields = {"policy": POLICY, "mode": args.mode, "profile": getattr(args, "local_profile", None),
+              "dpi": getattr(args, "dpi", None), "run": run_id, "text": _digest(text),
+              "review": bool(getattr(args, "local_ai_review", True)), "ai_page": getattr(args, "local_ai_page", "off") or "off",
+              "accept": bool(getattr(args, "local_ai_accept", False)), "tile": getattr(args, "local_ai_detail_tile", 0) or 0,
+              "batch": getattr(args, "local_ai_batch", 1) or 1, "columns": bool(getattr(args, "local_columns", True)),
+              "forms": bool(getattr(args, "local_korean_forms", True)), "offset": getattr(args, "print_offset", None),
+              "enhance": getattr(args, "local_enhance", "none"), "options": options or None}
+    return _digest(fields)
+
+
+def _resume_done(old, args, key, review_enabled):
+    """The record of an earlier run says this page is finished under the same conditions (same key)."""
+    first = (old or {}).get("local_first") or {}
+    status = (first.get("review") or {}).get("status")
+    if first.get("resume_key") != key:
+        return False
+    if status not in RESUME_DONE and not (status == "local-complete" and not review_enabled):
+        return False                                    # pending, failed, cancelled, or stopped before the review
+    mode = getattr(args, "local_ai_page", "off") or "off"
+    return mode == "off" or "ai_page" in first          # the AI page reading finished too
+
+
 def _record(project, number, args, work, started, review, extras=None):
     from .local_reading import reading_from_run
     extras = extras or {}
@@ -249,7 +279,8 @@ def _record(project, number, args, work, started, review, extras=None):
                             "baseline_run_id": run["id"], "profile": args.local_profile,
                             "review": copy.deepcopy(review), "ai_proposals": proposals,
                             **({"ai_page": ai_page_summary} if ai_page_summary else {}),
-                            **({"options": copy.deepcopy(extras["options"])} if extras.get("options") else {})}}
+                            **({"options": copy.deepcopy(extras["options"])} if extras.get("options") else {}),
+                            "resume_key": _resume_key(args, run["id"], project.text(number), extras.get("options"))}}
 
 
 def _blank_record(project, number, args, work, started):
@@ -277,7 +308,9 @@ def _save_record(project, number, args, work, started, review, *, render=True, e
     from ab_ocr.ocr import render_page
     from . import cli
     # The preview must use the same pixels and frame as local recognition.
-    if render:
+    if render and (not work.page_image_path(number).is_file() or getattr(args, "local_enhance", "none") not in (None, "none")
+                   or not (work.load_record(number) or {}).get("local_first")):
+        # The page image of an earlier local-first run is the same pixels (same source, same DPI): keep it.
         with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
             cli._save_png_atomic(image, work.page_image_path(number))
         write_atomic(work.pages_dir / f"p{number:03d}.src.txt", "로컬 OCR 전체 쪽 렌더링")
@@ -559,6 +592,10 @@ def _command(args, *, work=None, doc=None, pool=None):
                 return None
 
         page_reader = _ai_page_reader(args, project, work, cli, session, api)
+        resume = getattr(args, "local_resume", "unfinished") or "unfinished"
+        if resume != "unfinished":
+            cli.log("  이어서 할 때: " + {"continue": "앞선 쪽은 점검하지 않고 바로 이어갑니다",
+                                         "all": "앞선 쪽을 모두 다시 점검한 뒤 이어갑니다"}.get(resume, resume))
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -571,6 +608,19 @@ def _command(args, *, work=None, doc=None, pool=None):
                 cli.page_event(number, "record")
                 cli.progress("read", index, len(pages))
                 completed.append(number)
+                continue
+            if (resume == "continue" and old and old.get("pipeline") == POLICY and old.get("local_first")
+                    and not getattr(args, "force", False)):
+                # 바로 이어가기: an earlier page is left as recorded, unchecked (its pending review too).
+                done = old["local_first"].get("review") or {}
+                summaries[str(number)] = done
+                if review_enabled and done.get("status") not in RESUME_DONE:
+                    incomplete.append(number)
+                completed.append(number)
+                cli.page_event(number, "record")
+                cli.log(f"  {number}쪽: 앞선 기록 그대로 — 바로 이어가기(점검 안 함) · "
+                        f"{REVIEW_STATUS_LABELS.get(done.get('status'), done.get('status') or '')}")
+                cli.progress("read", index, len(pages))
                 continue
             cli.page_event(number, "now")
             review = {"status": "local-complete", "targets": 0, "calls": 0}
@@ -626,6 +676,20 @@ def _command(args, *, work=None, doc=None, pool=None):
                 if (selected is None or selected["engine"] not in successful
                         or _run_profile(selected) != expected or selected.get("request", {}).get("dpi") != args.dpi):
                     raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
+                # A page finished under the same conditions (no engine ran again, same key, review done):
+                # nothing to crop, plan, read or write again.
+                if (resume == "unfinished" and old and not getattr(args, "force", False) and not outcome.get("completed")
+                        and _resume_done(old, args, _resume_key(args, selected["id"], project.text(number), options),
+                                         review_enabled)):
+                    done = old["local_first"]["review"]
+                    summaries[str(number)] = done
+                    if review_enabled and (done.get("status") == "needs-local-review" or done.get("unlocalized_targets")):
+                        incomplete.append(number)
+                    completed.append(number)
+                    cli.page_event(number, "record")
+                    cli.log(f"  {number}쪽: 끝난 쪽 — 같은 조건이라 건너뜀 · {REVIEW_STATUS_LABELS.get(done.get('status'), done.get('status'))}")
+                    cli.progress("read", index, len(pages))
+                    continue
                 # Checkpoint local output BEFORE preparing or sending any API call.
                 _save_record(project, number, args, work, started, review, extras=extras)
                 if page_reader is not None:

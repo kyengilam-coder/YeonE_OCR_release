@@ -2797,6 +2797,10 @@ def build_parser():
                         "gemini=Gemini CLI(gemini -p, Google 로그인). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
                         "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
                         "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
+    p.add_argument("--local-resume", choices=("unfinished", "continue", "all"), default="unfinished",
+                   help="판독 기록이 있는 쪽(중간에 멈춘 실행을 이어서 할 때): unfinished(기본)=끝나고 조건이 같은 쪽은 건너뛰고 "
+                        "보류·실패한 검증이나 바뀐 쪽만 다시, continue=앞선 쪽은 점검하지 않고 그대로 둔 채 기록 없는 쪽부터(가장 빠름), "
+                        "all=앞선 쪽을 모두 다시 점검한 뒤 이어서(조건 확인·검증 계획·남은 검증, 끝난 검증은 다시 사지 않음)")
     p.add_argument("--local-ai-api-fallback", action=argparse.BooleanOptionalAction, default=True,
                    help="구독 계정의 사용량 한도에 닿거나 로그인이 풀리면 로그인된 다른 구독 계정으로 이어 가고, 쓸 수 있는 구독 계정이 "
                         "없으면 API 키로 넘어감(기본 켬, 이번 실행 API 호출은 --local-ai-max-calls 까지). "
