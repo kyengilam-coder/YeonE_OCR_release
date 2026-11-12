@@ -1,1 +1,1 @@
-Source version 1.1.0; exact release commit is recorded in the release source archive.
+Source version 1.2.1; exact release commit is recorded in the release source archive.
