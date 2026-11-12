@@ -264,6 +264,103 @@ class ComparisonTests(unittest.TestCase):
             unrelated.save(target)
         self.assertEqual(ComparisonProject.load(target).text(1), "乙")
 
+    def test_checkpoint_save_is_compact_and_skips_reparsing_its_own_file(self):
+        """A checkpoint encodes pages in place without indentation and proves an
+        unchanged file by its bytes; the stored values are the same as before."""
+        self.add("神 神\ufe00，\n漢字")
+        self.project.set_text(1, "校正文")
+        expected = self.project.to_dict()
+        target = self.save()
+        data = target.read_bytes()
+        self.assertTrue(data.endswith(b"\n")); self.assertEqual(data.count(b"\n"), 1)      # one line, not pretty-printed
+        self.assertEqual(json.loads(data), json.loads(json.dumps(expected)))
+        self.assertLess(len(data), len(json.dumps(expected, ensure_ascii=False, indent=2).encode("utf-8")))
+        page = expected["pages"]["1"]
+        page["runs"][0]["raw"]["text"] = "mutated"                                       # to_dict is still an independent copy
+        self.assertEqual(self.project.text(1), "校正文")
+        with patch("yeone_ocr.comparison._read", side_effect=AssertionError("unchanged file must not be parsed")):
+            self.project.set_text(1, "再校")
+            self.project.save()
+            self.project.save()
+        reopened = ComparisonProject.load(target)
+        self.assertEqual(reopened.text(1), "再校")
+        self.assertEqual(reopened.to_dict(), self.project.to_dict())
+        self.assertFalse(reopened.dirty)
+
+    def test_pretty_printed_project_from_an_earlier_release_opens_and_saves(self):
+        self.add("甲乙")
+        target = self.save()
+        legacy = json.dumps(json.loads(target.read_bytes()), ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        target.write_bytes(legacy)
+        project = ComparisonProject.load(target)
+        self.assertEqual(project.text(1), "甲乙")
+        project.set_text(1, "甲丙")
+        project.save()
+        self.assertEqual(ComparisonProject.load(target).text(1), "甲丙")
+        self.assertLess(len(target.read_bytes()), len(legacy))
+
+    def test_changed_or_foreign_file_is_still_parsed_and_rejected(self):
+        self.add("甲")
+        target = self.save()
+        saved = target.read_bytes()
+        target.write_bytes(saved.replace(b"\n", b" \n"))                                # same JSON, different bytes: another writer
+        self.project.set_text(1, "乙")
+        with self.assertRaisesRegex(ComparisonError, "다른 창에서"):
+            self.project.save()
+        target.write_bytes(b"{broken")
+        with self.assertRaisesRegex(ComparisonError, "읽을 수 없습니다"):
+            self.project.save()
+        target.write_bytes(saved)
+        self.project.save()                                                             # the file it wrote is accepted again
+        unrelated = ComparisonProject.open(self.source)
+        unrelated.add_result(self.raw("丙"))
+        with self.assertRaisesRegex(ComparisonError, "다른 프로젝트"):
+            unrelated.save(target)
+        self.assertEqual(ComparisonProject.load(target).text(1), "乙")
+
+    def test_recovery_checkpoint_reuses_only_its_own_unchanged_file(self):
+        self.add("甲")
+        self.save()
+        recovery = self.root / "recovery.json"
+        self.project.save_recovery(recovery)
+        self.assertIn("recovery", json.loads(recovery.read_bytes()))
+        with patch("yeone_ocr.comparison._read", side_effect=AssertionError("unchanged recovery must not be parsed")):
+            self.project.set_text(1, "乙")
+            self.project.save_recovery(recovery)
+        self.assertEqual(ComparisonProject.load(recovery).text(1), "乙")
+        unrelated = ComparisonProject.open(self.source)
+        unrelated.add_result(self.raw("丙"))
+        foreign = self.root / "foreign.json"
+        unrelated.save(foreign)
+        recovery.write_bytes(foreign.read_bytes())                                       # replaced behind our back
+        with self.assertRaisesRegex(ComparisonError, "다른 프로젝트"):
+            self.project.save_recovery(recovery)
+
+    def test_save_while_another_thread_edits_writes_valid_project(self):
+        import threading
+        self.add("甲" * 200)
+        target = self.save()
+        stop, errors = threading.Event(), []
+        def edit():
+            count = 0
+            while not stop.is_set():
+                count += 1
+                try:
+                    self.project.set_text(1, "乙" * (count % 50 + 1))
+                except Exception as exc:                                                 # pragma: no cover - reported below
+                    errors.append(exc); return
+        worker = threading.Thread(target=edit)
+        worker.start()
+        try:
+            for _ in range(25):
+                self.project.save()
+                json.loads(target.read_bytes())
+        finally:
+            stop.set(); worker.join()
+        self.assertEqual(errors, [])
+        self.project.save()
+        self.assertEqual(ComparisonProject.load(target).text(1), self.project.text(1))
+
     def test_atomic_failure_keeps_previous_project_and_removes_temp(self):
         self.add("甲")
         target = self.save()

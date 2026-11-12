@@ -250,6 +250,22 @@ def _read(path):
     return value, hashlib.sha256(data).hexdigest()
 
 
+def _file_sha256(path):
+    """SHA-256 of an existing project file without parsing it, or None when it
+    cannot be the file this process last read or wrote (unreadable, too big)."""
+    digest, size = hashlib.sha256(), 0
+    try:
+        with path.open("rb") as stream:
+            while chunk := stream.read(1_048_576):
+                size += len(chunk)
+                if size > MAX_BYTES:
+                    return None
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def _atomic_write(target, content, *, protected=(), before_replace=None):
     protected = tuple(protected)
     for original in protected:
@@ -476,6 +492,9 @@ class ComparisonProject:
         self._lock = threading.RLock()
         self._revision = self._saved_revision = 0
         self._disk_sha256 = None
+        # Recovery files this object wrote: path -> content digest. A file whose
+        # bytes still match needs no re-parse to prove it is this project's.
+        self._recovery_sha256 = {}
         # Loading or explicitly choosing a baseline must not replace it merely
         # because a new release recommends a different recognition model.
         self._preserve_baselines = set()
@@ -1561,8 +1580,27 @@ class ComparisonProject:
                                "page_count": self.page_count, "kind": self.kind},
                     "pages": {str(n): copy.deepcopy(page) for n, page in sorted(self._pages.items())}}
 
+    def _encoded(self, extra=None):
+        """Serialized project bytes. Call with the lock held: pages are encoded
+        in place, with no whole-project copy and no indentation. A checkpoint
+        after every engine result otherwise copies, pretty-prints and re-parses
+        every earlier page, which grows with the square of the page count."""
+        snapshot = {"format": FORMAT, "version": VERSION, "document_id": self._id,
+                    "source": {"path": str(self.source_path), "sha256": self.source_sha256,
+                               "page_count": self.page_count, "kind": self.kind},
+                    "pages": {str(n): page for n, page in sorted(self._pages.items())}}
+        if extra:
+            snapshot.update(extra)
+        return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+
     def _check_existing(self, target, *, check_current=True):
         if not target.exists():
+            return
+        # Unchanged bytes of a file this object loaded or wrote already carry
+        # this document id; only a different file has to be parsed.
+        known = self._disk_sha256 if check_current and self.project_path == target else (
+            None if check_current else self._recovery_sha256.get(target))
+        if known is not None and _file_sha256(target) == known:
             return
         previous, digest = _read(target)
         if previous.get("document_id") != self._id:
@@ -1580,7 +1618,7 @@ class ComparisonProject:
                 raise ComparisonError("원본 파일을 덮어쓸 수 없습니다.")
             self.validate_source()
             self._check_existing(target)
-            content = json.dumps(self.to_dict(), ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8") + b"\n"
+            content = self._encoded()
             if len(content) > MAX_BYTES:
                 raise ComparisonError("프로젝트가 허용 크기를 넘습니다.")
             def verify():
@@ -1598,13 +1636,13 @@ class ComparisonProject:
             if self.project_path and _same_file(target, self.project_path):
                 raise ComparisonError("복구 파일은 정식 프로젝트와 다른 이름으로 저장하세요.")
             self._check_existing(target, check_current=False)
-            snapshot = self.to_dict()
-            snapshot["recovery"] = {"source_validation": "required_before_ocr_or_export", "at": _now()}
-            content = json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8") + b"\n"
+            content = self._encoded({"recovery": {"source_validation": "required_before_ocr_or_export", "at": _now()}})
             if len(content) > MAX_BYTES:
                 raise ComparisonError("복구 프로젝트가 허용 크기를 넘습니다.")
-            return _atomic_write(target, content, protected=[self.source_path, self.project_path],
-                                 before_replace=lambda: self._check_existing(target, check_current=False))
+            written = _atomic_write(target, content, protected=[self.source_path, self.project_path],
+                                    before_replace=lambda: self._check_existing(target, check_current=False))
+            self._recovery_sha256 = {target: hashlib.sha256(content).hexdigest()}
+            return written
 
     def export_text(self, path, page_numbers=None):
         target = Path(path).expanduser().resolve()
