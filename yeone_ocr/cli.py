@@ -20,6 +20,7 @@
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
   compare-engines 선택한 로컬 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
+  plans    구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
@@ -2724,6 +2725,8 @@ def build_parser():
                        help="문서와 함께 검색 가능한 PDF(out/<이름>_글자층.pdf — 원본 쪽 위에 판독 글을 보이지 않는 글자층으로)도 만듦")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
+    p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태(모델 호출 없음)")
+    p.set_defaults(fn=cmd_plans)
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
     p = sub.add_parser("read"); common(p); read_opts(p); p.set_defaults(fn=cmd_read)
     p = sub.add_parser("estimate", help="판독 전 호출·토큰·비용 어림"); common(p); read_opts(p)
@@ -2786,25 +2789,35 @@ def build_parser():
     p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",
                    help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
     p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
-                   help="Claude 검증 연결 방식. subscription=PC에 로그인된 Claude Code(claude -p)로 구독 사용량에서 차감(API 요금 없음, 개인 사용), "
-                        "api=API 키만, auto(기본)=Claude에 API 키가 없으면 로그인된 Claude Code. 환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
+                   help="AI 검증 연결 방식. subscription=PC에 로그인된 구독 계정 프로그램(Claude Code·Codex CLI·Gemini CLI)으로 "
+                        "구독 사용량에서 차감(API 요금 없음, 개인 사용), api=API 키만, auto(기본)=API 키가 없으면 로그인된 구독 계정. "
+                        "환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
+    p.add_argument("--local-ai-plan", choices=("auto", "claude", "chatgpt", "gemini"), default=None,
+                   help="구독 계정: claude=Claude Code(claude -p), chatgpt=OpenAI Codex CLI(codex exec, ChatGPT 로그인), "
+                        "gemini=Gemini CLI(gemini -p, Google 로그인). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
+                        "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
+                        "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
+    p.add_argument("--local-ai-api-fallback", action=argparse.BooleanOptionalAction, default=True,
+                   help="구독 계정의 사용량 한도에 닿거나 로그인이 풀리면 로그인된 다른 구독 계정으로 이어 가고, 쓸 수 있는 구독 계정이 "
+                        "없으면 API 키로 넘어감(기본 켬, 이번 실행 API 호출은 --local-ai-max-calls 까지). "
+                        "API 요금을 쓰지 않으려면 --no-local-ai-api-fallback")
     p.add_argument("--local-ai-page", choices=("auto", "off", "witness", "prefer"), default="auto",
-                   help="Claude 구독(로그인된 Claude Code)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
-                        "auto(기본)=Claude 구독에 로그인되어 있으면 prefer, 아니면 off. "
+                   help="구독 계정(--local-ai-plan)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
+                        "auto(기본)=구독 계정에 로그인되어 있으면 prefer, 아니면 off. "
                         "prefer=짧게 다른 곳은 AI 글자를 문서에 넣음(초록), witness=엔진 글자를 두고 다른 곳만 파랑. 긴 차이는 빨강. "
                         "비교·교정 창의 엔진 판독은 그대로")
     p.add_argument("--local-korean-forms", action=argparse.BooleanOptionalAction, default=True,
                    help="한글·한자 혼용 문서(--local-profile mixed)의 한자를 한국 표준 모양(KS X 1001)으로 맞춤(기본 켬): "
                         "説→說, 真→眞, 絕→絶, 緒→緖 등 KS X 1001에 없는 모양만. 비교·교정 창의 엔진 판독은 그대로. 끄려면 --no-local-korean-forms")
     p.add_argument("--local-ai-detail-tile", type=int, default=None, metavar="화소",
-                   help="AI 검증 이미지가 이 크기(512~2048 화소)보다 크면 원래 해상도 조각도 함께 보냄(0=끔, 기본: Claude 구독이면 1024, 아니면 끔). "
+                   help="AI 검증 이미지가 이 크기(512~2048 화소)보다 크면 원래 해상도 조각도 함께 보냄(0=끔, 기본: 구독 계정이면 1024, 아니면 끔). "
                         "AI는 큰 이미지를 줄여서 보기 때문에 쪽 크기의 글 덩어리에서 작은 한글이 흐려짐. 예: 1024")
     p.add_argument("--local-ai-accept", action=argparse.BooleanOptionalAction, default=None,
-                   help="AI 검증이 확신하고 안전 검사를 통과한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 기본: Claude 구독이면 켬, 아니면 끔")
+                   help="AI 검증이 확신하고 안전 검사를 통과한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 기본: 구독 계정이면 켬, 아니면 끔")
     p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=None,
-                   help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본: Claude 구독이면 4, 아니면 1)")
+                   help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본: 구독 계정이면 4, 아니면 1)")
     p.add_argument("--local-ai-subscription-calls", type=int, default=1000, metavar="N",
-                   help="Claude 구독으로 검증할 때 이번 실행의 호출 상한(기본 1000). 구독은 호출마다 요금이 없어 API 호출 상한 대신 이 값을 씀")
+                   help="구독 계정으로 검증할 때 이번 실행의 호출 상한(기본 1000). 구독은 호출마다 요금이 없어 API 호출 상한 대신 이 값을 씀")
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
                    help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
                         "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
@@ -2855,11 +2868,27 @@ def build_parser():
     return ap
 
 
+def cmd_plans(args):
+    """Which signed-in plans this PC can use; runs only the CLIs' status commands."""
+    from . import subscriptions
+    chosen, reason = subscriptions.pick(None)
+    for plan in subscriptions.PLANS:
+        state = subscriptions.status(plan, refresh=True)
+        mark = "사용 가능" if state["usable"] else ("설치됨" if state.get("installed") else "없음")
+        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.PROGRAMS[plan]}): {mark}"
+        if state.get("plan") and state["usable"]:
+            line += f" · {state['plan']}"
+        log(line + ("" if state["usable"] else f" — {state.get('reason') or ''}"))
+    log(f"자동 선택(YEONE_OCR_AI_PLAN={subscriptions.plan_choice()}): "
+        + (subscriptions.NAMES[chosen] if chosen else "없음 — API 키로만 검증"))
+    return 0 if chosen else 1
+
+
 def main(argv=None):
     global LOCAL_API_CALLS
     LOCAL_API_CALLS = 0
     args = build_parser().parse_args(argv)
-    if args.cmd == "compare-engines":
+    if args.cmd in ("compare-engines", "plans"):
         return args.fn(args)
     from .reader_gemini import set_call_cap, set_cancel_event
     set_call_cap(getattr(args, "max_calls", 0) or 0)        # 호출 상한은 명령마다 새로 센다(창 프로그램은 한 프로세스에서 명령을 여럿 돌린다)

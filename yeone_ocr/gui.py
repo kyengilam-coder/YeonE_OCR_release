@@ -32,9 +32,18 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
-            "local_ai_subscription": True,
+            "local_ai_subscription": True, "local_ai_plan": "auto",
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
+AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
+                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Gemini CLI)"}
+
+
+def _label_key(labels: dict, shown: str):
+    """The key of a shown label (or of a key typed as-is), else None."""
+    return next((key for key, label in labels.items() if shown in (key, label)), None)
+
+
 LOCAL_PROFILE_LABELS = {"traditional": "번체·한문", "simplified": "간체·중문", "mixed": "한글·한자 혼용"}
 CHECK_LIST_LABELS = {"none": "없음(본문만)", "extra": "본문에 표시 못 한 것만", "all": "전부(검수 화면과 같음)"}
 LAYOUT_LABELS = {"page": "원본 쪽대로(검수용)", "flow": "내용별(제목·문단)"}   # 문서 짜임 --layout
@@ -2259,6 +2268,7 @@ class App(tk.Tk):
         self.v_local_line_verification = tk.BooleanVar(value=bool(self.cfg.get("local_line_verification", False)))
         self.v_local_easyocr = tk.BooleanVar(value=bool(self.cfg.get("local_easyocr", False)))
         self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
+        self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2385,12 +2395,22 @@ class App(tk.Tk):
         R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
 
         def local_ai_subscription(parent):
-            cb = ttk.Checkbutton(parent, text="Claude 구독으로 쪽 판독·검증 (로그인되어 있으면)", variable=self.v_local_ai_subscription)
-            Tip(cb, "이 PC의 Claude Code에 Claude(Pro/Max) 계정으로 로그인되어 있으면, 엔진 판독 뒤에 Claude가 쪽 전체를 원래 해상도 띠로 "
-                    "잘라 한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
-                    "세로쓰기 6쪽 측정에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초. 로그인은 PowerShell에서 claude auth login.", self)
-            return cb
-        R["local_ai_subscription"] = row(b, "Claude 구독 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
+            f = boxed(parent)
+            cb = ttk.Checkbutton(f, text="구독 계정으로 쪽 판독·검증", variable=self.v_local_ai_subscription)
+            cb.pack(side="left")
+            Tip(cb, "이 PC에서 공식 프로그램에 자기 계정으로 로그인되어 있으면, 엔진 판독 뒤에 AI가 쪽 전체를 원래 해상도 띠로 잘라 "
+                    "한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
+                    "Claude: Claude Code(claude auth login) · ChatGPT: Codex CLI(codex login → Sign in with ChatGPT) · "
+                    "Gemini: Gemini CLI(gemini 실행 → Login with Google). 이 프로그램은 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
+                    "세로쓰기 6쪽 측정(Claude)에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초.", self)
+            plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
+                                width=chars(300))
+            plan.pack(side="left", padx=(P(8), 0))
+            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
+                      "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 API 키로 넘어갑니다"
+                      "(API 호출은 「로컬 뒤 AI 검증」의 횟수까지). 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
+            return f
+        R["local_ai_subscription"] = row(b, "구독 계정 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
 
         def local_columns(parent):
             cb = ttk.Checkbutton(parent, text="두 단 본문은 왼쪽 단 먼저", variable=self.v_local_columns)
@@ -6026,6 +6046,11 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_ai_subscription")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))):
             options += ["--local-ai-auth", "api", "--local-ai-page", "off"]
+        else:
+            variable = vars(self).get("v_local_ai_plan")
+            plan = (_label_key(AI_PLAN_LABELS, variable.get()) if variable is not None else cfg.get("local_ai_plan")) or "auto"
+            if plan in AI_PLAN_LABELS and plan != "auto":
+                options += ["--local-ai-plan", plan]
         root = cfg.get("local_engine_root")
         if root:
             options += ["--local-engine-root", str(root)]
@@ -6946,6 +6971,8 @@ class App(tk.Tk):
                 self.cfg["local_easyocr"] = bool(self.v_local_easyocr.get())
             if vars(self).get("v_local_ai_subscription") is not None:
                 self.cfg["local_ai_subscription"] = bool(self.v_local_ai_subscription.get())
+            if vars(self).get("v_local_ai_plan") is not None:
+                self.cfg["local_ai_plan"] = _label_key(AI_PLAN_LABELS, self.v_local_ai_plan.get()) or "auto"
             cap = max_calls_value(self.v_local_ai_max_calls.get())
             if cap is not None and 1 <= cap <= 100:
                 self.cfg["local_ai_max_calls"] = cap

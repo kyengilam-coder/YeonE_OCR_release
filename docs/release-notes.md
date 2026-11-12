@@ -1,3 +1,27 @@
+# 연어OCR 1.2.2 · ChatGPT·Gemini 구독 계정 · 한도에 닿으면 다른 구독 → API 키
+
+1.2.1을 갱신하는 판이다. 로컬 우선 인식의 AI 쪽 판독·의심 구간 검증을 Claude뿐 아니라 ChatGPT·Gemini 구독 계정으로도 할 수 있게 하고, 쓰던 구독의 사용량이 다 차면 다른 구독으로, 남은 구독이 없으면 API 키로 이어 가게 했다. 안내는 [구독 계정 안내](SUBSCRIPTION_PLANS.md).
+
+**구독 계정 셋**
+
+- **ChatGPT(Plus/Pro 등)**: 공식 OpenAI Codex CLI(`codex exec`)를 실행한다. `npm install -g @openai/codex` 뒤 `codex login`에서 'Sign in with ChatGPT'.
+- **Gemini(Google 계정)**: 공식 Gemini CLI(`gemini -p`)를 실행한다. `npm install -g @google/gemini-cli` 뒤 `gemini`를 한 번 실행해 'Login with Google'.
+- **Claude**: 1.2.0과 같다(Claude Code `claude -p`).
+- **고르기**: 설정 「구독 계정 판독」(이전 「Claude 구독 판독」)의 계정 선택 — 자동 / Claude / ChatGPT / Gemini. 명령줄 `--local-ai-plan`, 환경 변수 `YEONE_OCR_AI_PLAN`. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순이고, 계정을 고르면 그것부터 쓴다. `yeone-ocr plans`로 세 프로그램의 설치·로그인 상태를 본다(모델 호출 없음).
+- 원칙은 Claude와 같다: 공식 프로그램만 실행하고 로그인 토큰 파일은 읽지 않는다(Gemini는 로그인 방식 확인에 `settings.json`만 읽음). 자식 프로그램에는 API 키 환경 변수를 넘기지 않고, 요청마다 빈 임시 폴더에서 도구·MCP·확장·사용자 설정을 끄고 실행한다. 개인 사용 전용.
+- ChatGPT·Gemini는 각 프로그램이 요금제에 맞춰 고르는 기본 모델을 쓴다(`YEONE_OCR_CHATGPT_MODEL`, `YEONE_OCR_GEMINI_MODEL`로 바꿈). Gemini CLI에는 응답 스키마 옵션이 없어 지시문에 스키마를 넣고 받은 답을 JSON으로 검사한다.
+- 기본 설정(쪽 판독 prefer, 4구간씩 1024화소 조각, 확신한 제안 반영)은 Claude로 잰 것이다. ChatGPT·Gemini에서의 정확도는 아직 재지 않았다.
+
+**한도에 닿으면 다른 구독 → API 키**
+
+- 실행 중에 구독의 사용량 한도에 닿거나 로그인이 풀리거나 프로그램을 실행할 수 없으면, 같은 요청을 로그인된 다음 구독으로 다시 보낸다. 이번 실행에서 실패한 구독은 건너뛴다. 쪽 판독과 검증이 한 연결을 같이 써서 함께 넘어간다.
+- 쓸 수 있는 구독이 하나도 남지 않으면 **바로 API 키로** 넘어간다 — 설정에서 고른 제공사·모델·키로, 이번 실행 API 호출은 「로컬 뒤 AI 검증」의 횟수(`--local-ai-max-calls`, 기본 20)까지(쪽 판독과 검증 합산). 처음부터 로그인된 구독이 없을 때도 키가 있으면 키로 검증한다.
+- API 키도 없거나 상한에 닿으면 AI 작업을 멈추고 결과와 검증 대상을 저장한다. 넘어갈 때마다 진행 기록에 적는다. API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`(예전의 구독 전용 동작).
+
+**검증**: Linux 가상 화면(Xvfb, Tk 8.6, Python 3.12)에서 `tests/` 전체 — 2,161개 통과 · 225개 건너뜀 · 실패 0개. 새 시험은 가짜 CLI로 명령 인자 · API 키 제외 · 토큰 파일 미열람 · 오류 안내 · 계정 순서 · 다른 구독으로 넘어가기 · API 키로 넘어가기 · 키 없을 때 멈춤을 본다. 실제 codex-cli 0.167.2 · gemini-cli 0.68.0으로 인자 해석과 로그인 단계 도달까지 확인했으나, 이 환경의 네트워크 제한으로 로그인된 계정의 실제 호출은 하지 못했다. Windows 설치판은 배포 CI의 회귀·설치 검사가 첫 확인이다.
+
+---
+
 # 연어OCR 1.2.1 · 간단한 화면 · 메모 없는 문서 · 정리된 결과 폴더
 
 1.2.0을 갱신하는 판이다. 1.2.0의 기능(세로쓰기 GPU 판독, Claude 구독 판독, 한국 표준 한자 모양, 단순 표시, 속도 개선)은 그대로 두고, 화면을 단순하게 고치고, 일반·이미지 OCR 문서에 메모를 넣지 않는 것을 기본으로 하고, 결과 폴더 맨 위를 정리했으며, 비교 프로젝트 저장을 빠르게 했다.

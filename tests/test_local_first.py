@@ -177,26 +177,117 @@ class LocalFirstTests(unittest.TestCase):
                 return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
                                              for t in data["targets"]]}), True, "end_turn", {"input_tokens": 3}, model_name
 
-        def factory(settings, key):
-            seen.append((settings.provider, settings.model, key))
-            return FakeCLI()
-        with patch("yeone_ocr.comparison_ai.create_client", side_effect=factory), \
+        with patch.object(subscription, "SubscriptionClient", side_effect=lambda: seen.append(1) or FakeCLI()), \
                 patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
             self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept",
                                                "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
-        self.assertEqual(seen[0], ("anthropic", "opus", subscription.SUBSCRIPTION_KEY))
+        self.assertEqual(seen, [1])                                                    # one CLI client for the run
         self.assertEqual(self.calls, ["opus"])
         rec = self.record()
         self.assertEqual(rec["local_first"]["review"]["ai_accept"], {"accepted": 0, "held": 0})
         self.assertEqual(rec["local_first"]["options"], {"ai_accept": True})
 
-    def test_subscription_mode_without_sign_in_keeps_the_review_pending(self):
+    def test_chatgpt_plan_reviews_through_the_codex_cli_with_its_default_model(self):
+        from yeone_ocr import chatgpt_subscription, claude_subscription
+        self.confidence = 20
+        seen = []
+        harness = self
+
+        class FakeCodex:
+            subscription = True
+            transport = chatgpt_subscription.TRANSPORT
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                harness.calls.append(model_name)
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "completed", {"input_tokens": 3}, model_name
+
+        signed_in = {"usable": True, "plan": "ChatGPT", "reason": None, "installed": True}
+        with patch.object(chatgpt_subscription, "SubscriptionClient", side_effect=lambda: seen.append("codex") or FakeCodex()), \
+                patch.object(claude_subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
+                patch.object(chatgpt_subscription, "status", return_value=signed_in):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-plan", "chatgpt",
+                                               "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
+        self.assertEqual(seen, ["codex"])                                              # Claude is signed in too
+        self.assertEqual(self.calls, ["codex-default"])
+
+    def test_subscription_mode_without_sign_in_keeps_the_review_pending_when_api_fallback_is_off(self):
         from yeone_ocr import claude_subscription as subscription
         self.confidence = 20
         with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):  # OpenAI key present
-            self.assertEqual(command(self.args("--local-ai-auth", "subscription")), 4)
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--no-local-ai-api-fallback")), 4)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
+
+    def test_subscription_mode_without_any_signed_in_plan_goes_straight_to_the_api_key(self):
+        from yeone_ocr import claude_subscription as subscription
+        self.confidence = 20
+        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):  # OpenAI key present
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off")), 0)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["model"], "synthetic-vision")                   # the provider's API, not a CLI
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
+
+    def _limited(self, seen):
+        from yeone_ocr.claude_subscription import SubscriptionError
+
+        class Limited:
+            subscription = True
+
+            def request(self, **kwargs):
+                seen.append("claude")
+                raise SubscriptionError("Claude 구독 사용량 한도(5시간 또는 주간)에 도달했습니다.")
+        return Limited()
+
+    def test_plan_at_its_usage_limit_hands_the_same_request_to_the_next_signed_in_plan(self):
+        from yeone_ocr import chatgpt_subscription, claude_subscription
+        self.confidence = 20
+        seen, logs = [], []
+        harness = self
+
+        class Codex:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                seen.append(model_name)
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                harness.calls.append(model_name)
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "completed", {}, model_name
+        signed_in = {"usable": True, "plan": "p", "reason": None, "installed": True}
+        with patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
+                patch.object(chatgpt_subscription, "SubscriptionClient", return_value=Codex()), \
+                patch.object(claude_subscription, "status", return_value=signed_in), \
+                patch.object(chatgpt_subscription, "status", return_value=signed_in), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off",
+                                               "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
+        self.assertEqual(seen, ["claude", "codex-default"])                            # same request, next plan's model
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
+        self.assertTrue(any("ChatGPT 구독으로 넘어갑니다" in line for line in logs))
+
+    def test_last_plan_at_its_limit_hands_over_to_the_api_key_and_without_a_key_stops(self):
+        from yeone_ocr import claude_subscription
+        self.confidence = 20
+        seen, logs = [], []
+        signed_in = {"usable": True, "plan": "max", "reason": None, "installed": True}
+        with patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
+                patch.object(claude_subscription, "status", return_value=signed_in), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off",
+                                               "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
+        self.assertEqual(seen, ["claude"])
+        self.assertEqual([call["model"] for call in self.calls], ["synthetic-vision"])   # OpenAI key, chosen model
+        self.assertTrue(any("API 키(openai" in line for line in logs))
+        seen.clear(); self.calls.clear()
+        self.work = self.root / "work-without-key"                                     # a fresh project: nothing reviewed yet
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+                patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
+                patch.object(claude_subscription, "status", return_value=signed_in):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off",
+                                               "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 4)
+        self.assertEqual((seen, self.calls), (["claude"], []))
 
     def test_ai_page_reading_goes_into_the_document_not_the_engine_reading(self):
         from yeone_ocr import ai_page, claude_subscription as subscription
