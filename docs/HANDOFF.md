@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: 1.2.7 동시 AI 요청
+
+`comparison_ai.run_plan(parallel=N)`: 묶음 처리를 prepare(계획 차례·주 스레드: 이미지·프롬프트·기록 틀) → start(클라이언트·중지/범위 확인·호출 수) → send(요청만, N>1이면 작업 스레드) → finish(계획 차례·주 스레드: 응답 검증·기록·checkpoint)로 나눴다. N=1은 예전과 같은 차례로 같은 함수를 부른다. 치명적 실패·중지·상한 오류는 새 요청 없이 이미 보낸 답을 기록한 뒤 처리한다. editorial 묶음이 있으면 늘 1. `local_first`는 구독 세션이면 `--local-ai-parallel`(기본 3), API 키면 1을 넘긴다. 창 설정 `local_ai_parallel`.
+
 ## 2026-11-12: 1.2.6 빠른 이어하기 · 「이어서 할 때」
 
 `local_first._record`가 `local_first.resume_key`(`_resume_key`: 판독 조건·기준 run id·`project.text` 지문·AI 설정)를 남긴다. 쪽 반복에서 엔진이 하나도 다시 돌지 않았고(`outcome["completed"]` 비어 있음) 열쇠가 같고 검증 상태가 `RESUME_DONE`이면(AI 쪽 판독이 켜져 있으면 그 요약도 있어야) 계획·쪽 판독·기록 쓰기 없이 넘어간다. `--local-resume continue`는 local-first 기록이 있는 쪽을 엔진 단계 전에 그대로 넘기고, `all`은 빠른 길을 끈다. `_save_record`는 이전 local-first 실행의 쪽 그림이 있으면(입력 보정 없음) 다시 그리지 않는다. 창: `RESUME_LABELS`, 실행 카드 `cb_resume`(기록 있는 책에서만, 실행 중 잠김), 설정 「인식」의 `resume` 줄.
