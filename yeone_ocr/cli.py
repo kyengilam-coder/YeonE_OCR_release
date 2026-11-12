@@ -1906,11 +1906,13 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         bold, binfo = measure_bold(pages_for_bold(), log=log)
         log(f"획 굵기: {binfo['pages']}쪽 {binfo['chars']:,}자 · 중앙값 {binfo['median']} · 굵은 글자가 있는 문단 {binfo['bold_paragraphs']}개 ({time.time() - t0:.0f}초)")
         bold_measured = bool(bold) and binfo.get("chars", 0) > 0        # 재지 못했으면(글자층 없음 등) '굵은 글자 없음' 을 본경 아님으로 읽지 않는다
+    simple_display = getattr(args, "display", "standard") == "simple" and not interim
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
-                                 context=ctx, memo_mode=getattr(args, "memo", "notice") or "notice",
-                                 legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold)
+                                 context=ctx, memo_mode=getattr(args, "memo", "none") or "none",
+                                 legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold,
+                                 display=simple_display and "simple" or "standard")
         if layout == "flow" and not interim:
             from .structure import apply_structure
             blocks, roles = apply_structure(blocks, preset, bold_measured=bold_measured)
@@ -1924,7 +1926,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 from collections import Counter
                 top = Counter(t for _, t in heads).most_common(6)
                 log("뺀 머리말 글: " + " · ".join(f"{t}×{c}" if c > 1 else t for t, c in top) + (" …" if len(set(t for _, t in heads)) > 6 else ""))
-        if not interim and args.append_report and ci == len(chunks) - 1:
+        if not interim and args.append_report and ci == len(chunks) - 1 and not simple_display:
             blocks.append(Block(type="report", text=make_report(work, len(doc))))
         if interim:
             stem = f"{Path(args.pdf).stem}_진행중"
@@ -1954,7 +1956,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             from .hwpx_template import build_hwpx_template
             try:
                 st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline", preset=preset)
+                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "none") != "inline", preset=preset,
+                                         simple=simple_display)
             except Exception as e:
                 log(f"오류: 양식 HWPX 를 쓸 수 없습니다({type(e).__name__}: {str(e)[:120]}) — 양식 없이 만듭니다"); ok = False
             else:
@@ -1966,8 +1969,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         all_tpl = all_tpl and st is not None
         if st is None:
             st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline",
-                            preset=preset if layout == "flow" else None)
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks and not simple_display,
+                            memos=getattr(args, "memo", "none") != "inline",
+                            preset=preset if layout == "flow" else None, simple=simple_display)
         fissues = check_hwpx_file(str(out_h))
         vi = st.get("validate_issues")
         if isinstance(vi, int) and vi > 0:                              # python-hwpx 스키마·꾸러미 검증(양식으로 만든 파일만 값이 있음)
@@ -2000,11 +2004,13 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             from .docx_builder import build_docx
             out_d = work.out_dir / f"{stem}.docx"
             sd = build_docx(blocks, str(out_d), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "none") != "inline")
             log(f"build: DOCX {out_d} · {sd}")
     if not interim and gstats:
         anyc = next(iter((ctx or {}).values()), {})
+        quiet = (getattr(args, "memo", "none") or "none") == "none" and gstats.get("notices")
         log(f"등급: 초록 {gstats.get('green', 0)} · 파랑 {gstats.get('blue', 0)} · 문맥 밑줄 {gstats.get('red_ctx', 0)} · 쪽 고지 {gstats.get('notices', 0)}"
+            + ("(색상만 표시 — 문서에는 넣지 않음, 검수 화면에서 확인)" if quiet else "")
             + (f" · 3차 확정 위치 못 찾음 {gstats['unmapped']}" if gstats.get("unmapped") else "")
             + (f" · 3차와 다른 대목 어긋남 {gstats['conflict']}" if gstats.get("conflict") else "")
             + (f" · 문맥 바탕 {anyc.get('corpus_chars', 0):,}자/{anyc.get('corpus_pages', 0)}쪽(1차·2차 일치 글)" if ctx else " · 문맥 추정 끔")
@@ -2448,7 +2454,7 @@ def cmd_report(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     progress("report", 0, 1)
     txt = make_report(work, len(doc))
-    (work.dir / "report.md").write_text(txt, encoding="utf-8")
+    work.report_path.write_text(txt, encoding="utf-8")
     progress("report", 1, 1)
     log(txt)
     return 0
@@ -2690,8 +2696,11 @@ def build_parser():
         p.add_argument("--whole-offset", type=int, default=None, help="분할 전 전체 PDF 쪽수 = PDF 쪽수 + N 을 기록에 함께 적음")
         p.add_argument("--append-report", action="store_true", help="문서 끝에 〔작업 기록〕 덧붙임")
         p.add_argument("--no-highlight", action="store_true", help="확인 등급 색·밑줄·범례를 넣지 않음(〔〕 표기와 고지 메모는 그대로)")
-        p.add_argument("--memo", choices=["notice", "all", "inline"], default="notice",
-                       help="한컴 메모: notice=고지 사항만(기본) / all=등급 근거까지 / inline=메모 없이 고지를 글 속 회색 〔고지: …〕 로")
+        p.add_argument("--display", choices=["standard", "simple"], default="standard",
+                       help="문서 표시: standard=색·밑줄·〔〕·메모(검수용, 기본) / simple=단순 표시(형광 바탕 + 빨강·파랑·초록 글자만, 메모·괄호·쪽 기록 줄 없음, 제목·문단 스타일)")
+        p.add_argument("--memo", choices=["none", "notice", "all", "inline"], default="none",
+                       help="한컴 메모: none=색상만, 메모·고지를 문서에 넣지 않음(기본 — 고지는 검수 화면에) / notice=고지 사항만 메모 / "
+                            "all=등급 근거까지 / inline=메모 없이 고지를 글 속 회색 〔고지: …〕 로")
         p.add_argument("--no-context", action="store_true", help="문맥 추정(이 판독의 다른 대목이 가리키는 후보에 밑줄)을 하지 않음")
         p.add_argument("--no-page-breaks", action="store_true", help="원본 쪽마다 쪽 나누기를 넣지 않음")
         p.add_argument("--check-list", choices=["none", "extra", "all"], default="none",
@@ -2766,6 +2775,51 @@ def build_parser():
     p.add_argument("--local-profile", choices=("traditional", "simplified", "mixed"), default="traditional")
     p.add_argument("--local-ai-review", action=argparse.BooleanOptionalAction, default=True,
                    help="로컬 인식의 불일치·어려운 구간만 선택한 AI로 검증(키가 없으면 대상으로 보관)")
+    p.add_argument("--local-engine-plan", choices=("all", "fast"), default="all",
+                   help="(시험) fast=처음 5쪽은 모든 엔진, 그 뒤로는 이긴 엔진 1~2개만 먼저 읽고 점수가 낮은 쪽만 모든 엔진으로 다시")
+    p.add_argument("--local-vote", action="store_true", help="(시험) 엔진 3개 이상 중 과반이 같게 읽은 글자를 기준 판독 대신 채택(초록, 되돌릴 수 있음)")
+    p.add_argument("--local-columns", action=argparse.BooleanOptionalAction, default=True,
+                   help="가로쓰기 두 단 본문 쪽을 문서에서 왼쪽 단·오른쪽 단 차례로 놓음(기본 켬). 표·사진 설명처럼 짧은 조각은 두 단으로 보지 않음. "
+                        "비교 프로젝트의 글 순서는 그대로. 끄려면 --no-local-columns")
+    p.add_argument("--local-textlayer-witness", action="store_true", help="(시험) PDF에 있던 글자층이 다르게 읽은 글자를 파랑으로 표시")
+    p.add_argument("--local-skip-blank", action="store_true", help="(시험) 어두운 화소가 거의 없는 빈 쪽은 엔진을 실행하지 않음")
+    p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",
+                   help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
+    p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
+                   help="Claude 검증 연결 방식. subscription=PC에 로그인된 Claude Code(claude -p)로 구독 사용량에서 차감(API 요금 없음, 개인 사용), "
+                        "api=API 키만, auto(기본)=Claude에 API 키가 없으면 로그인된 Claude Code. 환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
+    p.add_argument("--local-ai-page", choices=("auto", "off", "witness", "prefer"), default="auto",
+                   help="Claude 구독(로그인된 Claude Code)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
+                        "auto(기본)=Claude 구독에 로그인되어 있으면 prefer, 아니면 off. "
+                        "prefer=짧게 다른 곳은 AI 글자를 문서에 넣음(초록), witness=엔진 글자를 두고 다른 곳만 파랑. 긴 차이는 빨강. "
+                        "비교·교정 창의 엔진 판독은 그대로")
+    p.add_argument("--local-korean-forms", action=argparse.BooleanOptionalAction, default=True,
+                   help="한글·한자 혼용 문서(--local-profile mixed)의 한자를 한국 표준 모양(KS X 1001)으로 맞춤(기본 켬): "
+                        "説→說, 真→眞, 絕→絶, 緒→緖 등 KS X 1001에 없는 모양만. 비교·교정 창의 엔진 판독은 그대로. 끄려면 --no-local-korean-forms")
+    p.add_argument("--local-ai-detail-tile", type=int, default=None, metavar="화소",
+                   help="AI 검증 이미지가 이 크기(512~2048 화소)보다 크면 원래 해상도 조각도 함께 보냄(0=끔, 기본: Claude 구독이면 1024, 아니면 끔). "
+                        "AI는 큰 이미지를 줄여서 보기 때문에 쪽 크기의 글 덩어리에서 작은 한글이 흐려짐. 예: 1024")
+    p.add_argument("--local-ai-accept", action=argparse.BooleanOptionalAction, default=None,
+                   help="AI 검증이 확신하고 안전 검사를 통과한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 기본: Claude 구독이면 켬, 아니면 끔")
+    p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=None,
+                   help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본: Claude 구독이면 4, 아니면 1)")
+    p.add_argument("--local-ai-subscription-calls", type=int, default=1000, metavar="N",
+                   help="Claude 구독으로 검증할 때 이번 실행의 호출 상한(기본 1000). 구독은 호출마다 요금이 없어 API 호출 상한 대신 이 값을 씀")
+    p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
+                   help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
+                        "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
+    p.add_argument("--local-exclude-engines", nargs="+", default=[], metavar="ENGINE",
+                   choices=("ppocrv6", "rapidocr", "easyocr", "tesseract", "surya", "glmocr", "paddle_server"),
+                   help="(시험) 자동 선택에서 뺄 엔진. 예: --local-exclude-engines easyocr")
+    p.add_argument("--local-easyocr", action=argparse.BooleanOptionalAction, default=None,
+                   help="EasyOCR도 함께 읽음. 기본: 가로쓰기는 끔(측정한 4개 문서에서 빼는 편이 한자가 더 정확하고 27~35%% 빠름, "
+                        "문장부호 대조는 약해짐), 세로쓰기는 켬(측정 전)")
+    p.add_argument("--local-easyocr-threads", type=int, choices=range(1, 33), metavar="1-32", default=2,
+                   help="(시험) EasyOCR CPU 스레드 수(기본 2). 결과 글자는 같고 속도만 달라지는 설정")
+    p.add_argument("--local-easyocr-batch", type=int, choices=range(1, 65), metavar="1-64", default=1,
+                   help="(시험) EasyOCR가 한 번에 읽는 줄 수(기본 1). 늘리면 빨라질 수 있으나 글자가 조금 달라질 수 있음")
+    p.add_argument("--local-engine-parallel", type=int, choices=range(0, 9), metavar="0-8", default=0,
+                   help="로컬 우선 인식에서 한 쪽을 동시에 읽을 엔진 수(0=코어·메모리로 자동, 1=차례로)")
     p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,
                    help="이번 실행 전체의 선택 구간 API 호출 상한(기본20, --max-calls도 함께 적용)")
     p.add_argument("--pdf-only", action="store_true", help="판독·3차 판별 뒤 검색 가능한 PDF만 만듦(문서 조립·자동 교정·HWPX 중간 저장 생략)")

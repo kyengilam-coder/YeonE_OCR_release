@@ -345,9 +345,11 @@ def write_result(path: Path, result: dict) -> None:
 
 
 class EasyOCRWorker:
-    def __init__(self, model_dir: Path, threads: int = 2):
+    def __init__(self, model_dir: Path, threads: int = 2, verify_lines: bool = True, batch_size: int = 1):
         self.model_dir = model_dir.resolve()
         self.threads = threads
+        self.verify_lines = verify_lines
+        self.batch_size = batch_size
         self.readers = {}
         self.models = {}
         self.glyph_verifier = None
@@ -390,7 +392,7 @@ class EasyOCRWorker:
             used_models.extend(m for m in auxiliary_models if m["filename"] != "craft_mlt_25k.pth")
             auxiliary = lambda: self.reader("chi_sim", detector=False)
         if ((direction == "vertical" and language == "chi_tra")
-                or (direction == "horizontal" and language in ("chi_sim", "chi_tra"))):
+                or (direction == "horizontal" and language in ("chi_sim", "chi_tra") and self.verify_lines)):
             module = _glyph_module()
             if self.glyph_verifier is None:
                 self.glyph_verifier = module.GlyphVerifier(module.font_sources())
@@ -401,6 +403,9 @@ class EasyOCRWorker:
                 "glyph_verification_thresholds": {"min_similarity": module.MIN_SIMILARITY,
                                                    "min_margin": module.MIN_MARGIN},
                 "glyph_verification_status": "enabled" if glyph_verifier.sources else "disabled: no installed font sources"})
+        if direction == "horizontal" and language in ("chi_sim", "chi_tra") and not self.verify_lines:
+            layout_metadata.update({"recognition_policy": "easyocr-horizontal-native-unverified-v1",
+                                    "glyph_verification_status": "disabled: line verification switched off"})
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             if direction == "vertical":
                 import numpy as np
@@ -411,7 +416,7 @@ class EasyOCRWorker:
                 layout_metadata.update(vertical_metadata)
             else:
                 results = reader.readtext(str(input_path), detail=1, paragraph=False,
-                                          decoder="greedy", batch_size=1, workers=0,
+                                          decoder="greedy", batch_size=self.batch_size, workers=0,
                                           canvas_size=2560, mag_ratio=1.0)
                 if glyph_verifier is not None:
                     import numpy as np
@@ -441,7 +446,7 @@ class EasyOCRWorker:
                 "engine_metadata": {"engine": "easyocr", "device": "cpu",
                                     "languages": language, "easyocr_language": LANGUAGES[language][0],
                                     "torch_version": torch.__version__, "threads": self.threads,
-                                    "decoder": "greedy", "paragraph": False,
+                                    "decoder": "greedy", "paragraph": False, "batch_size": self.batch_size,
                                     "canvas_size": 2560, "mag_ratio": 1.0, "psm": None,
                                     "text_threshold": 0.7, "low_text": 0.4,
                                     "link_threshold": 0.4, "contrast_ths": 0.1,
@@ -456,6 +461,15 @@ class EasyOCRWorker:
                                     "unicode_normalization": "none", **layout_metadata}}
 
 
+class _Directed:
+    """Session requests carry no direction; the session pins one at start."""
+    def __init__(self, worker, direction):
+        self.worker, self.direction = worker, direction
+
+    def recognize(self, source, languages):
+        return self.worker.recognize(source, languages, self.direction)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path)
@@ -465,9 +479,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch", type=Path)
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
+    parser.add_argument("--session-root", type=Path)
+    parser.add_argument("--max-requests", type=int, default=8)
+    parser.add_argument("--no-line-verification", action="store_true",
+                        help="skip font glyph matching of horizontal Chinese lines")
+    parser.add_argument("--batch-size", type=int, default=1, help="recognition batch for horizontal pages")
     args = parser.parse_args(argv)
     if args.threads < 1:
         parser.error("--threads must be positive")
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
+    if args.session_root:
+        # Resident worker: models are verified and loaded once for up to --max-requests pages.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("yeone_worker_protocol", Path(__file__).with_name("worker_sessions.py"))
+        protocol = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(protocol)
+        return protocol.serve_requests(_Directed(EasyOCRWorker(args.model_dir, args.threads, not args.no_line_verification,
+                                                               args.batch_size), args.direction),
+                                       args.session_root, args.languages, write_result, max_requests=args.max_requests)
     if args.batch:
         data = json.loads(args.batch.read_text(encoding="utf-8-sig"))
         jobs = data.get("items", data.get("jobs")) if isinstance(data, dict) else data
@@ -475,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         jobs = [{"input": str(args.input), "output": str(args.output), "languages": args.languages}]
     else:
         parser.error("Provide input/output/languages, or batch")
-    worker = EasyOCRWorker(args.model_dir, args.threads)
+    worker = EasyOCRWorker(args.model_dir, args.threads, not args.no_line_verification, args.batch_size)
     for job in jobs:
         source, output = Path(job["input"]), Path(job["output"])
         if source.resolve() == output.resolve():

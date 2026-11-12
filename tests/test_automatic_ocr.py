@@ -149,6 +149,15 @@ def test_mixed_profile_only_uses_engine_covering_both_hangul_and_hanja():
     inspect.assert_called_once()
 
 
+def test_mixed_profile_korean_models_join_only_as_opt_in_trial():
+    with patch.object(auto, "memory_status", return_value=None), \
+            patch.dict("os.environ", {auto.MIXED_KOREAN_ENV: "1"}), \
+            patch.object(ocr, "doctor", return_value={"available": True, "languages": ["kor", "kor_vert", "chi_tra_vert"]}):
+        ready, excluded = auto.available_engines("mixed", "vertical", exclude=("easyocr",))
+    assert ready == ["rapidocr", "tesseract"]
+    assert "ppocrv6" in excluded and "easyocr" in excluded
+
+
 def test_low_commit_skips_heavy_models_without_importing_or_starting_them():
     with patch.object(auto, "memory_status", return_value={"available_commit_mb": 700, "available_physical_mb": 17000}), \
             patch.object(ocr, "doctor", return_value={"available": True, "languages": ["chi_tra"]}) as inspect:

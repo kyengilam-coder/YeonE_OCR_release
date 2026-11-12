@@ -209,7 +209,8 @@ class Window(unittest.TestCase):
         self.assertEqual(app.v_preset.get(), gui.preset_label("kaibao"))
         self.assertEqual(app.cb_preset.configure.call_args.kwargs["values"][-2:], [gui.PRESET_PICK, gui.PRESET_EXPORT])
         app.cb_bold.state.assert_called_with(["!disabled"])                              # 本草 조문은 굵은 글씨 해석이 있다 → 획 굵기 칸을 켬
-        self.assertIn(f"책별 설정을 불러옴({self.book_dir(self.a).name}/book_settings.json): 짜임 {gui.LAYOUT_LABELS['flow']} · 양식 본초학.hwpx"
+        self.assertEqual(self.book_dir(self.a), self.td / "개보본초_YeonE_OCR" / "작업자료")     # 새 책의 작업 자료는 결과 폴더 안 작업자료/ 에
+        self.assertIn(f"책별 설정을 불러옴(개보본초_YeonE_OCR/작업자료/book_settings.json): 짜임 {gui.LAYOUT_LABELS['flow']} · 양식 본초학.hwpx"
                       f" · 짜임 규칙 {gui.preset_label('kaibao')} · 획 굵기 안 잼 · 쪽 범위 3-9 · 인쇄 쪽수 보정 29", app.log[-1])
         self.assertEqual(self.saved[-1]["ocr_inputs"]["0"]["pages"], "3-9")
         before = snapshot(self.td)
@@ -277,7 +278,7 @@ class Window(unittest.TestCase):
         app.select_tab(0)
         self.assertEqual(load_book_settings(self.book_dir(self.img))["layout"], "flow")
         self.assertEqual(self.values(app), dict(BOOK, pages="5-9"))
-        self.assertEqual(sorted(p.name for p in self.td.iterdir()), sorted([self.book_dir(self.a).name, self.book_dir(self.img).name]))
+        self.assertEqual(sorted(p.name for p in self.td.iterdir()), sorted([self.book_dir(self.a).parent.name, self.book_dir(self.img).parent.name]))
 
     def test_startup_without_book_file_keeps_remembered_pages(self):
         app = self.app((self.a, "10-20", "29"))
@@ -295,7 +296,7 @@ class Window(unittest.TestCase):
         self.assertEqual(app.v_pages.get(), "")
 
     def test_broken_or_unreadable_book_file_only_warns(self):
-        d = self.book_dir(self.a); d.mkdir(); (d / BOOK_SETTINGS).write_text("{", encoding="utf-8")
+        d = self.book_dir(self.a); d.mkdir(parents=True); (d / BOOK_SETTINGS).write_text("{", encoding="utf-8")
         app = self.app(); app._use_pdf(self.a)
         self.assertTrue(any(m.startswith("주의: 책별 설정") and "깨져 있어" in m for m in app.log))
         self.assertTrue(list(d.glob("book_settings.json*broken*")))
@@ -354,7 +355,7 @@ class Window(unittest.TestCase):
         save_book_settings(self.book_dir(self.a), BOOK, create=True)
         app = self.app((self.a, "", ""), (self.img, "", "")); app.v_docbook = Var("")
         app.select_tab(0)
-        self.assertIn("「개보본초.pdf」(일반 OCR 탭)의 책별 설정입니다 — 개보본초_YeonE_OCR/book_settings.json", app.v_docbook.get())
+        self.assertIn("「개보본초.pdf」(일반 OCR 탭)의 책별 설정입니다 — 개보본초_YeonE_OCR/작업자료/book_settings.json", app.v_docbook.get())
         app.select_tab(2); app.select_tab(3)                                           # 설정 탭: 마지막에 쓴 입력 탭(이미지)의 책
         self.assertIn("「캡처.png」(이미지 OCR 탭)", app.v_docbook.get()); self.assertIn("결과 폴더가 아직 없어 이 창이 기억했다가 처음 실행할 때 남깁니다", app.v_docbook.get())
 
@@ -376,7 +377,7 @@ class Window(unittest.TestCase):
             setattr(app, name, getattr(gui.App, name).__get__(app))
         gui.App.save_settings(app, quiet=True)
         self.assertFalse(self.book_dir(self.a).exists())                                 # 아직 실행하지 않은 책 — 폴더를 만들지 않는다
-        self.book_dir(self.a).mkdir()
+        self.book_dir(self.a).mkdir(parents=True)
         gui.App.save_settings(app, quiet=True)
         self.assertEqual(load_book_settings(self.book_dir(self.a)),
                          {"layout": "flow", "template": "T.hwpx", "preset": "basic", "bold_split": True, "pages": "2-4", "print_offset": "", "mode": "auto"})

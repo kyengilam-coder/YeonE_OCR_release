@@ -58,7 +58,8 @@ class FrozenRuntime(unittest.TestCase):
 
     def test_source_paths_remain_compatible(self):
         with mock.patch.object(sys, "frozen", False, create=True):
-            self.assertEqual(gui.work_dir_for("book.pdf"), Path("book_YeonE_OCR"))
+            self.assertEqual(gui.result_dir_for("book.pdf"), Path("book_YeonE_OCR"))
+            self.assertEqual(gui.work_dir_for("book.pdf"), Path("book_YeonE_OCR") / "작업자료")     # 작업 자료는 결과 폴더 안 한 폴더에
             self.assertEqual(state.default_work_dir("book.pdf"), Path("work/book"))
 
     def test_installed_defaults_use_user_folder_and_do_not_collide(self):
@@ -78,10 +79,11 @@ class FrozenRuntime(unittest.TestCase):
     def test_frozen_gui_retains_existing_adjacent_work_for_normal_documents(self):
         source = self.root / "books" / "book.pdf"
         with self.frozen():
-            self.assertEqual(gui.work_dir_for(str(source)), source.with_name("book_YeonE_OCR"))
+            self.assertEqual(gui.result_dir_for(str(source)), source.with_name("book_YeonE_OCR"))
+            self.assertEqual(gui.work_dir_for(str(source)), source.with_name("book_YeonE_OCR") / "작업자료")
             # A sibling with a shared prefix is not inside the install directory.
             adjacent = self.root / "installed-other" / "book.pdf"
-            self.assertEqual(gui.work_dir_for(str(adjacent)), adjacent.with_name("book_YeonE_OCR"))
+            self.assertEqual(gui.result_dir_for(str(adjacent)), adjacent.with_name("book_YeonE_OCR"))
 
     def test_bundled_images_and_corrected_hwpx_use_safe_output(self):
         from yeone_ocr.collate.run import corrected_path

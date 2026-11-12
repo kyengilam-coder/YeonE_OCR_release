@@ -22,6 +22,13 @@ GRADE_STYLE: dict[str, dict] = {
     "red": dict(color="#C00000", highlight="#FFFF00", bold=True, underline=None, label="빨강"),
     "red_ctx": dict(color="#C00000", highlight="#FFFF00", bold=True, underline="SOLID", label="빨강 안 문맥 후보(실선 밑줄)"),
 }
+# 단순 표시(--display simple): 밑줄·굵게 없이 형광 바탕 + 글자색 세 단계만. 메모도 괄호도 없이 색으로만 읽는다.
+SIMPLE_GRADE_STYLE: dict[str, dict] = {
+    "green": dict(color="#0B7A3B", highlight="#E2F5DC", bold=False, underline=None, label="초록"),
+    "blue": dict(color="#1F4FBF", highlight="#E1EBFF", bold=False, underline=None, label="파랑"),
+    "red": dict(color="#C00000", highlight="#FFFF00", bold=False, underline=None, label="빨강"),
+    "red_ctx": dict(color="#C00000", highlight="#FFFF00", bold=False, underline=None, label="빨강"),
+}
 STYLE_ALIAS = {"mark": "red"}          # split_marks 의 mark(〔〕 표시) = 빨강
 
 # ---------- 글자 모양 나누기(문서 조립 공용) — 표시 나누기는 marks.split_marks ----------
@@ -219,6 +226,10 @@ LEGEND = ("[연어OCR 표시 범례] 검정 = 1차·2차 판독이 같게 읽은
           "빨강 굵게·노랑 〔 〕 = 정하지 못함, 원본 확인 필수(지침 19) · 〔 〕 안 한 후보의 실선 밑줄 = 이 판독의 다른 대목이 가리키는 후보"
           "(문맥 추정, 확정 아님, 문턱 미측정) · 괄호 〔 〕가 기준: 색이 사라져도 남으므로 Ctrl+F 로 〔 를 찾아 남은 자리를 돈다 · "
           "색이 남은 곳 = 아직 사람이 확인하지 않은 곳, 확인 뒤 모양 복사(Alt+C)로 지움 · 메모 = 색으로 전할 수 없는 고지 사항")
+LOCAL_LEGEND = ("[연어OCR 표시 범례 — 로컬 우선 인식] 검정 = 기준 엔진의 판독(사람 대조 전) · "
+                "빨강·노랑 바탕 = 엔진끼리 갈렸거나 판독불명·AI 검증이 다른 글자를 제안한 자리, 원본 확인 필수 · "
+                "파랑·하늘 바탕 = 기준 엔진의 신뢰도가 낮은 자리, 확인 권장 · 초록 = 기준 판독에서 바뀐 글자(채택한 후보·AI 제안·사람 교정) · "
+                "색이 남은 곳 = 아직 사람이 확인하지 않은 곳, 확인 뒤 모양 복사(Alt+C)로 지움")
 COLLATE_LEGEND = ("[연어OCR 표시 범례 — 책갈피 교정] 초록(점선 밑줄) = 3차 자형 판별 근거로 고친 글자 · 파랑(파선 밑줄) = 자동으로 고쳤지만 확인 권장"
                   "(판독 일치·사전·글자층·반복 근거, 정밀도 미측정) · 빨강 굵게·노랑 = 확인 요청, 글자는 HWPX 그대로 · 메모 = 지운 자리·넣지 않은 자리·"
                   "구조 차이·반영하지 않은 제안 같은 고지 사항 · 원래 글자와 근거 전체는 보고(collate 폴더의 html) · "
@@ -285,7 +296,8 @@ def _pass2_regions(rec: dict) -> set:
 
 def page_grades(rec: dict, ctx: dict | None = None, memo_mode: str = "notice", use_context: bool = True) -> PageGrades:
     """한 쪽의 등급(초록·파랑·빨강 안 문맥 밑줄)과 고지 메모. 글은 바꾸지 않는다.
-    memo_mode: notice(고지 사항만) | all(등급 근거까지) | inline(메모 없이 — 고지는 문서 조립이 회색 글로 넣음)."""
+    memo_mode: notice(고지 사항만) | all(등급 근거까지) | inline(메모 없이 — 고지는 문서 조립이 회색 글로 넣음) |
+    none(색상만 — 여기서는 notice 와 같게 세고, 문서 조립이 메모·고지를 넣지 않는다. 검수 화면은 고지를 그대로 보인다)."""
     from .adjudicate import adjacent_seen
     pr = PageReading.model_validate(rec["merged"])
     horizontal = (rec.get("mode") or "") == "horizontal_zh"
@@ -315,6 +327,10 @@ def page_grades(rec: dict, ctx: dict | None = None, memo_mode: str = "notice", u
             memos.setdefault(key, []).append((f.start, f"3차 자형 판별: 1차 「{e.get('a', '')}」·2차 「{e.get('b', '')}」 → 「{e.get('choice', '')}」"
                                                          + (f" · 근거 {e.get('evidence', '')[:60]}" if e.get("evidence") else "")
                                                          + ("" if grade == "green" else " · 조각 위치를 확인하지 못함")))
+    for s in rec.get("local_grades") or []:                              # 로컬 우선 인식(local_first._local_grades) — 줄 영역마다 글자 범위
+        if s.get("grade") in ("green", "blue", "red") and s.get("region_id") not in dup:
+            spans.setdefault((s["region_id"], int(s.get("para", 0))), []).append((int(s["start"]), int(s["end"]), s["grade"]))
+            stats[s["grade"]] = stats.get(s["grade"], 0) + 1
     for s in ctx_sites:
         if s.get("state") != "open" or s.get("verdict") != "suggest":
             continue

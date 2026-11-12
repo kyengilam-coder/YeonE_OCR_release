@@ -103,6 +103,56 @@ class Block:
         return anchor_map(self.anchors, len(self.text) if n is None else n)
 
 
+def simplify_marks(text: str) -> tuple[str, list[int], list[tuple[int, int]]]:
+    """단순 표시: 〔a/b〕→a, 〔疑: x〕→x, 〔판독불명〕→□ 로 접고, 작업 표시(〔→PDF …〕〔소주〕 …)는 지운다. 다른 〔…〕 는 그대로.
+    돌려주는 값: (새 글, origins[새 자리] = 옛 자리, 빨강으로 칠할 새 글 범위들). 글의 다른 글자는 바꾸지 않는다."""
+    from .marks import MARK_RE, NOTE_PREFIXES, mark_kind
+    out: list[str] = []; origins: list[int] = []; red: list[tuple[int, int]] = []; i = 0
+    for m in MARK_RE.finditer(text):
+        out.extend(text[i:m.start()]); origins.extend(range(i, m.start()))
+        whole, inner = m.group(0), m.group(0)[1:-1]
+        start = len(out)
+        if whole.startswith(NOTE_PREFIXES):
+            pass                                                     # 작업 표시는 본문에서 뺀다
+        else:
+            kind = mark_kind(inner)
+            if kind == "ab":
+                first = inner.strip().split("/")[0]
+                at = m.start() + 1 + inner.index(first) if first else m.start()
+                out.extend(first); origins.extend(range(at, at + len(first)))
+            elif kind == "doubt":
+                value = inner.strip()[2:].strip()
+                at = m.start() + 1 + inner.rindex(value) if value else m.start()
+                out.extend(value); origins.extend(range(at, at + len(value)))
+            elif kind == "unknown":
+                out.append("□"); origins.append(m.start())
+            else:
+                out.extend(whole); origins.extend(range(m.start(), m.end()))
+            if len(out) > start:
+                red.append((start, len(out)))
+        i = m.end()
+    out.extend(text[i:]); origins.extend(range(i, len(text)))
+    return "".join(out), origins, red
+
+
+def simplify_blocks(blocks: list["Block"]) -> list["Block"]:
+    """단순 표시(--display simple)의 마무리: 메모를 모두 빼고 본문 〔〕 표시를 접어 그 글자를 빨강으로. 글 아닌 블록·표는 그대로."""
+    out = []
+    for b in blocks:
+        b.memos = []
+        if b.type in ("para", "heading", "note") and b.text:
+            text, origins, red = simplify_marks(b.text)
+            if text != b.text:
+                b.remap(text, origins)
+                b.spans = [s for s in b.spans if not any(a < s[1] and s[0] < e for a, e in red)] + [(a, e, "red") for a, e in red]
+                b.memos = []
+            if b.type == "note" and not b.text.strip() and not b.anchors:
+                continue
+        out.append(b)
+    return out
+
+
+DISPLAYS = ("standard", "simple")   # standard = 색·밑줄·〔〕·메모(검수용, 예전 그대로), simple = 형광 바탕 + 글자색만(메모·괄호·기록 줄 없음)
 LAYOUTS = ("page", "flow")   # page = 원본 쪽마다 기록 줄·쪽 나누기(검수용), flow = 내용별(제목·문단으로 잇고 원본 쪽은 책갈피로)
 
 
@@ -174,7 +224,7 @@ def page_text_of(pr: PageReading) -> str:
 def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: int | None = None,
                     check_list: str = "none", grades: bool = True, context: dict | None = None,
                     memo_mode: str = "notice", legend: bool = True, stats: dict | None = None,
-                    layout: str = "page", bold: dict | None = None) -> list[Block]:
+                    layout: str = "page", bold: dict | None = None, display: str = "standard") -> list[Block]:
     """grades=True 면 글자마다 확인 등급(초록·파랑·빨강 안 문맥 밑줄)과 고지 메모를 블록에 단다(grades.page_grades).
     context 는 {쪽: 문맥 추정 기록}(context.analyze). 글 자체는 바꾸지 않는다.
     layout="flow"(내용별): 쪽마다의 기록 줄을 넣지 않고, 그 쪽이 시작되는 글자 자리에 책갈피 이름(anchors)과 쪽 고지 메모를 단다.
@@ -184,8 +234,14 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         raise ValueError(f"check_list 는 {CHECK_LIST_MODES} 중 하나: {check_list!r}")
     if layout not in LAYOUTS:
         raise ValueError(f"layout 은 {LAYOUTS} 중 하나: {layout!r}")
+    if display not in DISPLAYS:
+        raise ValueError(f"display 는 {DISPLAYS} 중 하나: {display!r}")
     flow = layout == "flow"
-    from .grades import page_grades, LEGEND, classify_uncertain, page_body, decided_keys, page_ranges
+    simple = display == "simple"
+    anchored = flow or simple                       # 쪽 기록 줄 대신 쪽이 시작되는 글자 자리에 책갈피
+    if simple:
+        check_list, legend = "none", False          # 확인 목록·범례는 검수 화면(review.html)·보고에
+    from .grades import page_grades, LEGEND, LOCAL_LEGEND, classify_uncertain, page_body, decided_keys, page_ranges
     blocks: list[Block] = []
     legend_block: Block | None = None
     no_pass2_pages: list[int] = []
@@ -196,6 +252,9 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
     if stats is not None and flow:
         stats.setdefault("running_heads", 0); stats.setdefault("running_head_texts", [])
     pending_list: list[tuple[str, list[str]]] = []  # 글 없는 쪽(그림만 등)이 이어질 때 앞 쪽들의 것
+
+    # 색상만 표시(memo_mode none): 쪽 고지·글자 메모·범례를 문서에 넣지 않는다. 등급 색과 〔〕 표기는 그대로이고 고지는 검수 화면(review.html)에 남는다
+    no_memos = memo_mode == "none"
 
     def place(b: Block, offset: int) -> None:
         """기다리던 쪽 책갈피·메모를 블록 b 의 offset 글자 자리에 단다(내용별)."""
@@ -218,14 +277,14 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         if grades and legend and legend_block is None:
             legend_block = meta
         if pg is not None:
-            if pg.page_notices:
+            if pg.page_notices and not no_memos:
                 meta.memos.append((max(0, len(meta.text) - 1), " / ".join(pg.page_notices)))   # 쪽 고지는 쪽 기록 줄 끝 글자에 하나로
             if pg.no_pass2:
                 no_pass2_pages.append(n)
             if stats is not None:
                 for k, v in pg.stats.items():
                     stats[k] = stats.get(k, 0) + v
-        if flow:                                    # 내용별: 기록 줄 대신 이 쪽의 첫 글자 자리에 책갈피(와 쪽 고지 메모)를
+        if anchored:                                # 내용별·단순 표시: 기록 줄 대신 이 쪽의 첫 글자 자리에 책갈피(와 쪽 고지 메모)를
             if pending is not None:
                 pending_list.append(pending)
             pending = (anchor_label(rec, whole_offset), [m for _, m in meta.memos])
@@ -238,9 +297,9 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 return [], []
             lead = len(raw) - len(raw.lstrip())
             sp = [(a - lead + shift, b - lead + shift, k) for a, b, k in pg.spans.get((reg_id, pi), []) if lead <= a and b <= lead + len(t)]
-            me = [(o - lead + shift, m) for o, m in pg.memos.get((reg_id, pi), []) if lead <= o < lead + len(t)]
+            me = [] if no_memos else [(o - lead + shift, m) for o, m in pg.memos.get((reg_id, pi), []) if lead <= o < lead + len(t)]
             return sp, me
-        if rec.get("reader") == "mock":
+        if rec.get("reader") == "mock" and not simple:
             blocks.append(Block(type="note", text="〔작업 메모〕 아래 본문은 기존 PDF 텍스트 레이어를 옮긴 것으로 원본 대조 전 상태입니다.", page=n))
         first_text_done = False
         tops = [bbox_frac(r.bbox)[1] for r in pr.regions if r.kind not in SKIP_KINDS and (r.kind in TITLE_KINDS or r.kind in TEXT_KINDS)]
@@ -267,7 +326,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                         vol_titles[:] = (vol_titles + [key])[-3:]
                     elif at_top:
                         top_titles[:] = (top_titles + [key])[-3:]
-                if flow:
+                if anchored:
                     place(hb, 0)
                 blocks.append(hb)
             elif reg.kind in TEXT_KINDS:
@@ -276,7 +335,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     t = raw.strip()
                     if not t:
                         continue
-                    prefix = "〔소주〕 " if reg.kind == "소주" and not flow else ""
+                    prefix = "〔소주〕 " if reg.kind == "소주" and not anchored else ""
                     sp, me = grade_of(reg.id, i, raw, t, len(prefix))
                     bd = bold_of(n, reg.id, i, raw, t, len(prefix))
                     t = prefix + t
@@ -288,14 +347,14 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                         else:
                             prev = next((b for b in reversed(blocks) if b.type == "para"), None)
                         if prev is not None:
-                            prev.extend("" if flow else f"〔→PDF {n}쪽" + (f"/인쇄 {pr.print_page}쪽" if pr.print_page else "") + "〕")
+                            prev.extend("" if anchored else f"〔→PDF {n}쪽" + (f"/인쇄 {pr.print_page}쪽" if pr.print_page else "") + "〕")
                             base = prev.extend(t, spans=sp, memos=me, cstyles=bd)
-                            if flow:
+                            if anchored:
                                 place(prev, base)
                             first_text_done = True
                             continue
                     pb = Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me, cstyles=bd)
-                    if flow:
+                    if anchored:
                         place(pb, 0)
                     blocks.append(pb)
                     first_text_done = True
@@ -304,9 +363,9 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 if info and info.get("path"):
                     blocks.append(Block(type="image", path=info["path"], kind=reg.kind, page=n,
                                         frac_w=info.get("frac_w", 0.5), ratio=info.get("ratio", 1.0)))
-                else:
+                elif not simple:
                     blocks.append(Block(type="note", text=f"〔도판 미삽입: {reg.kind} {reg.id} — 잘라낸 이미지가 없음〕", page=n))
-                if reg.note.strip():
+                if reg.note.strip() and not simple:
                     blocks.append(Block(type="note", text=f"〔판독 메모〕 {reg.note.strip()}", page=n))
             elif reg.kind == "단순표":
                 rows = [list(r.cells) for r in reg.table_rows if r.cells]
@@ -319,7 +378,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     t = paragraph_text(p).strip()
                     if t:
                         ob = Block(type="para", text=t, kind="기타", page=n)
-                        if flow:
+                        if anchored:
                             place(ob, 0)
                         blocks.append(ob)
             else:
@@ -341,13 +400,14 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
             blocks.append(Block(type="uncertain", items=items, page=n, text=CHECK_HEADER[check_list]))
         if pr.running_header.strip():
             prev_header = _title_key(pr.running_header)    # 다음 쪽의 되풀이 머리말 판정에
-    if flow and (pending or pending_list):         # 끝 쪽들에 글이 없으면 마지막 글 끝에
+    if anchored and (pending or pending_list):     # 끝 쪽들에 글이 없으면 마지막 글 끝에
         last = next((b for b in reversed(blocks) if b.type in ("para", "heading") and b.text), None)
         if last is not None:
             place(last, len(last.text))
-    if legend_block is not None:                    # 범례: 이 파일 첫 쪽 기록 줄(내용별은 첫 글)의 첫 글자에 메모 하나
-        extra = f" · 2차 판독 없이 1차만 들어간 쪽: {page_ranges(no_pass2_pages)}" if no_pass2_pages else ""
+    if legend_block is not None and not no_memos:   # 범례: 이 파일 첫 쪽 기록 줄(내용별은 첫 글)의 첫 글자에 메모 하나
+        local = any(r.get("pipeline") == "local-first-selective-review-v1" for r in records)
+        extra = f" · 2차 판독 없이 1차만 들어간 쪽: {page_ranges(no_pass2_pages)}" if no_pass2_pages and not local else ""
         target = legend_block if not flow else next((b for b in blocks if b.type in ("para", "heading") and b.text), None)
         if target is not None:
-            target.memos.insert(0, (0, LEGEND + extra))
-    return blocks
+            target.memos.insert(0, (0, (LOCAL_LEGEND if local else LEGEND) + extra))
+    return simplify_blocks(blocks) if simple else blocks

@@ -41,6 +41,27 @@ class LocalFirstGuiTests(unittest.TestCase):
         app.v_ocr_strategy.set(self.gui.OCR_STRATEGY_LABELS["ai-full"])
         self.assertEqual(self.gui.App._strategy_opts(app), ["--ocr-strategy", "ai-full"])
 
+    def test_two_column_order_is_on_by_default_and_only_switching_it_off_adds_a_flag(self):
+        app = self.app()
+        self.assertNotIn("--no-local-columns", self.gui.App._strategy_opts(app))
+        app.v_local_columns = Var(False)
+        self.assertIn("--no-local-columns", self.gui.App._strategy_opts(app))
+        self.assertIs(self.gui.DEFAULTS["local_columns"], True)
+
+    def test_line_verification_is_off_by_default_and_switching_it_on_adds_a_flag(self):
+        app = self.app()
+        self.assertNotIn("--local-line-verification", self.gui.App._strategy_opts(app))
+        app.v_local_line_verification = Var(True)
+        self.assertIn("--local-line-verification", self.gui.App._strategy_opts(app))
+        self.assertIs(self.gui.DEFAULTS["local_line_verification"], False)
+
+    def test_easyocr_is_off_for_horizontal_by_default_and_checking_it_adds_a_flag(self):
+        app = self.app()
+        self.assertNotIn("--local-easyocr", self.gui.App._strategy_opts(app))
+        app.v_local_easyocr = Var(True)
+        self.assertIn("--local-easyocr", self.gui.App._strategy_opts(app))
+        self.assertIs(self.gui.DEFAULTS["local_easyocr"], False)
+
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()
         app._env_optional_key = True

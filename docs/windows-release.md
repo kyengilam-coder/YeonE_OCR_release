@@ -1,3 +1,17 @@
+# Windows 1.2.1 설치판
+
+1.2.1은 1.2.0의 설치 구성(내장 PP-OCRv6 환경, 로컬 우선 인식, GPU 엔진·Claude 구독 판독)을 그대로 쓰고 화면 · 문서 메모 기본값 · 결과 폴더 짜임 · 저신뢰 구간 검증 · 비교 프로젝트 저장을 고친 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.1**로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.1`으로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
+
+배포 전 설치본에서 확인할 것: 버전 표시(1.2.1), 간단히 보기·자세히 보기 전환, [더 보기] 메뉴, 새 결과 폴더(`out` · `review.html` · `report.md` · `작업자료`), 이전 판 결과 폴더 이어 쓰기와 [결과 폴더 정리…], 메모 없는 HWPX, 로컬 인식과 선택 구간 계획, 키 없는 실행, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.1 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.1)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
+# Windows 1.2.0 설치판
+
+1.2.0은 1.1.0 위에 세로쓰기 GPU 판독, Claude 구독 판독(로그인된 Claude Code 실행), 한국 표준 한자 모양, 단순 색 표시와 속도 개선을 더한다. [릴리스 기록](release-notes.md)과 [구성 정리](연어OCR_구성_정리.md)를 따른다. 기존 AppId와 사용자 자료 저장 위치를 유지하며, 배포 CI는 공개 1.1.0 설치 위에 갱신·재설치·제거를 검증한다. 버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.0**으로 맞춘다. Claude Code는 설치 파일에 넣지 않으며 사용자가 따로 설치·로그인한다.
+
 # Windows 1.1.0 설치판
 
 1.1.0은 내장 PP-OCRv6 환경을 유지하고 일반·이미지 OCR의 기본 경로를 로컬 인식 후 선택 구간 AI 검증으로 연결한다. [사용법·검증 경계](LOCAL_FIRST.md)와 [릴리스 기록](release-notes.md)을 따른다. 기존 AppId와 사용자 자료 저장 위치를 유지하며 최신 배포판 1.0.6 설치 위에 갱신할 수 있도록 빌드한다. 기존 1.0.6의 저장·교정 동작을 통합한 소스를 기준으로 검증한다. 포터블 단일 파일은 엔진 환경을 별도로 준비해야 한다.

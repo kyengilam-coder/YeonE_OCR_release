@@ -458,19 +458,21 @@ class GuiConfig(unittest.TestCase):
     def test_work_dir_names_do_not_collide(self):
         """같은 이름의 PDF·이미지·이미지 폴더가 한곳에 있어도 결과 폴더(판독 기록)가 섞이지 않는다."""
         import tempfile
-        from yeone_ocr.gui import work_dir_for, IMAGE_EXTS
+        from yeone_ocr.gui import result_dir_for, work_dir_for, IMAGE_EXTS
         from yeone_ocr.pdfio import IMAGE_EXTS as PDFIO_EXTS
         self.assertEqual(IMAGE_EXTS, PDFIO_EXTS)
         with tempfile.TemporaryDirectory() as td:
             os.makedirs(os.path.join(td, "book"))
-            names = {work_dir_for(os.path.join(td, n)).name for n in ("book.pdf", "book.png", "book.jpg", "book")}
+            names = {result_dir_for(os.path.join(td, n)).name for n in ("book.pdf", "book.png", "book.jpg", "book")}
             self.assertEqual(names, {"book_YeonE_OCR", "book_png_YeonE_OCR", "book_jpg_YeonE_OCR", "book_이미지_YeonE_OCR"})
+            works = {work_dir_for(os.path.join(td, n)) for n in ("book.pdf", "book.png", "book.jpg", "book")}
+            self.assertEqual({w.parent.name for w in works}, names); self.assertEqual({w.name for w in works}, {"작업자료"})
 
     def test_cli_default_work_dir_follows_gui_rule(self):
         """명령줄 기본 결과 폴더(--work 없이)도 창과 같은 규칙: book.pdf·book.png·book/ 이 work/book 하나에 섞이지 않는다."""
         import tempfile
         from yeone_ocr.state import Work
-        from yeone_ocr.gui import work_dir_for
+        from yeone_ocr.gui import result_dir_for
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as td:
             os.chdir(td)
@@ -480,7 +482,7 @@ class GuiConfig(unittest.TestCase):
                 self.assertEqual({n: str(d) for n, d in dirs.items()}, {"book.pdf": os.path.join("work", "book"), "book.png": os.path.join("work", "book_png"),
                                                                        "book.JPG": os.path.join("work", "book_jpg"), "book": os.path.join("work", "book_이미지")})
                 for n, d in dirs.items():
-                    self.assertEqual(work_dir_for(n).name, d.name + "_YeonE_OCR")
+                    self.assertEqual(result_dir_for(n).name, d.name + "_YeonE_OCR")
                 self.assertEqual(Work("book.pdf", "elsewhere").dir, Path("elsewhere"))      # --work 를 주면 그대로
             finally:
                 os.chdir(cwd)

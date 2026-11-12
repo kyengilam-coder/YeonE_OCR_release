@@ -11,7 +11,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -61,6 +63,40 @@ def file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# A cached digest is reused only while the file identity (size, both
+# timestamps, inode) is unchanged AND the last change is older than this
+# margin. Coarse-timestamp filesystems therefore cannot hide a rewrite.
+STABLE_HASH_MIN_AGE_NS = 2_000_000_000
+_STABLE_HASHES: dict[tuple, str] = {}
+_STABLE_LOCK = threading.Lock()
+
+
+def stable_file_sha256(path: str | Path) -> str:
+    """file_sha256 for repeated source-change checks on an unchanged file.
+
+    Any write changes size or timestamps and forces a full re-read. A file
+    changed within the last two seconds (or dated in the future) is never
+    served from memory, so the check stays as strict as hashing every time.
+    """
+    resolved = Path(path)
+    before = resolved.stat()
+    key = (str(resolved), before.st_size, before.st_mtime_ns, before.st_ctime_ns, before.st_ino)
+    settled = time.time_ns() - max(before.st_mtime_ns, before.st_ctime_ns) >= STABLE_HASH_MIN_AGE_NS
+    if settled:
+        with _STABLE_LOCK:
+            cached = _STABLE_HASHES.get(key)
+        if cached is not None:
+            return cached
+    digest = file_sha256(resolved)
+    after = resolved.stat()
+    if settled and key == (str(resolved), after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_ino):
+        with _STABLE_LOCK:
+            if len(_STABLE_HASHES) > 256:
+                _STABLE_HASHES.clear()
+            _STABLE_HASHES[key] = digest
+    return digest
 
 
 def find_tesseract(executable=None, *, engine_root=None) -> Path | None:
@@ -179,7 +215,7 @@ def document_info(path: str | Path, *, should_stop=None) -> dict:
     if not source.is_file():
         raise OCRError("원본 파일을 찾을 수 없습니다.")
     _cancelled(should_stop)
-    before = file_sha256(source)
+    before = stable_file_sha256(source)
     try:
         if source.suffix.lower() == ".pdf":
             import pymupdf
@@ -200,7 +236,7 @@ def document_info(path: str | Path, *, should_stop=None) -> dict:
     if count < 1:
         raise OCRError("문서에 쪽이 없습니다.")
     _cancelled(should_stop)
-    if file_sha256(source) != before:
+    if stable_file_sha256(source) != before:
         raise OCRError("문서를 여는 동안 원본 파일이 변경되어 다시 열어야 합니다.")
     return {"page_count": count, "source_sha256": before, "source_path": str(source), "kind": kind}
 
@@ -266,7 +302,96 @@ def _engine_metadata(info: dict, selected: list[str]) -> dict:
     return metadata
 
 
+ENHANCEMENTS = ("contrast",)
+_ENHANCEMENT = {"mode": None}
+
+
+@contextmanager
+def input_enhancement(mode):
+    """Apply one pixel enhancement to every page render inside the block.
+
+    "contrast": per-channel autocontrast with 0.5 % clipping (geometry and size
+    unchanged, so boxes stay valid). Engines, previews and review crops all
+    render through _render, so they see the same pixels; the mode is recorded
+    in each result's preprocessing details.
+    """
+    if mode not in (None, *ENHANCEMENTS):
+        raise ValueError("지원하지 않는 입력 보정입니다: " + str(mode))
+    with _RENDER_LOCK:
+        previous, _ENHANCEMENT["mode"] = _ENHANCEMENT["mode"], mode
+    try:
+        yield
+    finally:
+        with _RENDER_LOCK:
+            _ENHANCEMENT["mode"] = previous
+
+
+def _enhance(destination: Path, details: dict) -> None:
+    mode = _ENHANCEMENT["mode"]
+    if mode is None:
+        return
+    from PIL import Image, ImageOps
+    with Image.open(destination) as image:
+        enhanced = ImageOps.autocontrast(image.convert("RGB"), cutoff=0.5)
+        info = {"dpi": image.info["dpi"]} if "dpi" in image.info else {}
+    enhanced.save(destination, **info)
+    details["enhancement"] = {"mode": mode, "method": "PIL.ImageOps.autocontrast", "cutoff_percent": 0.5}
+
+
+_RENDER_CACHE = {"depth": 0, "folder": None, "items": {}}
+_RENDER_LOCK = threading.RLock()
+RENDER_CACHE_PAGES = 3
+
+
+@contextmanager
+def render_cache():
+    """Reuse identical page renders inside the block (same bytes, page, DPI).
+
+    Every engine, the preview and the review crops otherwise rasterize and
+    PNG-encode the same page again. Entries are keyed on the source digest,
+    so a changed source is rendered afresh; files are removed on exit.
+    """
+    with _RENDER_LOCK:
+        if _RENDER_CACHE["depth"] == 0:
+            _RENDER_CACHE["folder"] = tempfile.TemporaryDirectory(prefix="abocr-render-cache-")
+            _RENDER_CACHE["items"] = {}
+        _RENDER_CACHE["depth"] += 1
+    try:
+        yield
+    finally:
+        with _RENDER_LOCK:
+            _RENDER_CACHE["depth"] -= 1
+            if _RENDER_CACHE["depth"] == 0:
+                folder, _RENDER_CACHE["folder"], _RENDER_CACHE["items"] = _RENDER_CACHE["folder"], None, {}
+                folder.cleanup()
+
+
 def _render(source: Path, destination: Path, page_number: int, dpi: int, *, details=None) -> tuple[int, int]:
+    details = {} if details is None else details
+    with _RENDER_LOCK:
+        if not _RENDER_CACHE["depth"] or type(page_number) is not int or type(dpi) is not int:
+            return _render_uncached(source, destination, page_number, dpi, details=details)
+        items, folder = _RENDER_CACHE["items"], Path(_RENDER_CACHE["folder"].name)
+        key = (stable_file_sha256(source), source.suffix.lower(), page_number, dpi, _ENHANCEMENT["mode"])
+        entry = items.get(key)
+        if entry is not None and entry["path"].is_file():
+            shutil.copyfile(entry["path"], destination)
+            details.update(json.loads(entry["details"]))
+            return entry["size"]
+        fresh = {}
+        size = _render_uncached(source, destination, page_number, dpi, details=fresh)
+        details.update(fresh)
+        if stable_file_sha256(source) != key[0]:
+            return size
+        while len(items) >= RENDER_CACHE_PAGES:
+            items.pop(next(iter(items)))["path"].unlink(missing_ok=True)
+        stored = folder / (hashlib.sha256(repr(key).encode("utf-8")).hexdigest()[:32] + ".png")
+        shutil.copyfile(destination, stored)
+        items[key] = {"path": stored, "details": json.dumps(fresh), "size": size}
+        return size
+
+
+def _render_uncached(source: Path, destination: Path, page_number: int, dpi: int, *, details=None) -> tuple[int, int]:
     details = {} if details is None else details
     if type(page_number) is not int or page_number < 1:
         raise ValueError("쪽 번호는 1 이상의 정수여야 합니다.")
@@ -292,6 +417,7 @@ def _render(source: Path, destination: Path, page_number: int, dpi: int, *, deta
             pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
             pixmap.save(destination)
             details.update(input_type="pdf", render_dpi=dpi, colorspace="RGB", annotation_rendering=True)
+            _enhance(destination, details)
             return pixmap.width, pixmap.height
     with Image.open(source) as image:
         if page_number > getattr(image, "n_frames", 1):
@@ -319,6 +445,7 @@ def _render(source: Path, destination: Path, page_number: int, dpi: int, *, deta
             image = Image.alpha_composite(background, rgba)
             details["alpha_background"] = "white"
         image.convert("RGB").save(destination, dpi=(dpi, dpi))
+        _enhance(destination, details)
         return image.width, image.height
 
 
@@ -409,7 +536,7 @@ def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number
     if missing:
         raise OCRError("설치되지 않은 언어: " + ", ".join(missing) +
                        ". 다른 언어로 자동 대체하지 않습니다. 설치 언어: " + ", ".join(info["languages"]))
-    original_hash = file_sha256(source)
+    original_hash = stable_file_sha256(source)
     supplement = {}
     _cancelled(should_stop)
     with tempfile.TemporaryDirectory(prefix="abocr-") as folder:
@@ -444,7 +571,7 @@ def recognize_file(path: str | Path, *, languages="kor+chi_tra+eng", page_number
                 vertical=languages.endswith("_vert"), check=check_verification)
             if coordinate_warnings:
                 preprocessing["raw_text_location"] = "engine_metadata.model_result.text"
-    if file_sha256(source) != original_hash:
+    if stable_file_sha256(source) != original_hash:
         raise OCRError("인식 중 원본 파일이 변경되어 결과를 적용하지 않습니다.")
     _cancelled(should_stop)
     return RecognitionResult(text=text, words=words, source_path=str(source), source_sha256=original_hash,

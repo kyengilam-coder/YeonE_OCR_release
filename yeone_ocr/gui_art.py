@@ -131,9 +131,9 @@ def checkbox(size: int, on: bool, accent: str, border: str, fill: str = "#ffffff
     s = float(size)
     r = s * 0.22
     bw = max(1.0, s / 14)
-    acc = hex_rgb("#c9c0b2" if disabled else accent) + (255,)
-    bd = hex_rgb("#d9d2c6" if disabled else (accent if hover else border)) + (255,)
-    fl = hex_rgb("#f4f1ec" if disabled else fill) + (255,)
+    acc = hex_rgb("#c2cad8" if disabled else accent) + (255,)
+    bd = hex_rgb("#d5dbe6" if disabled else (accent if hover else border)) + (255,)
+    fl = hex_rgb("#eef1f6" if disabled else fill) + (255,)
     mk = hex_rgb(mark) + (255,)
     rg = hex_rgb(ring) + (255,) if ring else None
     rw = bw * 1.8
@@ -161,9 +161,9 @@ def radio(size: int, on: bool, accent: str, border: str, fill: str = "#ffffff", 
     s = float(size)
     c = s / 2
     bw = max(1.0, s / 14) * (1.6 if (on or ring) else 1.0)
-    acc = hex_rgb("#c9c0b2" if disabled else accent) + (255,)
-    bd = hex_rgb("#d9d2c6" if disabled else (ring or (accent if (hover or on) else border))) + (255,)
-    fl = hex_rgb("#f4f1ec" if disabled else fill) + (255,)
+    acc = hex_rgb("#c2cad8" if disabled else accent) + (255,)
+    bd = hex_rgb("#d5dbe6" if disabled else (ring or (accent if (hover or on) else border))) + (255,)
+    fl = hex_rgb("#eef1f6" if disabled else fill) + (255,)
 
     def at(x: float, y: float):
         d = math.hypot(x - c, y - c)
@@ -277,6 +277,67 @@ def expand(size: int, color: str, stroke: float = 1.5) -> str:
     """두 번 눌러 크게 보기(원본 열기) 표지: 바깥으로 벌어지는 두 화살."""
     return _icon(size, color, stroke, [[(9.5, 2.5), (13.5, 2.5), (13.5, 6.5)], [(13.5, 2.5), (8.5, 7.5)],
                                        [(6.5, 13.5), (2.5, 13.5), (2.5, 9.5)], [(2.5, 13.5), (7.5, 8.5)]])
+
+
+def sliders(size: int, color: str, stroke: float = 1.5) -> str:
+    """조절 막대 셋(명령 띠의 [설정]): 가로줄 셋과 줄마다 손잡이 점 하나."""
+    knobs = ((5.5, 4.0), (10.5, 8.0), (6.5, 12.0))
+
+    def shape(x: float, y: float, half: float) -> bool:
+        return any(math.hypot(x - kx, y - ky) <= 1.9 for kx, ky in knobs)
+    return _icon(size, color, stroke, [[(2, 4), (14, 4)], [(2, 8), (14, 8)], [(2, 12), (14, 12)]], extra=shape)
+
+
+def menu_lines(size: int, color: str, stroke: float = 1.6) -> str:
+    """가로줄 셋(명령 띠의 [더 보기] 메뉴)."""
+    return _icon(size, color, stroke, [[(2.5, 4.5), (13.5, 4.5)], [(2.5, 8), (13.5, 8)], [(2.5, 11.5), (13.5, 11.5)]])
+
+
+def switch(w: int, h: int, on: bool, track_on: str, track_off: str, knob: str = "#ffffff", gap: int = 0) -> str:
+    """켜고 끄는 미닫이(명령 띠의 '자세히'): 알약 길 위에 둥근 손잡이 — 켜면 오른쪽 + track_on 색. gap 은 오른쪽 여백(글자와의 간격)."""
+    tr = hex_rgb(track_on if on else track_off) + (255,)
+    kn = hex_rgb(knob) + (255,)
+    r = h / 2.0
+    pad = max(1.5, h * 0.14)
+    kr = r - pad
+    cx = (w - r) if on else r
+
+    def at(x: float, y: float):
+        if x > w or not _in_rrect(x, y, 0, 0, w, h, r):
+            return None
+        return kn if math.hypot(x - cx, y - r) <= kr else tr
+
+    return png_b64(w + gap, h, _render(w + gap, h, at))
+
+
+def brand_mark(size: int, start: str, end: str, glyph: str = "#ffffff") -> str:
+    """이름 앞의 표지: 왼쪽 위 start → 오른쪽 아래 end 로 물드는 둥근 사각 위에 흰 스캔 틀(네 귀 꺾쇠)과 가운데 읽는 줄."""
+    s = float(size)
+    a, b = hex_rgb(start), hex_rgb(end)
+    g = hex_rgb(glyph) + (255,)
+    r = s * 0.28
+    k = s / 16.0
+    half = 0.8 * k
+    corners = [[(4, 6), (4, 4), (6, 4)], [(10, 4), (12, 4), (12, 6)], [(12, 10), (12, 12), (10, 12)], [(6, 12), (4, 12), (4, 10)]]
+    segs = [(p[0] * k, p[1] * k, q[0] * k, q[1] * k) for path in corners for p, q in zip(path, path[1:])]
+    segs.append((5.6 * k, 8 * k, 10.4 * k, 8 * k))
+
+    def at(x: float, y: float):
+        if not _in_rrect(x, y, 0, 0, s, s, r):
+            return None
+        if any(_seg_dist(x, y, *sg) <= half for sg in segs):
+            return g
+        t = max(0.0, min(1.0, (x + y) / (2 * s)))
+        return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3)) + (255,)
+
+    return png_b64(size, size, _render(size, size, at))
+
+
+def blend(start: str, end: str, t: float) -> str:
+    """두 색 사이의 색(#rrggbb). t=0 이면 start, 1 이면 end — 명령 띠 아래 빛줄을 조각으로 그릴 때."""
+    a, b = hex_rgb(start), hex_rgb(end)
+    t = max(0.0, min(1.0, t))
+    return "#%02x%02x%02x" % tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
 
 def step_circle(size: int, kind: str, ink: str, edge: str, red: str, panel: str, scale: float = 1.0) -> str:

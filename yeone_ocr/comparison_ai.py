@@ -6,7 +6,7 @@ No automatic retry, provider probing, environment key lookup or human-text edit.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace as _replace
 import base64
 import copy
 import difflib
@@ -89,6 +89,10 @@ class ReviewPolicy:
     selective: bool = False
     visual_scope: str = "auto"
     refinement_image_limit: int = 2
+    # 0 = off. Otherwise a target crop larger than this (pixels per side) also gets full-resolution
+    # detail tiles: vision models shrink a large image (Claude: long edge 1568), and a page-size
+    # block of small Hangul then becomes too blurry to tell 나/냐, 터/더 (2026-11 vertical sample).
+    detail_tile: int = 0
 
     def __post_init__(self):
         if any(type(v) is not bool for v in (self.traditional, self.punctuation, self.preserve_variants, self.selective)):
@@ -102,6 +106,8 @@ class ReviewPolicy:
             raise AIReviewError("이미지 검증 범위는 auto 또는 page로 지정하세요.")
         if type(self.refinement_image_limit) is not int or not 0 <= self.refinement_image_limit <= 4:
             raise AIReviewError("영역 재판독 근거 이미지는 대상마다 0~4개로 지정하세요.")
+        if type(self.detail_tile) is not int or not (self.detail_tile == 0 or 512 <= self.detail_tile <= 2048):
+            raise AIReviewError("세부 조각 크기는 0(끔) 또는 512~2048 화소로 지정하세요.")
 
 
 @dataclass(frozen=True)
@@ -254,6 +260,15 @@ def _word_spans(raw):
             yield start, position, word
 
 
+# Word confidence is stored on a 0–100 scale by every local adapter: the
+# RapidOCR/PP-OCRv6 and EasyOCR workers multiply the model score (0–1) by 100,
+# Tesseract reports 0–100 natively, and comparison.py validates that range.
+# These routing thresholds must use the same scale. The values are the former
+# 0–1 hints restated, not newly measured accuracy cut-offs.
+LOW_CONFIDENCE_THRESHOLDS = {"tesseract": 70.0, "rapidocr": 85.0, "easyocr": 55.0, "ppocrv6": 85.0,
+                             "paddle_server": 85.0, "glmocr": None, "surya": None}
+
+
 def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids):
     """Local-only risk detection; all returned targets have image coordinates."""
     snapshot, raw = scope["snapshot_text"], baseline["raw"]
@@ -290,9 +305,21 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
             target["difficulty_reason"] = reason
             result.append(target)
 
+    # A baseline without confidence (Surya, GLM-OCR) sends every one of its blocks for review below,
+    # so each disagreement inside them would only repeat a span already sent: with a weak second
+    # engine (Tesseract on vertical pages, 34% CER) that is hundreds of calls for the same text.
+    blocks_cover_all = LOW_CONFIDENCE_THRESHOLDS[baseline["engine"]] is None and requested_ids is None
     for item in page.get("suggestions", []):
         if requested_ids is not None and item["id"] not in requested_ids:
             continue
+        if requested_ids is None and item.get("kind") == "whitespace":
+            # Engines that only split lines or space text differently agree on
+            # every character. Automatic routing does not spend a paid call on
+            # that; the suggestion stays in the editor and can still be sent
+            # when a person selects it explicitly.
+            continue
+        if blocks_cover_all:
+            continue                     # covered, not unlocalized: never counted as an unresolved target
         if item["baseline_run_id"] != baseline["id"] or any(
             e["engine"] not in runs or e["run_id"] != runs[e["engine"]]["id"] for e in item["evidence"]):
             if requested_ids is not None:
@@ -320,8 +347,9 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
         return result, seen, skipped
     # Thresholds are engine-specific routing hints, never cross-engine votes or
     # measured accuracy. A null score cannot establish a clean single reading.
-    threshold = {"tesseract": 70.0, "rapidocr": .85, "easyocr": .55, "ppocrv6": .85,
-                 "paddle_server": .85, "glmocr": None, "surya": None}[baseline["engine"]]
+    # Every local worker stores confidence on the validated 0-100 scale
+    # (ab_ocr.local_engines), so the routing hints use the same unit.
+    threshold = LOW_CONFIDENCE_THRESHOLDS[baseline["engine"]]
     spans = list(_word_spans(raw))
     for start, end, word in spans:
         value, confidence = word["text"], word.get("confidence")
@@ -431,6 +459,40 @@ def _attach_image(target, image, policy):
     target["image_id"] = image_id
     return {"id": image_id, "sha256": sha, "width": out_width, "height": out_height,
             "source_width": width, "source_height": height, "source_bbox": crop, "png_bytes": len(content)}
+
+
+DETAIL_OVERLAP = 48            # pixels shared by neighbouring tiles, so no glyph is cut in every tile
+DETAIL_MAX_TILES = 12
+
+
+def _attach_detail_tiles(target, image, policy, *, vertical=False):
+    """Full-resolution tiles of a large target crop, in reading order (vertical: right to left)."""
+    crop = target.get("bbox")
+    edge = policy.detail_tile
+    if not edge or crop is None:
+        return
+    left, top = max(0, math.floor(crop[0])), max(0, math.floor(crop[1]))
+    right, bottom = min(image.width, math.ceil(crop[2])), min(image.height, math.ceil(crop[3]))
+    width, height = right - left, bottom - top
+    if width <= edge and height <= edge:
+        return
+    step = edge - DETAIL_OVERLAP
+    columns = max(1, math.ceil((width - DETAIL_OVERLAP) / step))
+    rows = max(1, math.ceil((height - DETAIL_OVERLAP) / step))
+    if columns * rows > DETAIL_MAX_TILES:
+        return                                   # too large to tile sensibly: the overview alone
+    xs = [left + round(i * (width - edge) / (columns - 1)) if columns > 1 else left for i in range(columns)]
+    ys = [top + round(j * (height - edge) / (rows - 1)) if rows > 1 else top for j in range(rows)]
+    if vertical:
+        xs.reverse()
+    tiles = []
+    for x in xs:
+        for y in ys:
+            box = [x, y, min(right, x + edge), min(bottom, y + edge)]
+            region = {"bbox": box}
+            descriptor = _attach_image(region, image, _replace(policy, crop_padding=0))
+            tiles.append({"tile": len(tiles) + 1, "of": columns * rows, "image": descriptor})
+    target["detail_images"] = tiles
 
 
 def _attach_refinement_images(target, scope, image, policy):
@@ -567,6 +629,9 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                         reason = target["difficulty_reason"]
                         difficulty_reasons[reason] = difficulty_reasons.get(reason, 0) + 1
                     _attach_refinement_images(target, scope, image, policy)
+                    if phase == "visual" and policy.detail_tile:
+                        _attach_detail_tiles(target, image, policy,
+                                             vertical=project.page(scope["page_number"]).get("direction") == "vertical")
                     target["context_before"] = scope["snapshot_text"][max(0, target["start"] - policy.context_chars):target["start"]]
                     target["context_after"] = scope["snapshot_text"][target["end"]:target["end"] + policy.context_chars]
                     target_count += 1
@@ -600,7 +665,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                 batch_id = _hash([fingerprint, phase, scope["page_number"], [t["id"] for t, _ in group]])[:32]
                 images = {image["id"]: image for _, image in group}
                 for target, _ in group:
-                    for supplemental in target.get("supplemental_images", []):
+                    for supplemental in (*target.get("supplemental_images", []), *target.get("detail_images", [])):
                         descriptor = supplemental["image"]
                         images[descriptor["id"]] = descriptor
                 batch = {**copy.deepcopy(scope), "phase": phase, "scope_fingerprint": fingerprint,
@@ -682,6 +747,11 @@ def _prompt(batch, policy, visual):
     instruction = ("VISUAL PHASE: read the source image and compare the independent engine candidates. Propose recognition changes only when strokes support them. Unsupported-language candidates are not votes. Do not convert simplified/traditional forms or edit punctuation style."
                    if batch["phase"] == "visual" else
                    "EDITORIAL PHASE: examine ALL target text, including places where the engines agreed. Traditional conversion and punctuation editing are allowed only by enabled policy. Visual proposals below are PROVISIONAL evidence, not accepted text. Return MINIMAL, NONOVERLAPPING patches against ORIGINAL snapshot offsets. A punctuation patch must contain ONLY punctuation or whitespace in both before and after: for 我,你 → 我，你 return only , → ，, never include unchanged words or Han characters. Traditional patches must have the same length, change only known simplified-to-traditional correspondences, and preserve all other characters. Use SEPARATE patches for punctuation and traditional changes. A combined visual+traditional patch may retain the ORIGINAL before and its final traditional after, using a fully contained provisional visual proposal as its basis; include the complete final intended replacement and explain both steps. Preserve meaning and unknown glyphs; do not general-rewrite or modernize.")
+    if any(t.get("detail_images") for t in batch["targets"]):
+        instruction += (" DETAIL TILES: a target's first image is a reduced overview; its detail_images are the same area at"
+                        " full resolution (overlapping tiles in reading order, source_bbox gives each tile's place). Judge"
+                        " every glyph from the tiles. When the strokes in a tile clearly show the character, set"
+                        " uncertain=false; set uncertain=true only when even the tile does not settle it.")
     data = {"phase": batch["phase"], "policy": asdict(policy), "targets": batch["targets"], "images": batch["images"],
             "snapshot_length": len(batch["snapshot_text"]), "visual_proposals_provisional": visual,
             "target_codepoints": [{"target_id": t["id"], "end_offset": t["end"],
@@ -1012,7 +1082,17 @@ def _gemini_thinking_level(settings):
 
 
 def create_client(settings, api_key):
-    """Existing SDK factories, with one explicit key/model and no probing."""
+    """Existing SDK factories, with one explicit key/model and no probing.
+
+    SUBSCRIPTION_KEY instead of a key: Claude through the signed-in Claude Code CLI (claude_subscription)."""
+    from .claude_subscription import SUBSCRIPTION_KEY, SubscriptionClient, SubscriptionError
+    if api_key == SUBSCRIPTION_KEY:
+        if settings.provider != "anthropic":
+            raise AIReviewError("구독 계정 연결은 Claude(Anthropic)에서만 쓸 수 있습니다.")
+        try:
+            return SubscriptionClient()
+        except SubscriptionError as exc:
+            raise AIReviewError(str(exc)) from exc
     if not isinstance(api_key, str) or not api_key.strip() or any(c.isspace() for c in api_key.strip()) or "," in api_key:
         raise AIReviewError("선택한 제공사의 API 키 하나를 명시하세요.")
     if settings.provider == "gemini":
@@ -1041,6 +1121,18 @@ def _request(client, settings, prompt, images, *, response_schema=None):
         complete = getattr(response, "status", "completed") == "completed" and not refusals
         finish_reason = getattr(response, "status", None)
         usage = getattr(response, "usage", None)
+    elif settings.provider == "anthropic" and getattr(client, "subscription", False):
+        from types import SimpleNamespace
+        from .claude_subscription import SubscriptionError
+        try:
+            text, complete, finish_reason, tokens, actual = client.request(
+                model_name=settings.model, system=SYSTEM, prompt=prompt, images=images, schema=response_schema)
+        except SubscriptionError as exc:
+            error = AIReviewError(str(exc))
+            error.fatal = True                      # not signed in, plan limit reached, CLI missing
+            raise error from exc
+        usage = SimpleNamespace(**tokens)
+        response = SimpleNamespace(model=actual)
     elif settings.provider == "anthropic":
         parts = [{"type": "text", "text": prompt + "\nJSON Schema:\n" + json.dumps(response_schema)}]
         parts += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(content).decode("ascii")}} for content in images]
@@ -1086,6 +1178,8 @@ def _request(client, settings, prompt, images, *, response_schema=None):
                 "response_schema_sha256": _hash(response_schema)}
     if isinstance(finish_reason, str) and len(finish_reason) <= 80:
         metadata["finish_reason"] = finish_reason
+    if getattr(client, "subscription", False):
+        metadata["transport"] = "claude-code-subscription"   # plan limits, no per-token charge
     if refusals:
         raw_refusal = "\n".join(refusals)
         metadata.update(refusal=True, refusal_text=raw_refusal[:64_000], refusal_text_sha256=_text_hash(raw_refusal),
@@ -1132,7 +1226,7 @@ def _assert_scope(project, plan):
 
 def _fatal_request_error(exc):
     code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-    return code in (400, 401, 403, 404, 422, 429) or isinstance(exc, (OSError, TimeoutError, ConnectionError)) or type(exc).__module__.split(".")[0] in ("httpx", "httpcore")
+    return getattr(exc, "fatal", False) or code in (400, 401, 403, 404, 422, 429) or isinstance(exc, (OSError, TimeoutError, ConnectionError)) or type(exc).__module__.split(".")[0] in ("httpx", "httpcore")
 
 
 def run_plan(project, plan, *, api_key, should_stop=None, on_result=None, client_factory=None):

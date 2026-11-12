@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from .blocks import Block, anchor_map
-from .grades import styled_runs, GRADE_STYLE, STYLE_ALIAS
+from .grades import styled_runs, GRADE_STYLE, SIMPLE_GRADE_STYLE, STYLE_ALIAS
 from .marks import split_marks
 from .presets import Preset, resolve_preset
 
@@ -178,6 +178,7 @@ class DefaultLook:
     모든 문단은 '바탕글'(문단 모양 0, 스타일 0)을 명시한다. python-hwpx 는 앞 문단의 모양을 물려주므로, 제목(개요 스타일) 다음 문단들이
     개요 모양을 받아 한컴이 "가. 나. 다." 자동 번호를 붙이던 문제를 막는다."""
     count_pieces = False             # 등급 수를 조각(seg)마다 — 예전 기본 모양 그대로
+    grade_style = GRADE_STYLE        # 단순 표시면 SIMPLE_GRADE_STYLE(형광 바탕 + 글자색만)
     SIZE = {"body": 11, "small": 9.5, "chk": 9, "note": 9, "meta": 8}
 
     def __init__(self, page_breaks: bool = True, author: str = MEMO_AUTHOR):
@@ -245,7 +246,7 @@ class DefaultLook:
             return self.S[para.key]
         key = (para.key, kind)
         if key not in self._grade:                                     # 본문·소주 크기에 맞춘 등급 글자 모양(같은 것은 한 번만 만든다)
-            g = GRADE_STYLE[kind]
+            g = self.grade_style[kind]
             kw = dict(font=FONT_BODY, size=self.SIZE.get(para.key, 11), bold=g["bold"], color=g["color"])
             if g["highlight"]:
                 kw["highlight"] = g["highlight"]
@@ -322,6 +323,7 @@ class TemplateLook:
     한문 문단은 줄 나눔을 '글자 단위'로 바꾼 문단 모양을 쓴다: 양식 스타일 대부분이 '어절 단위'(KEEP_WORD)라 띄어쓰기 없는 한문이 긴 덩어리째
     다음 줄로 넘어가며 줄 가운데 큰 빈칸이 생긴다. 스타일 연결은 그대로라 한글에서 스타일을 다시 적용하면 양식대로 돌아간다."""
     count_pieces = True              # 등급 수를 조각(cut)마다 — 예전 양식 작성기 그대로
+    grade_style = GRADE_STYLE
 
     def __init__(self, template: str, preset: Preset | None = None, author: str = "YeonE_OCR"):
         """preset: 쓰임 → 스타일 이름을 줄 짜임 규칙. None 이면 kaibao(본초학 양식 이름 — 예전 PARA_STYLES·CHAR_STYLES 그대로).
@@ -410,7 +412,7 @@ class TemplateLook:
             if kind == "note":
                 kw = dict(color=COLOR_NOTE)
             else:
-                g = GRADE_STYLE[STYLE_ALIAS.get(kind, kind)]
+                g = self.grade_style[STYLE_ALIAS.get(kind, kind)]
                 kw = dict(color=g["color"])
                 if g["bold"]:
                     kw["bold"] = True                                   # 굵기는 등급이 굵게일 때만 — 아니면 양식 글자 모양(본경 조문·제목)의 굵기를 그대로
@@ -482,12 +484,14 @@ class TemplateLook:
 
 
 def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, large_min_mm: float = 120,
-               highlight: bool = True, memos: bool = True) -> dict:
+               highlight: bool = True, memos: bool = True, simple: bool = False) -> dict:
     """blocks 를 look 의 모양으로 out_path 에 쓴다. highlight=False 면 등급 색·형광펜·밑줄 없이 글자만(〔〕 표기는 그대로).
     memos=False 면 고지를 메모 대신 회색 〔고지: …〕 로 글 속에. 돌려주는 값: 문단·제목·그림·표·의심 표시·등급·메모·책갈피 수와
     다시 열어 센 그림(images_in_file)·python-hwpx 검사(validate_issues·validate_messages), 그리고 look 의 통계(양식: styles·missing·template_dropped …)."""
     from hwpx import HwpxDocument
     from .hwpx_memo import MemoWriter
+    if simple:
+        look.grade_style = SIMPLE_GRADE_STYLE                          # 밑줄·굵게 없이 형광 바탕 + 글자색
     doc = look.open(highlight)
     mw = MemoWriter(doc, look.author)
     stats = {"paragraphs": 0, "headings": 0, "images": 0, "tables": 0, "uncertain_items": 0, "marks": 0, "page_breaks": 0,
@@ -503,7 +507,9 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
 
     def write(para: Para) -> None:
         text, notes = para.text, list(para.notes)
-        if not memos and notes:                                        # 메모를 쓰지 않으면 고지를 글 끝에 회색으로
+        if simple:
+            notes = []                                                 # 단순 표시: 메모도 글 속 고지도 넣지 않는다(보고·검수 화면에 있음)
+        elif not memos and notes:                                      # 메모를 쓰지 않으면 고지를 글 끝에 회색으로
             text = text + "".join(f"〔고지: {m}〕" for _, m in notes); notes = []
         amap = anchor_map(para.anchors, len(text))
         if para.skip_if_empty and not text and not amap:

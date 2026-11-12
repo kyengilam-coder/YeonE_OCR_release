@@ -1734,9 +1734,10 @@ def run(report_path: Path) -> int:
                 return project
             settings = AISettings("openai", "selective-offline-fixture", max_calls=2)
             policy = ReviewPolicy(selective=True)
-            clean = prepare_plan(project_with_confidence(.99), [1], policy, settings=settings)
+            # Local workers store confidence on the 0-100 scale (ab_ocr.local_engines; PP-OCRv6 threshold 85).
+            clean = prepare_plan(project_with_confidence(99), [1], policy, settings=settings)
             assert clean.summary["calls"] == 0
-            project = project_with_confidence(.2)
+            project = project_with_confidence(20)
             before = project.page(1)["runs"]
             plan = prepare_plan(project, [1], policy, settings=settings)
             assert plan.summary["calls"] == 1 and plan.summary["full_page_images"] == 0

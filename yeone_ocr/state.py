@@ -15,6 +15,90 @@ BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "preset": str, "bold_s
 LAST_COST = "last_cost.json"                   # 결과 폴더의 마지막 실행 전 비용 어림(창의 장부 — 실행을 고른 뒤에만 쓴다). 결과물이 아니라 원본이 바뀌어 보관할 때도 그대로 둔다
 
 
+# ---- 결과 폴더의 짜임 ----
+# 사람이 여는 것은 맨 위에 셋뿐: out/(문서) · review.html(검수 화면) · report.md(보고). 판독 기록·쪽 이미지·비교 프로젝트 같은 작업 자료는
+# 모두 INTERNAL_DIR 한 폴더 안에 둔다. 작업 폴더(Work.dir — 명령의 --work)의 이름이 INTERNAL_DIR 이면 그 부모가 결과 폴더이고,
+# 아니면(명령줄의 work/<이름> · 이전 판이 만든 폴더) 작업 폴더가 곧 결과 폴더다 — 그 안의 짜임은 두 경우 모두 같다.
+INTERNAL_DIR = "작업자료"
+PUBLIC_NAMES = ("out", "review.html", "report.md")
+_WORK_MARKS = ("state.json", "source.json", "readings", "pages", "textlayer", "comparison", "collate", BOOK_SETTINGS, LAST_COST)
+
+
+def public_root(work_dir) -> Path:
+    """작업 폴더의 결과 폴더(사람이 여는 out · review.html · report.md 가 놓이는 곳)."""
+    d = Path(work_dir)
+    return d.parent if d.name == INTERNAL_DIR else d
+
+
+def has_flat_work(root) -> bool:
+    """이전 판처럼 작업 자료가 결과 폴더 맨 위에 펼쳐져 있는가(판독 기록·상태 파일 등이 하나라도 있음)."""
+    root = Path(root)
+    return any((root / name).exists() for name in _WORK_MARKS)
+
+
+def work_dir_in(root) -> Path:
+    """결과 폴더(root)의 작업 폴더. 이미 작업자료/ 가 있으면 그곳, 이전 판의 자료가 맨 위에 펼쳐져 있으면 그 자리 그대로(옮기지 않는다 —
+    판독 기록은 다시 사려면 돈이 든다), 새 폴더면 작업자료/."""
+    root = Path(root)
+    inner = root / INTERNAL_DIR
+    if inner.is_dir() or not has_flat_work(root):
+        return inner
+    return root
+
+
+def tidy_result_dir(root) -> dict:
+    """이전 판이 결과 폴더 맨 위에 펼쳐 둔 작업 자료를 작업자료/ 로 옮긴다(같은 폴더 안의 이름 바꾸기 — 복사하지 않는다). out · review.html ·
+    report.md 는 그대로 둔다. 옮기지 못한 것이 하나라도 있으면 옮긴 것을 모두 되돌리고 OSError 를 낸다(반쯤 옮긴 폴더를 남기지 않는다).
+    돌려주는 값 {"moved": [이름…], "work": 작업 폴더}. 이미 정리된 폴더·빈 폴더는 아무것도 옮기지 않는다."""
+    root = Path(root)
+    inner = root / INTERNAL_DIR
+    if inner.exists() and (inner.is_symlink() or not inner.is_dir()):
+        raise ValueError("작업자료 자리에 폴더가 아닌 것이 있습니다")
+    if inner.is_dir() or not has_flat_work(root):
+        return {"moved": [], "work": inner}
+    entries = [e for e in sorted(root.iterdir()) if e.name not in PUBLIC_NAMES and e.name != INTERNAL_DIR]
+    if any(e.is_symlink() for e in entries):
+        raise ValueError("바로 가기(링크)가 있는 결과 폴더는 옮기지 않습니다")
+    staging = free_name(root / (INTERNAL_DIR + ".옮기는중"))
+    staging.mkdir()
+    moved = []
+    try:
+        for entry in entries:
+            os.replace(entry, staging / entry.name)
+            moved.append(entry)
+        os.replace(staging, inner)                       # 다 옮긴 뒤에야 작업자료/ 가 생긴다 — 그전까지는 work_dir_in 이 이전 자리를 본다
+    except OSError:
+        for entry in reversed(moved):
+            try:
+                os.replace(staging / entry.name, entry)
+            except OSError:
+                pass
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
+        raise
+    _repoint_state(inner, root)
+    return {"moved": [e.name for e in moved], "work": inner}
+
+
+def _repoint_state(inner: Path, root: Path) -> None:
+    """state.json 에 적어 둔 비교 프로젝트의 절대 경로를 옮긴 자리로 고친다(창이 그 경로로 프로젝트를 연다). 못 고쳐도 판독에는 지장이 없다."""
+    path = inner / "state.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
+        old = state.get("local_first_project") if isinstance(state, dict) else None
+        if not isinstance(old, str):
+            return
+        rel = os.path.relpath(old, root)
+        if rel.startswith("..") or os.path.isabs(rel) or not (inner / rel).is_file():
+            return
+        state["local_first_project"] = str(inner / rel)
+        write_atomic(path, json.dumps(state, ensure_ascii=False, indent=1))
+    except (OSError, ValueError):
+        pass
+
+
 def _tmp_path(path: Path) -> Path:
     """같은 폴더의 숨긴 임시 이름(스레드마다 다르게). 이름이 '.' 으로 시작해 p*.json 같은 찾기에 걸리지 않는다."""
     return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -200,7 +284,10 @@ class Work:
         self.textlayer_dir = self.dir / "textlayer"
         self.readings_dir = self.dir / "readings"
         self.crops_dir = self.dir / "crops"
-        self.out_dir = self.dir / "out"
+        self.public = public_root(self.dir)             # 결과 폴더: out · review.html · report.md (작업 폴더가 작업자료/ 면 그 부모)
+        self.out_dir = self.public / "out"
+        self.review_path = self.public / "review.html"
+        self.report_path = self.public / "report.md"
         self.state_path = self.dir / "state.json"
         self._page_locks: dict[int, threading.RLock] = {}
         if not initialize:                              # 비용 미리보기: 폴더·원본 지문을 새로 쓰지 않는다
@@ -227,15 +314,12 @@ class Work:
         except (ValueError, OSError):
             pass
         from .pdfio import image_sources
+        from ab_ocr.ocr import stable_file_sha256
         sources = image_sources(self.pdf_path) if self.pdf_path.is_dir() else [self.pdf_path]
         digest = hashlib.sha256()
         for src in sources:
             digest.update(src.name.encode("utf-8") + b"\0")
-            file_digest = hashlib.sha256()
-            with src.open("rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    file_digest.update(chunk)
-            digest.update(file_digest.digest())
+            digest.update(bytes.fromhex(stable_file_sha256(src)))
         current = {"sha256": digest.hexdigest(), "path": str(self.pdf_path.resolve()),
                    "image_pipeline": 2, "dpi": int(dpi) if dpi is not None else previous.get("dpi")}
         same = previous.get("sha256") == current["sha256"] and previous.get("image_pipeline") == current["image_pipeline"]
@@ -259,15 +343,17 @@ class Work:
             previous, current, same = self._source_state(dpi)
             names = ("pages", "textlayer", "readings", "crops", "out", "collate", "eval", "state.json",
                      "review.html", "report.md", "confusion.json", "context.json", "source.json")
-            populated = any((self.dir / n).is_file() or
-                            ((self.dir / n).is_dir() and any((self.dir / n).iterdir())) for n in names)
+            where = lambda n: (self.public if n in PUBLIC_NAMES else self.dir) / n    # 문서·검수 화면·보고는 결과 폴더에
+            populated = any(where(n).is_file() or
+                            (where(n).is_dir() and any(where(n).iterdir())) for n in names)
             if not same and populated:
                 root = self.dir.resolve()
                 archive_root = root / "archives"
                 if archive_root.is_symlink() or archive_root.resolve() != archive_root:
                     raise ValueError("잘못된 이전 결과 보관 경로")
-                sources_to_move = [root / name for name in names if (root / name).exists()]
-                if any(src.resolve().parent != root or src.is_symlink() for src in sources_to_move):
+                sources_to_move = [(self.public.resolve() if name in PUBLIC_NAMES else root) / name for name in names if where(name).exists()]
+                allowed = {root, self.public.resolve()}
+                if any(src.resolve().parent not in allowed or src.is_symlink() for src in sources_to_move):
                     raise ValueError("작업 폴더 밖의 결과는 옮기지 않습니다")
                 archive = free_name(archive_root / ("input-" + time.strftime("%Y%m%d-%H%M%S")))
                 archive.mkdir(parents=True)

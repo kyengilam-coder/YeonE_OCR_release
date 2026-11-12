@@ -416,7 +416,7 @@ class Documents(unittest.TestCase):
         legacy = [b.text for b in assemble_blocks([r], grades=False)]
         for grades in (True, False):
             for ctx in (True, False):
-                for mode in ("notice", "all", "inline"):
+                for mode in ("none", "notice", "all", "inline"):
                     bl = assemble_blocks([r], grades=grades, context=analyze(corpus() + [r], [r]) if ctx else None, memo_mode=mode)
                     self.assertEqual([b.text for b in bl], legacy)
                     for b in bl:
@@ -436,6 +436,35 @@ class Documents(unittest.TestCase):
             out3 = os.path.join(td, "i.hwpx"); build_hwpx(assemble_blocks([r], memo_mode="inline"), out3, memos=False)
             x3 = zipfile.ZipFile(out3).read("Contents/section0.xml").decode()
             self.assertEqual(x3.count('type="MEMO"'), 0); self.assertIn("[구조 검사 오류]", x3); self.assertIn("〔고지: [본문에 표시되지 않은 확인 항목]", x3); self.assertIn("〔고지: [연어OCR 표시 범례", x3)
+
+    def test_color_only_mode_writes_no_memos_and_keeps_text_and_colors(self):
+        """색상만 표시(none — 일반 OCR 기본): 쪽 고지·글자 메모·범례를 문서에 넣지 않는다. 글·등급 색·〔〕 표기는 고지 사항만 메모와 같고,
+        고지는 page_grades 에 그대로 남아 검수 화면이 보인다. 로컬 우선의 '의심 구간' 고지처럼 쪽마다 붙던 메모가 쌓이지 않는다."""
+        from yeone_ocr.hwpx_builder import build_hwpx
+        pages = []
+        for n in (3, 4, 5):
+            r = rec(n, ["大黃日一兩又能〔入/人〕肝經主之" + FILLER, FILLER * 2], adj=[adj("日", "曰", "日", "大黃", "一兩", "〔曰/日〕", "黃日一")],
+                    unc=[{"ctx": "로컬 인식 의심 구간의 AI 검증·수정 제안을 비교·교정 창에서 확인하세요."}])
+            r["verify"] = [{"level": "error", "rule": "열 순서", "where": "r1", "msg": "겹침"}]
+            pages.append(r)
+        ctx = analyze(corpus() + pages, pages)
+        noticed = assemble_blocks(pages, context=ctx, memo_mode="notice")
+        plain = assemble_blocks(pages, context=ctx, memo_mode="none")
+        self.assertEqual(sum(len(b.memos) for b in noticed), 1 + 3)                             # 범례 + 쪽마다 고지 하나
+        self.assertEqual(sum(len(b.memos) for b in plain), 0)
+        self.assertEqual([(b.type, b.text, b.spans) for b in plain], [(b.type, b.text, b.spans) for b in noticed])
+        self.assertTrue(all(any("의심 구간" in x for x in page_grades(r, memo_mode="none").page_notices) for r in pages))
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "c.hwpx"); st = build_hwpx(plain, out)
+            x = zipfile.ZipFile(out).read("Contents/section0.xml").decode()
+            self.assertEqual((x.count('type="MEMO"'), st["memos"]), (0, 0))
+            self.assertNotIn("〔고지", x); self.assertNotIn("범례", x)
+            self.assertEqual((st["green"], st["marks"]), (3, 3))                                 # 등급 색·〔a/b〕 표기는 그대로
+            from contextlib import closing
+            from hwpx import HwpxDocument
+            with closing(HwpxDocument.open(out)) as opened:
+                texts = [p.text for p in opened.paragraphs]
+            self.assertEqual(sum("大黃日一兩又能〔入/人〕肝經主之" in t for t in texts), 3)
 
     def test_legend_lists_pages_without_pass2(self):
         a = rec(3, ["大黃一兩" + FILLER, FILLER]); a["pass2"] = {}
@@ -461,7 +490,8 @@ class Cli(unittest.TestCase):
         from yeone_ocr import cli
         ap = cli.build_parser()
         a = ap.parse_args(["build", "x.pdf", "--memo", "inline", "--no-context"]); self.assertEqual((a.memo, a.no_context), ("inline", True))
-        self.assertEqual(ap.parse_args(["run", "x.pdf"]).memo, "notice")
+        self.assertEqual(ap.parse_args(["run", "x.pdf"]).memo, "none")                 # 일반 OCR 도 기본은 색상만(메모 없음)
+        self.assertEqual(ap.parse_args(["build", "x.pdf", "--memo", "notice"]).memo, "notice")
         from yeone_ocr.collate.run import memo_mode
         self.assertEqual(memo_mode(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx", "--no-memo"])), "inline")
         self.assertEqual(memo_mode(ap.parse_args(["collate", "x.pdf", "--hwpx", "b.hwpx"])), "none")

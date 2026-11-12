@@ -240,7 +240,9 @@ class ProgressCardRealTk(unittest.TestCase):
     def test_2_tools_card_toggles_between_progress_and_log(self):
         app = self.app; app.select_tab(0); self.settle()
         original_two_col = app._two_col
+        simple = app.v_simple.get()
         with mock.patch.object(self.gui, "write_config"):
+            app.set_simple_view(False, save=False)                      # 장부·고급 도구 카드는 자세히 보기에만 놓인다(간단히 보기 — test_2b)
             app.toggle_advanced(); self.settle()
             try:
                 # Both responsive layouts are valid. In one column the ledger
@@ -274,7 +276,76 @@ class ProgressCardRealTk(unittest.TestCase):
             finally:
                 app._two_col = original_two_col
                 app.toggle_advanced(); self.settle()
-        self.assertEqual(app._adv_card.winfo_manager(), "")
+            self.assertEqual(app._adv_card.winfo_manager(), "")
+            app.set_simple_view(simple, save=False); self.settle()
+
+    def test_2b_simple_view_keeps_only_source_run_progress_and_log(self):
+        """간단히 보기(기본): 책 카드는 정체 열 + 쪽 범위 한 칸, 단계 띠는 이름만, 장부·고급 도구 카드와 '이 책의 설정' 판·결과 저장 줄은 놓지 않는다.
+        자세히 보기로 바꾸면 모두 돌아오고, 같은 변수를 쓰는 쪽 범위 값은 두 보기에서 같다."""
+        app = self.app; gui = self.gui; app.select_tab(0); app._use_pdf(str(self.pdf)); self.wait_strip()
+        simple = app.v_simple.get(); pages = app.v_pages.get(); w = app._book_cards[0]
+        with mock.patch.object(gui, "write_config") as saved:
+            try:
+                app.set_simple_view(True); self.settle()
+                self.assertEqual(saved.call_count, 0 if simple else 1)                              # 보기가 바뀔 때만 설정에 남긴다
+                self.assertTrue(app.cfg["simple_view"])
+                for two_col in (False, True):
+                    with self.subTest(two_col=two_col):
+                        app._two_col = two_col; app._place_cards()
+                        self.assertEqual(app._led_card.winfo_manager(), ""); self.assertEqual(app._adv_card.winfo_manager(), "")
+                        self.assertEqual(app._prog_card.grid_info().get("in"), app._work_left)
+                        self.assertEqual(app._log_card.grid_info().get("in"), app._work_left)
+                self.assertEqual(w["panel"].winfo_manager(), ""); self.assertEqual(w["out_row"].winfo_manager(), "")
+                self.assertEqual(w["simple_pages"].winfo_manager(), "pack")
+                self.assertEqual(w["row_toggle"].winfo_manager(), "")                              # 판이 없으니 실행 중 '이 책의 설정 · 잠김 ▸'도 없다
+                entry = next(c for c in w["simple_pages"].winfo_children() if c.winfo_class() == "TEntry")
+                self.assertEqual(str(entry.cget("textvariable")), str(app.v_pages))                # 판의 칸과 같은 변수
+                self.assertIn(entry, app._lock_entries)                                            # 실행 중에는 함께 잠긴다
+                self.assertTrue(all(not c["lines"].winfo_children() for c in app._band_cols))      # 단계 띠: 동그라미·이름만
+                self.assertEqual([c["name"].cget("text").strip() for c in app._band_cols][3], "문서 만들기")
+                self.assertEqual(app.b_adv.winfo_manager(), "")                                    # 고급 도구는 [더 보기] 메뉴에서
+                app.v_pages.set("2-3"); self.settle()
+                app.set_simple_view(False); self.settle()
+                self.assertFalse(app.cfg["simple_view"]); self.assertEqual(saved.call_count, 1 if simple else 2)
+                self.assertEqual(w["panel"].winfo_manager(), "grid"); self.assertEqual(w["out_row"].winfo_manager(), "grid")
+                self.assertEqual(w["simple_pages"].winfo_manager(), "")
+                self.assertEqual(w["row_toggle"].winfo_manager(), "pack")
+                self.assertEqual(w["pages_parts"][0].get(), "2-3")
+                self.assertTrue(any(c["lines"].winfo_children() for c in app._band_cols))
+                self.assertEqual(app._led_card.winfo_manager(), "grid"); self.assertEqual(app.b_adv.winfo_manager(), "pack")
+                app.open_advanced_tools(); self.settle()                                           # 자세히 보기: 고급 도구 카드를 펼치고 접는다
+                self.assertEqual(app._adv_card.winfo_manager(), "grid")
+                app.open_advanced_tools(); self.settle()
+                self.assertEqual(app._adv_card.winfo_manager(), "")
+                app.set_simple_view(True); self.settle()
+                app.open_advanced_tools(); self.settle()                                           # 간단히 보기: 자세히 보기로 바꾸고 펼친다
+                self.assertFalse(app.v_simple.get()); self.assertEqual(app._adv_card.winfo_manager(), "grid")
+                app.toggle_advanced(); self.settle()
+            finally:
+                app.v_pages.set(pages)
+                if app.v_adv.get():
+                    app.toggle_advanced()
+                app.set_simple_view(simple, save=False); self.settle()
+
+    def test_2c_header_is_one_bar_with_a_more_menu(self):
+        """명령 띠는 한 줄: 탭 넷(일반·책갈피·이미지 | 설정) · '자세히' 미닫이 · [더 보기]. 예전 둘째 줄의 [모델 비교·교정]은 결과 단추 줄과 메뉴에 있다."""
+        app = self.app; gui = self.gui
+        self.assertEqual([str(b.cget("text")) for b in app._tab_buttons], ["일반 OCR", "책갈피 OCR", "이미지 OCR", "설정"])
+        self.assertEqual([int(b.cget("value")) for b in app._tab_buttons], [0, 1, 2, 3])
+        self.assertEqual(app.b_comparison.cget("text"), "모델 비교·교정"); self.assertIn(app.b_comparison, app.buttons)
+        self.assertEqual(app.b_comparison.winfo_parent(), app.b_open_hwpx.winfo_parent())
+        self.assertFalse(hasattr(app, "b_update"))
+        with mock.patch.object(gui.tk.Menu, "tk_popup") as popup, mock.patch.object(gui.tk.Menu, "grab_release"):
+            gui.App._post_menu(app)
+            popup.assert_called_once()
+        menu = app._menu
+        labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1) if menu.type(i) != "separator"]
+        self.assertEqual(labels[:5], ["OCR 모델 비교·교정…", "비용 미리 보기", "결과 폴더 정리…", "자세히 보기", "고급 도구 펼치기"])
+        self.assertEqual(labels[5:7], ["도움말", "업데이트 확인"]); self.assertIn(gui.__version__, labels[-1])
+        self.assertEqual(str(menu.entrycget(menu.index("end"), "state")), "disabled")
+        gui.App._draw_glow(app, 640)                                                               # 띠 아래 빛줄: 강조색 → 청록
+        fills = [app._header_rule.itemcget(i, "fill") for i in app._header_rule.find_all()]
+        self.assertEqual((fills[0], fills[-1]), (app.colors["SEAL"], app.colors["GLOW"])); self.assertEqual(len(fills), 48)
 
     def test_3_running_moves_band_and_locks_tools_not_open_buttons(self):
         app = self.app; app.select_tab(0); app._use_pdf(str(self.pdf)); self.wait_strip()

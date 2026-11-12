@@ -47,6 +47,6 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install -r requirements.txt pytest
+      - run: python -m pip install -r requirements.txt pytest httpx   # httpx: test_comparison_ai_sdk builds SDK transports
       - name: Check portable product logic (platform-specific cases may skip)
         run: python -B -X utf8 -m pytest tests -q --capture=sys

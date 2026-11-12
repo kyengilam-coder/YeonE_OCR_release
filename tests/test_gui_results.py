@@ -29,7 +29,8 @@ class ResultFilesGui(unittest.TestCase):
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.source = self.root / "캡처 [1].png"
         self.source.write_bytes(b"synthetic source")
-        self.work = self.gui.work_dir_for(str(self.source))
+        self.work = self.gui.work_dir_for(str(self.source))          # 작업 폴더(작업자료)
+        self.out = self.gui.public_root(self.work) / "out"             # 문서는 결과 폴더의 out — 작업자료 밖
         self.open_path = self.stack.enter_context(mock.patch.object(self.gui, "open_path"))
         self.info = self.stack.enter_context(mock.patch.object(self.gui.messagebox, "showinfo"))
         self.error = self.stack.enter_context(mock.patch.object(self.gui.messagebox, "showerror"))
@@ -41,7 +42,7 @@ class ResultFilesGui(unittest.TestCase):
         return app
 
     def result(self, stem, *, work=None, tick=1):
-        path = (work or self.work) / "out" / (stem + ".hwpx")
+        path = self.gui.public_root(work or self.work) / "out" / (stem + ".hwpx")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"synthetic result")
         timestamp = 1_700_000_000_000_000_000 + tick * 1_000_000_000
@@ -54,7 +55,7 @@ class ResultFilesGui(unittest.TestCase):
                      "다른 캡처", "캡처 1_p001-003", self.source.stem + "_p001-003_교정"):
             self.result(name, tick=10)
         # A directory with a plausible HWPX name is not a result document.
-        (self.work / "out" / (self.source.stem + "_p001-005.hwpx")).mkdir()
+        (self.out / (self.source.stem + "_p001-005.hwpx")).mkdir()
         self.assertEqual(self.gui.latest_result_hwpx(str(self.source), self.work), expected)
 
     def test_latest_partial_range_wins_until_full_document_is_rebuilt(self):
@@ -82,7 +83,7 @@ class ResultFilesGui(unittest.TestCase):
         self.result(self.source.stem, tick=10)
         app._sync_output_location()
         first_location = app.v_output_dir.get()
-        self.assertEqual(Path(first_location), (self.work / "out").resolve())
+        self.assertEqual(Path(first_location), (self.out).resolve())
 
         next_source = self.root / "다음 캡처.png"
         next_source.write_bytes(b"another synthetic source")
@@ -90,7 +91,7 @@ class ResultFilesGui(unittest.TestCase):
         expected = self.result(next_source.stem, work=next_work)
         app.v_pdf.set(str(next_source))
         app._sync_output_location()
-        self.assertEqual(Path(app.v_output_dir.get()), (next_work / "out").resolve())
+        self.assertEqual(Path(app.v_output_dir.get()), (self.gui.public_root(next_work) / "out").resolve())
         self.assertNotEqual(first_location, app.v_output_dir.get())
         self.gui.App.open_hwpx(app)
         self.open_path.assert_called_once_with(expected)
@@ -98,10 +99,10 @@ class ResultFilesGui(unittest.TestCase):
     def test_missing_result_reports_intended_location_without_opening_or_creating_it(self):
         app = self.app()
         app._sync_output_location()
-        self.assertEqual(Path(app.v_output_dir.get()), (self.work / "out").resolve())
+        self.assertEqual(Path(app.v_output_dir.get()), (self.out).resolve())
         self.gui.App.open_hwpx(app)
         self.open_path.assert_not_called()
-        self.assertIn(str(self.work / "out"), self.info.call_args.args[1])
+        self.assertIn(str(self.out), self.info.call_args.args[1])
         self.assertFalse(self.work.exists())
 
     def test_interim_only_is_not_opened_as_completed_result(self):
@@ -156,7 +157,7 @@ class ResultFilesGui(unittest.TestCase):
         app = self.app()
         with mock.patch("yeone_ocr.collate.section_editor.BookmarkSectionEditor") as constructor:
             self.gui.App.open_result_editor(app)
-            self.assertIn(str(self.work / "out"), self.info.call_args.args[1])
+            self.assertIn(str(self.out), self.info.call_args.args[1])
             self.assertFalse(self.work.exists())
             self.result(self.source.stem)
             app.running = True
@@ -202,7 +203,7 @@ class ResultFilesGui(unittest.TestCase):
     def test_missing_save_folder_is_reported_without_creating_it(self):
         self.gui.App.open_output_folder(self.app())
         self.open_path.assert_not_called()
-        self.assertIn(str(self.work / "out"), self.info.call_args.args[1])
+        self.assertIn(str(self.out), self.info.call_args.args[1])
         self.assertFalse(self.work.exists())
 
     def test_shell_open_failures_are_reported_for_document_and_folder(self):

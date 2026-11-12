@@ -6,6 +6,8 @@ its original text, engine identity, model hashes and rendered-image coordinates.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import hashlib
 import json
 import math
@@ -247,7 +249,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
         _cancelled,
         _render,
         _run,
-        file_sha256,
+        stable_file_sha256,
     )
     from .runtime import subprocess_environment
     start = time.monotonic()
@@ -275,7 +277,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
             raise OCRError("EasyOCR 번체 세로쓰기의 보조 인식 모델이 없습니다. EasyOCR 설치를 완료하세요: " + auxiliary)
         if auxiliary not in model_names:
             model_names.append(auxiliary)
-    original_hash = file_sha256(source)
+    original_hash = stable_file_sha256(source)
     info["used_model_names"] = model_names
     with tempfile.TemporaryDirectory(prefix=f"abocr-{engine}-") as folder:
         image_path, output = Path(folder) / "input.png", Path(folder) / "reading.json"
@@ -287,6 +289,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
                 *info.get("worker_args", [])]
         if engine in ("easyocr", "rapidocr", "ppocrv6"):
             argv.extend(["--direction", direction])
+        argv += _verification_args(engine)
         if engine == "glmocr":
             argv += ["--timeout", str(timeout)]
         try:
@@ -309,7 +312,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
             payload = parse_worker_result(output, width, height, engine=engine)
         if engine in VERTICAL_RTL_ENGINES and direction == "vertical":
             payload = order_vertical_payload(payload)
-    if file_sha256(source) != original_hash:
+    if stable_file_sha256(source) != original_hash:
         raise OCRError("인식 중 원본 파일이 변경되어 결과를 적용하지 않습니다.")
     _cancelled(should_stop)
     return _recognition_result(payload, info, source, original_hash, page_number, dpi, width, height,
@@ -344,6 +347,58 @@ def _recognition_result(payload, info, source, original_hash, page_number, dpi, 
                              image_height=height, engine_version=payload["engine_version"], languages=languages,
                              psm=None, duration_seconds=duration, preprocessing=preprocessing,
                              engine_metadata=metadata, engine=info["engine"])
+
+
+# Extra per-line passes of PP-OCRv6 (recrop re-reading) and EasyOCR (font glyph matching)
+# on horizontal Chinese pages. On by default; local_first can switch them off for a run.
+VERIFYING_ENGINES = ("ppocrv6", "easyocr")
+_LINE_VERIFICATION = {"enabled": True}
+
+
+@contextmanager
+def line_verification(enabled=True):
+    previous, _LINE_VERIFICATION["enabled"] = _LINE_VERIFICATION["enabled"], bool(enabled)
+    try:
+        yield
+    finally:
+        _LINE_VERIFICATION["enabled"] = previous
+
+
+def line_verification_enabled() -> bool:
+    return _LINE_VERIFICATION["enabled"]
+
+
+def _verification_args(engine) -> list[str]:
+    extra = [] if _LINE_VERIFICATION["enabled"] or engine not in VERIFYING_ENGINES else ["--no-line-verification"]
+    return extra + (_easyocr_args() if engine == "easyocr" else [])
+
+
+# EasyOCR runtime: CPU threads and recognition batch (worker defaults 2 and 1).
+EASYOCR_DEFAULTS = {"threads": 2, "batch": 1}
+_EASYOCR = dict(EASYOCR_DEFAULTS)
+
+
+@contextmanager
+def easyocr_runtime(threads=2, batch=1):
+    if type(threads) is not int or not 1 <= threads <= 32 or type(batch) is not int or not 1 <= batch <= 64:
+        raise ValueError("EasyOCR 스레드는 1~32, 묶음은 1~64입니다.")
+    previous = dict(_EASYOCR)
+    _EASYOCR.update(threads=threads, batch=batch)
+    try:
+        yield
+    finally:
+        _EASYOCR.update(previous)
+
+
+def easyocr_runtime_changes() -> dict:
+    """Non-default EasyOCR settings (empty when the defaults are in use)."""
+    return {key: value for key, value in _EASYOCR.items() if value != EASYOCR_DEFAULTS[key]}
+
+
+def _easyocr_args() -> list[str]:
+    changes = easyocr_runtime_changes()
+    return ((["--threads", str(changes["threads"])] if "threads" in changes else [])
+            + (["--batch-size", str(changes["batch"])] if "batch" in changes else []))
 
 
 def _device(info, requested=None):
@@ -471,6 +526,8 @@ class RecognitionSession:
                 args = ["--profile", "server", "--provider", selected_device]
             elif self.engine in ("surya", "glmocr"):
                 args += ["--device", selected_device]
+            elif self.engine in ("easyocr", "ppocrv6", "rapidocr"):
+                args += ["--direction", self.direction, *_verification_args(self.engine)]
             if self.engine == "glmocr":
                 args += ["--timeout", str(self.timeout)]
             argv = [info["executable"], "-I", "-B", "-X", "utf8", info["worker"], "--model-dir", info["model_dir"],
@@ -483,14 +540,15 @@ class RecognitionSession:
 
     def recognize_file(self, path, *, page_number=1, dpi=300, psm=None):
         from dataclasses import replace
-        from .ocr import OCRCancelled, OCRError, _cancelled, _render, file_sha256, recognize_file
+        from .ocr import OCRCancelled, OCRError, _cancelled, _render, stable_file_sha256, recognize_file
         if not self.active:
             raise OCRError("with RecognitionSession 문 안에서 인식하세요.")
         if self.cleanup_failures:
             raise OCRError("이전 OCR 세션 정리가 실패해 새 요청을 시작하지 않습니다. "
                            "완료 원시 결과는 보존되며 자동 재시도하지 않습니다.")
         _cancelled(self.should_stop)
-        if self.engine in ("tesseract", "easyocr", "ppocrv6") or (self.engine == "rapidocr" and self.direction == "vertical"):
+        # Vertical pages need one-shot post-processing (reading order, auxiliary model records).
+        if self.engine == "tesseract" or (self.engine in ("easyocr", "ppocrv6", "rapidocr") and self.direction == "vertical"):
             if self.device == "cuda":
                 raise OCRError("이 엔진은 현재 CPU 환경입니다.")
             before = self.condition_snapshot()
@@ -509,7 +567,7 @@ class RecognitionSession:
                 "engine_root": before["engine_root"], "session_conditions": before["pin"]})
         started = time.monotonic()
         source = Path(path).expanduser().resolve(strict=True)
-        original_hash = file_sha256(source)
+        original_hash = stable_file_sha256(source)
         try:
             self._inspection()
             if self.worker is None:
@@ -548,7 +606,7 @@ class RecognitionSession:
                                            "request_ordinal": self.count + 1}),
                         "text_policy": "failed raw model response preserved; no accepted OCR text"}}
             _cancelled(self.should_stop)
-            if file_sha256(source) != original_hash:
+            if stable_file_sha256(source) != original_hash:
                 raise OCRError("인식 중 원본이 변경되어 결과를 적용하지 않습니다.")
             self._inspection()
             payload["engine_metadata"]["session_conditions"] = self.pin

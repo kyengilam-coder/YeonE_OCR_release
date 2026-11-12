@@ -353,7 +353,7 @@ class ComparisonEditor(tk.Toplevel):
         self.force_check = ttk.Checkbutton(actions, text="완료한 엔진도 다시 읽기 (이전 기록 보존)", variable=self.force)
         self.force_check.pack(side="right")
         self.hint = tk.StringVar(self)
-        hint_label = ttk.Label(settings, textvariable=self.hint, foreground="#70553d", width=1)
+        hint_label = ttk.Label(settings, textvariable=self.hint, foreground="#4d586e", width=1)
         self._hint_label = hint_label
         hint_label.pack(fill="x", pady=(4, 0))
         self._tooltip(hint_label, self.hint)
@@ -393,7 +393,7 @@ class ComparisonEditor(tk.Toplevel):
         canvas_frame.grid(row=1, column=0, sticky="nsew")
         canvas_frame.rowconfigure(0, weight=1)
         canvas_frame.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(canvas_frame, background="#e4e6e9", highlightthickness=0, width=380, height=360)
+        self.canvas = tk.Canvas(canvas_frame, background="#e4e8ef", highlightthickness=0, width=380, height=360)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         vertical = ttk.Scrollbar(canvas_frame, command=self.canvas.yview)
         horizontal = ttk.Scrollbar(canvas_frame, orient="horizontal", command=self.canvas.xview)
