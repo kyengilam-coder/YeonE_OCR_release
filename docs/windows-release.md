@@ -1,3 +1,13 @@
+# Windows 1.2.12 설치판
+
+1.2.12는 1.2.11의 설치 구성을 그대로 쓰고 구독 계정 실행의 AI 작업 방식(엔진 앞서 읽기 · 계정이 여러 쪽 · 쉬었다 복귀)과 Codex CLI 호출을 고친 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.12**로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.12`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.12), 설정 「AI 판독기」 ①의 「계정이 함께 맡는 쪽」과 [연결 시험], 구독 실행 중 쪽 띠의 「AI 대기」 칸과 AI 연결 줄, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.12 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.12)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.11 설치판
 
 1.2.11은 1.2.10의 설치 구성을 그대로 쓰고 진행 카드 쪽 띠의 「기록 있음」 색을 옅은 파랑으로 바꾼 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
