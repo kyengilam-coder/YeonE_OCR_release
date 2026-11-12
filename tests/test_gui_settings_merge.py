@@ -155,10 +155,31 @@ class SettingsMerge(unittest.TestCase):
             gui.save_config(cfg)
             self.assertEqual(gui.load_config()["collate_memo"], chosen)
 
-    def test_bookmark_color_mode_does_not_add_unsupported_general_ocr_option(self):
+    def test_general_ocr_color_default_migrates_once_and_preserves_later_choice(self):
+        """일반·이미지 OCR 도 기본은 색상만(메모 없음). 이전 기본(고지 사항만 메모)은 한 번만 옮기고, 그 뒤 다시 고른 값과 all·inline 은 보존한다."""
+        gui = self.gui
+        self.assertEqual(gui.DEFAULTS["memo_mode"], "none")
+        self.assertEqual(list(gui.GENERAL_MEMO_LABELS)[0], "none")
+        for old, new in (("notice", "none"), ("all", "all"), ("inline", "inline"), ("none", "none"), (None, "none"), (["broken"], "none")):
+            with self.subTest(old=old):
+                raw = {"memo_mode": old, "collate_memo": "all"}
+                cfg = gui.upgrade_config(dict(gui.DEFAULTS, **raw), raw)
+                self.assertEqual((cfg["memo_mode"], cfg["collate_memo"], cfg["memo_display_version"]), (new, "all", 1))
+        self.assertEqual(gui.upgrade_config(dict(gui.DEFAULTS), {})["memo_mode"], "none")          # 새 설치
+        gui.save_config({"memo_mode": "notice"})
+        cfg = gui.load_config()
+        self.assertEqual(cfg["memo_mode"], "none")
+        self.assertEqual(self.disk()["memo_mode"], "notice")                                       # 읽기만으로는 파일을 고치지 않는다
+        gui.save_config(cfg)
+        self.assertEqual((self.disk()["memo_mode"], self.disk()["memo_display_version"]), ("none", 1))
+        chosen = dict(self.disk(), memo_mode="notice")                                             # 옮긴 뒤 사람이 다시 고른 메모는 그대로
+        gui.save_config(chosen)
+        self.assertEqual(gui.load_config()["memo_mode"], "notice")
+
+    def test_memo_labels_round_trip_for_bookmark_and_general_ocr(self):
         gui = self.gui
         self.assertIn("none", gui.MEMO_LABELS)
-        self.assertNotIn("none", gui.GENERAL_MEMO_LABELS)
+        self.assertEqual(set(gui.GENERAL_MEMO_LABELS), {"none", "notice", "all", "inline"})
         for mode, label in gui.MEMO_LABELS.items():
             app = types.SimpleNamespace(v_cmemo=Var(label))
             self.assertEqual(gui.App.collate_memo_mode(app), mode)

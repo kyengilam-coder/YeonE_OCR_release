@@ -26,7 +26,7 @@ PACKAGES = [("pymupdf", "pymupdf"), ("PIL", "pillow"), ("numpy", "numpy"), ("cv2
             ("pydantic", "pydantic"), ("google.genai", "google-genai"), ("openai", "openai"), ("anthropic", "anthropic"), ("hwpx", "python-hwpx"), ("docx", "python-docx"), ("opencc", "opencc-python-reimplemented"), ("hanja", "hanja")]
 DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini", "model": "gemini-3.1-pro-preview",
             "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "preset": DEFAULT_PRESET, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
-            "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "none", "memo_mode": "notice", "context_hint": True, "collate_vertical": False,
+            "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "none", "memo_mode": "none", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
@@ -167,8 +167,14 @@ def upgrade_config(cfg: dict, raw: dict | None = None) -> dict:
         cm = "none"
     cfg["collate_memo"] = cm
     cfg["collate_display_version"] = display_version if display_current else 1
-    if cfg.get("memo_mode") not in GENERAL_MEMO_LABELS:
-        cfg["memo_mode"] = "notice"
+    mm = cfg.get("memo_mode")
+    mm = mm if isinstance(mm, str) and mm in GENERAL_MEMO_LABELS else "none"       # 손으로 고쳐 망가진 값(목록 등)도 기본으로
+    memo_version = raw.get("memo_display_version", 0)
+    memo_current = isinstance(memo_version, int) and memo_version >= 1
+    if not memo_current and mm == "notice":                   # 이전 기본(고지 사항만 메모)은 색상만으로 한번 옮김. 이후 다시 고른 메모 옵션과 명시적 all·inline 은 보존.
+        mm = "none"
+    cfg["memo_mode"] = mm
+    cfg["memo_display_version"] = memo_version if memo_current else 1
     if cfg.get("media_res") not in MRES_LABELS:
         cfg["media_res"] = DEFAULTS["media_res"]
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
@@ -2240,7 +2246,7 @@ class App(tk.Tk):
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
-        self.v_memo = tk.StringVar(value=GENERAL_MEMO_LABELS.get(self.cfg.get("memo_mode", "notice"), GENERAL_MEMO_LABELS["notice"]))
+        self.v_memo = tk.StringVar(value=GENERAL_MEMO_LABELS.get(self.cfg.get("memo_mode", "none"), GENERAL_MEMO_LABELS["none"]))
         self.v_chk = tk.StringVar(value=CHECK_LIST_LABELS.get(self.cfg.get("check_list", "none"), CHECK_LIST_LABELS["none"]))
         self.v_workers = tk.StringVar(value=str(self.cfg.get("workers", 8))); self.v_model2 = tk.StringVar(value=self.cfg.get("second_model", ""))
         self.v_ckpt = tk.StringVar(value=str(self.cfg.get("checkpoint", 20))); self.v_cache = tk.BooleanVar(value=self.cfg.get("use_cache", True))
@@ -2559,10 +2565,11 @@ class App(tk.Tk):
 
         def memo(parent):
             mc = ttk.Combobox(parent, textvariable=self.v_memo, values=list(GENERAL_MEMO_LABELS.values()), state="readonly", width=wide)
-            Tip(mc, "고지 사항만(기본): 색으로 전할 수 없는 것 — 본문에 표시되지 않은 확인 항목, 구조 검사 오류, 3차와 다른 대목의 어긋남 — 과 첫머리의 표시 범례에만 "
-                    "한컴 메모를 답니다. 모든 표시에 메모: 초록·파랑·문맥 밑줄 자리마다 근거 메모. 메모 없이: 고지를 회색 〔고지: …〕 로 글 속에.", self)
+            Tip(mc, "색상만 표시(기본): 메모도 글 속 고지도 넣지 않습니다. 등급 색과 〔 〕 표기는 그대로이고, 고지 — 본문에 표시되지 않은 확인 항목, "
+                    "구조 검사 오류, 로컬 인식 의심 구간 — 는 검수 화면(review.html)과 보고에서 확인합니다. 고지 사항만 메모: 그 고지와 첫머리의 표시 범례에 "
+                    "한컴 메모를 답니다(의심 구간이 있는 쪽마다 하나). 모든 표시에 메모: 초록·파랑·문맥 밑줄 자리마다 근거 메모. 메모 없이 글 속: 고지를 회색 〔고지: …〕 로.", self)
             return mc
-        R["memo"] = row(b, "메모", "색으로 전할 수 없는 고지에만 한컴 메모(기본)", memo)
+        R["memo"] = row(b, "메모", "기본은 색상만 — 고지는 검수 화면에서 확인", memo)
 
         def checklist(parent):
             cc = ttk.Combobox(parent, textvariable=self.v_chk, values=list(CHECK_LIST_LABELS.values()), state="readonly", width=wide)
@@ -6002,7 +6009,7 @@ class App(tk.Tk):
         return o
 
     def memo_mode(self) -> str:
-        return next((k for k, v in GENERAL_MEMO_LABELS.items() if v == self.v_memo.get()), "notice")
+        return next((k for k, v in GENERAL_MEMO_LABELS.items() if v == self.v_memo.get()), "none")
 
     def layout_key(self) -> str:
         return next((k for k, v in LAYOUT_LABELS.items() if v == self.v_layout.get()), "page")

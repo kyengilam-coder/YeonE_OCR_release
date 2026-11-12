@@ -285,7 +285,8 @@ def _pass2_regions(rec: dict) -> set:
 
 def page_grades(rec: dict, ctx: dict | None = None, memo_mode: str = "notice", use_context: bool = True) -> PageGrades:
     """한 쪽의 등급(초록·파랑·빨강 안 문맥 밑줄)과 고지 메모. 글은 바꾸지 않는다.
-    memo_mode: notice(고지 사항만) | all(등급 근거까지) | inline(메모 없이 — 고지는 문서 조립이 회색 글로 넣음)."""
+    memo_mode: notice(고지 사항만) | all(등급 근거까지) | inline(메모 없이 — 고지는 문서 조립이 회색 글로 넣음) |
+    none(색상만 — 여기서는 notice 와 같게 세고, 문서 조립이 메모·고지를 넣지 않는다. 검수 화면은 고지를 그대로 보인다)."""
     from .adjudicate import adjacent_seen
     pr = PageReading.model_validate(rec["merged"])
     horizontal = (rec.get("mode") or "") == "horizontal_zh"

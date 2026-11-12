@@ -197,6 +197,9 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         stats.setdefault("running_heads", 0); stats.setdefault("running_head_texts", [])
     pending_list: list[tuple[str, list[str]]] = []  # 글 없는 쪽(그림만 등)이 이어질 때 앞 쪽들의 것
 
+    # 색상만 표시(memo_mode none): 쪽 고지·글자 메모·범례를 문서에 넣지 않는다. 등급 색과 〔〕 표기는 그대로이고 고지는 검수 화면(review.html)에 남는다
+    no_memos = memo_mode == "none"
+
     def place(b: Block, offset: int) -> None:
         """기다리던 쪽 책갈피·메모를 블록 b 의 offset 글자 자리에 단다(내용별)."""
         nonlocal pending
@@ -218,7 +221,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         if grades and legend and legend_block is None:
             legend_block = meta
         if pg is not None:
-            if pg.page_notices:
+            if pg.page_notices and not no_memos:
                 meta.memos.append((max(0, len(meta.text) - 1), " / ".join(pg.page_notices)))   # 쪽 고지는 쪽 기록 줄 끝 글자에 하나로
             if pg.no_pass2:
                 no_pass2_pages.append(n)
@@ -238,7 +241,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 return [], []
             lead = len(raw) - len(raw.lstrip())
             sp = [(a - lead + shift, b - lead + shift, k) for a, b, k in pg.spans.get((reg_id, pi), []) if lead <= a and b <= lead + len(t)]
-            me = [(o - lead + shift, m) for o, m in pg.memos.get((reg_id, pi), []) if lead <= o < lead + len(t)]
+            me = [] if no_memos else [(o - lead + shift, m) for o, m in pg.memos.get((reg_id, pi), []) if lead <= o < lead + len(t)]
             return sp, me
         if rec.get("reader") == "mock":
             blocks.append(Block(type="note", text="〔작업 메모〕 아래 본문은 기존 PDF 텍스트 레이어를 옮긴 것으로 원본 대조 전 상태입니다.", page=n))
@@ -345,7 +348,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         last = next((b for b in reversed(blocks) if b.type in ("para", "heading") and b.text), None)
         if last is not None:
             place(last, len(last.text))
-    if legend_block is not None:                    # 범례: 이 파일 첫 쪽 기록 줄(내용별은 첫 글)의 첫 글자에 메모 하나
+    if legend_block is not None and not no_memos:   # 범례: 이 파일 첫 쪽 기록 줄(내용별은 첫 글)의 첫 글자에 메모 하나
         extra = f" · 2차 판독 없이 1차만 들어간 쪽: {page_ranges(no_pass2_pages)}" if no_pass2_pages else ""
         target = legend_block if not flow else next((b for b in blocks if b.type in ("para", "heading") and b.text), None)
         if target is not None:

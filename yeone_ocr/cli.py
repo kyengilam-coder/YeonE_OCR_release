@@ -1909,7 +1909,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     for ci, chunk in enumerate(chunks):
         blocks = assemble_blocks(chunk, join_pages=not args.no_join_pages, whole_offset=args.whole_offset,
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
-                                 context=ctx, memo_mode=getattr(args, "memo", "notice") or "notice",
+                                 context=ctx, memo_mode=getattr(args, "memo", "none") or "none",
                                  legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold)
         if layout == "flow" and not interim:
             from .structure import apply_structure
@@ -1954,7 +1954,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             from .hwpx_template import build_hwpx_template
             try:
                 st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "notice") != "inline", preset=preset)
+                                         highlight=not args.no_highlight, memos=getattr(args, "memo", "none") != "inline", preset=preset)
             except Exception as e:
                 log(f"오류: 양식 HWPX 를 쓸 수 없습니다({type(e).__name__}: {str(e)[:120]}) — 양식 없이 만듭니다"); ok = False
             else:
@@ -1966,7 +1966,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         all_tpl = all_tpl and st is not None
         if st is None:
             st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline",
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "none") != "inline",
                             preset=preset if layout == "flow" else None)
         fissues = check_hwpx_file(str(out_h))
         vi = st.get("validate_issues")
@@ -2000,11 +2000,13 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             from .docx_builder import build_docx
             out_d = work.out_dir / f"{stem}.docx"
             sd = build_docx(blocks, str(out_d), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
-                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "notice") != "inline")
+                            highlight=not args.no_highlight, page_breaks=not args.no_page_breaks, memos=getattr(args, "memo", "none") != "inline")
             log(f"build: DOCX {out_d} · {sd}")
     if not interim and gstats:
         anyc = next(iter((ctx or {}).values()), {})
+        quiet = (getattr(args, "memo", "none") or "none") == "none" and gstats.get("notices")
         log(f"등급: 초록 {gstats.get('green', 0)} · 파랑 {gstats.get('blue', 0)} · 문맥 밑줄 {gstats.get('red_ctx', 0)} · 쪽 고지 {gstats.get('notices', 0)}"
+            + ("(색상만 표시 — 문서에는 넣지 않음, 검수 화면에서 확인)" if quiet else "")
             + (f" · 3차 확정 위치 못 찾음 {gstats['unmapped']}" if gstats.get("unmapped") else "")
             + (f" · 3차와 다른 대목 어긋남 {gstats['conflict']}" if gstats.get("conflict") else "")
             + (f" · 문맥 바탕 {anyc.get('corpus_chars', 0):,}자/{anyc.get('corpus_pages', 0)}쪽(1차·2차 일치 글)" if ctx else " · 문맥 추정 끔")
@@ -2690,8 +2692,9 @@ def build_parser():
         p.add_argument("--whole-offset", type=int, default=None, help="분할 전 전체 PDF 쪽수 = PDF 쪽수 + N 을 기록에 함께 적음")
         p.add_argument("--append-report", action="store_true", help="문서 끝에 〔작업 기록〕 덧붙임")
         p.add_argument("--no-highlight", action="store_true", help="확인 등급 색·밑줄·범례를 넣지 않음(〔〕 표기와 고지 메모는 그대로)")
-        p.add_argument("--memo", choices=["notice", "all", "inline"], default="notice",
-                       help="한컴 메모: notice=고지 사항만(기본) / all=등급 근거까지 / inline=메모 없이 고지를 글 속 회색 〔고지: …〕 로")
+        p.add_argument("--memo", choices=["none", "notice", "all", "inline"], default="none",
+                       help="한컴 메모: none=색상만, 메모·고지를 문서에 넣지 않음(기본 — 고지는 검수 화면에) / notice=고지 사항만 메모 / "
+                            "all=등급 근거까지 / inline=메모 없이 고지를 글 속 회색 〔고지: …〕 로")
         p.add_argument("--no-context", action="store_true", help="문맥 추정(이 판독의 다른 대목이 가리키는 후보에 밑줄)을 하지 않음")
         p.add_argument("--no-page-breaks", action="store_true", help="원본 쪽마다 쪽 나누기를 넣지 않음")
         p.add_argument("--check-list", choices=["none", "extra", "all"], default="none",
