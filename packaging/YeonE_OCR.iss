@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "1.2.12"
+#define AppVersion "1.2.13"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\work\windows-release\dist\YeonE_OCR"

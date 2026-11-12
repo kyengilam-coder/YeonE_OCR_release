@@ -1,6 +1,6 @@
 # 연어OCR 개발 인수인계
 
-## 2026-11-12: (다음 판) 읽은 쪽까지 HWPX 만들기
+## 2026-11-12: 1.2.13 읽은 쪽까지 HWPX 만들기
 
 중지한 [한 번에 인식 → HWPX] 뒤에 그때까지의 판독 기록으로 문서를 만든다. 새 명령은 없다 — `cli.cmd_build`가 이미 기록 있는 쪽만으로 `이름_pNNN-NNN.hwpx`를 만들고 `latest_result_hwpx`([HWPX 열기])가 그 이름을 안다. 창: `App.do_partial`(`build … --reader R --no-context-model` · 키를 묻지 않음 `_env_need_key=False` · 라벨 `PARTIAL_LABEL`), 실행 카드 `b_partial`(중지 단추 아래 `stops` 틀, `_sync_run_card`가 `_partial_wanted`일 때만 보임: 기록이 있고 남은 쪽이 있거나 방금 중지), `_finish`가 중지된 HWPX 실행 뒤 만들지 묻고(`after(50, do_partial)`) 부분 문서가 끝나면 열지 묻는다. 끝난 `build`도 [HWPX 열기]를 강조한다.
 
