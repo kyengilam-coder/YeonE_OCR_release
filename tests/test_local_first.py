@@ -177,12 +177,18 @@ class LocalFirstTests(unittest.TestCase):
                 return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
                                              for t in data["targets"]]}), True, "end_turn", {"input_tokens": 3}, model_name
 
-        with patch.object(subscription, "SubscriptionClient", side_effect=lambda: seen.append(1) or FakeCLI()), \
+        from yeone_ocr import subscriptions
+        states = []
+        with patch.object(subscriptions, "ON_CHANGE", states.append), \
+                patch.object(subscription, "SubscriptionClient", side_effect=lambda **_k: seen.append(1) or FakeCLI()), \
                 patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
             self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept",
                                                "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
         self.assertEqual(seen, [1])                                                    # one CLI client for the run
         self.assertEqual(self.calls, ["opus"])
+        from yeone_ocr import subscriptions
+        self.assertIsNone(subscriptions.active())                                     # the window's connection ends with the run
+        self.assertEqual((states[0]["plan"], states[-1]), ("claude", None))
         rec = self.record()
         self.assertEqual(rec["local_first"]["review"]["ai_accept"], {"accepted": 0, "held": 0})
         self.assertEqual(rec["local_first"]["options"], {"ai_accept": True})
@@ -204,7 +210,7 @@ class LocalFirstTests(unittest.TestCase):
                                              for t in data["targets"]]}), True, "completed", {"input_tokens": 3}, model_name
 
         signed_in = {"usable": True, "plan": "ChatGPT", "reason": None, "installed": True}
-        with patch.object(chatgpt_subscription, "SubscriptionClient", side_effect=lambda: seen.append("codex") or FakeCodex()), \
+        with patch.object(chatgpt_subscription, "SubscriptionClient", side_effect=lambda **_k: seen.append("codex") or FakeCodex()), \
                 patch.object(claude_subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
                 patch.object(chatgpt_subscription, "status", return_value=signed_in):
             self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-plan", "chatgpt",

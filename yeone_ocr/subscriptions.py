@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import importlib
 import os
+import signal
 import subprocess
+import sys
 import threading
 
 PLANS = ("claude", "chatgpt", "gemini")
@@ -159,7 +161,9 @@ class Session:
 
     The chosen plan first; when it raises SubscriptionError (usage limit, sign-in expired, CLI
     missing) the request is sent again to the next usable plan, and when none is left to `api`
-    (an ApiTransport, or None to stop)."""
+    (an ApiTransport, or None to stop). switch() does the same on the user's request (the GUI's
+    [다음 구독으로 넘기기]): it stops the CLI that is answering now and the interrupted request goes
+    to the chosen plan, or to the next one in order."""
 
     subscription = True
 
@@ -168,15 +172,19 @@ class Session:
         self.requested = requested
         self.api = api
         self.log = log
-        self._factory = factory or client
+        self._factory = factory or (lambda name: module(name).SubscriptionClient(runner=self._run))
         self._client = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._procs = set()
         self.reason = ""
         self.switches = []
 
     @property
     def available(self) -> bool:
-        return self.plan is not None or (self.api is not None and self.api.left > 0)
+        return self.plan is not None or self._api_left()
+
+    def _api_left(self) -> bool:
+        return self.api is not None and self.api.left > 0
 
     @property
     def transport(self) -> str:
@@ -195,6 +203,24 @@ class Session:
             return f"API 키({self.api.provider} · {self.api.model}, 남은 호출 {self.api.left}회)"
         return "없음"
 
+    def state(self) -> dict:
+        """For the GUI: what is connected now and where [다음 구독으로 넘기기] can go."""
+        with self._lock:
+            targets = [plan for plan in PLANS if plan != self.plan]
+            if self.plan is not None and self._api_left():
+                targets.append("api")
+            return {"plan": self.plan, "label": self.describe(), "available": self.available,
+                    "targets": targets, "next": self._next_auto()}
+
+    def _next_auto(self):
+        """Where an automatic switch would go now: a plan, "api" or None (no status calls: cached)."""
+        failed = exhausted()
+        for plan in order(self.requested):
+            if plan != self.plan and plan not in failed and status(plan)["usable"]:
+                return plan
+        return "api" if self.plan is not None and self._api_left() else None
+
+    # ---- requests ----
     def request(self, *, model_name, system, prompt, images, schema):
         from .claude_subscription import SubscriptionError
         while True:
@@ -215,10 +241,13 @@ class Session:
             try:
                 return self._as_first(current.request(model_name=name, system=system, prompt=prompt,
                                                       images=images, schema=schema))
-            except SubscriptionError as exc:
+            except Exception as exc:
                 with self._lock:
-                    if self.plan == plan:            # another caller may already have moved on
-                        self._fail(plan, exc)
+                    if self.plan != plan or self._client is not current:
+                        continue                      # switched while it ran (by the user or another caller): send again
+                    if not isinstance(exc, SubscriptionError):
+                        raise
+                    self._fail(plan, exc)
 
     def _as_first(self, result):
         """A completed answer from another provider is recorded under the first plan's provider
@@ -233,15 +262,136 @@ class Session:
         mark_exhausted(plan, str(exc))
         self._client = None
         following, _ = pick(self.requested)
-        self.switches.append({"from": plan, "to": following or ("api" if self.api is not None else None), "reason": str(exc)})
+        self.switches.append({"from": plan, "to": following or ("api" if self.api is not None else None),
+                              "reason": str(exc), "by": "limit"})
         if following:
             self.plan = following
             self.log(f"  {NAMES[plan]} 구독을 더 쓸 수 없습니다 — {exc} → {NAMES[following]} 구독으로 넘어갑니다.")
-            return
-        self.plan = None
-        if self.api is not None:
-            self.log(f"  {NAMES[plan]} 구독을 더 쓸 수 없고({exc}) 쓸 수 있는 다른 구독 계정이 없어 "
-                     f"API 키({self.api.provider} · 모델 {self.api.model})로 넘어갑니다. 이번 실행 API 호출 최대 {self.api.left}회.")
         else:
-            self.reason = f"{NAMES[plan]} 구독을 더 쓸 수 없고 다른 구독 계정도 API 키도 없습니다: {exc}"
-            self.log(f"  {self.reason} — AI 판독·검증을 멈추고 검증 대상은 저장합니다.")
+            self.plan = None
+            if self.api is not None:
+                self.log(f"  {NAMES[plan]} 구독을 더 쓸 수 없고({exc}) 쓸 수 있는 다른 구독 계정이 없어 "
+                         f"API 키({self.api.provider} · 모델 {self.api.model})로 넘어갑니다. 이번 실행 API 호출 최대 {self.api.left}회.")
+            else:
+                self.reason = f"{NAMES[plan]} 구독을 더 쓸 수 없고 다른 구독 계정도 API 키도 없습니다: {exc}"
+                self.log(f"  {self.reason} — AI 판독·검증을 멈추고 검증 대상은 저장합니다.")
+        _notify(self)
+
+    # ---- the user's [다음 구독으로 넘기기] ----
+    def switch(self, target=None) -> str:
+        """Stop the plan in use and connect to `target` (a plan or "api"); None, or a target that
+        cannot be used, takes the next one in order. Returns what happened, for the window."""
+        with self._lock:
+            old = self.plan
+            if old is not None:
+                mark_exhausted(old, "사용자가 넘김")
+            note = ""
+            chosen = None
+            if target in PLANS and target != old:
+                state = status(target, refresh=True)
+                if state["usable"]:
+                    with _exhausted_lock:
+                        _exhausted.pop(target, None)       # chosen by hand: try it again even if it failed earlier
+                    chosen = target
+                else:
+                    note = f"{NAMES[target]} 구독은 쓸 수 없어({state.get('reason') or '로그인 필요'}) 순서대로 고릅니다. "
+            elif target == "api" and old is not None:
+                if self._api_left():
+                    chosen = "api"
+                else:
+                    note = "API 키가 없거나 이번 실행 호출 상한에 닿아 순서대로 고릅니다. "
+            if chosen is None:
+                chosen = pick(self.requested)[0] or ("api" if old is not None and self._api_left() else None)
+            if chosen is None and old is None:
+                return note + "넘길 구독 계정이 없습니다. 지금 연결을 그대로 씁니다."
+            if chosen is None and old is not None:
+                with _exhausted_lock:
+                    _exhausted.pop(old, None)               # nothing to go to: keep the plan in use
+                return note + f"넘길 구독 계정도 API 키도 없어 {NAMES[old]} 구독을 그대로 씁니다."
+            self.plan = None if chosen == "api" else chosen
+            self._client = None
+            self._stop_running()
+            self.switches.append({"from": old or "api", "to": chosen, "reason": "사용자가 넘김", "by": "user"})
+            message = note + f"{NAMES[old] + ' 구독을' if old else 'API 키를'} 멈추고 {self.describe()}에 연결합니다."
+            self.log("  [다음 구독으로 넘기기] " + message)
+        _notify(self)
+        return message
+
+    def _run(self, args, *, input=None, timeout=None, capture_output=True, **kwargs):
+        """subprocess.run that switch() can stop: the process (and its children) is killed and the
+        request is sent again to the new connection."""
+        popen = dict(kwargs)
+        if sys.platform != "win32":
+            popen["start_new_session"] = True              # its own process group: killpg stops the CLI's children too
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen)
+        with self._lock:
+            self._procs.add(proc)
+        try:
+            out, err = proc.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            out, err = proc.communicate()
+            raise subprocess.TimeoutExpired(args, timeout, out, err) from None
+        finally:
+            with self._lock:
+                self._procs.discard(proc)
+        return subprocess.CompletedProcess(args, proc.returncode, out, err)
+
+    def _stop_running(self):
+        for proc in list(self._procs):
+            _kill_tree(proc)
+
+
+def _kill_tree(proc):
+    """Stop a CLI and what it started (npm's codex.cmd / gemini.cmd run node, which runs the program)."""
+    if proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15, check=False,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+# ---- the run's connection, for the window ----
+_active: Session | None = None
+ON_CHANGE = None          # the GUI sets a callable(state dict or None) while a run is going
+
+
+def activate(session: Session) -> None:
+    global _active
+    _active = session
+    _notify(session)
+
+
+def deactivate() -> None:
+    global _active
+    _active = None
+    if ON_CHANGE is not None:
+        ON_CHANGE(None)
+
+
+def active() -> Session | None:
+    return _active
+
+
+def switch(target=None) -> str:
+    """[다음 구독으로 넘기기]: switch the running connection (see Session.switch)."""
+    session = _active
+    if session is None:
+        return "지금 구독 계정으로 연결된 실행이 없습니다."
+    return session.switch(target)
+
+
+def _notify(session) -> None:
+    if ON_CHANGE is not None and session is _active:
+        ON_CHANGE(session.state())

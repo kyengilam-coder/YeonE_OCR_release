@@ -373,6 +373,7 @@ def _ai_page_reader(args, project, work, cli, session=None, api=None):
             cli.log("  AI 쪽 판독을 하지 않습니다: " + (reason or "구독 계정 연결을 확인하세요."))
             return None
         session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log)
+        subscriptions.activate(session)
     plan = session.plan
     client = session                     # moves to the next plan, then the API key, when a plan runs out
     model = subscriptions.model(plan, None)
@@ -484,6 +485,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                 args.model = subscriptions.model(plan, chosen if subscriptions.accepts_model(plan, chosen) else None)
                 key = subscriptions.KEYS[plan]
                 session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log)
+                subscriptions.activate(session)     # the window's [다음 구독으로 넘기기] switches this connection
             elif auth_mode(requested) == "subscription":
                 if api is not None:         # no usable plan: straight to the API key, within the paid cap
                     cap = api_cap
@@ -715,5 +717,7 @@ def _command(args, *, work=None, doc=None, pool=None):
         cli.log("AI 수정 제안은 비교·교정 창에서 채택·기각합니다. 원시 판독과 사람 교정은 보존됩니다.")
         return rc or (3 if failed else 4 if incomplete else 0)
     finally:
+        from . import subscriptions
+        subscriptions.deactivate()
         if owned_doc:
             doc.close()

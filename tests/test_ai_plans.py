@@ -351,3 +351,78 @@ def test_api_transport_counts_its_calls_and_uses_the_given_system_prompt(monkeyp
     with pytest.raises(SubscriptionError, match="호출 상한"):
         api.request(model_name="x", system="s", prompt="p", images=[], schema=SCHEMA)
     assert len(sent) == 1
+
+
+# ---- [다음 구독으로 넘기기] ----
+
+class _Slow:
+    """Answers through the session's own runner with a child process that would take 60 s."""
+    subscription = True
+
+    def __init__(self, session):
+        self.session, self.ran = session, []
+
+    def request(self, **kwargs):
+        import sys as _sys
+        proc = self.session._run([_sys.executable, "-c", "import time; time.sleep(60)"], input="prompt", text=True,
+                                 timeout=120)
+        self.ran.append(proc.returncode)
+        raise SubscriptionError(f"CLI 실행 실패(코드 {proc.returncode})")
+
+
+def test_switch_stops_the_running_cli_and_sends_the_request_to_the_chosen_plan():
+    import threading
+    import time
+    logs, states = [], []
+    with _with(_states(claude=True, chatgpt=True, gemini=True)):
+        session = subscriptions.Session("claude", log=logs.append)
+        slow, gemini_plan = _Slow(session), _Plan("gemini")
+        session._factory = {"claude": slow, "gemini": gemini_plan, "chatgpt": _Plan("chatgpt")}.__getitem__
+        subscriptions.ON_CHANGE = states.append
+        subscriptions.activate(session)
+        try:
+            out = {}
+            worker = threading.Thread(target=lambda: out.setdefault("r", session.request(
+                model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)))
+            started = time.monotonic()
+            worker.start()
+            for _ in range(200):
+                if session._procs:
+                    break
+                time.sleep(0.02)
+            assert session._procs, "the CLI never started"
+            assert states[0]["plan"] == "claude" and states[0]["next"] == "chatgpt"
+            message = subscriptions.switch("gemini")
+            worker.join(15)
+            assert not worker.is_alive() and time.monotonic() - started < 15     # killed, not waited for
+            assert out["r"][-1] == "gemini" and gemini_plan.models == ["gemini-cli-auto"]
+            assert slow.ran and slow.ran[0] != 0
+            assert "Claude 구독을 멈추고 Gemini 구독에 연결합니다" in message and logs[-1].endswith(message)
+            assert session.switches[-1] == {"from": "claude", "to": "gemini", "reason": "사용자가 넘김", "by": "user"}
+            assert states[-1]["plan"] == "gemini" and "claude" in subscriptions.exhausted()
+        finally:
+            subscriptions.ON_CHANGE = None
+            subscriptions.deactivate()
+    assert subscriptions.switch() == "지금 구독 계정으로 연결된 실행이 없습니다."
+
+
+def test_switch_without_a_choice_follows_the_order_and_ends_at_the_api_key():
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=lambda plan: _Plan(plan))
+        assert session.state()["targets"] == ["chatgpt", "gemini", "api"]
+        assert "ChatGPT 구독에 연결" in session.switch()                       # auto: the next signed-in plan
+        assert session.plan == "chatgpt" and session.state()["next"] == "api"
+        message = session.switch("gemini")                                   # not signed in: falls back to the order
+        assert "Gemini 구독은 쓸 수 없어" in message and session.plan is None and "API 키(openai" in message
+        assert session.switch() == "넘길 구독 계정이 없습니다. 지금 연결을 그대로 씁니다."
+        assert "Claude 구독에 연결" in session.switch("claude")             # chosen by hand: used again
+        assert session.plan == "claude"
+
+
+def test_switch_with_nowhere_to_go_keeps_the_plan_in_use():
+    with _with(_states(claude=True)):
+        session = subscriptions.Session("claude", log=lambda _m: None, factory=lambda plan: _Plan(plan))
+        assert "그대로 씁니다" in session.switch() and session.plan == "claude"
+        assert "claude" not in subscriptions.exhausted()
+        assert session.state()["next"] is None

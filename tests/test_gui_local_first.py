@@ -79,6 +79,31 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertEqual(gui.DEFAULTS["local_ai_plan"], "auto")
         self.assertEqual(set(gui.AI_PLAN_LABELS), {"auto", "claude", "chatgpt", "gemini"})
 
+    def test_ai_link_row_lists_targets_and_the_button_switches_to_the_choice_or_the_order(self):
+        import queue
+        gui = self.gui
+        row = mock.Mock(); label = mock.Mock(); box = mock.Mock(); button = mock.Mock()
+        app = SimpleNamespace(_ai_link_row=row, l_ai_link=label, cb_ai_next=box, b_ai_switch=button,
+                              v_ai_next=Var(gui.AI_NEXT_AUTO), px=lambda v: v, q=queue.Queue())
+        state = {"plan": "claude", "label": "Claude 구독", "available": True, "targets": ["chatgpt", "gemini", "api"],
+                 "next": "chatgpt"}
+        gui.App._show_ai_link(app, state)
+        row.grid.assert_called_once()
+        label.configure.assert_called_with(text="Claude 구독")
+        values = box.configure.call_args.kwargs["values"]
+        self.assertEqual(values, ["자동(순서대로) (다음: ChatGPT 구독)", "ChatGPT 구독", "Gemini 구독", "API 키"])
+        self.assertEqual(app.v_ai_next.get(), values[0])
+        with mock.patch("yeone_ocr.subscriptions.switch", return_value="넘김") as switch, \
+                mock.patch("yeone_ocr.subscriptions.active", return_value=None):
+            gui.App.switch_subscription(app)                                # 고르지 않음: 정해진 순서
+            self.assertEqual(app.q.get(timeout=5), ("log", "  넘김\n"))
+            app.v_ai_next.set("Gemini 구독")
+            gui.App.switch_subscription(app)
+            app.q.get(timeout=5); app.q.get(timeout=5)
+        self.assertEqual([c.args for c in switch.call_args_list], [(None,), ("gemini",)])
+        gui.App._show_ai_link(app, None)
+        row.grid_remove.assert_called_once()
+
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()
         app._env_optional_key = True

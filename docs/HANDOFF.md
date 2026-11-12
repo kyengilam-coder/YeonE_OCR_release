@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: [다음 구독으로 넘기기] (1.2.2 뒤, 미배포)
+
+진행 카드의 AI 연결 줄(`gui.App._show_ai_link`, `switch_subscription`)이 실행 중인 `subscriptions.Session`을 옮긴다. `local_first`가 세션을 `subscriptions.activate`로 알리고 실행이 끝나면 `deactivate`한다. 창은 같은 프로세스에서 명령을 돌리므로 `subscriptions.ON_CHANGE`(창이 실행 동안 거는 콜백)로 상태를 받는다. `Session.switch(target)`은 쓰던 계정을 이번 실행의 '넘김'으로 표시하고, 세션이 띄운 CLI(세션의 `_run`으로 실행, Windows는 `taskkill /T`, 그 밖은 프로세스 묶음)를 끈 뒤 고른 계정(로그인 안 됐으면 순서대로)이나 순서의 다음, 남은 구독이 없으면 API 키에 연결한다. 끊긴 요청은 `Session.request`가 계정이 바뀐 것을 보고 새 연결로 다시 보낸다.
+
 ## 2026-11-12: 1.2.2 ChatGPT·Gemini 구독 계정 연결, 한도 시 다른 구독 → API 키
 
 `yeone_ocr/subscriptions.py`가 구독 계정을 고른다: claude(Claude Code `claude -p`), chatgpt(OpenAI Codex CLI `codex exec`, Sign in with ChatGPT), gemini(Gemini CLI `gemini -p`, Login with Google). 각 전송은 `claude_subscription.py`와 같은 계약(`status`, `SubscriptionClient.request(...) -> (text, complete, finish_reason, tokens, model)`)이고, 구독 표지 키(`subscriptions.KEYS`)로 `comparison_ai.create_client`가 고른다. `local_first`의 기본값 판단·쪽 판독·의심 구간 검증이 모두 이 선택을 따른다. 자동 순서는 Claude → ChatGPT → Gemini(기본 설정을 Claude로 쟀으므로).
