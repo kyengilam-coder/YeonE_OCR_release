@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: (다음 판) 읽은 쪽까지 HWPX 만들기
+
+중지한 [한 번에 인식 → HWPX] 뒤에 그때까지의 판독 기록으로 문서를 만든다. 새 명령은 없다 — `cli.cmd_build`가 이미 기록 있는 쪽만으로 `이름_pNNN-NNN.hwpx`를 만들고 `latest_result_hwpx`([HWPX 열기])가 그 이름을 안다. 창: `App.do_partial`(`build … --reader R --no-context-model` · 키를 묻지 않음 `_env_need_key=False` · 라벨 `PARTIAL_LABEL`), 실행 카드 `b_partial`(중지 단추 아래 `stops` 틀, `_sync_run_card`가 `_partial_wanted`일 때만 보임: 기록이 있고 남은 쪽이 있거나 방금 중지), `_finish`가 중지된 HWPX 실행 뒤 만들지 묻고(`after(50, do_partial)`) 부분 문서가 끝나면 열지 묻는다. 끝난 `build`도 [HWPX 열기]를 강조한다.
+
 ## 2026-11-12: 1.2.12 엔진 앞서 읽기 · 계정이 여러 쪽 · 쪽 판독과 검증 동시 · 구독 쉬었다 복귀
 
 `local_first._AiWorkers`(이전 `_SplitPlans`): 구독 세션이 있고 AI 검증이 켜져 있으면 늘 쓴다. 엔진을 마친 쪽은 주 스레드가 `_save_record`로 먼저 기록하고(`saved=True`) 쪽 알림 `queued`를 낸 뒤 `submit`으로 대기열(쪽 차례)에 넣고 바로 다음 쪽을 읽는다 — 엔진은 AI의 답을 기다리지 않는다. 연결(crew)은 `--local-ai-split`이면 로그인된 구독마다, 아니면 실행의 한 구독이고, 연결마다 `--local-ai-pages`(기본 2, 창 설정 `local_ai_pages`)개의 스레드가 대기열에서 쪽을 가져간다. `_may_take`: 다음 쪽은 차례상 앞선 연결에 빈 작업자가 있으면 그쪽이 먼저(실행의 첫 구독 우선), 갈 곳 없는 연결(`session.available` 거짓)은 쪽을 가져가지 않는다. [중지]면 대기 중인 쪽은 엔진 판독만 남긴다(다음 실행에서 이어 검증). `ai_stage`는 쪽 판독을 `_Side`(스레드)로 띄우고 `review_stage`(계획·검증·제안 반영)와 함께 진행한 뒤 기록에서 만난다. 진행 막대(`cli.progress("read")`)는 엔진이 읽은 쪽이 아니라 끝난 쪽 수(`page_finished`)다. `state = work.load_state()`는 작업자가 끝난 뒤에 읽는다(먼저 읽으면 작업자의 쪽 상태를 덮어씀). API 키만 쓰는 실행·검증 끔은 예전처럼 쪽 반복 안에서 한다.
