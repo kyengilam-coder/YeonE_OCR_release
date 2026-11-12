@@ -141,7 +141,7 @@ class SettingsTabRealTk(unittest.TestCase):
                  "v_memo", "v_chk", "v_traditional", "v_yun", "v_punctuation", "v_ctxmodel", "v_suspects", "v_blind", "v_skipany", "v_model2", "v_workers",
                  "v_up", "v_ckpt", "v_chunk", "v_mres", "v_second", "v_cache", "v_think2", "v_think1", "v_mres1", "v_maxcalls", "v_policy", "v_cmemo",
                  "v_cforce", "v_auto_update", "v_mode", "v_pages", "v_off", "v_local_ai_subscription", "v_local_ai_plan",
-                 "v_local_ai_api_fallback", "v_local_ai_review", "v_local_ai_max_calls", "v_local_resume", "v_local_ai_parallel")
+                 "v_local_ai_api_fallback", "v_local_ai_review", "v_local_ai_max_calls", "v_local_resume", "v_local_ai_parallel", "v_local_ai_split")
         missing = [n for n in names if str(getattr(app, n)) not in bound]
         self.assertEqual(missing, [])
         texts = {str(w.cget("text")).strip() for w in self.walk(app._common_frame) if w.winfo_class() == "TButton"}

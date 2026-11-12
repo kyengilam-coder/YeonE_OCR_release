@@ -439,6 +439,32 @@ class LocalFirstTests(unittest.TestCase):
             self.assertEqual(command(self.args("--local-ai-auth", "api")), 0)
         self.assertEqual(seen, [3, 1])
 
+    def test_split_hands_pages_to_the_signed_in_plans(self):
+        from yeone_ocr import chatgpt_subscription, claude_subscription
+        self.confidence = 20
+        answered, logs = [], []
+
+        def fake(name):
+            class FakeCLI:
+                subscription = True
+
+                def request(self, *, model_name, system, prompt, images, schema):
+                    answered.append((name, model_name))
+                    data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                    return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                                 for t in data["targets"]]}), True, {"claude": "end_turn", "chatgpt": "completed"}[name], {}, model_name
+            return FakeCLI()
+        signed_in = {"usable": True, "plan": "p", "reason": None, "installed": True}
+        with patch.object(claude_subscription, "SubscriptionClient", side_effect=lambda **_k: fake("claude")), \
+                patch.object(chatgpt_subscription, "SubscriptionClient", side_effect=lambda **_k: fake("chatgpt")), \
+                patch.object(claude_subscription, "status", return_value=signed_in), \
+                patch.object(chatgpt_subscription, "status", return_value=signed_in), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off", "--local-ai-split")), 0)
+        self.assertTrue(any("쪽 나눠 보내기: Claude · ChatGPT 구독이 쪽을 나눠 맡습니다" in line for line in logs))
+        self.assertEqual(answered, [("claude", "opus")])                               # one page: the first free plan
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

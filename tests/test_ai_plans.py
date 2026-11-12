@@ -477,3 +477,70 @@ def test_window_label_is_short_and_the_details_stay_available():
     assert "호출 상한(20회)에 도달" in session.stop_reason() and "직접 고르면" in session.stop_reason()
     session.api = None
     assert "API 키도 없음" in session.stop_reason()
+
+
+# ---- 쪽 나눠 보내기 (--local-ai-split) ----
+
+def _split(stage, plans=("claude", "chatgpt")):
+    from concurrent.futures import ThreadPoolExecutor
+    from yeone_ocr.local_first import _SplitPlans
+    failed = []
+    workers = [{"plan": p, "session": SimpleNamespace(available=True, plan=p), "reader": None, "future": None,
+                "pool": ThreadPoolExecutor(max_workers=1)} for p in plans]
+    return _SplitPlans(workers, stage, lambda number, exc: failed.append((number, str(exc))), lambda _m: None), failed
+
+
+def test_split_pages_run_side_by_side_one_plan_per_page():
+    import threading
+    import time
+    seen, lock, live = [], threading.Lock(), {"now": 0, "most": 0}
+
+    def stage(number, started, review, extras, session, reader):
+        with lock:
+            live["now"] += 1
+            live["most"] = max(live["most"], live["now"])
+        time.sleep(0.2)
+        with lock:
+            live["now"] -= 1
+            seen.append((number, session.plan))
+    split, failed = _split(stage)
+    began = time.perf_counter()
+    for number in range(1, 5):
+        split.dispatch(number, 0, {}, {})
+    assert split.finish() is None
+    assert time.perf_counter() - began < 4 * 0.2 * 0.75 and live["most"] == 2       # two plans at a time
+    assert sorted(n for n, _ in seen) == [1, 2, 3, 4] and failed == []
+    assert {p for _, p in seen} == {"claude", "chatgpt"}
+    assert len({n for n, _ in seen}) == 4                                            # each page once, by one plan
+
+
+def test_split_sends_the_next_page_to_the_plan_that_is_free():
+    import threading
+    gate = threading.Event()
+    seen = []
+
+    def stage(number, started, review, extras, session, reader):
+        if number == 1:
+            gate.wait(5)                                                               # Claude busy with page 1
+        seen.append((number, session.plan))
+    split, _ = _split(stage)
+    split.dispatch(1, 0, {}, {})
+    split.dispatch(2, 0, {}, {})
+    split.dispatch(3, 0, {}, {})                                                       # waits for ChatGPT, not Claude
+    gate.set()
+    split.finish()
+    assert dict(seen)[2] == "chatgpt" and dict(seen)[3] == "chatgpt" and dict(seen)[1] == "claude"
+
+
+def test_split_reports_a_page_failure_and_a_stop():
+    from yeone_ocr.comparison import ComparisonError
+
+    def stage(number, started, review, extras, session, reader):
+        if number == 1:
+            raise ComparisonError("쪽 오류")
+        return 130 if number == 2 else None
+    split, failed = _split(stage)
+    for number in (1, 2, 3):
+        split.dispatch(number, 0, {}, {})
+    assert split.finish() == 130
+    assert failed == [(1, "쪽 오류")]
