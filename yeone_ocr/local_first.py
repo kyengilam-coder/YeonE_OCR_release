@@ -592,6 +592,10 @@ def _command(args, *, work=None, doc=None, pool=None):
                 return None
 
         page_reader = _ai_page_reader(args, project, work, cli, session, api)
+        resume = getattr(args, "local_resume", "unfinished") or "unfinished"
+        if resume != "unfinished":
+            cli.log("  이어서 할 때: " + {"continue": "앞선 쪽은 점검하지 않고 바로 이어갑니다",
+                                         "all": "앞선 쪽을 모두 다시 점검한 뒤 이어갑니다"}.get(resume, resume))
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -604,6 +608,19 @@ def _command(args, *, work=None, doc=None, pool=None):
                 cli.page_event(number, "record")
                 cli.progress("read", index, len(pages))
                 completed.append(number)
+                continue
+            if (resume == "continue" and old and old.get("pipeline") == POLICY and old.get("local_first")
+                    and not getattr(args, "force", False)):
+                # 바로 이어가기: an earlier page is left as recorded, unchecked (its pending review too).
+                done = old["local_first"].get("review") or {}
+                summaries[str(number)] = done
+                if review_enabled and done.get("status") not in RESUME_DONE:
+                    incomplete.append(number)
+                completed.append(number)
+                cli.page_event(number, "record")
+                cli.log(f"  {number}쪽: 앞선 기록 그대로 — 바로 이어가기(점검 안 함) · "
+                        f"{REVIEW_STATUS_LABELS.get(done.get('status'), done.get('status') or '')}")
+                cli.progress("read", index, len(pages))
                 continue
             cli.page_event(number, "now")
             review = {"status": "local-complete", "targets": 0, "calls": 0}
@@ -661,7 +678,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                     raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
                 # A page finished under the same conditions (no engine ran again, same key, review done):
                 # nothing to crop, plan, read or write again.
-                if (old and not getattr(args, "force", False) and not outcome.get("completed")
+                if (resume == "unfinished" and old and not getattr(args, "force", False) and not outcome.get("completed")
                         and _resume_done(old, args, _resume_key(args, selected["id"], project.text(number), options),
                                          review_enabled)):
                     done = old["local_first"]["review"]

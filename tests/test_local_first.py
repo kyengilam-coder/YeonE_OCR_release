@@ -391,6 +391,29 @@ class LocalFirstTests(unittest.TestCase):
             command(self.args("--no-local-columns"))
         self.assertTrue(planned)                                                        # a setting changed: not passed over
 
+    def test_resume_choice_continue_leaves_earlier_pages_unchecked_and_all_checks_them_again(self):
+        from yeone_ocr import local_first
+        self.confidence = 20
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            self.assertEqual(command(self.args()), 4)                                   # review pending (no key)
+        engines = len(self.local_calls)
+        logs = []
+        with patch("yeone_ocr.comparison_ai.prepare_plan", side_effect=AssertionError("앞선 쪽을 점검함")), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            self.assertEqual(command(self.args("--local-resume", "continue")), 4)       # still incomplete: left as it was
+        self.assertEqual(len(self.local_calls), engines)                                # not even the engine step
+        self.assertEqual(self.calls, [])
+        self.assertTrue(any("1쪽: 앞선 기록 그대로 — 바로 이어가기(점검 안 함) · AI 검증 보류" in line for line in logs))
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
+        self.assertEqual(command(self.args()), 0)                                       # unfinished (default): sent now
+        self.assertEqual(len(self.calls), 1)
+        planned = []
+        real = local_first._save_record
+        with patch.object(local_first, "_save_record", side_effect=lambda *a, **k: planned.append(1) or real(*a, **k)):
+            self.assertEqual(command(self.args("--local-resume", "all")), 0)            # finished, but checked again
+        self.assertTrue(planned)
+        self.assertEqual(len(self.calls), 1)                                            # finished review not bought again
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
