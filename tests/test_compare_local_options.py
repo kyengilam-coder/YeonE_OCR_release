@@ -135,7 +135,7 @@ def test_main_runs_sets_in_order_skips_witness_on_printed_and_resumes(tmp_path):
 
 def test_run_set_streams_page_progress_and_keeps_full_log(tmp_path, capsys):
     script = tmp_path / "fake.py"
-    script.write_text('print("  1쪽: 엔진 다수결로 3곳 채택(초록)")\nprint("  1쪽: no-api-needed · 로컬 ppocrv6")\nprint("MuPDF error: font")\n'
+    script.write_text('print("  1쪽: 엔진 다수결로 3곳 채택(초록)")\nprint("  1쪽: no-api-needed · 로컬 ppocrv6")\nprint("  2쪽: AI 검증 필요 없음 · 로컬 엔진 ppocrv6")\nprint("MuPDF error: font")\n'
                       'print("  glmocr: GPU 실행을 시작하지 못해")\nprint("detail line")\n', encoding="utf-8")
     doc = {"pdf": "x.pdf", "profile": "traditional", "pages": [1, 2]}
     args = tool.argparse.Namespace(engine_root=None, ai=False)
@@ -148,7 +148,7 @@ def test_run_set_streams_page_progress_and_keeps_full_log(tmp_path, capsys):
         _work, code, _seconds = tool.run_set("default", doc, args, tmp_path)
     shown = capsys.readouterr().out
     assert code == 0
-    assert "[1/2쪽" in shown and "[2/2쪽" not in shown and "GPU" in shown
+    assert "[1/2쪽" in shown and "[2/2쪽" in shown and "GPU" in shown       # 영문(이전)·한국어 상태 줄 모두
     assert "MuPDF" not in shown and "detail line" not in shown
     assert "detail line" in (tmp_path / "default.log").read_text(encoding="utf-8")
 

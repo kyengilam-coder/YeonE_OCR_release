@@ -202,6 +202,23 @@ def _target(scope, start, end, *, kind, bbox=None, candidates=None, origin=""):
             "candidates": candidates or [], "origin": origin}
 
 
+def _unique_ids(targets):
+    """Targets that share a span and origin but not a box (several missed ink regions after the same
+    word all sit at one empty span) would share an id: a repeated id makes an invalid response schema
+    (duplicate enum, refused by Claude Code and strict structured outputs) and a review record the
+    project rejects. Keep every first id as it was, so earlier reviews still resume, and derive the
+    repeats from their box, the same way every time."""
+    seen = set()
+    for target in targets:
+        if target["id"] in seen:
+            base, n = target["id"], 0
+            while target["id"] in seen:
+                n += 1
+                target["id"] = _hash([base, target.get("bbox"), n])[:32]
+        seen.add(target["id"])
+    return targets
+
+
 def _whole_page_targets(scope, runs, baseline, policy, origin):
     from .comparison import _slice_aligned, _eligibility
     alignments = {engine: difflib.SequenceMatcher(None, scope["snapshot_text"], runs[engine]["raw"]["text"],
@@ -605,6 +622,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
             visual = _whole_page_targets(scope, runs, baseline, policy, "dense-disagreements-whole-page")
         if not policy.selective and not visual and requested_ids is None:
             visual = _whole_page_targets(scope, runs, baseline, policy, "whole-page-agreement-check")
+        _unique_ids(visual)
         editorial = []
         if policy.traditional or policy.punctuation:
             if requested_ids is None and not policy.selective:
@@ -617,6 +635,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                     editorial.append(_target(scope, start, end, kind="editorial", bbox=box, origin="whole-page-editorial"))
             else:
                 editorial = [_target(scope, v["start"], v["end"], kind="editorial", bbox=v["bbox"], origin=v["origin"]) for v in visual]
+            _unique_ids(editorial)
         image = image or ocr.render_page(project.source_path, number, dpi=scope["dpi"], should_stop=should_stop)
         try:
             if image.size != (scope["source_width"], scope["source_height"]):
@@ -1112,13 +1131,14 @@ def _request(client, settings, prompt, images, *, response_schema=None, system=S
     if getattr(client, "subscription", False):
         # The signed-in CLI of the plan (claude_subscription, chatgpt_subscription, gemini_subscription).
         from types import SimpleNamespace
-        from .claude_subscription import SubscriptionError
+        from .claude_subscription import RequestRejected, SubscriptionError
         try:
             text, complete, finish_reason, tokens, actual = client.request(
                 model_name=settings.model, system=system, prompt=prompt, images=images, schema=response_schema)
         except SubscriptionError as exc:
             error = AIReviewError(str(exc))
-            error.fatal = True                      # not signed in, plan limit reached, CLI missing
+            # Not signed in, plan limit reached, CLI missing: stop. A refused request fails alone.
+            error.fatal = not isinstance(exc, RequestRejected)
             raise error from exc
         usage = SimpleNamespace(**tokens)
         response = SimpleNamespace(model=actual)

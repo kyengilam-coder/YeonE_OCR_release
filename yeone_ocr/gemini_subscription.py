@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError
+from .claude_subscription import SubscriptionError, failure
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
@@ -170,7 +170,7 @@ def _classify(text: str) -> str | None:
         return "Gemini CLI 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT
     if any(k in low for k in ("quota", "resource_exhausted", "rate limit", "429", "usage limit")):
         return "Google 계정의 Gemini 사용량 한도에 도달했습니다. 한도가 초기화된 뒤 다시 실행하세요."
-    if "model" in low and any(k in low for k in ("not found", "not supported", "unknown", "does not exist")):
+    if re.search(r"model\b[^.\n]{0,80}\b(?:is not supported|does not exist|not found)|model_not_found", low):
         return "이 Google 계정에서 쓸 수 없는 모델입니다. YEONE_OCR_GEMINI_MODEL을 비우면 Gemini CLI 기본 선택을 씁니다."
     return None
 
@@ -250,7 +250,7 @@ class SubscriptionClient:
         error = data.get("error") if isinstance(data, dict) else None
         if proc.returncode != 0 or error or not isinstance(data.get("response"), str):
             detail = (error.get("message") if isinstance(error, dict) else error) or (proc.stderr or out or "").strip()[-400:]
-            raise SubscriptionError(_classify(str(detail)) or f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}")
+            raise failure("Gemini CLI", str(detail), _classify, f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}")
         text = _json_text(data["response"])
         tokens, actual = {"input_tokens": 0, "output_tokens": 0}, label(model_name)
         models = ((data.get("stats") or {}).get("models") or {}) if isinstance(data.get("stats"), dict) else {}

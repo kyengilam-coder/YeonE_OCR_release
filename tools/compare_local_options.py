@@ -434,7 +434,7 @@ def run_set(name, doc, args, out_dir):
 
     def show(text):
         text = text.strip()
-        if re.match(r"\d+쪽: \S+ · 로컬 ", text):                       # the one line local-first prints per finished page
+        if re.match(r"\d+쪽: [^·]+ · 로컬 ", text):                     # the one line local-first prints per finished page
             state["done"] += 1
             print(f"    [{state['done']}/{total}쪽 · {time.perf_counter() - started:.0f}초] {text}", flush=True)
         elif re.search(r"오류|실패|GPU|제외|Traceback|Error", text) and "MuPDF" not in text:

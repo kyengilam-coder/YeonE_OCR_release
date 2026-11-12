@@ -61,6 +61,26 @@ class SubscriptionError(RuntimeError):
     pass
 
 
+class RequestRejected(SubscriptionError):
+    """The program refused this request itself (its JSON schema or input), not the account: another
+    plan would refuse the same request, so the connection stays and only this request fails."""
+
+
+_REQUEST_REJECTIONS = ("not a valid json schema", "invalid_json_schema", "invalid schema", "invalid_request_error",
+                       "response_format", "output_schema", "text.format")
+
+
+def failure(program: str, detail: str, classify, fallback: str) -> SubscriptionError:
+    """The error for a failed call, with the program's own words kept: RequestRejected for a refused
+    request, else the account problem `classify` recognises (sign-in, plan limit), else `fallback`."""
+    text = (detail or "").strip()
+    raw = f" (원문: {text[:240]})" if text else ""
+    if any(k in text.lower() for k in _REQUEST_REJECTIONS):
+        return RequestRejected(f"{program}가 이번 요청(검증 스키마·입력)을 거부했습니다{raw}")
+    message = classify(text)
+    return SubscriptionError(message + raw) if message else SubscriptionError(fallback)
+
+
 def auth_mode(requested: str | None = None) -> str:
     mode = (requested or os.environ.get("YEONE_OCR_CLAUDE_AUTH", "") or "auto").strip().lower()
     return mode if mode in AUTH_MODES else "auto"
@@ -201,8 +221,6 @@ def _classify(text: str) -> str | None:
         return "Claude Code 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT
     if any(k in low for k in ("usage limit", "limit reached", "rate_limit", "rate limit")):
         return "Claude 구독 사용량 한도(5시간 또는 주간)에 도달했습니다. 한도가 초기화된 뒤 다시 실행하세요."
-    if "not a valid json schema" in low:
-        return "Claude Code가 검증 스키마를 거부했습니다. `claude update`로 최신 버전으로 올리세요."
     return None
 
 
@@ -253,13 +271,13 @@ class SubscriptionClient:
         result = next((e for e in reversed(events) if e.get("type") == "result"), None)
         if result is None:
             detail = (proc.stderr or proc.stdout or "").strip()[-400:]
-            raise SubscriptionError(_classify(detail) or f"Claude Code 실행 실패(코드 {proc.returncode}): {detail}")
+            raise failure("Claude Code", detail, _classify, f"Claude Code 실행 실패(코드 {proc.returncode}): {detail}")
         structured = result.get("structured_output")
         if result.get("is_error") or structured is None:
             text = str(result.get("result") or "")
             if result.get("stop_reason") == "refusal":
                 return text, False, "refusal", {}, model_name
-            raise SubscriptionError(_classify(text) or f"Claude Code 오류: {text[:300] or result.get('subtype')}")
+            raise failure("Claude Code", text, _classify, f"Claude Code 오류: {text[:300] or result.get('subtype')}")
         usage = result.get("usage") or {}
         tokens = {name: int(usage.get(name) or 0) for name in ("input_tokens", "output_tokens")}
         actual = next(iter(result.get("modelUsage") or {}), model_name)
