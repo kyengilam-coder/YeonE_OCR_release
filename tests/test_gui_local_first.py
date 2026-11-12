@@ -116,6 +116,17 @@ class LocalFirstGuiTests(unittest.TestCase):
         app.v_local_resume = Var(gui.RESUME_LABELS["unfinished"])
         self.assertNotIn("--local-resume", gui.App._strategy_opts(app))
 
+    def test_parallel_requests_add_a_flag_only_when_not_the_default(self):
+        gui = self.gui
+        app = self.app()
+        self.assertNotIn("--local-ai-parallel", gui.App._strategy_opts(app))
+        self.assertEqual(gui.DEFAULTS["local_ai_parallel"], 3)
+        app.v_local_ai_parallel = Var("1")
+        flags = gui.App._strategy_opts(app)
+        self.assertEqual(flags[flags.index("--local-ai-parallel") + 1], "1")
+        app.v_local_ai_parallel = Var("9")                                              # out of range: the default
+        self.assertNotIn("--local-ai-parallel", gui.App._strategy_opts(app))
+
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()
         app._env_optional_key = True

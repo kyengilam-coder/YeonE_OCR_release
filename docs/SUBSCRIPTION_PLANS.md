@@ -75,3 +75,7 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`. 한도가 풀렸
 - 그림: Claude는 stream-json 입력에 base64로, Codex는 `-i 파일`, Gemini는 지시문의 `@image1.png` 참조로 보낸다.
 - 지시문은 셋 다 표준 입력으로 넘겨 Windows 명령줄 길이 제한(cmd.exe 8191자)에 걸리지 않는다.
   npm으로 설치한 `codex.cmd`, `gemini.cmd`도 그래서 쓸 수 있다.
+
+## 동시 AI 요청 (1.2.7)
+
+구독 계정으로 검증할 때 한 쪽의 검증 묶음을 여러 개 함께 보낸다(설정 「AI 판독기」 ③ 「동시 AI 요청」, 기본 3, `--local-ai-parallel`). 요청만 겹치고 응답 확인·기록은 차례대로다. 총 사용량은 같고 한도가 그만큼 빨리 찬다. API 키로 검증할 때는 하나씩 보낸다.

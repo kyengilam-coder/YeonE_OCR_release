@@ -352,3 +352,86 @@ class SelectiveReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParallelRequestTests(unittest.TestCase):
+    """run_plan(parallel=N): requests overlap; preparing, validating and recording stay in plan order."""
+    setUp = SelectiveReviewTests.setUp
+    make_image = SelectiveReviewTests.make_image
+    add = SelectiveReviewTests.add
+    plan = SelectiveReviewTests.plan
+
+    def many_targets(self, n=6):
+        words = [{"text": "甲乙丙丁戊己庚辛"[i], "bbox": [40 + 30 * i, 20, 60 + 30 * i, 45], "confidence": 40} for i in range(n)]
+        self.add(text="".join(w["text"] for w in words), words=words)
+        return self.plan(policy=ReviewPolicy(selective=True, batch_size=1))
+
+    def client(self, delay=0.3, fail_first=False):
+        import threading
+        import time
+        state = {"now": 0, "most": 0, "order": [], "lock": threading.Lock(), "calls": 0}
+
+        def request(*, model_name, system, prompt, images, schema):
+            with state["lock"]:
+                state["calls"] += 1
+                first = state["calls"] == 1
+                state["now"] += 1
+                state["most"] = max(state["most"], state["now"])
+            try:
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].rsplit("\nReturn JSON", 1)[0])
+                time.sleep(delay)
+                if fail_first and first:
+                    from yeone_ocr.claude_subscription import SubscriptionError
+                    raise SubscriptionError("Claude 구독 사용량 한도에 도달했습니다.")
+                ids = [t["id"] for t in data["targets"]]
+                state["order"].append(ids)
+                items = [{"target_id": i, "uncertain": False, "note": "ok", "proposals": []} for i in ids]
+                return json.dumps({"items": items}), True, "completed", {}, model_name
+            finally:
+                with state["lock"]:
+                    state["now"] -= 1
+        return SimpleNamespace(subscription=True, transport="test-subscription", request=request), state
+
+    def test_three_requests_overlap_and_records_follow_the_plan(self):
+        import time
+        plan = self.many_targets(6)
+        self.assertEqual(len(plan.batches), 6)
+        client, state = self.client()
+        started = time.perf_counter()
+        outcome = run_plan(self.project, plan, api_key="synthetic-key", client_factory=lambda *_: client, parallel=3)
+        elapsed = time.perf_counter() - started
+        self.assertEqual((outcome["completed"], outcome["failed"], outcome["calls"]), (6, 0, 6))
+        self.assertEqual(state["most"], 3)
+        self.assertLess(elapsed, 6 * 0.3 * 0.75)                                   # well under one-by-one
+        recorded = [r["request"]["targets"][0]["id"] for r in self.project.page(1)["ai_reviews"]]
+        self.assertEqual(recorded, [b["targets"][0]["id"] for b in plan.batches])     # plan order, not arrival order
+
+    def test_one_at_a_time_is_unchanged(self):
+        plan = self.many_targets(3)
+        client, state = self.client(delay=0.05)
+        outcome = run_plan(self.project, plan, api_key="synthetic-key", client_factory=lambda *_: client)
+        self.assertEqual((outcome["completed"], state["most"]), (3, 1))
+
+    def test_a_fatal_answer_stops_new_requests_and_keeps_those_in_flight(self):
+        plan = self.many_targets(6)
+        client, state = self.client(delay=0.2, fail_first=True)
+        outcome = run_plan(self.project, plan, api_key="synthetic-key", client_factory=lambda *_: client, parallel=3)
+        self.assertEqual(state["calls"], 3)                                         # nothing sent after the fatal answer
+        self.assertEqual((outcome["failed"], outcome["completed"]), (1, 2))
+        self.assertEqual(len(self.project.page(1)["ai_reviews"]), 3)
+
+    def test_stop_keeps_the_answers_in_flight_and_sends_no_more(self):
+        import threading
+        plan = self.many_targets(6)
+        client, state = self.client(delay=0.2)
+        stop = threading.Event()
+        seen = []
+
+        def checkpoint(result):
+            seen.append(result)
+            stop.set()                                                              # [중지] right after the first answer
+        outcome = run_plan(self.project, plan, api_key="synthetic-key", client_factory=lambda *_: client, parallel=3,
+                           should_stop=stop.is_set, on_result=checkpoint)
+        self.assertTrue(outcome["cancelled"])
+        self.assertEqual(state["calls"], 3)
+        self.assertEqual(outcome["completed"], 3)                                   # the three already bought are recorded

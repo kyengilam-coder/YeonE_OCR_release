@@ -739,7 +739,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                             checkpoints[0] += 1
                             cli.LOCAL_API_CALLS = calls + checkpoints[0]
                         result = run_plan(project, plan, api_key=key, should_stop=cli.CANCEL.is_set, on_result=checkpoint,
-                                          client_factory=(lambda _settings, _key: session) if session is not None else None)
+                                          client_factory=(lambda _settings, _key: session) if session is not None else None,
+                                          parallel=(getattr(args, "local_ai_parallel", 3) or 1) if session is not None else 1)
                         calls += result["calls"]
                         if getattr(args, "local_ai_accept", False):
                             review["ai_accept"] = _accept_ai(project, number)

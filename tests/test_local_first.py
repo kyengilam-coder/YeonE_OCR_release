@@ -186,6 +186,7 @@ class LocalFirstTests(unittest.TestCase):
             self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept",
                                                "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
         self.assertEqual(seen, [1])                                                    # one CLI client for the run
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
         self.assertEqual(self.calls, ["opus"])
         from yeone_ocr import subscriptions
         self.assertIsNone(subscriptions.active())                                     # the window's connection ends with the run
@@ -413,6 +414,30 @@ class LocalFirstTests(unittest.TestCase):
             self.assertEqual(command(self.args("--local-resume", "all")), 0)            # finished, but checked again
         self.assertTrue(planned)
         self.assertEqual(len(self.calls), 1)                                            # finished review not bought again
+
+    def test_requests_go_three_at_a_time_through_a_plan_and_one_by_one_through_an_api_key(self):
+        from yeone_ocr import claude_subscription, comparison_ai
+        self.confidence = 20
+        real, seen = comparison_ai.run_plan, []
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("parallel"))
+            return real(*args, **kwargs)
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "end_turn", {}, model_name
+        with patch("yeone_ocr.comparison_ai.run_plan", side_effect=spy), \
+                patch.object(claude_subscription, "SubscriptionClient", side_effect=lambda **_k: FakeCLI()), \
+                patch.object(claude_subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off")), 0)
+            self.work = self.root / "work-api"
+            self.assertEqual(command(self.args("--local-ai-auth", "api")), 0)
+        self.assertEqual(seen, [3, 1])
 
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20

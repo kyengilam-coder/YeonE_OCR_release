@@ -33,6 +33,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
+            "local_ai_parallel": 3,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
@@ -2306,6 +2307,7 @@ class App(tk.Tk):
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
         self.v_local_resume = tk.StringVar(value=RESUME_LABELS.get(self.cfg.get("local_resume"), RESUME_LABELS["unfinished"]))
+        self.v_local_ai_parallel = tk.StringVar(value=str(self.cfg.get("local_ai_parallel", 3)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2528,6 +2530,16 @@ class App(tk.Tk):
             return f
         R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
 
+        def parallel(parent):
+            f = boxed(parent)
+            sp = ttk.Spinbox(f, from_=1, to=4, width=3, textvariable=self.v_local_ai_parallel, state="readonly")
+            sp.pack(side="left")
+            L(f, "개씩 함께").pack(side="left", padx=(P(4), 0))
+            Tip(sp, "구독 계정으로 검증할 때 한 쪽의 검증 묶음 여럿을 동시에 보냅니다(기본 3). 묶음이 많은 쪽이 2~3배 빨라집니다. "
+                    "총 사용량은 같고 한도(5시간·주간·하루)가 그만큼 빨리 찹니다 — 한도에 닿으면 다음 구독 → API 키로 넘어갑니다. "
+                    "응답 확인과 기록은 차례대로입니다. 1 = 예전처럼 하나씩. API 키로 검증할 때는 늘 하나씩.", self)
+            return f
+        R["ai_parallel"] = row(b, "동시 AI 요청", "구독 계정으로 검증할 때 함께 보내는 요청 수(1~4, 기본 3) · 빠르지만 한도가 빨리 참", parallel)
         R["api_fallback"] = row(b, "API 키로 넘어가기", "구독이 한도에 닿거나 로그인이 풀리면 다른 구독 → API 키(위 횟수까지) · 끄면 API 요금 없음",
                                 check(self.v_local_ai_api_fallback))
         # 세부 설정(펼치면 판독 섹션 아래에 — 보통은 기본값). 3차 판별 세 줄은 '모델 단계' 섹션으로 옮겼다
@@ -6214,6 +6226,13 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_easyocr")
         if bool(variable.get()) if variable is not None else bool(cfg.get("local_easyocr", False)):
             options.append("--local-easyocr")
+        variable = vars(self).get("v_local_ai_parallel")
+        try:
+            parallel = int(variable.get() if variable is not None else cfg.get("local_ai_parallel", 3))
+        except (TypeError, ValueError):
+            parallel = 3
+        if 1 <= parallel <= 4 and parallel != 3:
+            options += ["--local-ai-parallel", str(parallel)]
         variable = vars(self).get("v_local_resume")
         resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
         if resume in RESUME_LABELS and resume != "unfinished":
@@ -7166,6 +7185,12 @@ class App(tk.Tk):
                 self.cfg["local_ai_plan"] = _label_key(AI_PLAN_LABELS, self.v_local_ai_plan.get()) or "auto"
             if vars(self).get("v_local_ai_api_fallback") is not None:
                 self.cfg["local_ai_api_fallback"] = bool(self.v_local_ai_api_fallback.get())
+            if vars(self).get("v_local_ai_parallel") is not None:
+                try:
+                    value = int(self.v_local_ai_parallel.get())
+                except ValueError:
+                    value = 3
+                self.cfg["local_ai_parallel"] = value if 1 <= value <= 4 else 3
             if vars(self).get("v_local_resume") is not None:
                 self.cfg["local_resume"] = _label_key(RESUME_LABELS, self.v_local_resume.get()) or "unfinished"
             cap = max_calls_value(self.v_local_ai_max_calls.get())
