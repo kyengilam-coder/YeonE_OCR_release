@@ -1,6 +1,12 @@
 # 연어OCR 1.2.10 · Codex 모델 거부 시 다른 모델로
 
-1.2.9를 고치는 판이다. ChatGPT 구독(Codex CLI)으로 판독·검증할 때 "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account (model_not_found)"로 쪽마다 실패하던 문제를 고쳤다.
+**1.2.9는 배포 회귀 시험에서 멈춰 게시되지 않았다**(새 시험 둘이 Windows에서 건너뛰도록 되어 있었고, 배포 회귀는 건너뛴 시험을 실패로 본다 — 두 시험이 Windows 경로로도 돌게 고쳤다). 그래서 1.2.10에 1.2.9의 변경이 모두 들어 있다:
+
+- **구독 프로그램 설치·로그인**: 설정 「AI 판독기」 ①의 설치·로그인 줄 — [설치]는 확인 뒤 공식 설치 명령(`npm install -g @google/gemini-cli` · `@openai/codex`)을 실행하고, npm이 없으면 winget으로 Node.js LTS 설치를 묻거나 내려받기 페이지를 연다. [로그인 창 열기]는 공식 프로그램을 새 창으로 연다(로그인은 그 회사 화면에서).
+- **로그인 상태 원인 표시**: Gemini CLI를 찾았지만 실행되지 않으면 「설치 안 됨」이 아니라 「실행 실패」와 종료 코드·오류 문구·경로. Codex CLI·Gemini CLI를 PATH 밖(npm 전역 폴더·Node 설치 폴더·nvm·Volta·pnpm)에서도 찾는다. 「로그인 상태」에 마우스를 올리면 계정마다 이유와 해결 방법.
+- **쪽 나눠 보내기 기본 켬**: 1.2.8에서 저장된 '끔'(그때의 기본값)은 한 번만 켬으로 옮기고, 그 뒤 직접 끈 값은 지킨다.
+
+그리고 ChatGPT 구독(Codex CLI)으로 판독·검증할 때 "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account (model_not_found)"로 쪽마다 실패하던 문제를 고쳤다.
 
 - **원인**: 연어OCR은 모델을 정하지 않고 Codex가 계정에 맞춰 고르게 둔다. 그런데 Codex가 고른 기본 모델(gpt-5.5)을 그 ChatGPT 계정이 쓸 수 없었다(예전 판 Codex일 때 흔함 — 최신 0.167의 기본은 gpt-6.1-sol). 또 오류 문구에 `invalid_request_error`가 들어 있어 연어OCR이 이를 "요청 자체의 거부"로 잘못 나눠, 다른 모델로도 다른 구독으로도 넘기지 않고 쪽마다 같은 실패를 되풀이했다.
 - **다른 모델로 다시**: 기본 모델이 거부되면 `codex debug models`로 그 계정이 쓸 수 있는 모델 목록을 받아, 이미지를 받는 모델을 Codex의 우선순위대로 같은 요청에 다시 써 보고, 답한 모델을 그 뒤 요청에 바로 쓴다(목록을 내지 못하는 예전 Codex는 짧은 내장 목록). 모두 거부되면 계정 문제로 보고 다음 구독으로 넘긴다(Codex를 최신으로 올리라는 안내와 함께). `YEONE_OCR_CHATGPT_MODEL`로 직접 정한 모델은 바꾸지 않는다.
