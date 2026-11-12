@@ -33,7 +33,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
-            "local_ai_parallel": 3, "local_ai_split": True,
+            "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
@@ -2316,6 +2316,7 @@ class App(tk.Tk):
         self.v_local_resume = tk.StringVar(value=RESUME_LABELS.get(self.cfg.get("local_resume"), RESUME_LABELS["unfinished"]))
         self.v_local_ai_parallel = tk.StringVar(value=str(self.cfg.get("local_ai_parallel", 3)))
         self.v_local_ai_split = tk.BooleanVar(value=bool(self.cfg.get("local_ai_split", True)))
+        self.v_local_ai_pages = tk.StringVar(value=str(self.cfg.get("local_ai_pages", 2)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2504,18 +2505,35 @@ class App(tk.Tk):
             self.l_plans = L(f, "설정 탭을 열면 확인합니다", "CAP", "MUTED")
             self.l_plans.pack(side="left")
             self._plans_tip = Tip(self.l_plans, "", self)                    # 계정마다 이유·찾은 경로·설치·로그인 방법
+            self.l_plans.configure(cursor="hand2")
+            self.l_plans.bind("<Button-1>", lambda _e: App.show_plan_details(self), add="+")
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
                       tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
+            self.b_plan_test = self._btn(f, "연결 시험", lambda: App.test_plans(self), lock=False,
+                                         tip="쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 봅니다(실행 때와 같은 방식 · 구독 사용량에서 조금 차감). "
+                                             "답하는지, 어느 모델인지, 실패하면 그 프로그램이 말한 이유를 보여 줍니다. 긴 작업 전에 눌러 보세요.")
+            self.b_plan_test.pack(side="left", padx=(P(8), 0))
             return f
         def split(parent):
             cb = ttk.Checkbutton(parent, text="로그인된 구독 여러 개에 쪽 나눠 보내기", variable=self.v_local_ai_split)
             Tip(cb, "Claude·ChatGPT·Gemini 중 로그인된 구독이 둘 이상이면, 엔진이 다음 쪽을 읽는 동안 계정마다 맡은 쪽의 AI 쪽 판독·검증을 "
                     "함께 진행합니다. 한 쪽은 한 계정이 끝까지 검증하고, 한도를 계정마다 나눠 써서 빨라집니다. 쪽마다 검증한 모델이 다를 수 "
                     "있으며 ChatGPT·Gemini의 검증 정확도는 아직 재지 않았습니다(기본 설정은 Claude로 잼). 실제로 답한 계정·모델은 "
-                    "검증 기록에 남습니다. [다음 구독으로 넘기기]는 첫 계정의 연결을 옮깁니다.", self)
+                    "검증 기록에 남습니다. [다음 구독으로 넘기기]는 첫 계정의 연결과, 같은 계정을 쓰던 다른 연결을 옮깁니다.", self)
             return cb
         R["ai_split"] = row(b, "쪽 나눠 보내기", "로그인된 구독이 둘 이상일 때 계정마다 쪽을 맡아 함께 진행(기본 켬) · 빠르지만 쪽마다 모델이 다를 수 있음", split)
-        R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 명령줄 yeone-ocr plans 와 같음", plans_status)
+
+        def ai_pages(parent):
+            f = boxed(parent)
+            sp = ttk.Spinbox(f, from_=1, to=4, width=3, textvariable=self.v_local_ai_pages, state="readonly")
+            sp.pack(side="left")
+            L(f, "쪽씩 함께").pack(side="left", padx=(P(4), 0))
+            Tip(sp, "구독 계정 하나가 AI 쪽 판독·검증을 함께 맡는 쪽 수입니다(기본 2). 엔진은 AI의 답을 기다리지 않고 다음 쪽을 계속 읽고, "
+                    "엔진을 마친 쪽은 차례대로 계정에 넘어갑니다. 쪽 수만큼 빨라지며 총 사용량은 같고 한도(5시간·주간·하루)가 그만큼 "
+                    "빨리 찹니다. 한 쪽 안에서는 쪽 판독과 검증 요청(「동시 AI 요청」)을 함께 보냅니다. 1 = 계정마다 한 쪽씩.", self)
+            return f
+        R["ai_pages"] = row(b, "계정이 함께 맡는 쪽", "구독 계정 하나가 AI 판독·검증을 함께 진행하는 쪽 수(1~4, 기본 2) · 빠르지만 한도가 빨리 참", ai_pages)
+        R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 글자를 누르면 이유·찾아본 곳 · [연결 시험]은 실제로 작은 요청을 보내 봄", plans_status)
 
         def plan_setup(parent):
             f = boxed(parent)
@@ -4514,6 +4532,7 @@ class App(tk.Tk):
         link = self._ai_link_row = tk.Frame(b, bg=C["PANEL"])
         L(link, "AI 연결", "CAP", "MUTED").pack(side="left")
         self.l_ai_link = L(link, "", "BODY_B"); self.l_ai_link.pack(side="left", padx=(P(8), 0))
+        self._ai_link_tip = Tip(self.l_ai_link, "", self)
         self.b_ai_switch = self._btn(link, "다음 구독으로 넘기기", lambda: App.switch_subscription(self), lock=False,
                                      tip="지금 쓰는 구독 계정을 멈추고(답을 기다리던 요청은 다시 보냄) 옆에서 고른 계정에 연결합니다. "
                                          "고르지 않으면(자동) 정해진 순서(Claude → ChatGPT → Gemini, 남은 구독이 없으면 API 키)로 다음 계정에 연결합니다. "
@@ -4535,7 +4554,16 @@ class App(tk.Tk):
             row.grid_remove()
             return
         row.grid(row=5, column=0, sticky="ew", pady=(self.px(10), 0))
-        self.l_ai_link.configure(text=state["label"] if state["available"] else "없음 — AI 판독·검증을 멈춤")
+        resting = state.get("resting") or []
+        rest = " · ".join(f"{AI_TARGET_LABELS[item['plan']].split()[0]}({str(item['minutes']) + '분 뒤 다시' if item.get('minutes') else '이번 실행 제외'})"
+                          for item in resting)
+        self.l_ai_link.configure(text=(state["label"] if state["available"] else "없음 — AI 판독·검증을 멈춤")
+                                 + (f"  |  쉼: {rest}" if rest else ""))
+        tip = vars(self).get("_ai_link_tip")
+        if tip is not None:                                              # 쉬는 계정마다 그 프로그램이 말한 이유
+            tip.text = "\n\n".join(f"{AI_TARGET_LABELS[item['plan']]} — "
+                                    + (f"약 {item['minutes']}분 뒤 다시 씁니다" if item.get("minutes") else "이번 실행에서 다시 쓰지 않습니다")
+                                    + f": {item['reason']}" for item in resting) or "지금 쓰는 AI 연결입니다. 쪽 나눠 보내기면 계정마다 하나씩."
         following = state.get("next")
         auto = AI_NEXT_AUTO + (f" (다음: {AI_TARGET_LABELS[following]})" if following else " (넘길 곳 없음)")
         targets = {auto: None}
@@ -4567,6 +4595,11 @@ class App(tk.Tk):
                 details.append(f"{subscriptions.NAMES[plan]} — {mark[2:]}{where}" + (f": {state['reason']}" if state.get("reason") else ""))
             self.q.put(("plans", " · ".join(parts), "\n\n".join(details)))
         threading.Thread(target=work, daemon=True, name="plan-status").start()
+
+    def show_plan_details(self):
+        """로그인 상태 글자를 누르면: 계정마다 찾은 경로·이유·해결 방법(마우스 도움말과 같은 글)을 창으로 — 복사해 물어볼 수 있게."""
+        text = getattr(vars(self).get("_plans_tip"), "text", "") or "아직 확인하지 않았습니다. [상태 확인]을 누르세요."
+        messagebox.showinfo("로그인 상태 자세히", text, parent=self)
 
     def install_plan(self):
         """[설치]: 고른 구독의 공식 프로그램을 이 PC에 설치(확인 뒤 뒤에서 실행 · 과정은 진행 기록).
@@ -4642,12 +4675,42 @@ class App(tk.Tk):
             from . import subscriptions
             message = subscriptions.switch(target)
             self.q.put(("log", "  " + message + "\n"))
-            session = subscriptions.active()
-            self.q.put(("ai_link", session.state() if session is not None else None))
+            self.q.put(("ai_link", subscriptions.state()))
         threading.Thread(target=work, daemon=True, name="ai-switch").start()
 
-    STRIP_LABEL = {"record": "판독 기록 있음 · 건너뜀", "remain": "남음", "done": "끝남", "now": "판독 중", "fail": "판독 실패(다시 시도 가능)"}
-    LEGEND = (("done", "끝남"), ("now", "지금"), ("fail", "실패"), ("record", "기록 있음 · 건너뜀"), ("remain", "남음"))
+    def test_plans(self):
+        """[연결 시험]: 쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 본다(뒤에서 — 계정마다 수십 초 걸릴 수 있음). 결과는 창과 진행 기록에."""
+        if vars(self).get("_plan_test_busy"):
+            return
+        self._plan_test_busy = True
+        button = vars(self).get("b_plan_test")
+        if button is not None:
+            button.configure(state="disabled")
+        label = vars(self).get("l_plans")
+        if label is not None:
+            label.configure(text="연결 시험 중… (계정마다 작은 요청 하나)")
+        def work():
+            try:
+                from . import cli
+                lines = cli.plan_test_lines()
+            except Exception as exc:                 # 시험은 창을 멈추지 않는다
+                lines = [f"연결 시험을 하지 못했습니다: {exc}"]
+            self.q.put(("plan_test", lines))
+        threading.Thread(target=work, daemon=True, name="plan-test").start()
+
+    def _plan_test_done(self, lines):
+        self._plan_test_busy = False
+        button = vars(self).get("b_plan_test")
+        if button is not None:
+            button.configure(state="normal")
+        for line in lines:
+            self.q.put(("log", "  연결 시험 — " + line + "\n"))
+        App.refresh_plans(self)
+        messagebox.showinfo("연결 시험", "\n\n".join(lines), parent=self)
+
+    STRIP_LABEL = {"record": "판독 기록 있음 · 건너뜀", "remain": "남음", "done": "끝남", "now": "판독 중",
+                   "queued": "엔진 판독 끝 · AI 차례 기다림", "fail": "판독 실패(다시 시도 가능)"}
+    LEGEND = (("done", "끝남"), ("now", "지금"), ("queued", "AI 대기"), ("fail", "실패"), ("record", "기록 있음 · 건너뜀"), ("remain", "남음"))
     LOOKS = {"cap": ("CAP", "MUTED"), "cap_b": ("CAP_B", "INK"), "red_b": ("CAP_B", "RED"), "red": ("CAP", "RED"), "warn": ("CAP", "WARN")}
     BIG_LOOKS = {"m": ("BODY", "MUTED"), "big": ("BIG", "INK"), "unit": ("UNIT", "MUTED"), "body": ("BODY", "INK"), "b": ("BODY_B", "INK"),
                  "red_b": ("BODY_B", "RED"), "warn": ("BODY", "WARN")}
@@ -4910,11 +4973,13 @@ class App(tk.Tk):
             outer = rounded_path(x0, 0, x1, ch, r)
             if kind == "done":
                 poly(outer, C["SEAL"])
-            elif kind in ("now", "fail", "remain"):
-                bw = {"now": bold, "fail": fail_w, "remain": thin}[kind]
-                poly(outer, {"now": C["SEAL"], "fail": C["RED"], "remain": C["RULE"]}[kind])
+            elif kind in ("now", "queued", "fail", "remain"):
+                bw = {"now": bold, "queued": thin, "fail": fail_w, "remain": thin}[kind]
+                poly(outer, {"now": C["SEAL"], "queued": C["SEAL"], "fail": C["RED"], "remain": C["RULE"]}[kind])
                 inner = rounded_path(x0 + bw, bw, x1 - bw, ch - bw, max(0, r - bw))
                 poly(inner, C["PANEL"])
+                if kind == "queued":                                    # 엔진 판독 끝 · AI 차례 기다림: 가는 먹 테 + 아래 절반 옅은 파랑
+                    poly(rounded_path(x0 + bw, ch / 2, x1 - bw, ch - bw, 0), C["SEAL_LINE"])
                 if frac > 0 and kind != "fail":
                     part = clip_x(inner, x0 + bw, x0 + bw + (x1 - x0 - 2 * bw) * frac)
                     if len(part) >= 3:
@@ -4955,15 +5020,20 @@ class App(tk.Tk):
         font = self._font("CAP"); s = P(14); y0 = (cv.winfo_height() - s) / 2; x = 0
         flat = lambda pts: [c for pt in pts for c in pt]
         for kind, name in self.LEGEND:
+            if kind == "queued" and not count.get(kind):                # 엔진이 앞서 읽는 실행에서만 보인다
+                continue
             box = rounded_path(x, y0, x + s, y0 + s, max(1, P(2)))
             if kind == "done":
                 cv.create_polygon(flat(box), fill=C["SEAL"], outline="")
             elif kind == "record":
                 cv.create_polygon(flat(box), fill=C["SEAL_LINE"], outline="")
             else:
-                bw = {"now": max(2, P(2)), "fail": max(1, int(1.5 * self.scale)) + 0, "remain": max(1, int(self.scale))}[kind]
-                cv.create_polygon(flat(box), fill={"now": C["SEAL"], "fail": C["RED"], "remain": C["RULE"]}[kind], outline="")
+                bw = {"now": max(2, P(2)), "queued": max(1, int(self.scale)), "fail": max(1, int(1.5 * self.scale)) + 0,
+                      "remain": max(1, int(self.scale))}[kind]
+                cv.create_polygon(flat(box), fill={"now": C["SEAL"], "queued": C["SEAL"], "fail": C["RED"], "remain": C["RULE"]}[kind], outline="")
                 cv.create_polygon(flat(rounded_path(x + bw, y0 + bw, x + s - bw, y0 + s - bw, 1)), fill=C["PANEL"], outline="")
+                if kind == "queued":
+                    cv.create_polygon(flat(rounded_path(x + bw, y0 + s / 2, x + s - bw, y0 + s - bw, 0)), fill=C["SEAL_LINE"], outline="")
                 if kind == "fail":
                     cv.create_text(x + s / 2, y0 + s / 2, text="!", fill=C["RED"], font=self.fonts["CAP_B"])     # 칸의 '!'와 같은 9pt(앱에서 9pt 아래 글은 없음)
             text = f"{name} {count.get(kind, 0):,}"
@@ -6327,6 +6397,13 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_ai_split")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_split", True))):
             options.append("--no-local-ai-split")                               # 기본 켬(1.2.9) — 끈 경우만 넘긴다
+        variable = vars(self).get("v_local_ai_pages")
+        try:
+            together = int(variable.get() if variable is not None else cfg.get("local_ai_pages", 2))
+        except (TypeError, ValueError):
+            together = 2
+        if 1 <= together <= 4 and together != 2:
+            options += ["--local-ai-pages", str(together)]
         variable = vars(self).get("v_local_resume")
         resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
         if resume in RESUME_LABELS and resume != "unfinished":
@@ -6748,6 +6825,8 @@ class App(tk.Tk):
                     App._show_ai_link(self, item[1])
                 elif item[0] == "setup_done":
                     App._setup_done(self, *item[1:])
+                elif item[0] == "plan_test":
+                    App._plan_test_done(self, item[1])
                 elif item[0] == "plans":
                     if vars(self).get("l_plans") is not None:
                         self.l_plans.configure(text=item[1])
@@ -7291,6 +7370,12 @@ class App(tk.Tk):
                 except ValueError:
                     value = 3
                 self.cfg["local_ai_parallel"] = value if 1 <= value <= 4 else 3
+            if vars(self).get("v_local_ai_pages") is not None:
+                try:
+                    value = int(self.v_local_ai_pages.get())
+                except ValueError:
+                    value = 2
+                self.cfg["local_ai_pages"] = value if 1 <= value <= 4 else 2
             if vars(self).get("v_local_resume") is not None:
                 self.cfg["local_resume"] = _label_key(RESUME_LABELS, self.v_local_resume.get()) or "unfinished"
             cap = max_calls_value(self.v_local_ai_max_calls.get())

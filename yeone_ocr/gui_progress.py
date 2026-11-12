@@ -392,7 +392,7 @@ def merge_marks(disk: dict, live: dict | None, *, finished: bool, before: dict |
     out = dict(disk)
     for n, st in (live or {}).items():
         if n in out:
-            out[n] = _unfinished(n, before) if finished and st == "now" else st
+            out[n] = _unfinished(n, before) if finished and st in ("now", "queued") else st
     return out
 
 
@@ -403,7 +403,7 @@ def _unfinished(n: int, before: dict | None) -> str:
 def settle_marks(marks: dict, before: dict | None = None) -> dict:
     """실행이 끝난 칸: '지금'이 남았으면(쪽이 끝나기 전에 멈춤·오류) '남음' — 다시 누르면 그 쪽부터 읽는다. 실행 전에 실패였던 쪽(before)을
     다시 읽다 멈췄으면 그대로 실패(상태 파일의 '판독 확인 필요'도 그대로라 다음 실행 전 칸과 같게)."""
-    return {n: (_unfinished(n, before) if st == "now" else st) for n, st in marks.items()}
+    return {n: (_unfinished(n, before) if st in ("now", "queued") else st) for n, st in marks.items()}
 
 def strip_layout(n: int, width: float, gap: float, min_cell: float) -> tuple[int, list[tuple[float, float, int, int]]]:
     """대상 n쪽을 너비 width 에 칸으로 나눈다: 칸 최소 너비 min_cell, 칸 사이 gap. → (한 칸의 쪽 수, [(x0, x1, 첫 쪽 번호(0부터), 끝 쪽 번호+1)])."""
@@ -430,6 +430,8 @@ def cell_kind(states: list[str]) -> tuple[str, float]:
     n = len(states)
     if "now" in states:
         return "now", states.count("done") / n
+    if "queued" in states:                              # 엔진은 끝나고 AI 차례를 기다리는 쪽
+        return "queued", states.count("done") / n
     if all(s == "done" for s in states):
         return "done", 1.0
     if all(s == "record" for s in states):

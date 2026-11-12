@@ -94,7 +94,7 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertEqual(values, ["자동(순서대로) (다음: ChatGPT 구독)", "ChatGPT 구독", "Gemini 구독", "API 키"])
         self.assertEqual(app.v_ai_next.get(), values[0])
         with mock.patch("yeone_ocr.subscriptions.switch", return_value="넘김") as switch, \
-                mock.patch("yeone_ocr.subscriptions.active", return_value=None):
+                mock.patch("yeone_ocr.subscriptions.state", return_value=None):
             gui.App.switch_subscription(app)                                # 고르지 않음: 정해진 순서
             self.assertEqual(app.q.get(timeout=5), ("log", "  넘김\n"))
             app.v_ai_next.set("Gemini 구독")
@@ -103,6 +103,24 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertEqual([c.args for c in switch.call_args_list], [(None,), ("gemini",)])
         gui.App._show_ai_link(app, None)
         row.grid_remove.assert_called_once()
+
+    def test_ai_link_row_names_every_connection_and_the_resting_plans_and_the_test_button_reports(self):
+        import queue
+        gui = self.gui
+        label, tip = mock.Mock(), SimpleNamespace(text="")
+        app = SimpleNamespace(_ai_link_row=mock.Mock(), l_ai_link=label, cb_ai_next=mock.Mock(), b_ai_switch=mock.Mock(),
+                              _ai_link_tip=tip, v_ai_next=Var(gui.AI_NEXT_AUTO), px=lambda v: v, q=queue.Queue(),
+                              b_plan_test=mock.Mock(), l_plans=mock.Mock())
+        state = {"plan": "claude", "label": "Claude 구독 · Gemini 구독", "available": True, "targets": ["chatgpt", "gemini"], "next": "gemini",
+                 "resting": [{"plan": "chatgpt", "reason": "Codex 사용량 한도(원문: usage limit)", "minutes": 42}]}
+        gui.App._show_ai_link(app, state)
+        label.configure.assert_called_with(text="Claude 구독 · Gemini 구독  |  쉼: ChatGPT(42분 뒤 다시)")
+        self.assertIn("ChatGPT 구독 — 약 42분 뒤 다시 씁니다: Codex 사용량 한도(원문: usage limit)", tip.text)
+        with mock.patch("yeone_ocr.cli.plan_test_lines", return_value=["Claude: 응답함 · 모델 opus · 9초"]):
+            gui.App.test_plans(app)
+            self.assertEqual(app.q.get(timeout=5), ("plan_test", ["Claude: 응답함 · 모델 opus · 9초"]))
+        gui.App.test_plans(app)                                                         # 시험 중에는 다시 시작하지 않는다
+        self.assertTrue(app.q.empty())
 
     def test_resume_choice_adds_a_flag_only_when_not_the_default(self):
         gui = self.gui
@@ -126,6 +144,17 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertEqual(flags[flags.index("--local-ai-parallel") + 1], "1")
         app.v_local_ai_parallel = Var("9")                                              # out of range: the default
         self.assertNotIn("--local-ai-parallel", gui.App._strategy_opts(app))
+
+    def test_pages_a_plan_takes_together_add_a_flag_only_when_not_the_default(self):
+        gui = self.gui
+        app = self.app()
+        self.assertNotIn("--local-ai-pages", gui.App._strategy_opts(app))
+        self.assertEqual(gui.DEFAULTS["local_ai_pages"], 2)
+        app.v_local_ai_pages = Var("3")
+        flags = gui.App._strategy_opts(app)
+        self.assertEqual(flags[flags.index("--local-ai-pages") + 1], "3")
+        app.v_local_ai_pages = Var("9")                                                 # out of range: the default
+        self.assertNotIn("--local-ai-pages", gui.App._strategy_opts(app))
 
     def test_split_is_on_by_default_and_unchecking_it_adds_a_flag(self):
         gui = self.gui

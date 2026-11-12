@@ -22,8 +22,10 @@ Environment:
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,7 +60,23 @@ _last_limits: dict | None = None
 
 
 class SubscriptionError(RuntimeError):
-    pass
+    """A plan's own program could not answer. `kind` says what a run does next (subscriptions.Session):
+    "limit" (usage limit: the plan rests until `retry_after` seconds have passed, when the program said
+    when it resets), "account" (sign-in, missing program, a model the plan lacks: out for this run) or
+    "temporary" (server trouble, network, anything not recognised: tried again, then a short rest)."""
+    kind = "account"
+    retry_after = None
+
+
+class Problem(str):
+    """What a module's _classify recognised in a program's error text: the message, with its kind."""
+    kind = "account"
+
+
+def problem(kind: str, message: str) -> Problem:
+    value = Problem(message)
+    value.kind = kind
+    return value
 
 
 class RequestRejected(SubscriptionError):
@@ -71,16 +89,50 @@ _REQUEST_REJECTIONS = ("not a valid json schema", "invalid_json_schema", "invali
 
 
 def failure(program: str, detail: str, classify, fallback: str) -> SubscriptionError:
-    """The error for a failed call, with the program's own words kept: RequestRejected for a refused
-    request, else the account problem `classify` recognises (sign-in, plan limit), else `fallback`."""
+    """The error for a failed call, with the program's own words kept: the account problem `classify`
+    recognises (sign-in, plan limit), else RequestRejected for a refused request, else `fallback` as a
+    temporary failure (the plan itself is not at fault as far as this text says)."""
     text = (detail or "").strip()
     raw = f" (원문: {text[:240]})" if text else ""
     message = classify(text)                 # account problems first: sign-in, plan limit, a model the plan lacks
     if message:
-        return SubscriptionError(message + raw)
+        error = SubscriptionError(message + raw)
+        error.kind = getattr(message, "kind", "account")
+        if error.kind == "limit":
+            error.retry_after = reset_after(text)
+        return error
     if any(k in text.lower() for k in _REQUEST_REJECTIONS):
         return RequestRejected(f"{program}가 이번 요청(검증 스키마·입력)을 거부했습니다{raw}")
-    return SubscriptionError(fallback)
+    error = SubscriptionError(fallback)
+    error.kind = "temporary"
+    return error
+
+
+_CLOCK = re.compile(r"\bresets?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b")
+_SPAN = re.compile(r"\b(?:try again|retry|resets?|reset)\s+(?:in|after)\s+((?:[\s,]*(?:about|and)?\s*\d+\s*"
+                   r"(?:days?|hours?|hrs?|minutes?|mins?|seconds?|secs?|d|h|m|s)(?![a-z]))+)")
+_UNIT = re.compile(r"(\d+)\s*(d|h|m|s)")
+
+
+def reset_after(text: str, now=None) -> float | None:
+    """Seconds until a plan limit resets, as the program's message says: "resets 12:10am" (the next
+    such local time), "try again in 3 hours 42 minutes", "reset after 3h12m5s". None when it does not say."""
+    low = (text or "").lower()
+    span = _SPAN.search(low)
+    if span:
+        seconds = sum(int(n) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[u] for n, u in _UNIT.findall(span.group(1)))
+        return float(min(max(seconds + 60, 60), 7 * 86400)) if seconds else None
+    clock = _CLOCK.search(low)
+    if clock:
+        hour, minute = int(clock.group(1)) % 12 + (12 if clock.group(3) == "p" else 0), int(clock.group(2) or 0)
+        if minute > 59:
+            return None
+        now = now or datetime.datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        return (target - now).total_seconds() + 60
+    return None
 
 
 def auth_mode(requested: str | None = None) -> str:
@@ -123,36 +175,82 @@ def find_cli() -> str | None:
     return on_path
 
 
-def npm_global_cli(name: str) -> str | None:
-    """A command-line program installed with `npm install -g` (Codex CLI, Gemini CLI) that is not on this
-    process's PATH: npm's global folder, Node installers, nvm, Volta, Homebrew, ~/.local/bin."""
+_npm_prefix_cache: dict = {}
+
+
+def npm_global_prefix(runner=subprocess.run) -> str | None:
+    """npm's own global folder (`npm prefix -g`), which also follows a prefix set in .npmrc. Cached."""
+    if "value" in _npm_prefix_cache:
+        return _npm_prefix_cache["value"]
+    value = None
+    names = ("npm.cmd", "npm") if sys.platform == "win32" else ("npm",)
+    npm = next((found for found in (shutil.which(n) for n in names) if found), None)
+    if npm is None and sys.platform == "win32":
+        base = os.environ.get("ProgramFiles", "").strip()
+        candidate = Path(base) / "nodejs" / "npm.cmd" if base else None
+        npm = str(candidate) if candidate is not None and candidate.is_file() else None
+    if npm:
+        try:
+            proc = runner([npm, "prefix", "-g"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=30, **_NO_WINDOW)
+            line = (proc.stdout or "").strip().splitlines()
+            value = line[-1].strip() if proc.returncode == 0 and line else None
+        except (OSError, subprocess.SubprocessError):
+            value = None
+    _npm_prefix_cache["value"] = value
+    return value
+
+
+def cli_search_folders(name: str, runner=subprocess.run) -> list:
+    """Where a program installed outside this process's PATH may be: npm's global folder (asked from npm,
+    then the defaults), Node installers, nvm, Volta, pnpm, bun, Scoop, Chocolatey, winget, Homebrew."""
     home = Path.home()
     folders = []
-    prefix = os.environ.get("NPM_CONFIG_PREFIX", "").strip()
+    prefixes = [p for p in (os.environ.get("NPM_CONFIG_PREFIX", "").strip(), npm_global_prefix(runner)) if p]
     if sys.platform == "win32":
-        names = (f"{name}.cmd", f"{name}.exe", f"{name}.ps1")
+        folders += [Path(p) for p in prefixes]
         for variable, tail in (("APPDATA", "npm"), ("ProgramFiles", "nodejs"), ("NVM_SYMLINK", ""), ("VOLTA_HOME", "bin"),
-                               ("LOCALAPPDATA", "Volta/bin"), ("LOCALAPPDATA", "pnpm")):
+                               ("LOCALAPPDATA", "Volta/bin"), ("LOCALAPPDATA", "pnpm"), ("SCOOP", "shims"),
+                               ("ChocolateyInstall", "bin"), ("LOCALAPPDATA", "Microsoft/WinGet/Links"),
+                               ("BUN_INSTALL", "bin")):
             base = os.environ.get(variable, "").strip()
             if base:
                 folders.append(Path(base) / tail if tail else Path(base))
-        if prefix:
-            folders.append(Path(prefix))
+        folders += [home / "scoop" / "shims", home / ".bun" / "bin", Path("C:/ProgramData/chocolatey/bin")]
     else:
-        names = (name,)
-        if prefix:
-            folders.append(Path(prefix) / "bin")
-        folders += [home / ".npm-global" / "bin", home / ".local" / "bin", home / ".volta" / "bin",
+        folders += [Path(p) / "bin" for p in prefixes]
+        folders += [home / ".npm-global" / "bin", home / ".local" / "bin", home / ".volta" / "bin", home / ".bun" / "bin",
                     Path("/usr/local/bin"), Path("/opt/homebrew/bin")]
         nvm = home / ".nvm" / "versions" / "node"
         if nvm.is_dir():
             folders += sorted((version / "bin" for version in nvm.iterdir()), reverse=True)
+    seen, unique = set(), []
     for folder in folders:
+        key = str(folder).lower() if sys.platform == "win32" else str(folder)
+        if key not in seen:
+            seen.add(key)
+            unique.append(folder)
+    return unique
+
+
+def npm_global_cli(name: str, runner=subprocess.run) -> str | None:
+    """A command-line program (Codex CLI, Gemini CLI) found in cli_search_folders but not on PATH."""
+    names = (f"{name}.cmd", f"{name}.exe") if sys.platform == "win32" else (name,)   # Windows: not npm's sh script
+    for folder in cli_search_folders(name, runner):
         for candidate in names:
             path = folder / candidate
-            if path.is_file() and not candidate.endswith(".ps1"):
+            if path.is_file():
                 return str(path)
     return None
+
+
+def not_found_reason(program: str, name: str, hint: str) -> str:
+    """Why a program counts as missing: where it was looked for, and how to install it."""
+    places = ", ".join(str(f) for f in cli_search_folders(name)[:8])
+    return (f"{program}({name})를 찾지 못했습니다 — PATH와 {places} 등을 찾아봤습니다. {hint} "
+            f"다른 곳에 설치했다면 PowerShell에서 `where.exe {name}`(Mac·Linux: `which {name}`)로 위치를 보고 "
+            f"환경 변수 YEONE_OCR_{'GEMINI' if name == 'gemini' else 'CODEX'}_CLI_PATH로 지정하세요. "
+            "`npx`로만 실행했다면 전역 설치가 아니므로 [설치]를 누르세요.")
 
 
 def _is_cmd_shim(path: str) -> bool:
@@ -248,13 +346,19 @@ def _parse_events(stdout: str) -> list:
     return events
 
 
+# "You've hit your 5-hour limit · resets 12:10am", "weekly limit reached", "usage limit". A bare
+# rate_limit_error / overloaded (too many requests at this moment) is left to the temporary path:
+# the same plan is tried again, and rests only for a short while if it keeps failing.
+_LIMIT = re.compile(r"usage limit|(?<!rate )limit reached|hit your\b[^.\n]{0,40}\blimit|out of (?:extra )?usage")
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
     if any(k in low for k in ("not logged in", "/login", "login expired", "authentication_failed",
                               "invalid api key", "oauth token has expired")):
-        return "Claude Code 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT
-    if any(k in low for k in ("usage limit", "limit reached", "rate_limit", "rate limit")):
-        return "Claude 구독 사용량 한도(5시간 또는 주간)에 도달했습니다. 한도가 초기화된 뒤 다시 실행하세요."
+        return problem("account", "Claude Code 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT)
+    if _LIMIT.search(low):
+        return problem("limit", "Claude 구독 사용량 한도(5시간 또는 주간)에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
     return None
 
 

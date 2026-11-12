@@ -412,7 +412,8 @@ def _ai_page_reader(args, project, work, cli, session=None, api=None):
         if not plan:
             cli.log("  AI 쪽 판독을 하지 않습니다: " + (reason or "구독 계정 연결을 확인하세요."))
             return None
-        session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log)
+        session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log,
+                                        should_stop=cli.CANCEL.is_set)
         subscriptions.activate(session)
     plan = session.plan
     client = session                     # moves to the next plan, then the API key, when a plan runs out
@@ -435,85 +436,150 @@ def _ai_page_reader(args, project, work, cli, session=None, api=None):
         except (SubscriptionError, TimeoutError, ValueError, OSError) as exc:
             cli.log(f"  {number}쪽: AI 쪽 판독 실패 — {exc} (엔진 판독만 씀)")
             return None
-        cli.log(f"  {number}쪽: AI 쪽 판독 {len(result['text'])}자" + (" (저장된 판독)" if result.get("cached") else ""))
+        cli.log(f"  {number}쪽: AI 쪽 판독 {len(result['text'])}자"
+                + (" (저장된 판독)" if result.get("cached") else f"({session.short()})"))
         return {**result, "mode": mode}
     return read
 
 
-class _SplitPlans:
-    """--local-ai-split: every signed-in plan gets its own session and one worker; the AI part of each
-    page (ai_stage) goes to a free plan while the engines read the next page, so plans answer pages
-    side by side. A page is answered by one plan only (its review stays consistent). Records keep the
-    run's provider and model settings, so a page sent to another plan next time resumes the same plan
-    of batches; the actual plan and model are in each review's metadata."""
+class _Side:
+    """A call on its own thread (the AI page reading beside the review); result() waits for it."""
 
-    def __init__(self, workers, stage, failed_page, log):
-        self.workers, self.stage, self.failed_page, self.log = workers, stage, failed_page, log
+    def __init__(self, function, *args):
+        import threading
+        self._value = self._error = None
+        self._thread = threading.Thread(target=self._run, args=(function, args), daemon=True, name="ai-page")
+        self._thread.start()
+
+    def _run(self, function, args):
+        try:
+            self._value = function(*args)
+        except BaseException as exc:                 # handed to the caller of result()
+            self._error = exc
+
+    def result(self):
+        self._thread.join()
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+class _AiWorkers:
+    """The AI part of pages (ai_stage) on worker threads, so the engines read on without waiting for an
+    answer: pages wait in one queue, in page order, and every connection takes --local-ai-pages pages
+    at a time. With --local-ai-split every signed-in plan has its own connection (session); otherwise
+    the run's one connection. A page is answered by one connection only (its review stays consistent).
+    Records keep the run's provider and model settings, so a page sent to another plan next time
+    resumes the same plan of batches; the actual plan and model are in each review's metadata."""
+
+    def __init__(self, crews, stage, failed_page, log, *, should_stop=lambda: False, on_start=None, on_done=None):
+        import collections
+        import threading
+        self.crews, self.stage, self.failed_page, self.log = crews, stage, failed_page, log
+        self.should_stop, self.on_start, self.on_done = should_stop, on_start, on_done
         self.stopped = False
+        self._queue, self._closed = collections.deque(), False
+        self._cond = threading.Condition()
+        self._threads = []
+        for crew in crews:
+            crew["idle"] = max(1, int(crew.get("pages") or 1))          # workers of this connection without a page
+        for crew in crews:
+            for index in range(crew["idle"]):
+                thread = threading.Thread(target=self._work, args=(crew,), daemon=True, name=f"ai-{crew['plan']}-{index + 1}")
+                thread.start()
+                self._threads.append(thread)
 
     @classmethod
-    def start(cls, args, session, api, project, work, cli, stage, failed_page, review_enabled):
-        if not getattr(args, "local_ai_split", False) or session is None or not review_enabled:
-            return None
-        from concurrent.futures import ThreadPoolExecutor
+    def start(cls, args, session, api, project, work, cli, stage, failed_page, review_enabled, **hooks):
+        if session is None or not review_enabled:
+            return None                              # API key or no review: the page loop does the AI part itself
         from . import subscriptions
-        plans = [session.plan] + [plan for plan in subscriptions.order(getattr(args, "local_ai_plan", None))
-                                  if plan != session.plan and plan not in subscriptions.exhausted()
-                                  and subscriptions.status(plan)["usable"]]
-        if len(plans) < 2:
-            cli.log("  쪽 나눠 보내기: 로그인된 구독 계정이 하나뿐이라 한 계정으로 진행합니다.")
-            return None
-        workers = []
+        plans = [session.plan]
+        if getattr(args, "local_ai_split", False):
+            plans += [plan for plan in subscriptions.order(getattr(args, "local_ai_plan", None))
+                      if plan != session.plan and plan not in subscriptions.exhausted()
+                      and subscriptions.status(plan)["usable"]]
+        per = min(4, max(1, int(getattr(args, "local_ai_pages", 2) or 1)))
+        crews = []
         for plan in plans:
             plan_session = session if plan == session.plan else subscriptions.Session(
-                plan, plan, api=api, log=cli.log, record_provider=session.record_provider)
+                plan, plan, api=api, log=cli.log, record_provider=session.record_provider, should_stop=cli.CANCEL.is_set)
             reader = _ai_page_reader(args, project, work, cli, plan_session, api)
-            workers.append({"plan": plan, "session": plan_session, "reader": reader, "future": None,
-                            "pool": ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"ai-{plan}")})
-        cli.log("  쪽 나눠 보내기: " + " · ".join(subscriptions.NAMES[p] for p in plans)
-                + " 구독이 쪽을 나눠 맡습니다(한 쪽은 한 계정이 끝까지 검증)")
-        return cls(workers, stage, failed_page, cli.log)
+            crews.append({"plan": plan, "session": plan_session, "reader": reader, "pages": per})
+        subscriptions.activate(session, [crew["session"] for crew in crews])     # the window shows every connection
+        names = " · ".join(subscriptions.NAMES[p] for p in plans)
+        if len(plans) > 1:
+            cli.log(f"  쪽 나눠 보내기: {names} 구독이 쪽을 나눠 맡습니다(한 쪽은 한 계정이 끝까지 검증 · 계정마다 {per}쪽씩 함께)")
+        else:
+            if getattr(args, "local_ai_split", False):
+                cli.log("  쪽 나눠 보내기: 로그인된 구독 계정이 하나뿐이라 한 계정으로 진행합니다.")
+            cli.log(f"  AI 판독·검증: {names} 구독이 {per}쪽씩 함께 맡습니다.")
+        cli.log("  엔진은 AI의 답을 기다리지 않고 다음 쪽을 계속 읽고, 엔진을 마친 쪽은 차례대로 AI 판독·검증을 받습니다.")
+        return cls(crews, stage, failed_page, cli.log, should_stop=cli.CANCEL.is_set, **hooks)
 
-    def _collect(self, worker):
-        future, worker["future"] = worker["future"], None
-        try:
-            if future.result() == 130:
-                self.stopped = True
-        except Exception as exc:                     # the page's own failure, as the inline loop reports it
-            number = getattr(future, "page_number", None)
-            from ab_ocr.ocr import OCRCancelled
-            from .comparison_ai import AIReviewCancelled
-            if isinstance(exc, (OCRCancelled, AIReviewCancelled, KeyboardInterrupt)):
-                self.stopped = True
-            else:
-                self.failed_page(number, exc)
+    def waiting(self) -> int:
+        with self._cond:
+            return len(self._queue)
 
-    def _free(self):
-        """A worker with no page (finished pages collected); waits for one when all are busy."""
-        from concurrent.futures import FIRST_COMPLETED, wait
+    def submit(self, number, started, review, extras, saved=False):
+        with self._cond:
+            self._queue.append((number, started, review, extras, saved))
+            self._cond.notify_all()
+
+    def _may_take(self, crew) -> bool:
+        """The next page goes to the first connection in order that has a free worker (the run's own plan
+        first). A connection with no way left to answer leaves the pages to the ones that still have one."""
+        usable = [other for other in self.crews if other["session"].available]
+        if not usable:
+            return True                              # nobody can answer: the pages are recorded as pending
+        if crew not in usable:
+            return False
+        return not any(other["idle"] > 0 for other in usable[:usable.index(crew)])
+
+    def _work(self, crew):
         while True:
-            for worker in self.workers:
-                if worker["future"] is not None and worker["future"].done():
-                    self._collect(worker)
-            free = [w for w in self.workers if w["future"] is None]
-            if free:
-                usable = [w for w in free if w["session"].available]
-                return (usable or free)[0]
-            wait([w["future"] for w in self.workers if w["future"] is not None], return_when=FIRST_COMPLETED)
+            with self._cond:
+                while not ((self._queue and self._may_take(crew)) or (self._closed and not self._queue)):
+                    self._cond.wait(2.0)
+                if not self._queue:
+                    return
+                job = self._queue.popleft()
+                crew["idle"] -= 1
+                self._cond.notify_all()              # the next connection in order may take the page after this one
+            try:
+                if self.stopped or self.should_stop():
+                    self.stopped = True              # [중지]: pages still waiting keep their engine reading
+                else:
+                    self._run(crew, job)
+            finally:
+                with self._cond:
+                    crew["idle"] += 1
+                    self._cond.notify_all()
 
-    def dispatch(self, number, started, review, extras):
-        worker = self._free()
-        future = worker["pool"].submit(self.stage, number, started, review, extras, worker["session"], worker["reader"])
-        future.page_number = number
-        worker["future"] = future
+    def _run(self, crew, job):
+        number = job[0]
+        from ab_ocr.ocr import OCRCancelled
+        from .comparison_ai import AIReviewCancelled
+        if self.on_start is not None:
+            self.on_start(number)
+        try:
+            number, started, review, extras, saved = job
+            if self.stage(number, started, review, extras, crew["session"], crew["reader"], saved) == 130:
+                self.stopped = True
+            elif self.on_done is not None:
+                self.on_done(number)
+        except (OCRCancelled, AIReviewCancelled, KeyboardInterrupt):
+            self.stopped = True
+        except Exception as exc:                     # the page's own failure, as the inline loop reports it
+            self.failed_page(number, exc)
 
     def finish(self):
-        """Wait for every page in flight; 130 when one was stopped."""
-        for worker in self.workers:
-            if worker["future"] is not None:
-                worker["future"].exception()             # wait
-                self._collect(worker)
-            worker["pool"].shutdown(wait=True)
+        """Wait for every page handed in; 130 when the run was stopped."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+        for thread in self._threads:
+            thread.join()
         return 130 if self.stopped else None
 
 
@@ -602,7 +668,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                 args.reader = subscriptions.PROVIDERS[plan]
                 args.model = subscriptions.model(plan, chosen if subscriptions.accepts_model(plan, chosen) else None)
                 key = subscriptions.KEYS[plan]
-                session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log)
+                session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log,
+                                                should_stop=cli.CANCEL.is_set)
                 subscriptions.activate(session)     # the window's [다음 구독으로 넘기기] switches this connection
             elif auth_mode(requested) == "subscription":
                 if api is not None:         # no usable plan: straight to the API key, within the paid cap
@@ -672,14 +739,34 @@ def _command(args, *, work=None, doc=None, pool=None):
                 return None
 
         page_reader = _ai_page_reader(args, project, work, cli, session, api)
-        def ai_stage(number, started, review, extras, stage_session, stage_reader):
-            """The AI part of one page after the engines: checkpoint, AI page reading, review plan, review,
-            accepted proposals, record. Inline, or (--local-ai-split) on the worker of one signed-in plan
-            while the engines read the next page. Returns 130 when stopped."""
+        def ai_stage(number, started, review, extras, stage_session, stage_reader, saved=False):
+            """The AI part of one page after the engines: checkpoint, AI page reading beside the review
+            (review plan, review, accepted proposals), record. Inline, or on a worker of a signed-in plan
+            (_AiWorkers) while the engines read on. Returns 130 when stopped."""
             # Checkpoint local output BEFORE preparing or sending any API call.
-            _save_record(project, number, args, work, started, review, extras=extras)
-            if stage_reader is not None:
-                extras["ai_page"] = stage_reader(number)
+            if not saved:
+                _save_record(project, number, args, work, started, review, extras=extras)
+            # The page reading and the review do not depend on each other (they meet in the record): both go out now.
+            reading = _Side(stage_reader, number) if stage_reader is not None else None
+            try:
+                stopped = review_stage(number, started, review, extras, stage_session)
+            finally:
+                if reading is not None:
+                    extras["ai_page"] = reading.result()
+            if stopped:
+                return 130
+            if not work.source_matches(args.dpi):
+                raise ComparisonError("처리 중 원본이 변경되어 출력 기록을 갱신하지 않았습니다.")
+            _save_record(project, number, args, work, started, review, render=False, extras=extras)
+            summaries[str(number)] = review
+            completed.append(number)
+            cli.page_event(number, "done")
+            cli.log(f"  {number}쪽: {REVIEW_STATUS_LABELS.get(review['status'], review['status'])} · "
+                    f"로컬 엔진 {(_selected(project, number) or {}).get('engine', '')}")
+            return None
+
+        def review_stage(number, started, review, extras, stage_session):
+            """The review of one page's suspicious spans. True when stopped."""
             settings = _settings(args, cap)
             try:
                 plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
@@ -740,27 +827,30 @@ def _command(args, *, work=None, doc=None, pool=None):
                     if result["cancelled"]:
                         review["status"] = "cancelled"
                         _save_record(project, number, args, work, started, review, render=False, extras=extras)
-                        return 130
-            if not work.source_matches(args.dpi):
-                raise ComparisonError("처리 중 원본이 변경되어 출력 기록을 갱신하지 않았습니다.")
-            _save_record(project, number, args, work, started, review, render=False, extras=extras)
-            summaries[str(number)] = review
-            completed.append(number)
-            cli.page_event(number, "done")
-            cli.log(f"  {number}쪽: {REVIEW_STATUS_LABELS.get(review['status'], review['status'])} · "
-                    f"로컬 엔진 {(_selected(project, number) or {}).get('engine', '')}")
-            return None
+                        return True
+            return False
+
+        finished = [0]
+        def page_finished(_number=None):
+            """The progress bar counts pages that are finished (their AI part too), not pages the engines have read."""
+            with tally_lock:
+                finished[0] += 1
+                count = finished[0]
+            cli.progress("read", count, len(pages))
 
         def page_failed(number, exc):
             failed.append(number)
             cli.page_event(number, "fail")
             cli.log(f"  {number}쪽 오류: {exc}")
+            page_finished()
 
-        split = _SplitPlans.start(args, session, api, project, work, cli, ai_stage, page_failed, review_enabled)
+        split = _AiWorkers.start(args, session, api, project, work, cli, ai_stage, page_failed, review_enabled,
+                                 on_start=lambda number: cli.page_event(number, "now"), on_done=page_finished)
         resume = getattr(args, "local_resume", "unfinished") or "unfinished"
         if resume != "unfinished":
             cli.log("  이어서 할 때: " + {"continue": "앞선 쪽은 점검하지 않고 바로 이어갑니다",
                                          "all": "앞선 쪽을 모두 다시 점검한 뒤 이어갑니다"}.get(resume, resume))
+        engine_read = 0
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -771,7 +861,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             if _protected_record(work, number, old) and not getattr(args, "force", False):
                 cli.log(f"  {number}쪽: 기존 판독·사람 교정 보존(다시 인식하려면 강제 재판독)")
                 cli.page_event(number, "record")
-                cli.progress("read", index, len(pages))
+                page_finished()
                 completed.append(number)
                 continue
             if (resume == "continue" and old and old.get("pipeline") == POLICY and old.get("local_first")
@@ -785,7 +875,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                 cli.page_event(number, "record")
                 cli.log(f"  {number}쪽: 앞선 기록 그대로 — 바로 이어가기(점검 안 함) · "
                         f"{REVIEW_STATUS_LABELS.get(done.get('status'), done.get('status') or '')}")
-                cli.progress("read", index, len(pages))
+                page_finished()
                 continue
             cli.page_event(number, "now")
             review = {"status": "local-complete", "targets": 0, "calls": 0}
@@ -808,7 +898,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                         completed.append(number)
                         cli.page_event(number, "done")
                         cli.log(f"  {number}쪽: 빈 쪽 — 엔진 건너뜀")
-                        cli.progress("read", index, len(pages))
+                        page_finished()
                         continue
 
                 def read(only=None):
@@ -853,20 +943,31 @@ def _command(args, *, work=None, doc=None, pool=None):
                     completed.append(number)
                     cli.page_event(number, "record")
                     cli.log(f"  {number}쪽: 끝난 쪽 — 같은 조건이라 건너뜀 · {REVIEW_STATUS_LABELS.get(done.get('status'), done.get('status'))}")
-                    cli.progress("read", index, len(pages))
+                    page_finished()
                     continue
                 if split is not None:
-                    split.dispatch(number, started, review, extras)
+                    # The engines' reading is on disk before the page waits for its AI turn.
+                    _save_record(project, number, args, work, started, review, extras=extras)
+                    cli.page_event(number, "queued")
+                    split.submit(number, started, review, extras, True)
+                    engine_read += 1
+                    if engine_read % 10 == 0:
+                        cli.log(f"  엔진 판독 {index}/{len(pages)}쪽째 · AI 차례를 기다리는 쪽 {split.waiting()}")
                 elif ai_stage(number, started, review, extras, session, page_reader) == 130:
                     return 130
+                else:
+                    page_finished()
             except (OCRCancelled, AIReviewCancelled, KeyboardInterrupt):
                 return 130
             except (OCRError, ComparisonError, AIReviewError, OSError, ValueError) as exc:
                 page_failed(number, exc)
-            cli.progress("read", index, len(pages))
-        state = work.load_state()
-        if split is not None and split.finish() == 130:
-            return 130
+        if split is not None:
+            if split.waiting():
+                cli.log(f"  엔진 판독을 모두 마쳤습니다. AI 판독·검증을 기다리는 쪽 {split.waiting()} — 끝날 때까지 이어갑니다"
+                        "([중지]를 누르면 끝난 쪽까지 저장하고, 남은 쪽은 다음 실행에서 이어 검증).")
+            if split.finish() == 130:
+                return 130
+        state = work.load_state()                    # after the workers: their pages' statuses are in it
         calls = tally["calls"]
         state["local_first_last_run"] = {"calls": calls, "cap": cap, "failed_pages": failed,
                                          "incomplete_review_pages": incomplete, "pages": summaries}

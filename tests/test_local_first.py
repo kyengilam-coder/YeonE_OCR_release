@@ -465,6 +465,73 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(answered, [("claude", "opus")])                               # one page: the first free plan
         self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
 
+    def test_page_reading_and_review_go_out_together(self):
+        import threading
+        from yeone_ocr import claude_subscription
+        self.confidence = 20
+        reading, reviewing, both = threading.Event(), threading.Event(), []
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                if "Source DATA (JSON):" in prompt:
+                    reviewing.set()
+                    both.append(reading.wait(10))                      # the page reading is in flight at the same time
+                    data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                    return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                                 for t in data["targets"]]}), True, "end_turn", {}, model_name
+                reading.set()
+                both.append(reviewing.wait(10))                        # and the review does not wait for it
+                return json.dumps({"lines": [self_.recognized_text], "uncertain": []}), True, "end_turn", {}, "opus"
+        self_ = self
+        with patch.object(claude_subscription, "SubscriptionClient", side_effect=lambda **_k: FakeCLI()), \
+                patch.object(claude_subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "prefer")), 0)
+        self.assertEqual(both, [True, True])
+        record = self.record()["local_first"]
+        self.assertEqual(record["review"]["status"], "reviewed")
+        self.assertIn("ai_page", record)
+
+    def test_engines_read_on_while_the_ai_part_waits_and_progress_counts_finished_pages(self):
+        import threading
+        from yeone_ocr import claude_subscription
+        self.confidence = 20
+        self.source = self.root / "book.pdf"
+        pages = [Image.new("RGB", (400, 200), "white") for _ in range(3)]
+        pages[0].save(self.source, save_all=True, append_images=pages[1:], resolution=300)     # 400x200 px at the run's 300 DPI
+        all_read, waited, progress, events, logs = threading.Event(), [], [], [], []
+        recognize = self.recognize
+
+        def engines(project, number, **kwargs):
+            out = recognize(project, number, **kwargs)
+            if number == 3:
+                all_read.set()
+            return out
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                waited.append(all_read.wait(10))                       # no answer until the engines have read every page
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "end_turn", {}, model_name
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=engines), \
+                patch.object(claude_subscription, "SubscriptionClient", side_effect=lambda **_k: FakeCLI()), \
+                patch.object(claude_subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
+                patch.object(cli, "PROGRESS", lambda stage, done, total: progress.append((stage, done, total))), \
+                patch.object(cli, "PAGE_EVENT", lambda number, state: events.append((number, state))), \
+                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
+            rc = command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off", "--local-ai-pages", "1"))
+        self.assertEqual(rc, 0)
+        self.assertTrue(waited and all(waited))                         # the engines did not wait for the first answer
+        self.assertEqual([p for p in progress if p[0] == "read"], [("read", 1, 3), ("read", 2, 3), ("read", 3, 3)])
+        self.assertEqual([state for number, state in events if number == 3], ["now", "queued", "now", "done"])
+        self.assertTrue(any("엔진은 AI의 답을 기다리지 않고" in line for line in logs))
+        for number in (1, 2, 3):
+            self.assertEqual(self.record(number)["local_first"]["review"]["status"], "reviewed")
+
     def test_missing_key_saves_local_and_pending_review(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
