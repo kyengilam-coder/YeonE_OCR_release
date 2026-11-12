@@ -139,13 +139,13 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
             pg = page_grades(rec, (context or {}).get(n), "notice")
         except Exception:
             pg = None
-        img = os.path.relpath(work.page_image_path(n), out.parent)
+        img = os.path.relpath(work.page_image_path(n), out.parent).replace(os.sep, "/")   # URL 은 '/' — 결과 폴더 맨 위에서 작업자료/pages 를 가리킨다
         sts = " ".join(f"<span>{html.escape(s)}</span>" for s in work.statuses(n))
         parts.append(f"<section class=page id=p{n}><div class=img><div class=sheet><img src='{img}' loading=lazy alt='PDF {n}쪽'>{overlay_boxes(pr)}</div>"
                      "<div class=legend>상자: 회색 = 문자 영역 · 파랑 = 도판 · 빨강 = 제목 · 붉은 점선 = 영역 밖 글줄 흔적(모델이 어느 영역에도 넣지 않음, 확인 필요)</div>")
         crops = rec.get("crops") or {}
         if crops:
-            parts.append("<div class=crops>" + "".join(f"<figure><img src='{os.path.relpath(c['path'], out.parent)}' alt='{k}'><figcaption style='font-size:11px'>{k} {'⚠ 외곽 '+','.join(c['touching']) if c.get('touching') else '외곽 OK'}</figcaption></figure>" for k, c in crops.items()) + "</div>")
+            parts.append("<div class=crops>" + "".join(f"<figure><img src='{os.path.relpath(c['path'], out.parent).replace(os.sep, '/')}' alt='{k}'><figcaption style='font-size:11px'>{k} {'⚠ 외곽 '+','.join(c['touching']) if c.get('touching') else '외곽 OK'}</figcaption></figure>" for k, c in crops.items()) + "</div>")
         parts.append("</div><div class=txt>")
         parts.append(f"<div class=meta><b>PDF {n}쪽</b> · 인쇄 {html.escape(pr.print_page) or '확인 안 됨'} · 쪽번호 표기 「{html.escape(pr.page_label)}」 · 머리말 「{html.escape(pr.running_header)}」 · 판독기 {html.escape(str(rec.get('reader')))} {html.escape(str(rec.get('model') or ''))} · 이미지 {html.escape(str(rec.get('image_source') or ''))}</div>")
         parts.append(f"<div class=status>{sts}</div>")
