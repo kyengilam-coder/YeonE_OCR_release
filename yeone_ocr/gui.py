@@ -16,7 +16,8 @@ from .providers import DEFAULT_MODELS, PROVIDER_LABELS, ENV_KEYS, KEY_URLS
 from .presets import (ALIASES, BUILTIN, DEFAULT_PRESET, PresetError, export_builtin, load_preset, preset_choices, preset_label,   # 표준 라이브러리만 — 창이 바로 뜬다
                       resolve_preset, template_suggests)
 from .runtime import is_frozen, is_installed_bundle, can_replace_executable, safe_output_path, external_dll_search
-from .state import BOOK_SETTINGS, LAST_COST, book_counts, clean_book_values, load_book_settings, page_marks, save_book_settings, target_pages, write_atomic   # 표준 라이브러리만(무거운 모듈은 그 안에서 늦게 부른다)
+from .state import (BOOK_SETTINGS, INTERNAL_DIR, LAST_COST, book_counts, clean_book_values, has_flat_work, load_book_settings, page_marks, public_root,
+                    save_book_settings, target_pages, tidy_result_dir, work_dir_in, write_atomic)   # 표준 라이브러리만(무거운 모듈은 그 안에서 늦게 부른다)
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif", ".jp2", ".j2k", ".jpx")   # pdfio.IMAGE_EXTS 와 같게(창은 pymupdf 없이도 떠야 하므로 따로 둠)
 
@@ -109,10 +110,12 @@ AI의 답은 제안으로 보존하며 결과 단추의 [모델 비교·교정]�
 
 결과는 원본 옆의 「<이름>_YeonE_OCR」(이미지는 「<이름>_<확장자>_YeonE_OCR」) 안에 생깁니다.
 붙여넣은 캡처는 Windows의 %LOCALAPPDATA%\\YeonE_OCR\\screenshots에 보관합니다. [결과 폴더]로 결과 위치를 엽니다.
- out/      HWPX (+DOCX)
+결과 폴더 맨 위에는 사람이 여는 셋과 작업자료 폴더 하나만 둡니다.
+ out/         HWPX (+DOCX, 문자 PDF)
  review.html  검수 화면      report.md  상태 보고
- readings/ 쪽별 판독 기록    crops/     이미지로 보존한 도판
- book_settings.json  책별 설정(원본을 바꿔 이전 결과를 보관해도 남음)
+ 작업자료/    판독 기록(readings) · 쪽 이미지 · 비교 프로젝트 · 책별 설정(book_settings.json) 등 — 보통은 열 필요 없음
+이전 판이 작업 자료를 맨 위에 펼쳐 둔 결과 폴더는 그대로 이어 씁니다. [더 보기] → [결과 폴더 정리…]를 누르면
+작업자료 폴더 하나로 옮깁니다(같은 폴더 안에서 이름만 옮김 — 판독 기록은 그대로 이어 쓰고 다시 사지 않음).
 
 짜임 규칙은 판독한 글을 제목·본문·주석 등으로 나누고 문단 스타일에 연결하는 기준입니다.
 한글 스타일은 글꼴·크기·문단 모양을 정합니다. [기본 규칙]은 대제목·중제목·소제목과 문단-1~5를 사용합니다.
@@ -370,9 +373,9 @@ def missing_packages() -> list[str]:
     return out
 
 
-def work_dir_for(pdf: str) -> Path:
-    """결과 폴더: PDF 옆 '<이름>_YeonE_OCR'. 이미지는 '<이름>_<확장자>_YeonE_OCR', 이미지 폴더는 '<폴더>_이미지_YeonE_OCR'
-    (같은 이름의 PDF·이미지·폴더가 한곳에 있어도 판독 기록이 섞이지 않게)."""
+def result_dir_for(pdf: str) -> Path:
+    """결과 폴더(사람이 여는 곳): PDF 옆 '<이름>_YeonE_OCR'. 이미지는 '<이름>_<확장자>_YeonE_OCR', 이미지 폴더는 '<폴더>_이미지_YeonE_OCR'
+    (같은 이름의 PDF·이미지·폴더가 한곳에 있어도 판독 기록이 섞이지 않게). 맨 위에는 out · review.html · report.md 와 작업자료/ 만 둔다."""
     p = Path(pdf)
     if p.is_dir():
         out = p.with_name(p.name + "_이미지_YeonE_OCR")
@@ -383,12 +386,32 @@ def work_dir_for(pdf: str) -> Path:
     return safe_output_path(out, p)
 
 
+def work_dir_for(pdf: str) -> Path:
+    """작업 폴더(명령의 --work — 판독 기록·쪽 이미지·책별 설정 등): 결과 폴더 안의 '작업자료'. 이전 판이 작업 자료를 결과 폴더 맨 위에 펼쳐 둔
+    책은 그 자리 그대로 쓴다(저절로 옮기지 않는다 — [더 보기] → [결과 폴더 정리]로 옮긴다)."""
+    return work_dir_in(result_dir_for(pdf))
+
+
+def book_place(work: Path, sep: str = "/") -> str:
+    """책별 설정 파일의 자리를 결과 폴더 이름부터 적는다: '개보본초_YeonE_OCR/작업자료/book_settings.json'(이전 판의 폴더는 작업자료 없이)."""
+    work = Path(work); root = public_root(work)
+    return sep.join([root.name] + ([work.name] if work != root else []) + [BOOK_SETTINGS])
+
+
+TIDY_ASK = ("이 책의 결과 폴더에는 이전 판의 작업 폴더(판독 기록·쪽 이미지·비교 프로젝트 등)가 맨 위에 펼쳐져 있습니다.\n"
+            "이것들을 '{inner}' 폴더 하나로 옮기고 맨 위에는 out(문서) · review.html(검수 화면) · report.md(보고)만 남길까요?\n\n"
+            "  {root}\n\n"
+            "· 같은 폴더 안에서 이름만 옮깁니다(복사·삭제 없음). 판독 기록은 그대로 이어 씁니다.\n"
+            "· 옮긴 뒤에는 1.1.0 이하의 이전 판이 이 폴더의 판독 기록을 찾지 못합니다(이전 판으로 열면 처음부터 다시 판독합니다).\n"
+            "· 결과 폴더의 파일이 다른 프로그램에 열려 있으면 옮기지 못합니다 — 닫고 다시 누르십시오.")
+
+
 def latest_result_hwpx(pdf: str, work: Path) -> Path | None:
     """이 원본의 완성된 문서만 고른다. 중간 저장본이나 다른 문서는 열지 않는다."""
     stem = Path(pdf).stem
     partial = re.compile(re.escape(stem) + r"_p\d+-\d+\Z")
     candidates = []
-    for path in (work / "out").glob("*.hwpx"):
+    for path in (public_root(work) / "out").glob("*.hwpx"):
         if path.stem != stem and not partial.fullmatch(path.stem):
             continue
         try:
@@ -2076,6 +2099,8 @@ class App(tk.Tk):
         ocr = vars(self).get("_selected_tab", 0) in (0, 2)
         m.add_command(label="OCR 모델 비교·교정…", command=self.open_local_comparison, state=busy)
         m.add_command(label="비용 미리 보기", command=self.do_estimate, state=busy if ocr and self.pdf() and not vars(self).get("_planning") else "disabled")
+        flat = bool(ocr and self.pdf() and self.work() == App.result_dir(self) and has_flat_work(App.result_dir(self)))
+        m.add_command(label="결과 폴더 정리…", command=self.tidy_result_folder, state=busy if flat else "disabled")
         m.add_separator()
         m.add_checkbutton(label="자세히 보기", variable=self.v_detail, command=lambda: self.set_simple_view(not self.v_detail.get()))
         m.add_command(label="고급 도구 접기" if self.v_adv.get() and not App._simple(self) else "고급 도구 펼치기", command=self.open_advanced_tools,
@@ -2840,7 +2865,7 @@ class App(tk.Tk):
         bk["title_tip"].text = self.v_docbook.get()
         state = App._book_save_state(self)
         d = self._book.get("dir")
-        where = f"— {d.name}{os.sep}{BOOK_SETTINGS}" if d is not None and state in ("saved", "changed", "unsaved") else ""
+        where = f"— {book_place(d, os.sep)}" if d is not None and state in ("saved", "changed", "unsaved") else ""
         text, color, font, icon = SAVE_LOOKS[state]
         bk["save_icon"].configure(image=self.icons["check"] if icon else "")
         bk["save_icon"].grid_configure(padx=(0, self.px(5)) if icon else 0)
@@ -3448,7 +3473,7 @@ class App(tk.Tk):
         w["common"].configure(text=App._common_line(self))
         state = App._book_save_state(self) if tab == self._active_input else "none"
         d = self._book.get("dir")
-        where = f"— {d.name}{os.sep}{BOOK_SETTINGS}" if d is not None and state in ("saved", "changed", "unsaved") else ""
+        where = f"— {book_place(d, os.sep)}" if d is not None and state in ("saved", "changed", "unsaved") else ""
         look = SAVE_LOOKS[state]
         w["save_icon"].configure(image=self.icons["check"] if look[3] else "")
         w["save_icon"].grid_configure(padx=(0, self.px(5)) if look[3] else 0)
@@ -5875,9 +5900,13 @@ class App(tk.Tk):
     def work(self) -> Path:
         return work_dir_for(self.pdf())
 
+    def result_dir(self) -> Path:
+        """지금 원본의 결과 폴더(out · review.html · report.md 가 놓이는 곳). 작업 폴더가 '작업자료'면 그 부모, 이전 판의 폴더면 작업 폴더 그대로."""
+        return public_root(self.work())
+
     def _sync_output_location(self, *_):
         """결과 저장 칸(읽기 전용): out 폴더의 전체 경로. 원본이 없으면 비운다(이름표가 '원본을 고르면 정해짐')."""
-        self.v_output_dir.set(str((self.work() / "out").resolve()) if self.pdf() else "")
+        self.v_output_dir.set(str((App.result_dir(self) / "out").resolve()) if self.pdf() else "")
 
     def _need_pdf(self) -> bool:
         if getattr(self, "_selected_tab", None) == 3 and not self.running:
@@ -5908,12 +5937,12 @@ class App(tk.Tk):
         other = self.v_pdf2.get().strip() if hasattr(self, "v_pdf2") else ""
         n2 = self._n_records(other) if other and other != self.pdf() else 0
         if n2:
-            if messagebox.askyesno(APP_NAME, f"[일반 OCR] 의 PDF 에는 판독 기록이 없습니다.\n  {self.pdf()}\n  → 결과 폴더 {self.work()}\n\n"
+            if messagebox.askyesno(APP_NAME, f"[일반 OCR] 의 PDF 에는 판독 기록이 없습니다.\n  {self.pdf()}\n  → 결과 폴더 {App.result_dir(self)}\n\n"
                                              f"[책갈피 OCR] 의 PDF 에는 {n2}쪽 기록이 있습니다.\n  {other}\n\n{what}을(를) 그 PDF 로 할까요? ([일반 OCR] 의 PDF 도 그것으로 바뀝니다)"):
                 self.select_tab(0); self._use_pdf(other)
                 return True
             return False
-        messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {self.work()}\n\n먼저 [▶ 한 번에 인식] 을 하거나, "
+        messagebox.showinfo(APP_NAME, f"판독 기록이 없습니다.\n결과 폴더: {App.result_dir(self)}\n\n먼저 [▶ 한 번에 인식] 을 하거나, "
                                       f"기록이 있는 원본을 [PDF 고르기…]나 [이미지 고르기…]로 고르십시오(복사본 PDF 옆에는 빈 결과 폴더가 새로 생깁니다).")
         return False
 
@@ -6530,7 +6559,9 @@ class App(tk.Tk):
         self._save_book(create=False)                        # 앞 책의 설정을 그 결과 폴더에(폴더가 있을 때만)
         self.v_pdf.set(p); self.cfg["last_pdf"] = p
         kind = "이미지" if Path(p).suffix.lower() in IMAGE_EXTS else "PDF"
-        self._append(f"{kind}: {p}\n결과 폴더: {self.work()}\n")
+        self._append(f"{kind}: {p}\n결과 폴더: {App.result_dir(self)}\n")
+        if self.work() == App.result_dir(self) and has_flat_work(App.result_dir(self)):
+            self._append(f"  이전 판의 작업 폴더가 결과 폴더 맨 위에 펼쳐져 있습니다 — [더 보기] → [결과 폴더 정리]로 '{INTERNAL_DIR}' 폴더 하나에 모을 수 있습니다.\n")
         self._load_book(clear_if_missing=bool(old) and Path(p) != Path(old))   # 다른 책: 그 책의 설정, 없으면 앞 책의 쪽 범위·보정을 비움
         self._remember_inputs(); write_config(self); self.refresh_table()
         if kind == "이미지" and self.mode_key() == "auto":
@@ -6590,7 +6621,7 @@ class App(tk.Tk):
             v.set(f"{scope} 탭에 원본을 고르면 쪽 범위·인쇄 쪽수·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기는 그 책의 책별 설정으로 남깁니다.")
         else:
             v.set(f"쪽 범위·인쇄 쪽수·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기는 「{Path(self.pdf()).name}」({scope} 탭)의 책별 설정입니다 — "
-                  + (f"{d.name}/{BOOK_SETTINGS}" if d.is_dir() else "결과 폴더가 아직 없어 이 창이 기억했다가 처음 실행할 때 남깁니다") + ".")
+                  + (book_place(d, "/") if d.is_dir() else "결과 폴더가 아직 없어 이 창이 기억했다가 처음 실행할 때 남깁니다") + ".")
 
     def _load_book(self, clear_if_missing: bool = False) -> None:
         """지금 원본의 책별 설정을 읽어 칸에 넣는다(읽기만 — 폴더·파일을 만들지 않는다). clear_if_missing(다른 책을 골랐을 때)이면 '다시 판독' 을 끈다.
@@ -6605,7 +6636,8 @@ class App(tk.Tk):
             if data:
                 App._pending(self).pop(str(d), None)                        # 파일이 생겼으면(다른 창·실행) 그것이 맞다
             elif not unread:
-                pend = clean_book_values(App._pending(self).get(str(d)) or {})
+                pending = App._pending(self)                              # 이전 판은 결과 폴더 이름으로 기억했다 — 아직 실행하지 않은 책의 설정을 잃지 않게
+                pend = clean_book_values(pending.get(str(d)) or pending.get(str(public_root(d))) or {})
         forced = clear_if_missing and bool(self.v_force.get())
         if forced:
             self.v_force.set(False)                                      # 다른 책을 '다시 판독' 으로 시작하지 않는다(기록 있는 쪽을 모두 다시 산다)
@@ -6616,7 +6648,7 @@ class App(tk.Tk):
                 got = {"pages": "", "print_offset": "", **got}           # 손으로 고쳐 빠진 열쇠 — 앞 책의 쪽 범위로 새 책을 읽지 않게
             self._apply_book(got)
             v = self._book_values()
-            where = f"책별 설정을 불러옴({d.name}/{BOOK_SETTINGS})" if data else "아직 실행하지 않은 책: 이 창에서 앞서 고른 설정을 되살림(결과 폴더가 생기면 남김)"
+            where = f"책별 설정을 불러옴({book_place(d)})" if data else "아직 실행하지 않은 책: 이 창에서 앞서 고른 설정을 되살림(결과 폴더가 생기면 남김)"
             self._append(f"{where}: {App._doc_summary(self, v)} · 쪽 범위 {v['pages'] or '전체'}"   # 쪽 범위는 늘 보인다(읽을 쪽 수 = 비용)
                          + (f" · 인쇄 쪽수 보정 {v['print_offset']}" if v["print_offset"] else "") + off + "\n")
         elif clear_if_missing and d is not None and not unread:
@@ -6720,8 +6752,8 @@ class App(tk.Tk):
                 os.replace(part, out); err = None
                 log = (f"기존 이미지 뒤에 붙여넣은 이미지를 추가했습니다: {out.name}\n  {names}\n" if preserve_order else
                        f"이미지 {len(srcs)}장을 이름 순서로 묶음: {out.name}\n  {names}\n") + (
-                    f"  참고: 예전 판이 묶은 '{old.name}' 이(가) 옆에 있습니다 — 그 판독 기록은 '{work_dir_for(str(old)).name}' 에 따로 있으니 이어 쓰려면 [일반 OCR]의 [PDF 고르기…]로 그 PDF를 고르십시오.\n"
-                    if old is not None and old.exists() and work_dir_for(str(old)).is_dir() else "")
+                    f"  참고: 예전 판이 묶은 '{old.name}' 이(가) 옆에 있습니다 — 그 판독 기록은 '{result_dir_for(str(old)).name}' 에 따로 있으니 이어 쓰려면 [일반 OCR]의 [PDF 고르기…]로 그 PDF를 고르십시오.\n"
+                    if old is not None and old.exists() and result_dir_for(str(old)).is_dir() else "")
             except ModuleNotFoundError as e:
                 err = f"패키지가 없어 이미지를 묶지 못했습니다: {e.name}. [더 보기] 메뉴의 [패키지 설치·점검]을 누르십시오."
             except Exception as e:
@@ -7004,7 +7036,7 @@ class App(tk.Tk):
             priced = costplan.price_plan(plan, self.cfg.get("prices") or {}, *self.fx_setting())
             self._append(costplan.format_plan(priced).splitlines()[0] + "\n")
             if kind == "adjudicate" and go is not None and not costplan.needs_confirm(priced):
-                messagebox.showinfo(APP_NAME, f"이 쪽 범위에 판독 기록이 없습니다.\n결과 폴더: {self.work()}" if not plan["records"] else
+                messagebox.showinfo(APP_NAME, f"이 쪽 범위에 판독 기록이 없습니다.\n결과 폴더: {App.result_dir(self)}" if not plan["records"] else
                                     f"판독 기록 {plan['records']:,}쪽에 〔a/b〕 자리·합의 판독 의심 자리 모두 새로 물을 곳이 없습니다(1차·2차가 갈린 자리가 없거나 이미 물음)."
                                     + "".join("\n" + x for x in costplan.skipped_lines(plan)))
                 return
@@ -7058,7 +7090,7 @@ class App(tk.Tk):
 
     def do_review(self):
         if not self._need_records("검수 화면"): return
-        rv = self.work() / "review.html"
+        rv = App.result_dir(self) / "review.html"
         self.start(["review", self.pdf(), "--work", str(self.work())] + self._pages(), "⑤ 검수 화면", open_after=rv)
 
     def do_small_annotations(self):
@@ -7104,7 +7136,7 @@ class App(tk.Tk):
                 self.nb.select(0)
                 self._save_book(create=True)
                 App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
-                out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
+                out = App.result_dir(self) / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
                 argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
                 argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra + App._strategy_opts(self)
                 self.start(argv, "한 번에 인식 (문자 PDF 만들기)", open_after=out)
@@ -7153,7 +7185,7 @@ class App(tk.Tk):
         """검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 만들고 연다(모델 호출 없음)."""
         if not self._need_records("PDF 글자층 넣기"): return
         self.nb.select(0)
-        out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"          # textlayer.out_path 와 같은 규칙(창은 pymupdf 없이도 떠야 하므로 따로 셈)
+        out = App.result_dir(self) / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"          # textlayer.out_path 와 같은 규칙(창은 pymupdf 없이도 떠야 하므로 따로 셈)
         self.start(["textlayer", self.pdf(), "--work", str(self.work())] + self._pages(), "PDF 글자층 넣기", open_after=out)
 
     def do_ledger(self):
@@ -7161,9 +7193,37 @@ class App(tk.Tk):
         self.nb.select(0)
         self.start(["ledger", self.pdf(), "--work", str(self.work())], "혼동 장부")
 
+    def tidy_result_folder(self):
+        """[더 보기] → [결과 폴더 정리]: 이전 판이 결과 폴더 맨 위에 펼쳐 둔 작업 자료를 '작업자료' 폴더 하나로 옮긴다(state.tidy_result_dir — 묻고 나서,
+        실행 중에는 하지 않는다). 옮긴 뒤 검수 화면이 있었으면 그림 경로가 바뀌므로 다시 만든다(모델 호출 없음)."""
+        if self.running or vars(self).get("_planning") or not self._need_pdf():
+            return
+        root = App.result_dir(self)
+        if self.work() != root or not has_flat_work(root):
+            messagebox.showinfo(APP_NAME, f"이 책의 결과 폴더는 이미 정리되어 있습니다.\n\n{root}")
+            return
+        if not messagebox.askyesno(APP_NAME, TIDY_ASK.format(inner=INTERNAL_DIR, root=root)):
+            return
+        self._save_book(create=False)                          # 옮기기 전에 — 칸의 책별 설정을 지금 자리에 남긴다
+        had_review = (root / "review.html").is_file()
+        try:
+            done = tidy_result_dir(root)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(APP_NAME, f"결과 폴더를 정리하지 못했습니다. 옮기던 것은 모두 제자리로 되돌렸습니다.\n\n{root}\n{type(exc).__name__}: {exc}\n\n"
+                                           "폴더 안의 파일이 다른 프로그램(한글·탐색기 미리 보기·브라우저)에 열려 있으면 닫고 다시 누르십시오.")
+            return
+        self._append(f"결과 폴더 정리: {len(done['moved'])}개를 '{INTERNAL_DIR}' 폴더로 옮겼습니다 — {root}\n")
+        self._book["dir"] = None                               # 책별 설정의 자리가 바뀌었다 — 다시 읽는다
+        self._load_book(clear_if_missing=False)
+        self._sync_output_location(); self.refresh_table(); App._schedule_cards(self)
+        if had_review and self._n_records(self.pdf()):
+            self.start(["review", self.pdf(), "--work", str(self.work())] + self._pages(), "검수 화면 다시 만들기(결과 폴더 정리)")
+        else:
+            self.v_status.set(f"결과 폴더를 정리했습니다 → {root}")
+
     def open_work(self):
         if not self._need_pdf(): return
-        w = self.work()
+        w = App.result_dir(self)
         if not w.exists():
             messagebox.showinfo(APP_NAME, "아직 결과 폴더가 없습니다. 먼저 [▶ 한 번에 인식] 을 누르십시오."); return
         open_path(w)
@@ -7186,7 +7246,7 @@ class App(tk.Tk):
         try:
             path = latest_result_hwpx(self.pdf(), self.work())
             if path is None:
-                messagebox.showinfo(APP_NAME, f"이 원본의 완성된 HWPX가 아직 없습니다. [한 번에 인식]으로 문서를 만든 뒤 누르십시오.\n\n저장 위치: {self.work() / 'out'}")
+                messagebox.showinfo(APP_NAME, f"이 원본의 완성된 HWPX가 아직 없습니다. [한 번에 인식]으로 문서를 만든 뒤 누르십시오.\n\n저장 위치: {App.result_dir(self) / 'out'}")
                 return
             App._open_result(self, path)
         except OSError as exc:
@@ -7216,7 +7276,7 @@ class App(tk.Tk):
             if result is None:
                 messagebox.showinfo(APP_NAME, "이 원본의 완성된 HWPX가 아직 없습니다.\n"
                                     "[한 번에 인식 (HWPX 만들기)]으로 문서를 만든 뒤 누르십시오.\n\n"
-                                    f"저장 위치: {work / 'out'}", parent=self)
+                                    f"저장 위치: {public_root(work) / 'out'}", parent=self)
                 return
             result = result.resolve()
             key = tuple(os.path.normcase(str(path)) for path in (source, result, work))
@@ -7240,7 +7300,7 @@ class App(tk.Tk):
 
     def open_textlayer(self):
         if not self._need_pdf(): return
-        out = self.work() / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
+        out = App.result_dir(self) / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
         if not out.is_file():
             messagebox.showinfo(APP_NAME, f"문자 PDF가 아직 없습니다. [한 번에 인식 (문자 PDF 만들기)]를 먼저 실행하십시오.\n\n저장 위치: {out}")
             return
@@ -7252,7 +7312,7 @@ class App(tk.Tk):
     def open_review(self):
         """[검수 화면]: 결과 폴더의 review.html 을 연다(열기만 함 — 만들려면 한 번에 인식 또는 고급 도구의 [⑤ 검수 화면])."""
         if not self._need_pdf(): return
-        rv = self.work() / "review.html"
+        rv = App.result_dir(self) / "review.html"
         if not rv.is_file():
             messagebox.showinfo(APP_NAME, "아직 검수 화면이 없습니다. [▶ 한 번에 인식] 또는 [더 보기] → 고급 도구의 [⑤ 검수 화면]으로 만드십시오.\n\n"
                                           f"저장 위치: {rv}")
@@ -7264,7 +7324,7 @@ class App(tk.Tk):
 
     def open_output_folder(self):
         if not self._need_pdf(): return
-        out = self.work() / "out"
+        out = App.result_dir(self) / "out"
         if not out.is_dir():
             messagebox.showinfo(APP_NAME, f"아직 HWPX 저장 폴더가 없습니다. [한 번에 인식]으로 문서를 만든 뒤 누르십시오.\n\n저장 위치: {out}")
             return

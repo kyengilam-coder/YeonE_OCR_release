@@ -2450,7 +2450,7 @@ def cmd_report(args, work: Work | None = None, doc=None):
     doc = doc or open_pdf(args.pdf)
     progress("report", 0, 1)
     txt = make_report(work, len(doc))
-    (work.dir / "report.md").write_text(txt, encoding="utf-8")
+    work.report_path.write_text(txt, encoding="utf-8")
     progress("report", 1, 1)
     log(txt)
     return 0

@@ -124,7 +124,7 @@ def _normalization_reports(work: Work, out: Path) -> str:
 
 
 def make_review(work: Work, records: list[dict], out_path: str | None = None, context: dict | None = None) -> str:
-    out = Path(out_path) if out_path else work.dir / "review.html"
+    out = Path(out_path) if out_path else work.review_path
     parts = [f"<!doctype html><html lang=ko><head><meta charset=utf-8><title>검수 · {html.escape(work.pdf_path.name)}</title><style>{CSS}</style></head><body>",
              f"<header><h1>연어OCR 검수 — {html.escape(work.pdf_path.name)}</h1><small>쪽 {len(records)}개 · 〔 〕 표시는 확인이 필요한 자리 · 수정은 readings/pNNN.json 을 고친 뒤 build 를 다시 실행</small>"
              "<div class=grades>글자 색(문서와 같음): <span class=g>초록</span> = 1차·2차가 갈려 3차 자형 판별로 고름(정밀도 미측정, 훑어 확인) · "

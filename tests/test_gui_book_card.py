@@ -313,7 +313,7 @@ class WorkTabRealTk(unittest.TestCase):
     def test_4_open_result_while_running_opens_a_copy(self):
         app = self.app; gui = self.gui
         app.select_tab(0); app._use_pdf(str(self.pdf)); self.settle()
-        out = app.work() / "out"; out.mkdir(parents=True, exist_ok=True)
+        out = app.result_dir() / "out"; out.mkdir(parents=True, exist_ok=True)                 # 문서는 결과 폴더의 out(작업자료 밖)
         hwpx = out / "개보본초.ocr.hwpx"; hwpx.write_bytes(b"result")
         with mock.patch.object(gui, "open_path") as op:
             app.open_hwpx()

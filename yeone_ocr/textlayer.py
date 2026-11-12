@@ -46,7 +46,8 @@ class Line:
 
 def out_path(work_dir, pdf) -> Path:
     """기본 저장 자리: 결과 폴더 out/<원본 이름>_글자층.pdf (창 프로그램도 같은 규칙으로 연다)."""
-    return Path(work_dir) / "out" / f"{Path(pdf).stem}_글자층.pdf"
+    from .state import public_root
+    return public_root(work_dir) / "out" / f"{Path(pdf).stem}_글자층.pdf"
 
 
 def token_positions(text: str) -> list[tuple[str | None, int]]:

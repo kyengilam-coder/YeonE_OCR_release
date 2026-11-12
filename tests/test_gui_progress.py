@@ -340,8 +340,8 @@ class ProgressCardRealTk(unittest.TestCase):
             popup.assert_called_once()
         menu = app._menu
         labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1) if menu.type(i) != "separator"]
-        self.assertEqual(labels[:4], ["OCR 모델 비교·교정…", "비용 미리 보기", "자세히 보기", "고급 도구 펼치기"])
-        self.assertEqual(labels[4:6], ["도움말", "업데이트 확인"]); self.assertIn(gui.__version__, labels[-1])
+        self.assertEqual(labels[:5], ["OCR 모델 비교·교정…", "비용 미리 보기", "결과 폴더 정리…", "자세히 보기", "고급 도구 펼치기"])
+        self.assertEqual(labels[5:7], ["도움말", "업데이트 확인"]); self.assertIn(gui.__version__, labels[-1])
         self.assertEqual(str(menu.entrycget(menu.index("end"), "state")), "disabled")
         gui.App._draw_glow(app, 640)                                                               # 띠 아래 빛줄: 강조색 → 청록
         fills = [app._header_rule.itemcget(i, "fill") for i in app._header_rule.find_all()]
