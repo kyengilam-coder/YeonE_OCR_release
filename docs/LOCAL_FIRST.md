@@ -205,7 +205,7 @@ AI 쪽 판독 오류 분석(`ai-page/errors.txt`, 33곳): 문장 끝 부호를 `
 
 ## 기본 동작: Claude 구독에 로그인되어 있으면 AI 판독 자동 (2026-11)
 
-> 1.2.1 뒤: Claude뿐 아니라 ChatGPT(Codex CLI)·Gemini(Gemini CLI) 구독도 같은 자리에 쓸 수 있다. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순이며, `--local-ai-plan`·설정 「구독 계정 판독」으로 고른다. 아래 수치는 Claude로 잰 것이다. [구독 계정 안내](SUBSCRIPTION_PLANS.md)
+> 1.2.1 뒤: Claude뿐 아니라 ChatGPT(Codex CLI)·Gemini(Gemini CLI) 구독도 같은 자리에 쓸 수 있다. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순이며, `--local-ai-plan`·설정 「AI 판독기」 ① 구독 계정으로 고른다. 아래 수치는 Claude로 잰 것이다. [구독 계정 안내](SUBSCRIPTION_PLANS.md)
 
-`--local-ai-page auto`(기본): 이 PC의 Claude Code가 Claude 구독으로 로그인되어 있으면 세트 `ai-page+review`와 같은 설정을 자동으로 씁니다 — 쪽 판독 prefer, 의심 구간 검증은 구독으로 4개씩 묶어 1024화소 조각과 함께, 확신하고 안전 검사를 통과한 제안 반영, 이번 실행 호출 상한 1000(`--local-ai-subscription-calls`, 구독은 호출당 요금이 없어 API 호출 상한 대신). 로그인되어 있지 않으면 예전 기본과 같습니다. 직접 준 옵션이 항상 우선합니다. 끄기: 설정 창 「Claude 구독 판독」 체크 해제, 또는 `--local-ai-page off --local-ai-auth api`, 또는 환경 변수 `YEONE_OCR_CLAUDE_AUTH=api`. 측정 도구의 세트는 `--local-ai-page`를 직접 주지 않으면 끔으로 실행하고, 기본 동작은 세트 `auto`로 잽니다. 전체 구성은 `docs/연어OCR_구성_정리.md`.
+`--local-ai-page auto`(기본): 이 PC의 Claude Code가 Claude 구독으로 로그인되어 있으면 세트 `ai-page+review`와 같은 설정을 자동으로 씁니다 — 쪽 판독 prefer, 의심 구간 검증은 구독으로 4개씩 묶어 1024화소 조각과 함께, 확신하고 안전 검사를 통과한 제안 반영, 이번 실행 호출 상한 1000(`--local-ai-subscription-calls`, 구독은 호출당 요금이 없어 API 호출 상한 대신). 로그인되어 있지 않으면 예전 기본과 같습니다. 직접 준 옵션이 항상 우선합니다. 끄기: 설정 「AI 판독기」의 「구독 계정 판독」 체크 해제, 또는 `--local-ai-page off --local-ai-auth api`, 또는 환경 변수 `YEONE_OCR_CLAUDE_AUTH=api`. 측정 도구의 세트는 `--local-ai-page`를 직접 주지 않으면 끔으로 실행하고, 기본 동작은 세트 `auto`로 잽니다. 전체 구성은 `docs/연어OCR_구성_정리.md`.
 
