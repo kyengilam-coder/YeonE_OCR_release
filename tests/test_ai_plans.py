@@ -559,17 +559,21 @@ def test_gemini_found_but_not_running_is_not_reported_as_missing(_fresh):
 
 
 def test_cli_outside_path_is_found_in_the_npm_global_folder(monkeypatch, tmp_path):
-    if os.name == "nt":
-        pytest.skip("POSIX layout")
+    """Runs on every platform (the Windows release regression counts a skip as a failure)."""
     monkeypatch.delenv("YEONE_OCR_GEMINI_CLI_PATH", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    assert gemini.find_cli() is None
+    for name in ("APPDATA", "ProgramFiles", "NVM_SYMLINK", "VOLTA_HOME", "LOCALAPPDATA"):
+        monkeypatch.delenv(name, raising=False)
     prefix = tmp_path / "npm-prefix"
-    (prefix / "bin").mkdir(parents=True)
-    (prefix / "bin" / "gemini").write_text("")
+    if os.name == "nt":
+        prefix.mkdir()
+        expected = prefix / "gemini.cmd"                                   # npm's Windows shim
+    else:
+        (prefix / "bin").mkdir(parents=True)
+        expected = prefix / "bin" / "gemini"
+    expected.write_text("")
     monkeypatch.setenv("NPM_CONFIG_PREFIX", str(prefix))
-    assert gemini.find_cli() == str(prefix / "bin" / "gemini")
+    assert gemini.find_cli() == str(expected)
 
 
 

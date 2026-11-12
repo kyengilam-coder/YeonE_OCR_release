@@ -1,5 +1,6 @@
 """설치·로그인 줄: 공식 설치 명령과 로그인 창. 실제로 설치하거나 창을 열지 않는다(가짜 실행)."""
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -18,15 +19,23 @@ def test_install_commands_use_the_official_npm_packages(monkeypatch):
 
 
 def test_npm_is_found_outside_path(monkeypatch, tmp_path):
-    if sys.platform == "win32":
-        pytest.skip("POSIX layout")
+    """Runs on every platform (the Windows release regression counts a skip as a failure)."""
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    monkeypatch.setattr(plan_setup.Path, "home", lambda: tmp_path)
-    assert plan_setup.find_npm() is None or "/usr/local/bin" in plan_setup.find_npm() or "/opt/homebrew" in plan_setup.find_npm()
-    (tmp_path / ".volta" / "bin").mkdir(parents=True)
-    (tmp_path / ".volta" / "bin" / "npm").write_text("")
+    if sys.platform == "win32":
+        for name in ("ProgramFiles(x86)", "NVM_SYMLINK", "LOCALAPPDATA"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
+        (tmp_path / "pf" / "nodejs").mkdir(parents=True)
+        npm = tmp_path / "pf" / "nodejs" / "npm.cmd"
+    else:
+        monkeypatch.setattr(plan_setup.Path, "home", lambda: tmp_path)
+        (tmp_path / ".volta" / "bin").mkdir(parents=True)
+        npm = tmp_path / ".volta" / "bin" / "npm"
+    npm.write_text("")
     found = plan_setup.find_npm()
-    assert found is not None and found.endswith("npm")
+    assert found is not None and Path(found).name in ("npm", "npm.cmd")
+    if sys.platform == "win32":
+        assert found == str(npm)
 
 
 def test_run_streams_the_output_to_the_log_and_returns_the_code():
