@@ -2795,7 +2795,12 @@ def build_parser():
     p.add_argument("--local-ai-plan", choices=("auto", "claude", "chatgpt", "gemini"), default=None,
                    help="구독 계정: claude=Claude Code(claude -p), chatgpt=OpenAI Codex CLI(codex exec, ChatGPT 로그인), "
                         "gemini=Gemini CLI(gemini -p, Google 로그인). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
+                        "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
                         "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
+    p.add_argument("--local-ai-api-fallback", action=argparse.BooleanOptionalAction, default=True,
+                   help="구독 계정의 사용량 한도에 닿거나 로그인이 풀리면 로그인된 다른 구독 계정으로 이어 가고, 쓸 수 있는 구독 계정이 "
+                        "없으면 API 키로 넘어감(기본 켬, 이번 실행 API 호출은 --local-ai-max-calls 까지). "
+                        "API 요금을 쓰지 않으려면 --no-local-ai-api-fallback")
     p.add_argument("--local-ai-page", choices=("auto", "off", "witness", "prefer"), default="auto",
                    help="구독 계정(--local-ai-plan)으로 쪽 전체를 원래 해상도 띠로 잘라 처음부터 한 번 더 읽고 엔진 판독과 맞춰 봄. "
                         "auto(기본)=구독 계정에 로그인되어 있으면 prefer, 아니면 off. "

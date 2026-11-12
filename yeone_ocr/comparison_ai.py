@@ -1105,7 +1105,7 @@ def create_client(settings, api_key):
     return _client(settings.provider, api_key, timeout=settings.timeout_seconds)
 
 
-def _request(client, settings, prompt, images, *, response_schema=None):
+def _request(client, settings, prompt, images, *, response_schema=None, system=SYSTEM):
     """Single SDK request. Raw text is returned before our JSON validation."""
     refusals, finish_reason = [], None
     response_schema = _wire_schema(response_schema or RESPONSE_SCHEMA, settings.provider)
@@ -1115,7 +1115,7 @@ def _request(client, settings, prompt, images, *, response_schema=None):
         from .claude_subscription import SubscriptionError
         try:
             text, complete, finish_reason, tokens, actual = client.request(
-                model_name=settings.model, system=SYSTEM, prompt=prompt, images=images, schema=response_schema)
+                model_name=settings.model, system=system, prompt=prompt, images=images, schema=response_schema)
         except SubscriptionError as exc:
             error = AIReviewError(str(exc))
             error.fatal = True                      # not signed in, plan limit reached, CLI missing
@@ -1125,7 +1125,7 @@ def _request(client, settings, prompt, images, *, response_schema=None):
     elif settings.provider == "openai":
         parts = [{"type": "input_text", "text": prompt}]
         parts += [{"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(content).decode("ascii"), "detail": "high"} for content in images]
-        response = client.responses.create(model=settings.model, instructions=SYSTEM,
+        response = client.responses.create(model=settings.model, instructions=system,
             input=[{"role": "user", "content": parts}], store=False, max_output_tokens=settings.max_output_tokens,
             text={"format": {"type": "json_schema", "name": "ocr_comparison_review", "strict": True, "schema": response_schema}})
         text = getattr(response, "output_text", "") or ""
@@ -1140,7 +1140,7 @@ def _request(client, settings, prompt, images, *, response_schema=None):
     elif settings.provider == "anthropic":
         parts = [{"type": "text", "text": prompt + "\nJSON Schema:\n" + json.dumps(response_schema)}]
         parts += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(content).decode("ascii")}} for content in images]
-        response = client.messages.create(model=settings.model, system=SYSTEM, max_tokens=settings.max_output_tokens,
+        response = client.messages.create(model=settings.model, system=system, max_tokens=settings.max_output_tokens,
                                          messages=[{"role": "user", "content": parts}])
         text = "".join(getattr(p, "text", "") for p in getattr(response, "content", []) if getattr(p, "type", "") == "text")
         complete = getattr(response, "stop_reason", "end_turn") == "end_turn"
@@ -1156,7 +1156,7 @@ def _request(client, settings, prompt, images, *, response_schema=None):
         extra_body = ({"generationConfig": {"thinkingConfig": {"thinkingLevel": level.upper()}}}
                       if level is not None else None)
         response = client.models.generate_content(model=settings.model, contents=parts,
-            config=types.GenerateContentConfig(system_instruction=SYSTEM, response_mime_type="application/json",
+            config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
                 response_json_schema=response_schema, max_output_tokens=settings.max_output_tokens,
                 http_options=types.HttpOptions(timeout=int(settings.timeout_seconds * 1000),
                     extra_body=extra_body,
@@ -1226,6 +1226,36 @@ def _assert_scope(project, plan):
     if any(_current_scope(project, scope, plan.policy) != scope
            for scope in plan._scope["pages"]):
         raise AIReviewError("원문·교정문·판독 범위가 변경됐습니다. 전송 계획을 다시 확인하세요.")
+
+
+class ApiTransport:
+    """The subscription clients' request contract through one provider's API key, with a call budget:
+    where subscriptions.Session goes when no signed-in plan is left (usage limits, sign-in expired)."""
+
+    subscription = False
+
+    def __init__(self, provider, model, api_key, calls):
+        self.settings = AISettings(provider, model, max_calls=100, max_output_tokens=8192,
+                                   max_total_output_tokens=819200, timeout_seconds=60.0)
+        self.provider, self.model, self.calls, self.left = provider, model, int(calls), int(calls)
+        self.transport = f"{provider}-api-key"
+        self._key, self._client = api_key, None
+        import threading
+        self._lock = threading.Lock()
+
+    def request(self, *, model_name, system, prompt, images, schema):
+        from .claude_subscription import SubscriptionError
+        with self._lock:
+            if self.left <= 0:
+                raise SubscriptionError(f"구독 계정을 쓸 수 없어 넘어간 API 키의 이번 실행 호출 상한({self.calls}회)에 도달했습니다.")
+            self.left -= 1
+            if self._client is None:
+                self._client = create_client(self.settings, self._key)
+        text, complete, metadata = _request(self._client, self.settings, prompt, images, response_schema=schema, system=system)
+        usage = metadata.get("usage") or {}
+        tokens = {"input_tokens": int(usage.get("input_tokens", usage.get("prompt_token_count", 0)) or 0),
+                  "output_tokens": int(usage.get("output_tokens", usage.get("candidates_token_count", 0)) or 0)}
+        return text, complete, metadata.get("finish_reason"), tokens, metadata.get("actual_model", self.settings.model)
 
 
 def _fatal_request_error(exc):

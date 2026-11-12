@@ -2406,8 +2406,9 @@ class App(tk.Tk):
             plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
                                 width=chars(300))
             plan.pack(side="left", padx=(P(8), 0))
-            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고릅니다. "
-                      "상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
+            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
+                      "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 API 키로 넘어갑니다"
+                      "(API 호출은 「로컬 뒤 AI 검증」의 횟수까지). 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
             return f
         R["local_ai_subscription"] = row(b, "구독 계정 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
 

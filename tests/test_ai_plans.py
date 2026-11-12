@@ -20,7 +20,7 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["lines"]
 
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
-    subscriptions.reset_status_cache()
+    subscriptions.reset_status_cache(); subscriptions.reset_exhausted()
     for name, binary in (("CODEX", "codex"), ("GEMINI", "gemini"), ("CLAUDE", "claude")):
         path = tmp_path / "bin" / (binary + (".exe" if os.name == "nt" else ""))
         path.parent.mkdir(exist_ok=True)
@@ -33,7 +33,7 @@ def _fresh(tmp_path, monkeypatch):
                  "YEONE_OCR_CHATGPT_EFFORT", "YEONE_OCR_CODEX_HOME"):
         monkeypatch.delenv(name, raising=False)
     yield home
-    subscriptions.reset_status_cache()
+    subscriptions.reset_status_cache(); subscriptions.reset_exhausted()
 
 
 def _ok(**kwargs):
@@ -214,8 +214,7 @@ def test_auto_takes_claude_then_chatgpt_then_gemini():
     with _with(_states(chatgpt=True, gemini=True)):
         assert subscriptions.pick()[0] == "chatgpt"
         assert subscriptions.pick("gemini")[0] == "gemini"
-        plan, reason = subscriptions.pick("claude")
-        assert plan is None and "claude 로그인 필요" in reason
+        assert subscriptions.pick("claude")[0] == "chatgpt"                   # a named plan is the first choice, not the only one
     with _with(_states(claude=True, chatgpt=True, gemini=True)):
         assert subscriptions.pick()[0] == "claude"
         assert subscriptions.pick(prefer="gemini")[0] == "gemini"
@@ -287,3 +286,68 @@ def test_plans_command_lists_each_plan(capsys):
         assert cli.main(["plans"]) == 0
     out = capsys.readouterr().out
     assert "Gemini" in out and "사용 가능" in out and "자동 선택" in out
+
+
+class _Plan:
+    subscription = True
+
+    def __init__(self, name, error=None):
+        self.name, self.error, self.models = name, error, []
+
+    def request(self, *, model_name, **kwargs):
+        self.models.append(model_name)
+        if self.error:
+            raise SubscriptionError(self.error)
+        return '{"lines": []}', True, "done", {}, self.name
+
+
+def test_session_moves_to_the_next_plan_then_the_api_key_then_stops():
+    plans = {"claude": _Plan("claude", "사용량 한도에 도달했습니다."), "chatgpt": _Plan("chatgpt", "로그인이 만료되었습니다."),
+             "gemini": _Plan("gemini")}
+    logs = []
+    with _with(_states(claude=True, chatgpt=True, gemini=True)):
+        session = subscriptions.Session("claude", api=None, log=logs.append, factory=plans.__getitem__)
+        out = session.request(model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)
+        assert out[-1] == "gemini" and session.plan == "gemini" and session.transport == gemini.TRANSPORT
+        assert plans["claude"].models == ["opus"] and plans["chatgpt"].models == ["codex-default"]
+        assert plans["gemini"].models == ["gemini-cli-auto"]
+        assert set(subscriptions.exhausted()) == {"claude", "chatgpt"}
+        assert subscriptions.pick()[0] == "gemini"                            # other callers skip the spent plans
+        assert len(logs) == 2 and "Gemini 구독으로 넘어갑니다" in logs[-1]
+
+        plans["gemini"].error = "사용량 한도에 도달했습니다."
+        api = mock.Mock(provider="openai", model="gpt-x", left=2, transport="openai-api-key")
+        api.request.return_value = ('{"lines": []}', True, "completed", {}, "gpt-x")
+        session.api = api
+        assert session.request(model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)[-1] == "gpt-x"
+        assert session.plan is None and session.transport == "openai-api-key" and "API 키(openai" in logs[-1]
+        assert session.request(model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)[-1] == "gpt-x"
+        assert api.request.call_count == 2                                    # no plan is retried once all are spent
+
+    subscriptions.reset_exhausted()
+    with _with(_states(claude=True)):
+        session = subscriptions.Session("claude", api=None, log=logs.append,
+                                        factory={"claude": _Plan("claude", "사용량 한도")}.__getitem__)
+        with pytest.raises(SubscriptionError, match="API 키도 없습니다"):
+            session.request(model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)
+        assert not session.available
+
+
+def test_api_transport_counts_its_calls_and_uses_the_given_system_prompt(monkeypatch):
+    sent = []
+
+    class Responses:
+        def create(self, **kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(output_text='{"lines": ["甲"]}', output=[], status="completed",
+                                   usage=SimpleNamespace(input_tokens=10, output_tokens=3), model="gpt-x", id="r1")
+    monkeypatch.setattr(comparison_ai, "create_client", lambda settings, key: SimpleNamespace(responses=Responses()))
+    api = comparison_ai.ApiTransport("openai", "gpt-x", "sk-test", 1)
+    text, complete, reason, tokens, actual = api.request(model_name="ignored", system="PAGE SYSTEM", prompt="p",
+                                                         images=[b"png"], schema=SCHEMA)
+    assert (json.loads(text), complete, reason, tokens, actual) == ({"lines": ["甲"]}, True, "completed",
+                                                                     {"input_tokens": 10, "output_tokens": 3}, "gpt-x")
+    assert sent[0]["instructions"] == "PAGE SYSTEM" and sent[0]["model"] == "gpt-x"
+    with pytest.raises(SubscriptionError, match="호출 상한"):
+        api.request(model_name="x", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert len(sent) == 1

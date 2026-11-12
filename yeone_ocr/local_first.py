@@ -343,7 +343,23 @@ def _resolve_ai_defaults(args, cli):
     return {name.removeprefix("local_"): value for name, value in chosen.items()}
 
 
-def _ai_page_reader(args, project, work, cli):
+def _api_fallback(args, calls, environment_key, split_keys):
+    """comparison_ai.ApiTransport for the API key of the chosen provider, or None (no key, mock,
+    --no-local-ai-api-fallback, --local-ai-auth api handles the key itself)."""
+    if not getattr(args, "local_ai_api_fallback", True) or args.reader not in ("gemini", "openai", "anthropic"):
+        return None
+    keys = split_keys(args.reader, environment_key(args.reader))
+    if not keys:
+        return None
+    from .comparison_ai import AIReviewError, ApiTransport
+    from .providers import default_model
+    try:
+        return ApiTransport(args.reader, getattr(args, "model", None) or default_model(args.reader), keys[0], calls)
+    except AIReviewError:
+        return None
+
+
+def _ai_page_reader(args, project, work, cli, session=None, api=None):
     """(Trial, --local-ai-page) a function number -> AI page reading for extras, or None.
     Through a signed-in plan's CLI (subscriptions) only; failures leave the engine reading alone."""
     mode = getattr(args, "local_ai_page", "off") or "off"
@@ -351,15 +367,14 @@ def _ai_page_reader(args, project, work, cli):
         return None
     from . import subscriptions
     from .claude_subscription import SubscriptionError
-    plan, reason = subscriptions.pick(getattr(args, "local_ai_plan", None))
-    if not plan:
-        cli.log("  AI 쪽 판독을 하지 않습니다: " + (reason or "구독 계정 연결을 확인하세요."))
-        return None
-    try:
-        client = subscriptions.client(plan)
-    except SubscriptionError as exc:
-        cli.log(f"  AI 쪽 판독을 하지 않습니다: {exc}")
-        return None
+    if session is None:
+        plan, reason = subscriptions.pick(getattr(args, "local_ai_plan", None))
+        if not plan:
+            cli.log("  AI 쪽 판독을 하지 않습니다: " + (reason or "구독 계정 연결을 확인하세요."))
+            return None
+        session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log)
+    plan = session.plan
+    client = session                     # moves to the next plan, then the API key, when a plan runs out
     model = subscriptions.model(plan, None)
     direction = "horizontal" if args.mode == "horizontal_zh" else "vertical"
     import os
@@ -370,6 +385,8 @@ def _ai_page_reader(args, project, work, cli):
     def read(number):
         from ab_ocr.ocr import render_page
         from .ai_page import read_page
+        if not session.available:
+            return None
         try:
             with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
                 result = read_page(image, direction=direction, profile=args.local_profile, client=client,
@@ -427,6 +444,7 @@ def _command(args, *, work=None, doc=None, pool=None):
         return 2
     command_cap = getattr(args, "max_calls", 0)
     cap = min(cap, command_cap) if command_cap else cap
+    api_cap = cap                       # paid calls: also the budget when a run falls back from the plans to the key
     if getattr(args, "local_ai_auth", None) == "subscription":
         cap = max(1, int(getattr(args, "local_ai_subscription_calls", 1000) or 1000))   # no per-call charge
     owned_doc = doc is None
@@ -449,11 +467,14 @@ def _command(args, *, work=None, doc=None, pool=None):
         work.save_state(state)
         cli.log(f"▶ 로컬 우선 인식: {len(pages)}쪽 · 의심 구간만 API 검증(이번 실행 최대 {cap}회)")
         review_enabled = bool(getattr(args, "local_ai_review", True))
+        from . import subscriptions
+        subscriptions.reset_exhausted()     # plan limits may have reset since the last run
+        api = _api_fallback(args, api_cap, environment_key, split_keys)
         keys = split_keys(args.reader, environment_key(args.reader)) if review_enabled else []
         key = keys[0] if keys else ""
+        session = None
         if review_enabled:
             # A signed-in plan's own CLI (personal plan, no API charge): Claude Code, Codex CLI or Gemini CLI.
-            from . import subscriptions
             from .claude_subscription import auth_mode
             requested = getattr(args, "local_ai_auth", None)
             plan, note = subscriptions.choose(requested, args.reader, key, getattr(args, "local_ai_plan", None))
@@ -462,8 +483,13 @@ def _command(args, *, work=None, doc=None, pool=None):
                 args.reader = subscriptions.PROVIDERS[plan]
                 args.model = subscriptions.model(plan, chosen if subscriptions.accepts_model(plan, chosen) else None)
                 key = subscriptions.KEYS[plan]
+                session = subscriptions.Session(plan, getattr(args, "local_ai_plan", None), api=api, log=cli.log)
             elif auth_mode(requested) == "subscription":
-                key = ""                    # asked for the plan: never fall back to a paid API key
+                if api is not None:         # no usable plan: straight to the API key, within the paid cap
+                    cap = api_cap
+                    note = (note + " → " if note else "") + f"API 키({api.provider} · 모델 {api.model})로 검증합니다."
+                else:
+                    key = ""
             if note:
                 cli.log("  " + note + (f" · 모델 {args.model}" if plan else ""))
         calls, failed, incomplete, completed = 0, [], [], []
@@ -523,7 +549,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             except Exception:
                 return None
 
-        page_reader = _ai_page_reader(args, project, work, cli)
+        page_reader = _ai_page_reader(args, project, work, cli, session, api)
         for index, number in enumerate(pages, 1):
             if cli.CANCEL.is_set():
                 return 130
@@ -618,9 +644,12 @@ def _command(args, *, work=None, doc=None, pool=None):
                         review["status"] = "needs-local-review" if unresolved else "no-api-needed"
                         if unresolved and review_enabled:
                             incomplete.append(number)
-                    elif not review_enabled or not key or plan.summary["calls"] > cap - calls:
+                    elif not review_enabled or not key or plan.summary["calls"] > cap - calls or (
+                            session is not None and not session.available):
                         review["status"] = "pending"
-                        review["reason"] = ("AI 검증 꺼짐" if not review_enabled else "API 키 없음" if not key else "이번 실행 호출 상한 도달")
+                        review["reason"] = ("AI 검증 꺼짐" if not review_enabled else "API 키 없음" if not key else
+                                            "구독 한도에 닿고 API 키도 없거나 상한 도달" if session is not None and not session.available
+                                            else "이번 실행 호출 상한 도달")
                         if review_enabled:
                             cli.log(f"  {number}쪽: AI 검증 보류 — {review['reason']} (이 쪽 {plan.summary['calls']}회 필요)")
                         if review_enabled:
@@ -634,8 +663,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                             project.save()
                             checkpoints[0] += 1
                             cli.LOCAL_API_CALLS = calls + checkpoints[0]
-                        result = run_plan(project, plan, api_key=key, should_stop=cli.CANCEL.is_set,
-                                          on_result=checkpoint)
+                        result = run_plan(project, plan, api_key=key, should_stop=cli.CANCEL.is_set, on_result=checkpoint,
+                                          client_factory=(lambda _settings, _key: session) if session is not None else None)
                         calls += result["calls"]
                         if getattr(args, "local_ai_accept", False):
                             review["ai_accept"] = _accept_ai(project, number)
