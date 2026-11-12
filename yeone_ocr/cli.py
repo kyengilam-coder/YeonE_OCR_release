@@ -2804,8 +2804,8 @@ def build_parser():
     p.add_argument("--local-ai-parallel", type=int, choices=range(1, 5), metavar="1-4", default=3,
                    help="구독 계정으로 검증할 때 동시에 보내는 AI 요청 수(기본 3, 1 = 하나씩). 한 쪽의 검증 묶음 여럿을 함께 보내 "
                         "빨라지며 총 사용량은 같고 한도가 그만큼 빨리 참. 응답 확인·기록은 차례대로. API 키로 검증할 때는 하나씩")
-    p.add_argument("--local-ai-split", action=argparse.BooleanOptionalAction, default=False,
-                   help="로그인된 구독 계정 여럿(Claude·ChatGPT·Gemini)에 쪽을 나눠 보냄(기본 끔): 엔진이 다음 쪽을 읽는 동안 "
+    p.add_argument("--local-ai-split", action=argparse.BooleanOptionalAction, default=True,
+                   help="로그인된 구독 계정 여럿(Claude·ChatGPT·Gemini)에 쪽을 나눠 보냄(기본 켬, 끄려면 --no-local-ai-split): 엔진이 다음 쪽을 읽는 동안 "
                         "계정마다 맡은 쪽의 AI 쪽 판독·검증을 함께 진행. 한 쪽은 한 계정이 끝까지 검증. 한도를 나눠 쓰고 빨라지지만 "
                         "쪽마다 검증한 모델이 다를 수 있음(ChatGPT·Gemini의 정확도는 아직 재지 않음)")
     p.add_argument("--local-ai-api-fallback", action=argparse.BooleanOptionalAction, default=True,
@@ -2885,8 +2885,11 @@ def cmd_plans(args):
     chosen, reason = subscriptions.pick(None)
     for plan in subscriptions.PLANS:
         state = subscriptions.status(plan, refresh=True)
-        mark = "사용 가능" if state["usable"] else ("설치됨" if state.get("installed") else "없음")
+        mark = ("사용 가능" if state["usable"] else "실행 실패" if state.get("runs") is False
+                else "설치됨" if state.get("installed") else "없음")
         line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.PROGRAMS[plan]}): {mark}"
+        if state.get("path"):
+            line += f" · {state['path']}"
         if state.get("plan") and state["usable"]:
             line += f" · {state['plan']}"
         log(line + ("" if state["usable"] else f" — {state.get('reason') or ''}"))

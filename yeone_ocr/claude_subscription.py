@@ -121,6 +121,38 @@ def find_cli() -> str | None:
     return on_path
 
 
+def npm_global_cli(name: str) -> str | None:
+    """A command-line program installed with `npm install -g` (Codex CLI, Gemini CLI) that is not on this
+    process's PATH: npm's global folder, Node installers, nvm, Volta, Homebrew, ~/.local/bin."""
+    home = Path.home()
+    folders = []
+    prefix = os.environ.get("NPM_CONFIG_PREFIX", "").strip()
+    if sys.platform == "win32":
+        names = (f"{name}.cmd", f"{name}.exe", f"{name}.ps1")
+        for variable, tail in (("APPDATA", "npm"), ("ProgramFiles", "nodejs"), ("NVM_SYMLINK", ""), ("VOLTA_HOME", "bin"),
+                               ("LOCALAPPDATA", "Volta/bin"), ("LOCALAPPDATA", "pnpm")):
+            base = os.environ.get(variable, "").strip()
+            if base:
+                folders.append(Path(base) / tail if tail else Path(base))
+        if prefix:
+            folders.append(Path(prefix))
+    else:
+        names = (name,)
+        if prefix:
+            folders.append(Path(prefix) / "bin")
+        folders += [home / ".npm-global" / "bin", home / ".local" / "bin", home / ".volta" / "bin",
+                    Path("/usr/local/bin"), Path("/opt/homebrew/bin")]
+        nvm = home / ".nvm" / "versions" / "node"
+        if nvm.is_dir():
+            folders += sorted((version / "bin" for version in nvm.iterdir()), reverse=True)
+    for folder in folders:
+        for candidate in names:
+            path = folder / candidate
+            if path.is_file() and not candidate.endswith(".ps1"):
+                return str(path)
+    return None
+
+
 def _is_cmd_shim(path: str) -> bool:
     return Path(path).suffix.lower() in (".cmd", ".bat")
 

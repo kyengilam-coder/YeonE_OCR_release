@@ -33,7 +33,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
-            "local_ai_parallel": 3, "local_ai_split": False,
+            "local_ai_parallel": 3, "local_ai_split": True,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
@@ -44,6 +44,7 @@ RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게
               "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
               "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
               "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
+SETUP_LABELS = {"gemini": "Gemini (Gemini CLI)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Gemini 구독", "api": "API 키"}
 
@@ -198,6 +199,12 @@ def upgrade_config(cfg: dict, raw: dict | None = None) -> dict:
         mm = "none"
     cfg["memo_mode"] = mm
     cfg["memo_display_version"] = memo_version if memo_current else 1
+    split_version = raw.get("local_ai_split_version", 0)
+    if not (isinstance(split_version, int) and split_version >= 1):
+        cfg["local_ai_split"] = True                          # 1.2.9: 쪽 나눠 보내기 기본 켬 — 1.2.8 의 저장된 '끔'(기본값)은 한 번만 켬으로. 이후 직접 끈 값은 보존
+    cfg["local_ai_split_version"] = 1
+    if not isinstance(cfg.get("local_ai_split"), bool):
+        cfg["local_ai_split"] = True
     if cfg.get("media_res") not in MRES_LABELS:
         cfg["media_res"] = DEFAULTS["media_res"]
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
@@ -2308,7 +2315,7 @@ class App(tk.Tk):
         self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
         self.v_local_resume = tk.StringVar(value=RESUME_LABELS.get(self.cfg.get("local_resume"), RESUME_LABELS["unfinished"]))
         self.v_local_ai_parallel = tk.StringVar(value=str(self.cfg.get("local_ai_parallel", 3)))
-        self.v_local_ai_split = tk.BooleanVar(value=bool(self.cfg.get("local_ai_split", False)))
+        self.v_local_ai_split = tk.BooleanVar(value=bool(self.cfg.get("local_ai_split", True)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2496,6 +2503,7 @@ class App(tk.Tk):
             f = boxed(parent)
             self.l_plans = L(f, "설정 탭을 열면 확인합니다", "CAP", "MUTED")
             self.l_plans.pack(side="left")
+            self._plans_tip = Tip(self.l_plans, "", self)                    # 계정마다 이유·찾은 경로·설치·로그인 방법
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
                       tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
             return f
@@ -2506,8 +2514,23 @@ class App(tk.Tk):
                     "있으며 ChatGPT·Gemini의 검증 정확도는 아직 재지 않았습니다(기본 설정은 Claude로 잼). 실제로 답한 계정·모델은 "
                     "검증 기록에 남습니다. [다음 구독으로 넘기기]는 첫 계정의 연결을 옮깁니다.", self)
             return cb
-        R["ai_split"] = row(b, "쪽 나눠 보내기", "로그인된 구독이 둘 이상일 때 계정마다 쪽을 맡아 함께 진행(기본 끔) · 빠르지만 쪽마다 모델이 다를 수 있음", split)
+        R["ai_split"] = row(b, "쪽 나눠 보내기", "로그인된 구독이 둘 이상일 때 계정마다 쪽을 맡아 함께 진행(기본 켬) · 빠르지만 쪽마다 모델이 다를 수 있음", split)
         R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 명령줄 yeone-ocr plans 와 같음", plans_status)
+
+        def plan_setup(parent):
+            f = boxed(parent)
+            self.v_setup_plan = tk.StringVar(value=SETUP_LABELS["gemini"])
+            ttk.Combobox(f, textvariable=self.v_setup_plan, values=list(SETUP_LABELS.values()), state="readonly",
+                         width=chars(170)).pack(side="left")
+            self.b_plan_install = self._btn(f, "설치", lambda: App.install_plan(self),
+                                            tip="고른 구독의 공식 프로그램을 이 PC에 설치합니다(ChatGPT·Gemini: npm install -g …). "
+                                                "Node.js가 없으면 먼저 설치를 안내합니다. 실행 전에 명령을 보여 주고 묻습니다.")
+            self.b_plan_install.pack(side="left", padx=(P(8), 0))
+            self._btn(f, "로그인 창 열기", lambda: App.open_plan_login(self),
+                      tip="고른 구독의 공식 프로그램을 새 창으로 열어 그 회사 화면에서 직접 로그인합니다(이 프로그램은 비밀번호·토큰을 보지 않음). "
+                          "로그인한 뒤 [상태 확인]을 누르세요.").pack(side="left", padx=(P(6), 0))
+            return f
+        R["plan_setup"] = row(b, "설치·로그인", "공식 프로그램을 설치하고 그 회사 화면에서 로그인 · 끝나면 [상태 확인]", plan_setup)
         subhead(b, "② API 키", "구독을 쓸 수 없을 때 · AI 전체 쪽 판독(기존 방식)에")
         def provider(parent):
             cb = self.cb_provider = ttk.Combobox(parent, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=chars(220))
@@ -4531,16 +4554,84 @@ class App(tk.Tk):
             label.configure(text="확인 중…")
         def work():
             from . import subscriptions
-            parts = []
+            parts, details = [], []
             for plan in subscriptions.PLANS:
                 try:
                     state = subscriptions.status(plan, refresh=True)
                 except Exception:                    # 상태 확인은 실행을 막지 않는다
                     state = {"usable": False, "installed": False}
-                mark = ("● 사용 가능" if state.get("usable") else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
+                mark = ("● 사용 가능" if state.get("usable") else "○ 실행 실패" if state.get("runs") is False
+                        else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
                 parts.append(f"{subscriptions.NAMES[plan]} {mark}")
-            self.q.put(("plans", " · ".join(parts)))
+                where = f" ({state['path']})" if state.get("path") else ""
+                details.append(f"{subscriptions.NAMES[plan]} — {mark[2:]}{where}" + (f": {state['reason']}" if state.get("reason") else ""))
+            self.q.put(("plans", " · ".join(parts), "\n\n".join(details)))
         threading.Thread(target=work, daemon=True, name="plan-status").start()
+
+    def install_plan(self):
+        """[설치]: 고른 구독의 공식 프로그램을 이 PC에 설치(확인 뒤 뒤에서 실행 · 과정은 진행 기록).
+        Node.js(npm)가 없으면 winget 으로 Node.js LTS 설치를 묻고, winget 도 없으면 다운로드 페이지를 연다."""
+        from . import plan_setup
+        plan = _label_key(SETUP_LABELS, self.v_setup_plan.get()) or "gemini"
+        if vars(self).get("_setup_busy"):
+            return
+        if plan == "claude":
+            messagebox.showinfo("Claude Code 설치", "Claude Code는 Anthropic의 공식 설치 프로그램으로 설치합니다:\n\n"
+                                + plan_setup.CLAUDE_INSTALL + "\n\n설치한 뒤 [로그인 창 열기]로 로그인하세요.", parent=self)
+            return
+        command = plan_setup.install_command(plan)
+        name = SETUP_LABELS[plan]
+        if command is None:
+            node = plan_setup.node_install_command()
+            if node is not None:
+                if messagebox.askyesno("Node.js 필요", f"{name} 는 Node.js(20 이상)의 npm 으로 설치합니다. 이 PC에 npm 이 없습니다.\n\n"
+                                       "Windows 패키지 관리자(winget)로 Node.js LTS 를 먼저 설치할까요?\n\n" + " ".join(node)
+                                       + "\n\n끝나면 연어OCR을 다시 열고 [설치]를 다시 누르세요.", parent=self):
+                    App._run_setup(self, node, "Node.js LTS 설치")
+            elif messagebox.askyesno("Node.js 필요", f"{name} 는 Node.js(20 이상)의 npm 으로 설치합니다. 이 PC에 npm 이 없습니다.\n\n"
+                                     "Node.js 내려받기 페이지를 열까요? 설치한 뒤 연어OCR을 다시 열고 [설치]를 다시 누르세요.", parent=self):
+                import webbrowser
+                webbrowser.open(plan_setup.NODE_PAGE)
+            return
+        if messagebox.askyesno(f"{name} 설치", "이 PC에서 공식 설치 명령을 실행합니다:\n\n" + " ".join(command)
+                               + "\n\n인터넷에서 그 회사의 공식 패키지를 받아 설치합니다(몇 분 걸릴 수 있음). 계속할까요?", parent=self):
+            App._run_setup(self, command, f"{name} 설치")
+
+    def _run_setup(self, command, label):
+        from . import plan_setup
+        self._setup_busy = True
+        self.v_status.set(label + " 중…")
+        def work():
+            self.q.put(("log", f"\n▶ {label}\n   {' '.join(command)}\n"))
+            code = plan_setup.run(command, lambda line: self.q.put(("log", line + "\n")))
+            self.q.put(("setup_done", label, code))
+        threading.Thread(target=work, daemon=True, name="plan-setup").start()
+
+    def _setup_done(self, label, code):
+        self._setup_busy = False
+        if code == 0:
+            self.v_status.set(label + " 끝")
+            messagebox.showinfo(label, f"{label}을(를) 마쳤습니다. 이제 [로그인 창 열기]로 로그인한 뒤 [상태 확인]을 누르세요.", parent=self)
+        else:
+            self.v_status.set(f"{label} 실패(코드 {code})")
+            messagebox.showerror(label, f"{label}에 실패했습니다(코드 {code}). 진행 기록에서 내용을 확인하세요. "
+                                 "권한 오류면 PowerShell을 관리자 권한으로 열어 같은 명령을 실행하세요.", parent=self)
+        App.refresh_plans(self)
+
+    def open_plan_login(self):
+        """[로그인 창 열기]: 고른 구독의 공식 프로그램을 새 창으로 — 로그인은 그 회사 화면에서 사람이 한다."""
+        from . import plan_setup, subscriptions
+        plan = _label_key(SETUP_LABELS, self.v_setup_plan.get()) or "gemini"
+        cli = subscriptions.module(plan).find_cli()
+        if not cli:
+            messagebox.showinfo("로그인", f"{SETUP_LABELS[plan]} 가 이 PC에 없습니다. 먼저 [설치]를 누르세요.", parent=self)
+            return
+        try:
+            message = plan_setup.open_login(plan, cli)
+        except OSError as exc:
+            message = f"로그인 창을 열지 못했습니다: {exc}. 명령 프롬프트에서 실행하세요: " + " ".join(plan_setup.login_command(plan, cli))
+        messagebox.showinfo("로그인", (message + "\n\n" if message else "새 창이 열렸습니다. ")
+                            + plan_setup.LOGIN_NOTES[plan] + " 로그인한 뒤 [상태 확인]을 누르세요.", parent=self)
 
     def switch_subscription(self):
         """[다음 구독으로 넘기기]: 고른 곳(없으면 정해진 순서의 다음)으로 실행 중인 연결을 옮긴다.
@@ -6243,8 +6334,8 @@ class App(tk.Tk):
         if 1 <= parallel <= 4 and parallel != 3:
             options += ["--local-ai-parallel", str(parallel)]
         variable = vars(self).get("v_local_ai_split")
-        if bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_split", False)):
-            options.append("--local-ai-split")
+        if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_split", True))):
+            options.append("--no-local-ai-split")                               # 기본 켬(1.2.9) — 끈 경우만 넘긴다
         variable = vars(self).get("v_local_resume")
         resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
         if resume in RESUME_LABELS and resume != "unfinished":
@@ -6664,9 +6755,13 @@ class App(tk.Tk):
                         self.v_hstyles.set(item[1])
                 elif item[0] == "ai_link":
                     App._show_ai_link(self, item[1])
+                elif item[0] == "setup_done":
+                    App._setup_done(self, *item[1:])
                 elif item[0] == "plans":
                     if vars(self).get("l_plans") is not None:
                         self.l_plans.configure(text=item[1])
+                        if len(item) > 2 and vars(self).get("_plans_tip") is not None:
+                            self._plans_tip.text = item[2]                       # 마우스를 올리면 계정마다 이유·경로·해결 방법
                 elif item[0] == "progress":
                     self._on_progress(*item[1:])                       # (단계, 끝난 수, 전체 수[, 그때의 호출 수])
                 elif item[0] == "plan_progress":

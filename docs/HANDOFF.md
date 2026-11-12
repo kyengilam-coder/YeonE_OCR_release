@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: 1.2.9 설치·로그인 · 실행 실패 구분 · 쪽 나눠 보내기 기본 켬
+
+`yeone_ocr/plan_setup.py`: 공식 설치 명령(npm 패키지)·npm/winget 찾기·출력 흐름 실행·운영체제별 로그인 창. 창은 「AI 판독기」 ① `plan_setup` 줄(`App.install_plan`·`_run_setup`·`_setup_done`·`open_plan_login`). `gemini_subscription._query_status`는 찾으면 installed(경로 `path`), `--version` 실패는 `runs=False`. `claude_subscription.npm_global_cli`가 PATH 밖 npm 전역 폴더 등을 찾는다(Codex·Gemini). 쪽 나눠 보내기 기본 켬: 설정 `local_ai_split_version`으로 1.2.8 의 저장된 끔을 한 번만 켬으로.
+
 ## 2026-11-12: 1.2.8 쪽 나눠 보내기
 
 `local_first._command`의 쪽 반복에서 엔진 뒤 AI 부분(체크포인트 기록·AI 쪽 판독·prepare_plan·run_plan·제안 반영·기록)을 `ai_stage`로 옮겼다. 선택을 끄면 반복 안에서 그대로 부른다. `--local-ai-split`이고 구독 세션이 있으면 `_SplitPlans`가 로그인된 구독마다 `Session`(record_provider는 실행의 제공사)·쪽 판독기·작업자 1개를 두고, 엔진을 마친 쪽을 빈 작업자에 맡긴다. 프로젝트 저장·상태 파일·쪽 그림 그리기는 각자 잠금이 있어 쪽마다 다른 스레드가 써도 된다. 호출 수는 `tally`(잠금). 중지·반환 때 `finally`에서 작업자를 기다린다. `Session.request`는 받은 모델 이름이 그 계정 것이 아니면 계정의 모델을, `_as_first`는 기록 제공사 기준 완료 표시를 쓴다.

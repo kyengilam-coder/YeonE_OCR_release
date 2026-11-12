@@ -544,3 +544,28 @@ def test_split_reports_a_page_failure_and_a_stop():
         split.dispatch(number, 0, {}, {})
     assert split.finish() == 130
     assert failed == [(1, "쪽 오류")]
+
+
+# ---- 찾았지만 실행되지 않는 CLI · PATH 밖의 npm 전역 폴더 ----
+
+def test_gemini_found_but_not_running_is_not_reported_as_missing(_fresh):
+    def broken(args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="Error: Node.js 18 is not supported; please use 20+")
+    state = gemini.status(refresh=True, runner=broken)
+    assert state["installed"] is True and state["runs"] is False and not state["usable"]
+    assert "실행하지 못했습니다(코드 1)" in state["reason"] and "Node.js 18" in state["reason"]
+    assert state["path"] == gemini.find_cli()
+
+
+def test_cli_outside_path_is_found_in_the_npm_global_folder(monkeypatch, tmp_path):
+    if os.name == "nt":
+        pytest.skip("POSIX layout")
+    monkeypatch.delenv("YEONE_OCR_GEMINI_CLI_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert gemini.find_cli() is None
+    prefix = tmp_path / "npm-prefix"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "gemini").write_text("")
+    monkeypatch.setenv("NPM_CONFIG_PREFIX", str(prefix))
+    assert gemini.find_cli() == str(prefix / "bin" / "gemini")

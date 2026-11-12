@@ -1,3 +1,28 @@
+# 연어OCR 1.2.9 · 구독 프로그램 설치·로그인 · 로그인 상태 원인 표시 · 쪽 나눠 보내기 기본 켬
+
+1.2.8을 갱신하는 판이다.
+
+**설치·로그인을 창에서**
+
+- 설정 「AI 판독기」 ①에 **설치·로그인** 줄을 더했다. 구독(Gemini · ChatGPT · Claude)을 고르고 **[설치]**를 누르면, 실행할 공식 설치 명령을 보여 주고 물은 뒤 이 PC에서 실행한다 — Gemini CLI `npm install -g @google/gemini-cli`, Codex CLI `npm install -g @openai/codex`. 과정은 진행 기록에 나오고, 끝나면 로그인 상태를 다시 확인한다. Claude Code는 Anthropic의 공식 설치 프로그램을 안내한다.
+- npm(Node.js)이 없으면 Windows 패키지 관리자(winget)로 Node.js LTS를 먼저 설치할지 묻고, winget도 없으면 Node.js 내려받기 페이지를 연다.
+- **[로그인 창 열기]**는 고른 구독의 공식 프로그램을 새 창으로 연다(Gemini는 'Login with Google', ChatGPT는 'Sign in with ChatGPT'). 로그인은 그 회사 화면에서 직접 하며 이 프로그램은 비밀번호·토큰을 보지 않는다. 로그인한 뒤 [상태 확인].
+
+**로그인 상태: 「설치 안 됨」과 「실행 실패」 구분**
+
+- 이전에는 Gemini CLI를 찾았어도 `gemini --version`이 실패하면(낮은 Node.js · 시간 초과 등) 이유 없이 「설치 안 됨」으로 보였다. 이제 찾으면 설치됨으로 두고, 실행이 안 되면 **「실행 실패」**와 종료 코드 · 오류 문구 · 찾은 경로를 보인다.
+- Codex CLI · Gemini CLI를 PATH 밖에서도 찾는다: npm 전역 폴더(`%APPDATA%\npm`) · Node 설치 폴더 · nvm · Volta · pnpm · Homebrew · `~/.local/bin`.
+- 「로그인 상태」에 마우스를 올리면 계정마다 경로 · 이유 · 해결 방법이 나온다. 명령줄 `yeone-ocr plans`도 같은 구분과 경로를 보인다.
+- 참고: Gemini 구독(Google AI Pro 등)이 있어도 연어OCR은 **Gemini CLI**를 통해서만 쓴다 — 설치와 'Login with Google'이 필요하다.
+
+**쪽 나눠 보내기 기본 켬**
+
+- 「쪽 나눠 보내기」(1.2.8)를 기본으로 켠다(명령줄도 기본 켬, 끄려면 `--no-local-ai-split`). 1.2.8에서 저장된 '끔'(그때의 기본값)은 한 번만 켬으로 옮기고, 그 뒤 직접 끈 값은 지킨다. 로그인된 구독이 하나뿐이면 한 계정으로 진행한다.
+
+**검증**: Linux 가상 화면(Xvfb, Tk 8.6, Python 3.12)에서 화면 시험을 포함한 `tests/` 전체 — 2,390개 통과 · 29개 건너뜀 · 실패 1개(`test_bookmark_section_editor`의 지연 표시 시험 — 변경 전 소스에서도 같은 환경에서 실패). 설치 명령 · npm 찾기 · 설치 출력 흐름 · 운영체제별 로그인 창 · 설치 단추의 확인·Node.js 안내 · 찾았지만 실행되지 않는 CLI · PATH 밖 npm 폴더 · 기본 켬 옮기기를 시험한다. 실제 Windows에서 npm 설치·로그인 창은 이 환경에서 실행하지 못했다. Windows 설치판은 배포 CI의 회귀·설치 검사가 첫 확인이다.
+
+---
+
 # 연어OCR 1.2.8 · 여러 구독에 쪽 나눠 보내기
 
 1.2.7을 갱신하는 판이다. 로그인된 구독 계정이 둘 이상이면 계정마다 쪽을 맡아 AI 쪽 판독·검증을 함께 진행하는 선택을 더했다(기본 끔).

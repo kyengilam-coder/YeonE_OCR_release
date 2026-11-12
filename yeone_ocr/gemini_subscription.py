@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure
+from .claude_subscription import SubscriptionError, failure, npm_global_cli
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
@@ -77,8 +77,10 @@ def find_cli() -> str | None:
         path = Path(configured).expanduser()
         return str(path) if path.exists() else None
     if sys.platform == "win32":
-        return shutil.which("gemini.cmd") or shutil.which("gemini.exe") or shutil.which("gemini")
-    return shutil.which("gemini")
+        found = shutil.which("gemini.cmd") or shutil.which("gemini.exe") or shutil.which("gemini")
+    else:
+        found = shutil.which("gemini")
+    return found or npm_global_cli("gemini")
 
 
 def _home() -> Path:
@@ -136,16 +138,20 @@ def _query_status(runner) -> dict:
     cli = find_cli()
     if not cli:
         return result
+    result.update(installed=True, path=cli)              # found: a failure below is "won't run", not "missing"
     try:
         proc = runner([cli, "--version"], env=cli_env(), cwd=_empty_dir(), capture_output=True, text=True,
-                      encoding="utf-8", errors="replace", timeout=60, **_NO_WINDOW)
+                      encoding="utf-8", errors="replace", timeout=90, **_NO_WINDOW)
     except (OSError, subprocess.SubprocessError) as exc:
-        result["reason"] = f"Gemini CLI를 실행하지 못했습니다: {exc}"
+        result.update(runs=False, reason=f"Gemini CLI({cli})를 실행하지 못했습니다: {exc}. "
+                                         "PowerShell에서 `gemini --version`이 되는지 확인하세요(Node.js 20 이상 필요).")
         return result
     if proc.returncode != 0:
-        result["reason"] = f"Gemini CLI를 실행하지 못했습니다(코드 {proc.returncode})."
+        detail = (proc.stderr or proc.stdout or "").strip()[-240:]
+        result.update(runs=False, reason=f"Gemini CLI({cli})를 실행하지 못했습니다(코드 {proc.returncode})"
+                                         + (f": {detail}" if detail else "")
+                                         + ". PowerShell에서 `gemini --version`이 되는지 확인하세요(Node.js 20 이상 필요).")
         return result
-    result["installed"] = True
     chosen = _sign_in_type()
     if chosen in SIGN_IN_TYPES:
         result.update(logged_in=True, billing="subscription", plan="Google 계정", usable=True, reason=None)
