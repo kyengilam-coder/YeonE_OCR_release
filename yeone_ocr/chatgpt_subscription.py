@@ -173,6 +173,33 @@ def _classify(text: str) -> str | None:
 _MODEL_REFUSED = re.compile(r"model_not_found|unsupported model|model\b[^.\n]{0,80}\b(?:is not supported|does not exist|not found)")
 
 
+class ModelRefused(SubscriptionError):
+    """The ChatGPT account does not serve this model through Codex (model_not_found)."""
+
+    def __init__(self, model, message):
+        super().__init__(message)
+        self.model = model
+
+
+# Tried after Codex's own default is refused when `codex debug models` is not available (older CLI).
+FALLBACK_MODELS = ("gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol")
+_working_model: str | None = None        # the model that answered after the default was refused (this process)
+_catalog_cache: list | None = None
+_model_lock = threading.Lock()
+
+
+def _remember(model_name: str) -> None:
+    global _working_model
+    with _model_lock:
+        _working_model = model_name
+
+
+def reset_model_choice() -> None:
+    global _working_model, _catalog_cache
+    with _model_lock:
+        _working_model, _catalog_cache = None, None
+
+
 class SubscriptionClient:
     """One `codex exec` call per request; same contract as claude_subscription.SubscriptionClient."""
 
@@ -190,7 +217,55 @@ class SubscriptionClient:
         self.effort = effort_level or effort()
 
     def request(self, *, model_name, system, prompt, images, schema):
-        """-> (text, complete, finish_reason, usage dict, actual model). Images are PNG bytes."""
+        """-> (text, complete, finish_reason, usage dict, actual model). Images are PNG bytes.
+
+        Codex picks the plan's default model when none is named; when the ChatGPT account refuses the
+        model it picked ("model is not supported when using Codex with a ChatGPT account"), the next
+        image-capable models of the account's own catalog (`codex debug models`) are tried in order and
+        the one that answers is used from then on."""
+        default = not model_name or model_name == label("")
+        first = (_working_model or model_name) if default else model_name
+        try:
+            return self._request_once(first, system, prompt, images, schema)
+        except ModelRefused as refused:
+            if not default:
+                raise SubscriptionError(str(refused)) from refused          # a named model: the person's choice
+            tried = {refused.model, first}
+            for candidate in self._catalog():
+                if candidate in tried:
+                    continue
+                tried.add(candidate)
+                try:
+                    result = self._request_once(candidate, system, prompt, images, schema)
+                except ModelRefused:
+                    continue
+                _remember(candidate)
+                return result
+            raise SubscriptionError(str(refused) + " 이 계정에서 쓸 수 있는 다른 모델도 찾지 못했습니다. "
+                                    "[설치]로 Codex CLI를 최신으로 올리거나(npm install -g @openai/codex) "
+                                    "YEONE_OCR_CHATGPT_MODEL로 모델을 지정하세요.") from refused
+
+    def _catalog(self) -> list:
+        """The account's image-capable models in Codex's own order (`codex debug models`); a short
+        built-in list when the CLI is too old to print it."""
+        global _catalog_cache
+        if _catalog_cache is not None:
+            return _catalog_cache
+        models = []
+        try:
+            proc = self._run([self.cli, "debug", "models"], env=cli_env(), cwd=_empty_dir(), capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=60, **_NO_WINDOW)
+            data = json.loads(proc.stdout or "{}")
+            entries = data.get("models", data) if isinstance(data, dict) else data
+            listed = [m for m in entries if isinstance(m, dict) and m.get("visibility", "list") == "list"
+                      and "image" in (m.get("input_modalities") or ["image"]) and isinstance(m.get("slug"), str)]
+            models = [m["slug"] for m in sorted(listed, key=lambda m: m.get("priority", 999))]
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+            models = []
+        _catalog_cache = models[:6] or list(FALLBACK_MODELS)
+        return _catalog_cache
+
+    def _request_once(self, model_name, system, prompt, images, schema):
         with tempfile.TemporaryDirectory(prefix="yeone-ocr-codex-") as folder:
             root = Path(folder)
             (root / "instructions.md").write_text(system, encoding="utf-8")
@@ -229,6 +304,11 @@ class SubscriptionClient:
             if not detail:
                 errors = [str(e.get("message") or "") for e in events if e.get("type") == "error"]
                 detail = errors[-1] if errors else (proc.stderr or proc.stdout or "").strip()[-400:]
+            refused = _MODEL_REFUSED.search((detail or "").lower())
+            if refused:
+                slug = re.search(r"'([^']+)' model", detail or "")
+                raise ModelRefused(slug.group(1) if slug else (model_name or ""),
+                                   f"이 ChatGPT 요금제에서 쓸 수 없는 모델입니다 (원문: {(detail or '')[:240]})")
             raise failure("Codex CLI", detail or "", _classify, f"Codex CLI 실행 실패(코드 {proc.returncode}): {detail}")
         if not text:
             message = next((e.get("item", {}).get("text") for e in reversed(events) if e.get("type") == "item.completed"
@@ -239,5 +319,5 @@ class SubscriptionClient:
         try:
             json.loads(text)
         except ValueError:
-            return text, False, "invalid_json", tokens, label(model_name)
-        return text, True, "completed", tokens, label(model_name)
+            return text, False, "invalid_json", tokens, label(model_name or "")
+        return text, True, "completed", tokens, label(model_name or "")

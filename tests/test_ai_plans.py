@@ -21,6 +21,7 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["lines"]
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
     subscriptions.reset_status_cache(); subscriptions.reset_exhausted()
+    codex.reset_model_choice()
     for name, binary in (("CODEX", "codex"), ("GEMINI", "gemini"), ("CLAUDE", "claude")):
         path = tmp_path / "bin" / (binary + (".exe" if os.name == "nt" else ""))
         path.parent.mkdir(exist_ok=True)
@@ -569,3 +570,61 @@ def test_cli_outside_path_is_found_in_the_npm_global_folder(monkeypatch, tmp_pat
     (prefix / "bin" / "gemini").write_text("")
     monkeypatch.setenv("NPM_CONFIG_PREFIX", str(prefix))
     assert gemini.find_cli() == str(prefix / "bin" / "gemini")
+
+
+
+# ---- Codex: the account refuses Codex's default model (model_not_found) ----
+
+REFUSED = ('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'gpt-5.5\' model is not '
+           'supported when using Codex with a ChatGPT account.","code":"model_not_found"}}')
+
+
+def _codex_runner(accepted, calls):
+    def run(args, **kwargs):
+        if args[1:3] == ["debug", "models"]:
+            calls.append("catalog")
+            catalog = {"models": [
+                {"slug": "gpt-6.1-sol", "visibility": "list", "priority": 1, "input_modalities": ["text", "image"]},
+                {"slug": "gpt-text-only", "visibility": "list", "priority": 2, "input_modalities": ["text"]},
+                {"slug": "gpt-hidden", "visibility": "hide", "priority": 3, "input_modalities": ["text", "image"]},
+                {"slug": "gpt-6-sol", "visibility": "list", "priority": 4, "input_modalities": ["text", "image"]}]}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(catalog), stderr="")
+        named = args[args.index("-m") + 1] if "-m" in args else None
+        calls.append(named)
+        if named not in accepted:
+            events = [{"type": "turn.started"}, {"type": "turn.failed", "error": {"message": REFUSED}}]
+            return SimpleNamespace(returncode=1, stdout="\n".join(json.dumps(e) for e in events), stderr="")
+        Path(args[args.index("-o") + 1]).write_text('{"lines": []}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"type": "turn.completed", "usage": {}}))
+    return run
+
+
+def test_codex_tries_the_accounts_next_model_when_its_default_is_refused_and_keeps_it():
+    calls = []
+    client = codex.SubscriptionClient(runner=_codex_runner({"gpt-6-sol"}, calls))
+    out = client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert out[1] is True and out[-1] == "gpt-6-sol"
+    assert calls == [None, "catalog", "gpt-6.1-sol", "gpt-6-sol"]              # text-only and hidden models skipped
+    calls.clear()
+    client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert calls == ["gpt-6-sol"]                                               # remembered: no refused call again
+
+
+def test_codex_with_no_model_left_is_an_account_problem_not_a_refused_request():
+    from yeone_ocr.claude_subscription import RequestRejected
+    calls = []
+    client = codex.SubscriptionClient(runner=_codex_runner(set(), calls))
+    with pytest.raises(SubscriptionError) as caught:
+        client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert not isinstance(caught.value, RequestRejected)                        # the session moves to the next plan
+    assert "쓸 수 없는 모델" in str(caught.value) and "npm install -g @openai/codex" in str(caught.value)
+    calls.clear()
+    with pytest.raises(SubscriptionError):
+        client.request(model_name="gpt-5.5", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert calls == ["gpt-5.5"]                                                 # a model chosen by the person is not changed
+
+
+def test_model_refusal_is_classified_before_the_request_rejection_words():
+    from yeone_ocr.claude_subscription import RequestRejected, failure
+    error = failure("Codex CLI", REFUSED, codex._classify, "fallback")
+    assert not isinstance(error, RequestRejected) and "쓸 수 없는 모델" in str(error)
