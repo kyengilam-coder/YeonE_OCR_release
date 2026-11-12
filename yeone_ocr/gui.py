@@ -33,7 +33,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
-            "local_ai_parallel": 3, "local_ai_split": False,
+            "local_ai_parallel": 3, "local_ai_split": True,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
@@ -198,6 +198,12 @@ def upgrade_config(cfg: dict, raw: dict | None = None) -> dict:
         mm = "none"
     cfg["memo_mode"] = mm
     cfg["memo_display_version"] = memo_version if memo_current else 1
+    split_version = raw.get("local_ai_split_version", 0)
+    if not (isinstance(split_version, int) and split_version >= 1):
+        cfg["local_ai_split"] = True                          # 1.2.9: 쪽 나눠 보내기 기본 켬 — 1.2.8 의 저장된 '끔'(기본값)은 한 번만 켬으로. 이후 직접 끈 값은 보존
+    cfg["local_ai_split_version"] = 1
+    if not isinstance(cfg.get("local_ai_split"), bool):
+        cfg["local_ai_split"] = True
     if cfg.get("media_res") not in MRES_LABELS:
         cfg["media_res"] = DEFAULTS["media_res"]
     cfg["speed_defaults"] = SPEED_DEFAULTS_VERSION
@@ -2308,7 +2314,7 @@ class App(tk.Tk):
         self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
         self.v_local_resume = tk.StringVar(value=RESUME_LABELS.get(self.cfg.get("local_resume"), RESUME_LABELS["unfinished"]))
         self.v_local_ai_parallel = tk.StringVar(value=str(self.cfg.get("local_ai_parallel", 3)))
-        self.v_local_ai_split = tk.BooleanVar(value=bool(self.cfg.get("local_ai_split", False)))
+        self.v_local_ai_split = tk.BooleanVar(value=bool(self.cfg.get("local_ai_split", True)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2496,6 +2502,7 @@ class App(tk.Tk):
             f = boxed(parent)
             self.l_plans = L(f, "설정 탭을 열면 확인합니다", "CAP", "MUTED")
             self.l_plans.pack(side="left")
+            self._plans_tip = Tip(self.l_plans, "", self)                    # 계정마다 이유·찾은 경로·설치·로그인 방법
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
                       tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
             return f
@@ -2506,7 +2513,7 @@ class App(tk.Tk):
                     "있으며 ChatGPT·Gemini의 검증 정확도는 아직 재지 않았습니다(기본 설정은 Claude로 잼). 실제로 답한 계정·모델은 "
                     "검증 기록에 남습니다. [다음 구독으로 넘기기]는 첫 계정의 연결을 옮깁니다.", self)
             return cb
-        R["ai_split"] = row(b, "쪽 나눠 보내기", "로그인된 구독이 둘 이상일 때 계정마다 쪽을 맡아 함께 진행(기본 끔) · 빠르지만 쪽마다 모델이 다를 수 있음", split)
+        R["ai_split"] = row(b, "쪽 나눠 보내기", "로그인된 구독이 둘 이상일 때 계정마다 쪽을 맡아 함께 진행(기본 켬) · 빠르지만 쪽마다 모델이 다를 수 있음", split)
         R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 명령줄 yeone-ocr plans 와 같음", plans_status)
         subhead(b, "② API 키", "구독을 쓸 수 없을 때 · AI 전체 쪽 판독(기존 방식)에")
         def provider(parent):
@@ -4531,15 +4538,18 @@ class App(tk.Tk):
             label.configure(text="확인 중…")
         def work():
             from . import subscriptions
-            parts = []
+            parts, details = [], []
             for plan in subscriptions.PLANS:
                 try:
                     state = subscriptions.status(plan, refresh=True)
                 except Exception:                    # 상태 확인은 실행을 막지 않는다
                     state = {"usable": False, "installed": False}
-                mark = ("● 사용 가능" if state.get("usable") else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
+                mark = ("● 사용 가능" if state.get("usable") else "○ 실행 실패" if state.get("runs") is False
+                        else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
                 parts.append(f"{subscriptions.NAMES[plan]} {mark}")
-            self.q.put(("plans", " · ".join(parts)))
+                where = f" ({state['path']})" if state.get("path") else ""
+                details.append(f"{subscriptions.NAMES[plan]} — {mark[2:]}{where}" + (f": {state['reason']}" if state.get("reason") else ""))
+            self.q.put(("plans", " · ".join(parts), "\n\n".join(details)))
         threading.Thread(target=work, daemon=True, name="plan-status").start()
 
     def switch_subscription(self):
@@ -6243,8 +6253,8 @@ class App(tk.Tk):
         if 1 <= parallel <= 4 and parallel != 3:
             options += ["--local-ai-parallel", str(parallel)]
         variable = vars(self).get("v_local_ai_split")
-        if bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_split", False)):
-            options.append("--local-ai-split")
+        if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_split", True))):
+            options.append("--no-local-ai-split")                               # 기본 켬(1.2.9) — 끈 경우만 넘긴다
         variable = vars(self).get("v_local_resume")
         resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
         if resume in RESUME_LABELS and resume != "unfinished":
@@ -6667,6 +6677,8 @@ class App(tk.Tk):
                 elif item[0] == "plans":
                     if vars(self).get("l_plans") is not None:
                         self.l_plans.configure(text=item[1])
+                        if len(item) > 2 and vars(self).get("_plans_tip") is not None:
+                            self._plans_tip.text = item[2]                       # 마우스를 올리면 계정마다 이유·경로·해결 방법
                 elif item[0] == "progress":
                     self._on_progress(*item[1:])                       # (단계, 끝난 수, 전체 수[, 그때의 호출 수])
                 elif item[0] == "plan_progress":

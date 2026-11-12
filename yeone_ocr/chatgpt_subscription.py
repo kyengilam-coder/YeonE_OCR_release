@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure
+from .claude_subscription import SubscriptionError, failure, npm_global_cli
 
 SUBSCRIPTION_KEY = "chatgpt-subscription"
 PROVIDER = "openai"
@@ -81,8 +81,10 @@ def find_cli() -> str | None:
         path = Path(configured).expanduser()
         return str(path) if path.exists() else None
     if sys.platform == "win32":
-        return shutil.which("codex.exe") or shutil.which("codex.cmd") or shutil.which("codex")
-    return shutil.which("codex")
+        found = shutil.which("codex.exe") or shutil.which("codex.cmd") or shutil.which("codex")
+    else:
+        found = shutil.which("codex")
+    return found or npm_global_cli("codex")
 
 
 def cli_env() -> dict:
@@ -123,7 +125,7 @@ def _query_status(runner) -> dict:
     cli = find_cli()
     if not cli:
         return result
-    result["installed"] = True
+    result.update(installed=True, path=cli)
     try:
         proc = runner([cli, "login", "status"], env=cli_env(), cwd=_empty_dir(), capture_output=True,
                       text=True, encoding="utf-8", errors="replace", timeout=30, **_NO_WINDOW)

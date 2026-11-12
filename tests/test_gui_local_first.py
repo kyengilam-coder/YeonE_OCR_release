@@ -127,13 +127,22 @@ class LocalFirstGuiTests(unittest.TestCase):
         app.v_local_ai_parallel = Var("9")                                              # out of range: the default
         self.assertNotIn("--local-ai-parallel", gui.App._strategy_opts(app))
 
-    def test_split_is_off_by_default_and_checking_it_adds_a_flag(self):
+    def test_split_is_on_by_default_and_unchecking_it_adds_a_flag(self):
         gui = self.gui
         app = self.app()
-        self.assertNotIn("--local-ai-split", gui.App._strategy_opts(app))
-        self.assertIs(gui.DEFAULTS["local_ai_split"], False)
-        app.v_local_ai_split = Var(True)
-        self.assertIn("--local-ai-split", gui.App._strategy_opts(app))
+        self.assertNotIn("--no-local-ai-split", gui.App._strategy_opts(app))
+        self.assertIs(gui.DEFAULTS["local_ai_split"], True)
+        app.v_local_ai_split = Var(False)
+        self.assertIn("--no-local-ai-split", gui.App._strategy_opts(app))
+
+    def test_split_saved_off_by_1_2_8_is_turned_on_once_and_a_later_choice_is_kept(self):
+        gui = self.gui
+        old = gui.upgrade_config(dict(gui.DEFAULTS, local_ai_split=False), {"local_ai_split": False})
+        self.assertIs(old["local_ai_split"], True)                                    # 1.2.8 의 기본값 '끔'
+        self.assertEqual(old["local_ai_split_version"], 1)
+        kept = gui.upgrade_config(dict(gui.DEFAULTS, local_ai_split=False),
+                                  {"local_ai_split": False, "local_ai_split_version": 1})
+        self.assertIs(kept["local_ai_split"], False)                                  # 1.2.9 에서 직접 끈 값
 
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()

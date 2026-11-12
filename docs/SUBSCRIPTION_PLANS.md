@@ -82,4 +82,12 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`. 한도가 풀렸
 
 ## 쪽 나눠 보내기 (1.2.8)
 
-로그인된 구독이 둘 이상이면 계정마다 쪽을 맡아 함께 진행할 수 있다(설정 「AI 판독기」 ① 「쪽 나눠 보내기」, `--local-ai-split`, 기본 끔). 한 쪽은 한 계정이 끝까지 검증하고, 한도는 계정마다 나눠 쓴다. 쪽마다 검증한 모델이 다를 수 있으며 ChatGPT·Gemini의 검증 정확도는 아직 재지 않았다. 실제로 답한 계정·모델은 검증 기록에 남는다.
+로그인된 구독이 둘 이상이면 계정마다 쪽을 맡아 함께 진행할 수 있다(설정 「AI 판독기」 ① 「쪽 나눠 보내기」, `--local-ai-split`, 1.2.9부터 기본 켬 — 끄려면 체크 해제 또는 `--no-local-ai-split`). 한 쪽은 한 계정이 끝까지 검증하고, 한도는 계정마다 나눠 쓴다. 쪽마다 검증한 모델이 다를 수 있으며 ChatGPT·Gemini의 검증 정확도는 아직 재지 않았다. 실제로 답한 계정·모델은 검증 기록에 남는다.
+
+## 로그인 상태가 이상할 때
+
+설정 「AI 판독기」 ①의 「로그인 상태」에 마우스를 올리면 계정마다 찾은 프로그램 경로와 이유가 나온다(명령줄 `yeone-ocr plans`도 같음).
+
+- **설치 안 됨**: 그 회사의 공식 프로그램(Codex CLI · Gemini CLI)을 찾지 못함. Gemini 구독(Google AI Pro 등)이 있어도 연어OCR은 **Gemini CLI**를 통해서만 쓴다 — PowerShell에서 `npm install -g @google/gemini-cli` 뒤 `gemini`를 한 번 실행해 'Login with Google'. PATH에 없어도 npm 전역 폴더(`%APPDATA%\npm`)·Node 설치 폴더·nvm·Volta에서 찾는다. 다른 곳에 있으면 환경 변수 `YEONE_OCR_GEMINI_CLI_PATH`로 지정.
+- **실행 실패**: 찾았지만 `gemini --version`이 실패함 — 이유(종료 코드·오류 문구)가 함께 나온다. 흔한 원인은 Node.js가 20보다 낮음.
+- **로그인 필요**: 설치됐지만 Google 계정 로그인이 아님 — `gemini`에서 /auth로 'Login with Google'.
