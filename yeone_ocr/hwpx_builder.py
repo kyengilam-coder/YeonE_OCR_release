@@ -19,9 +19,12 @@ __all__ = ["BODY_WIDTH_MM", "HP", "MEMO_AUTHOR", "FONT_BODY", "FONT_HEAD", "HEAD
 
 
 def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min_mm: float = 120,
-               highlight: bool = True, page_breaks: bool = True, memos: bool = True, preset: Preset | str | None = None) -> dict:
+               highlight: bool = True, page_breaks: bool = True, memos: bool = True, preset: Preset | str | None = None,
+               simple: bool = False) -> dict:
     """highlight=False 면 등급 색·형광펜·밑줄 없이 글자만(〔〕 표기는 그대로). memos=False 면 고지를 메모 대신 회색 〔고지: …〕 로 글 속에.
     preset=basic 은 대제목·중제목·소제목·문단-1~5 한글 스타일을 만든다. None 은 예전 기본 모양을 그대로 쓴다."""
+    if simple and preset is None:
+        preset = "basic"                                               # 단순 표시: 한글에서 다시 적용할 수 있는 제목·문단 스타일
     preset = resolve_preset(preset) if isinstance(preset, str) else preset
     look = BasicLook(preset, page_breaks=page_breaks) if preset is not None and preset.id == "basic" else DefaultLook(page_breaks=page_breaks)
-    return write_hwpx(blocks, out_path, look, min_mm=min_mm, large_min_mm=large_min_mm, highlight=highlight, memos=memos)
+    return write_hwpx(blocks, out_path, look, min_mm=min_mm, large_min_mm=large_min_mm, highlight=highlight, memos=memos, simple=simple)

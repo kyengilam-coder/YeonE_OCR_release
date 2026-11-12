@@ -23,7 +23,7 @@ class LocalFirstTests(unittest.TestCase):
         self.source = self.root / "source.png"
         Image.new("RGB", (400, 200), "white").save(self.source)
         self.work = self.root / "work"
-        self.confidence = 99.0
+        self.confidence = 99
         self.omit_geometry = False
         self.calls = []
         self.local_calls = []
@@ -100,7 +100,7 @@ class LocalFirstTests(unittest.TestCase):
         self.make_textlayer.assert_called_once()
 
     def test_low_confidence_single_v6_review_crops_and_resume_skips_paid_call(self):
-        self.confidence = 20.0
+        self.confidence = 20
         self.assertEqual(command(self.args()), 0)
         self.assertEqual(len(self.calls), 1)
         rec = self.record()
@@ -112,8 +112,144 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(ComparisonProject.load(project.project_path).page(1)["runs"][0]["raw"]["text"], "天地玄黃")
 
+    def test_record_carries_per_glyph_grades_for_document_colours(self):
+        self.confidence = 20
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            command(self.args())
+        self.assertEqual(self.record()["local_grades"],
+                         [{"region_id": "local-line-1", "para": 0, "start": 0, "end": 4, "grade": "blue"}])
+
+    def test_skip_blank_reads_no_engine_and_saves_an_empty_record(self):
+        self.assertEqual(command(self.args("--local-skip-blank")), 0)
+        self.assertEqual(self.local_calls, [])
+        rec = self.record()
+        self.assertEqual((rec["model"], rec["local_first"]["review"]["status"]), ("blank-page", "blank-page"))
+        self.assertEqual(rec["merged"]["regions"], [])
+        self.assertEqual(self.calls, [])
+
+    def test_options_are_recorded_and_ai_batch_reaches_the_plan(self):
+        self.confidence = 20
+        self.assertEqual(command(self.args("--local-ai-batch", "3")), 0)
+        rec = self.record()
+        self.assertEqual(rec["local_first"]["options"], {"ai_batch": 3})          # columns is the default now
+        project = ComparisonProject.load(rec["local_first"]["project_path"])
+        self.assertEqual(project.page(1)["ai_reviews"][0]["policy"]["batch_size"], 3)
+
+    def test_two_column_order_follows_the_switch(self):
+        from yeone_ocr import local_first
+        seen = []
+        real = local_first._record
+
+        def spy(project, number, args, work, started, review, extras=None):
+            seen.append((extras or {}).get("columns"))
+            return real(project, number, args, work, started, review, extras)
+        with patch.object(local_first, "_record", side_effect=spy):
+            command(self.args())
+            command(self.args("--no-local-columns", "--force"))
+        self.assertTrue(seen[0] is True and seen[-1] is False)
+        self.assertEqual(self.record()["local_first"]["options"], {"columns": False})
+
+    def test_easyocr_left_out_of_horizontal_pages_unless_asked(self):
+        seen = []
+        original = self.recognize
+
+        def capture(project, number, **kwargs):
+            seen.append(kwargs.get("exclude", ()))
+            return original(project, number, **kwargs)
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=capture):
+            command(self.args())
+            command(self.args("--local-easyocr", "--force"))
+            command(self.args("--local-exclude-engines", "tesseract", "--force"))
+        self.assertEqual(seen, [("easyocr",), (), ("easyocr", "tesseract")])
+
+    def test_subscription_review_runs_through_the_signed_in_cli(self):
+        from yeone_ocr import claude_subscription as subscription
+        self.confidence = 20
+        seen = []
+        harness = self
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                harness.calls.append(model_name)
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "end_turn", {"input_tokens": 3}, model_name
+
+        def factory(settings, key):
+            seen.append((settings.provider, settings.model, key))
+            return FakeCLI()
+        with patch("yeone_ocr.comparison_ai.create_client", side_effect=factory), \
+                patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-accept",
+                                               "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
+        self.assertEqual(seen[0], ("anthropic", "opus", subscription.SUBSCRIPTION_KEY))
+        self.assertEqual(self.calls, ["opus"])
+        rec = self.record()
+        self.assertEqual(rec["local_first"]["review"]["ai_accept"], {"accepted": 0, "held": 0})
+        self.assertEqual(rec["local_first"]["options"], {"ai_accept": True})
+
+    def test_subscription_mode_without_sign_in_keeps_the_review_pending(self):
+        from yeone_ocr import claude_subscription as subscription
+        self.confidence = 20
+        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):  # OpenAI key present
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription")), 4)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
+
+    def test_ai_page_reading_goes_into_the_document_not_the_engine_reading(self):
+        from yeone_ocr import ai_page, claude_subscription as subscription
+        self.recognized_text = "天地玄黄宇宙洪荒"
+        sent = []
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, **kwargs):
+                sent.append(kwargs)
+                return json.dumps({"lines": ["天地玄黃宇宙洪荒"], "uncertain": []}), True, "end_turn", {}, "opus"
+        with patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
+                patch.object(subscription, "SubscriptionClient", return_value=FakeCLI()):
+            self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
+        rec = self.record()
+        self.assertIn("天地玄黃宇宙洪荒", json.dumps(rec["merged"], ensure_ascii=False))
+        self.assertEqual(rec["local_first"]["ai_page"]["taken"], 1)
+        self.assertIn("green", {g["grade"] for g in rec["local_grades"]})
+        project = ComparisonProject.load(rec["local_first"]["project_path"])
+        self.assertEqual(project.text(1), "天地玄黄宇宙洪荒")                  # engine reading kept for the editor
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(rec["local_first"]["options"], {"ai_page": "prefer"})
+
+    def test_ai_page_without_sign_in_keeps_the_engine_reading(self):
+        from yeone_ocr import claude_subscription as subscription
+        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):
+            self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
+        self.assertNotIn("ai_page", self.record()["local_first"])
+
+    def test_signed_in_subscription_turns_on_page_reading_and_tiled_review_by_default(self):
+        from yeone_ocr import claude_subscription as subscription, local_first
+        args = self.args()
+        with patch.dict(os.environ, {"YEONE_OCR_CLAUDE_AUTH": ""}), \
+                patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            resolved = local_first._resolve_ai_defaults(args, cli)
+        self.assertEqual((args.local_ai_page, args.local_ai_accept, args.local_ai_detail_tile, args.local_ai_batch,
+                          args.local_ai_auth), ("prefer", True, 1024, 4, "subscription"))
+        self.assertEqual(resolved["ai_page"], "prefer")
+        args = self.args("--local-ai-page", "off")
+        with patch.dict(os.environ, {"YEONE_OCR_CLAUDE_AUTH": ""}), \
+                patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}):
+            local_first._resolve_ai_defaults(args, cli)
+        self.assertEqual(args.local_ai_page, "off")                                   # explicit choice wins
+        args = self.args()
+        with patch.dict(os.environ, {"YEONE_OCR_CLAUDE_AUTH": ""}), \
+                patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):
+            local_first._resolve_ai_defaults(args, cli)
+        self.assertEqual((args.local_ai_page, args.local_ai_accept, args.local_ai_batch), ("off", False, 1))
+        self.assertIsNone(args.local_ai_auth)
+
     def test_missing_key_saves_local_and_pending_review(self):
-        self.confidence = 20.0
+        self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
             self.assertEqual(command(self.args()), 4)
         self.assertEqual(self.calls, [])
@@ -121,13 +257,13 @@ class LocalFirstTests(unittest.TestCase):
         self.make_textlayer.assert_called_once()
 
     def test_disabled_review_has_no_external_call(self):
-        self.confidence = 20.0
+        self.confidence = 20
         self.assertEqual(command(self.args("--no-local-ai-review")), 0)
         self.assertEqual(self.calls, [])
         self.assertEqual(self.record()["local_first"]["review"]["reason"], "AI 검증 꺼짐")
 
     def test_api_failure_keeps_raw_and_builds_local_output(self):
-        self.confidence = 20.0
+        self.confidence = 20
         self.api_failure = True
         self.assertEqual(command(self.args()), 4)
         rec = self.record()
@@ -166,7 +302,7 @@ class LocalFirstTests(unittest.TestCase):
             document.new_page(width=96, height=48)
             document.new_page(width=96, height=48)
             document.save(self.source)
-        self.confidence = 20.0
+        self.confidence = 20
         self.assertEqual(command(self.args("--local-ai-max-calls", "1")), 4)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.record(2)["local_first"]["review"]["status"], "pending")
@@ -178,7 +314,7 @@ class LocalFirstTests(unittest.TestCase):
             document.new_page(width=96, height=48)
             document.new_page(width=96, height=48)
             document.save(self.source)
-        self.confidence = 20.0
+        self.confidence = 20
         self.assertEqual(command(self.args("--local-ai-max-calls", "3")), 0)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(command(self.args("--local-ai-max-calls", "3")), 0)
@@ -193,7 +329,7 @@ class LocalFirstTests(unittest.TestCase):
     def test_relative_source_and_work_paths_resume_without_duplicate_review(self):
         original_cwd = Path.cwd()
         original_source, original_work = self.source, self.work
-        self.confidence = 20.0
+        self.confidence = 20
         try:
             os.chdir(self.root)
             self.source, self.work = Path("source.png"), Path("work")
@@ -230,7 +366,7 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_cancel_after_paid_response_checkpoints_and_resumes_without_resend(self):
-        self.confidence = 20.0
+        self.confidence = 20
         self.transport_callback = cli.CANCEL.set
         self.assertEqual(command(self.args()), 130)
         self.assertEqual(len(self.calls), 1)
@@ -256,7 +392,7 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(rec["local_first"]["review"]["status"], "no-api-needed")
 
     def test_source_change_during_transport_blocks_document_output(self):
-        self.confidence = 20.0
+        self.confidence = 20
         def replace_source():
             with Image.new("RGB", (400, 200), "black") as changed:
                 changed.save(self.source)
@@ -269,7 +405,7 @@ class LocalFirstTests(unittest.TestCase):
 
     def test_review_and_report_display_pending_without_injecting_html(self):
         from yeone_ocr.review_html import make_review
-        self.confidence = 20.0
+        self.confidence = 20
         command(self.args("--no-local-ai-review"))
         work = Work(str(self.source), str(self.work), initialize=False)
         rec = self.record()

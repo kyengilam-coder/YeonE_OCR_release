@@ -314,15 +314,12 @@ class Work:
         except (ValueError, OSError):
             pass
         from .pdfio import image_sources
+        from ab_ocr.ocr import stable_file_sha256
         sources = image_sources(self.pdf_path) if self.pdf_path.is_dir() else [self.pdf_path]
         digest = hashlib.sha256()
         for src in sources:
             digest.update(src.name.encode("utf-8") + b"\0")
-            file_digest = hashlib.sha256()
-            with src.open("rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    file_digest.update(chunk)
-            digest.update(file_digest.digest())
+            digest.update(bytes.fromhex(stable_file_sha256(src)))
         current = {"sha256": digest.hexdigest(), "path": str(self.pdf_path.resolve()),
                    "image_pipeline": 2, "dpi": int(dpi) if dpi is not None else previous.get("dpi")}
         same = previous.get("sha256") == current["sha256"] and previous.get("image_pipeline") == current["image_pipeline"]

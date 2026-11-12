@@ -1036,7 +1036,7 @@ class ComparisonProject:
 
     def validate_source(self):
         try:
-            current = ocr.file_sha256(self.source_path)
+            current = ocr.stable_file_sha256(self.source_path)
         except OSError as exc:
             raise SourceChangedError("원본을 읽을 수 없습니다. 원래 원본을 다시 연결하세요.") from exc
         if current != self.source_sha256:
@@ -1342,7 +1342,7 @@ class ComparisonProject:
                 if isinstance(proposal, dict):
                     proposal.setdefault("id", uuid.uuid4().hex)
         try:
-            current_hash = ocr.file_sha256(self.source_path)
+            current_hash = ocr.stable_file_sha256(self.source_path)
             source_state = "verified" if current_hash == self.source_sha256 else "changed"
         except OSError:
             source_state = "unavailable"
@@ -1730,7 +1730,7 @@ def _effective_device(run):
 
 def run_page(project, number, profile="traditional", direction="horizontal", dpi=300,
              should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
-              engines=None, primary_engine=None, recognizer=None, device=None):
+              engines=None, primary_engine=None, recognizer=None, device=None, parallel=1, input_enhancement=None):
     """Run an explicit local engine set; legacy callers still run three engines.
 
     A failed engine never removes successful raw results or human edits.  Model
@@ -1769,6 +1769,8 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
     request = _request(profile, direction, dpi, engine_root)
     if device is not None:
         request["device"] = device
+    if input_enhancement is not None:
+        request["input_enhancement"] = input_enhancement   # a different input: never reuse unenhanced runs
     outcome = {"completed": [], "errors": {}, "cancelled": False, "skipped": [], "unsupported": {}}
     with project._lock:
         page = project._page(number)
@@ -1788,6 +1790,8 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
                 return project.compare_page(number, baseline=primary_engine)
         return project.compare_page(number)
 
+    # 1) Requests and cache decisions, in engine order (cheap, no recognition).
+    jobs = []
     for engine in selected_engines:
         if should_stop is not None and should_stop():
             outcome["cancelled"] = True
@@ -1827,6 +1831,13 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
             from ab_ocr.glyph_verifier import font_sources
             engine_request["recognition_policy"] = HORIZONTAL_RECOGNITION_POLICY
             engine_request["glyph_font_sources"] = font_sources()
+        from ab_ocr.local_engines import VERIFYING_ENGINES, line_verification_enabled
+        if engine in VERIFYING_ENGINES and not line_verification_enabled():
+            engine_request["line_verification"] = "off"         # a different reading: never reuse verified runs
+        if engine == "easyocr":
+            from ab_ocr.local_engines import easyocr_runtime_changes
+            if easyocr_runtime_changes():
+                engine_request["easyocr_runtime"] = easyocr_runtime_changes()
         manifest = resolved_root / "tools" / engine / "installation.json"
         engine_request["installation_sha256"] = ocr.file_sha256(manifest) if manifest.is_file() else None
         existing = _latest_runs(project.page(number)).get(engine)
@@ -1839,46 +1850,73 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
         psm = 6 if engine == "tesseract" else None
         if direction == "vertical" and engine == "tesseract":
             psm = 5
-        try:
-            options = {"direction": direction} if engine in VERTICAL_RTL_ENGINES else {}
-            if engine == "tesseract" and profile in ("traditional", "simplified"):
-                options["verify_chinese_glyphs"] = True
-            if recognizer is None and device is not None:
-                from ab_ocr.local_engines import RecognitionSession
-                with RecognitionSession(engine, languages, engine_root=resolved_root, device=device,
-                        timeout=timeout, should_stop=should_stop, psm=psm, direction=direction) as session:
-                    result = session.recognize_file(project.source_path, page_number=number, dpi=dpi, psm=psm)
-            else:
-                result = (recognizer or ocr.recognize_file)(project.source_path, engine=engine, page_number=number,
-                                        languages=languages, psm=psm, dpi=dpi, timeout=timeout,
-                                        should_stop=should_stop, engine_root=resolved_root, **options)
-            project.add_result(result, request=engine_request)
-        except ocr.OCRCancelled:
-            outcome["cancelled"] = True
-            break
-        except SourceChangedError:
-            raise
-        except (ocr.OCRError, OSError, ValueError) as exc:
-            project.validate_source()
-            # Engine subprocess stderr is deliberately not copied into a project.
-            message = f"{engine} 인식 실패: 엔진 설치·언어·원본 상태를 확인하세요. ({type(exc).__name__})"
-            project.record_error(number, engine, message)
-            outcome["errors"][engine] = message
-        else:
-            if _run_complete(project.page(number)["runs"][-1]):
-                outcome["completed"].append(engine)
-            else:
-                message = f"{engine} 생성이 완료되지 않아 원시 결과만 보존했습니다. 비교·AI 교정 근거에서는 제외합니다."
+        options = {"direction": direction} if engine in VERTICAL_RTL_ENGINES else {}
+        if engine == "tesseract" and profile in ("traditional", "simplified"):
+            options["verify_chinese_glyphs"] = True
+        jobs.append((engine, engine_request, resolved_root, languages, psm, options))
+
+    def recognize(job):
+        engine, _request, resolved_root, languages, psm, options = job
+        if recognizer is None and device is not None:
+            from ab_ocr.local_engines import RecognitionSession
+            with RecognitionSession(engine, languages, engine_root=resolved_root, device=device,
+                    timeout=timeout, should_stop=should_stop, psm=psm, direction=direction) as session:
+                return session.recognize_file(project.source_path, page_number=number, dpi=dpi, psm=psm)
+        return (recognizer or ocr.recognize_file)(project.source_path, engine=engine, page_number=number,
+                                languages=languages, psm=psm, dpi=dpi, timeout=timeout,
+                                should_stop=should_stop, engine_root=resolved_root, **options)
+
+    # 2) Recognition: engines are independent subprocesses, so up to
+    #    ``parallel`` run at once. 3) Results are recorded strictly in engine
+    #    order, so the project, comparisons and checkpoints are identical to a
+    #    sequential run whatever finishes first.
+    workers = max(1, min(int(parallel or 1), len(jobs)))
+    pool = None
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="yeone-engine")
+    try:
+        pending = [pool.submit(recognize, job) for job in jobs] if pool is not None else None
+        for index, job in enumerate(jobs):
+            engine, engine_request = job[0], job[1]
+            if outcome["cancelled"]:
+                break
+            try:
+                result = pending[index].result() if pending is not None else recognize(job)
+                project.add_result(result, request=engine_request)
+            except ocr.OCRCancelled:
+                outcome["cancelled"] = True
+                break
+            except SourceChangedError:
+                raise
+            except (ocr.OCRError, OSError, ValueError) as exc:
+                project.validate_source()
+                # Engine subprocess stderr is deliberately not copied into a project.
+                message = f"{engine} 인식 실패: 엔진 설치·언어·원본 상태를 확인하세요. ({type(exc).__name__})"
                 project.record_error(number, engine, message)
                 outcome["errors"][engine] = message
-            try:
-                compare()
-            finally:
-                if on_result is not None:
-                    # Even a comparison failure checkpoints the completed raw OCR.
-                    # Checkpoint failures stop orchestration, never masquerade as
-                    # an engine failure, and leave in-memory raw/history intact.
-                    on_result(result)
+            else:
+                if _run_complete(project.page(number)["runs"][-1]):
+                    outcome["completed"].append(engine)
+                else:
+                    message = f"{engine} 생성이 완료되지 않아 원시 결과만 보존했습니다. 비교·AI 교정 근거에서는 제외합니다."
+                    project.record_error(number, engine, message)
+                    outcome["errors"][engine] = message
+                try:
+                    compare()
+                finally:
+                    if on_result is not None:
+                        # Even a comparison failure checkpoints the completed raw OCR.
+                        # Checkpoint failures stop orchestration, never masquerade as
+                        # an engine failure, and leave in-memory raw/history intact.
+                        on_result(result)
+            if should_stop is not None and should_stop() and index + 1 < len(jobs):
+                outcome["cancelled"] = True
+                break
+    finally:
+        if pool is not None:
+            # Running engines observe should_stop; never abandon their subprocesses.
+            pool.shutdown(wait=True, cancel_futures=True)
     if project.page(number)["runs"]:
         compare()
     return outcome

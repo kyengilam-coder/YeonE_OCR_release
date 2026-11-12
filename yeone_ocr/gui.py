@@ -31,6 +31,8 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
+            "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
+            "local_ai_subscription": True,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 LOCAL_PROFILE_LABELS = {"traditional": "번체·한문", "simplified": "간체·중문", "mixed": "한글·한자 혼용"}
@@ -2253,6 +2255,10 @@ class App(tk.Tk):
         self.v_ocr_strategy = tk.StringVar(value=OCR_STRATEGY_LABELS.get(self.cfg.get("ocr_strategy"), OCR_STRATEGY_LABELS["local-first"]))
         self.v_local_profile = tk.StringVar(value=LOCAL_PROFILE_LABELS.get(self.cfg.get("local_profile"), LOCAL_PROFILE_LABELS["traditional"]))
         self.v_local_ai_review = tk.BooleanVar(value=bool(self.cfg.get("local_ai_review", True)))
+        self.v_local_columns = tk.BooleanVar(value=bool(self.cfg.get("local_columns", True)))
+        self.v_local_line_verification = tk.BooleanVar(value=bool(self.cfg.get("local_line_verification", False)))
+        self.v_local_easyocr = tk.BooleanVar(value=bool(self.cfg.get("local_easyocr", False)))
+        self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2269,6 +2275,7 @@ class App(tk.Tk):
         self.v_punctuation = tk.BooleanVar(value=bool(self.cfg.get("normalize_punctuation", True)))
         self.v_punctuation_rules = tk.StringVar(value=str(self.cfg.get("punctuation_rules", "") or ""))
         self.v_join = tk.BooleanVar(value=self.cfg["join_pages"]); self.v_force = tk.BooleanVar(value=self._input_force[0])
+        self.v_simple_display = tk.BooleanVar(value=bool(self.cfg.get("simple_display", False)))   # 문서의 단순 표시(--display simple) — 화면의 간단히 보기(v_simple)와 다름
         self.v_hl = tk.BooleanVar(value=self.cfg.get("highlight", True)); self.v_pb = tk.BooleanVar(value=self.cfg.get("page_breaks", True))
         self.v_ctx = tk.BooleanVar(value=self.cfg.get("context_hint", True))
         self.v_memo = tk.StringVar(value=GENERAL_MEMO_LABELS.get(self.cfg.get("memo_mode", "none"), GENERAL_MEMO_LABELS["none"]))
@@ -2376,6 +2383,36 @@ class App(tk.Tk):
             L(f, "회까지").pack(side="left")
             return f
         R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
+
+        def local_ai_subscription(parent):
+            cb = ttk.Checkbutton(parent, text="Claude 구독으로 쪽 판독·검증 (로그인되어 있으면)", variable=self.v_local_ai_subscription)
+            Tip(cb, "이 PC의 Claude Code에 Claude(Pro/Max) 계정으로 로그인되어 있으면, 엔진 판독 뒤에 Claude가 쪽 전체를 원래 해상도 띠로 "
+                    "잘라 한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
+                    "세로쓰기 6쪽 측정에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초. 로그인은 PowerShell에서 claude auth login.", self)
+            return cb
+        R["local_ai_subscription"] = row(b, "Claude 구독 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
+
+        def local_columns(parent):
+            cb = ttk.Checkbutton(parent, text="두 단 본문은 왼쪽 단 먼저", variable=self.v_local_columns)
+            Tip(cb, "가로쓰기 두 단 조판에서 엔진이 왼쪽·오른쪽 줄을 번갈아 내놓아 글이 섞이는 것을 바로잡습니다. 각 단이 단 폭을 채우는 "
+                    "긴 줄로 이루어진 쪽만 두 단으로 보며, 표 칸·사진 설명처럼 짧은 조각은 그대로 둡니다. 결과 문서의 순서만 바꾸고 비교·교정 창의 "
+                    "판독 순서는 그대로입니다.", self)
+            return cb
+        R["local_columns"] = row(b, "두 단 조판", "가로쓰기 두 단 쪽의 읽기 순서 정리(기본 켬)", local_columns)
+
+        def local_line_verification(parent):
+            cb = ttk.Checkbutton(parent, text="줄마다 다시 확인 (느림)", variable=self.v_local_line_verification)
+            Tip(cb, "PP-OCRv6가 번체 가로쓰기 줄을 잘라 다시 읽고, EasyOCR가 글꼴로 글자 모양을 대조합니다. 측정한 4개 문서 19쪽에서는 "
+                    "결과 글자가 같았고 번체 쪽당 시간만 30~37% 늘었습니다. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켜십시오.", self)
+            return cb
+        R["local_line_verification"] = row(b, "줄 다시 확인", "PP-OCRv6·EasyOCR 추가 검증(기본 끔, 느림)", local_line_verification)
+
+        def local_easyocr(parent):
+            cb = ttk.Checkbutton(parent, text="가로쓰기에도 EasyOCR 쓰기 (느림)", variable=self.v_local_easyocr)
+            Tip(cb, "기본은 가로쓰기에서 EasyOCR을 쓰지 않습니다. 측정한 4개 문서에서 빼는 편이 한자가 더 정확했고 27~35% 빨랐습니다. "
+                    "EasyOCR은 문장부호를 원문대로 잘 살리므로, 문장부호 대조가 중요하면 켜십시오. 세로쓰기에서는 늘 씁니다.", self)
+            return cb
+        R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
 
         def provider(parent):
             cb = self.cb_provider = ttk.Combobox(parent, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=chars(220))
@@ -2571,6 +2608,10 @@ class App(tk.Tk):
         checks = (("hl", "확인 등급 색 (초록·파랑·빨강)", self.v_hl, grades,
                    "글자를 얼마나 믿어도 되는지 색과 밑줄로: 초록 = 1차·2차가 갈려 3차 자형 판별로 고름(훑어 확인) · 파랑 = 골랐지만 근거가 약하거나 다른 대목과 "
                    "어긋남(확인 권장) · 빨강 〔 〕 = 정하지 못함, 원본 확인 필수(지침 19). 끄면 색 없이 〔 〕 표기만 남습니다."),
+                  ("simple", "단순 표시 (메모·괄호 없이 색만)", self.v_simple_display, "형광 바탕 + 빨강·파랑·초록 글자 · 쪽 기록 줄 대신 책갈피",
+                   "결과 HWPX 를 단순하게 만듭니다: 불확실한 글자는 노랑 바탕 빨강(원본 확인 필수)·하늘 바탕 파랑(확인 권장)·연두 바탕 초록(기계가 고친 글자)으로만 "
+                   "보이고, 한컴 메모·〔a/b〕 괄호(첫 후보만 남기고 빨강)·쪽 기록 줄·작업 표시·확인 목록을 넣지 않습니다. 원본 쪽은 책갈피로 남고 문단은 제목·문단 "
+                   "스타일을 씁니다. 다른 후보와 근거는 검수 화면(review.html)과 보고에 있습니다. 서식을 지우면 불확실 표시도 사라지므로 검수용 원본은 끈 상태로 만드세요."),
                   ("ctx", "문맥 추정 밑줄 (확정 아님)", self.v_ctx, "〔a/b〕 안에서 더 많이 쓰는 후보에 실선 밑줄 · 글자는 그대로",
                    "빨간 〔a/b〕 안에서, 이 판독의 다른 대목(1차·2차가 같게 읽은 글)이 더 많이 쓰는 후보에 실선 밑줄을 긋습니다. 글자는 바꾸지 않고 두 후보도 "
                    "그대로 둡니다(지침 2·7·19·21). 숫자·이체자·판독불명·자형이 다른 쌍에는 긋지 않습니다. 이 OCR 자신의 합의에서 센 힌트이며 문턱은 아직 재지 않았습니다."),
@@ -5973,6 +6014,18 @@ class App(tk.Tk):
         cap = variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20)
         options += ["--local-profile", profile, "--local-ai-max-calls", str(cap),
                     "--local-ai-review" if review else "--no-local-ai-review"]
+        variable = vars(self).get("v_local_columns")
+        if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_columns", True))):
+            options.append("--no-local-columns")
+        variable = vars(self).get("v_local_line_verification")
+        if bool(variable.get()) if variable is not None else bool(cfg.get("local_line_verification", False)):
+            options.append("--local-line-verification")
+        variable = vars(self).get("v_local_easyocr")
+        if bool(variable.get()) if variable is not None else bool(cfg.get("local_easyocr", False)):
+            options.append("--local-easyocr")
+        variable = vars(self).get("v_local_ai_subscription")
+        if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))):
+            options += ["--local-ai-auth", "api", "--local-ai-page", "off"]
         root = cfg.get("local_engine_root")
         if root:
             options += ["--local-engine-root", str(root)]
@@ -6030,6 +6083,7 @@ class App(tk.Tk):
                     o.append("--no-bold")
         if not self.v_join.get(): o.append("--no-join-pages")
         if not self.v_hl.get(): o.append("--no-highlight")
+        if getattr(self, "v_simple_display", None) is not None and self.v_simple_display.get(): o += ["--display", "simple"]
         if not self.v_ctx.get(): o.append("--no-context")
         if not self.v_pb.get(): o.append("--no-page-breaks")
         if not App._context_model_enabled(self): o.append("--no-context-model")
@@ -6868,6 +6922,8 @@ class App(tk.Tk):
                          "page_thinking": self.page_think_key(), "page_media_res": self.page_mres_key()})
         if getattr(self, "v_suspects", None) is not None:
             self.cfg["suspects"] = self.v_suspects.get()
+        if getattr(self, "v_simple_display", None) is not None:
+            self.cfg["simple_display"] = bool(self.v_simple_display.get())
         if getattr(self, "v_skipany", None) is not None:
             self.cfg["skip_any_model"] = bool(self.v_skipany.get())
         if getattr(self, "v_tlpdf", None) is not None:
@@ -6882,6 +6938,14 @@ class App(tk.Tk):
             value = self.v_local_profile.get()
             self.cfg["local_profile"] = next((key for key, label in LOCAL_PROFILE_LABELS.items() if value in (key, label)), "traditional")
             self.cfg["local_ai_review"] = bool(self.v_local_ai_review.get())
+            if vars(self).get("v_local_columns") is not None:
+                self.cfg["local_columns"] = bool(self.v_local_columns.get())
+            if vars(self).get("v_local_line_verification") is not None:
+                self.cfg["local_line_verification"] = bool(self.v_local_line_verification.get())
+            if vars(self).get("v_local_easyocr") is not None:
+                self.cfg["local_easyocr"] = bool(self.v_local_easyocr.get())
+            if vars(self).get("v_local_ai_subscription") is not None:
+                self.cfg["local_ai_subscription"] = bool(self.v_local_ai_subscription.get())
             cap = max_calls_value(self.v_local_ai_max_calls.get())
             if cap is not None and 1 <= cap <= 100:
                 self.cfg["local_ai_max_calls"] = cap
