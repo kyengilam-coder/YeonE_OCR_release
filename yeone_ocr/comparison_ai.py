@@ -254,6 +254,15 @@ def _word_spans(raw):
             yield start, position, word
 
 
+# Word confidence is stored on a 0–100 scale by every local adapter: the
+# RapidOCR/PP-OCRv6 and EasyOCR workers multiply the model score (0–1) by 100,
+# Tesseract reports 0–100 natively, and comparison.py validates that range.
+# These routing thresholds must use the same scale. The values are the former
+# 0–1 hints restated, not newly measured accuracy cut-offs.
+LOW_CONFIDENCE_BELOW = {"tesseract": 70.0, "rapidocr": 85.0, "easyocr": 55.0, "ppocrv6": 85.0,
+                        "paddle_server": 85.0, "glmocr": None, "surya": None}
+
+
 def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids):
     """Local-only risk detection; all returned targets have image coordinates."""
     snapshot, raw = scope["snapshot_text"], baseline["raw"]
@@ -293,6 +302,12 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
     for item in page.get("suggestions", []):
         if requested_ids is not None and item["id"] not in requested_ids:
             continue
+        if requested_ids is None and item.get("kind") == "whitespace":
+            # Engines that only split lines or space text differently agree on
+            # every character. Automatic routing does not spend a paid call on
+            # that; the suggestion stays in the editor and can still be sent
+            # when a person selects it explicitly.
+            continue
         if item["baseline_run_id"] != baseline["id"] or any(
             e["engine"] not in runs or e["run_id"] != runs[e["engine"]]["id"] for e in item["evidence"]):
             if requested_ids is not None:
@@ -320,8 +335,7 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
         return result, seen, skipped
     # Thresholds are engine-specific routing hints, never cross-engine votes or
     # measured accuracy. A null score cannot establish a clean single reading.
-    threshold = {"tesseract": 70.0, "rapidocr": .85, "easyocr": .55, "ppocrv6": .85,
-                 "paddle_server": .85, "glmocr": None, "surya": None}[baseline["engine"]]
+    threshold = LOW_CONFIDENCE_BELOW[baseline["engine"]]
     spans = list(_word_spans(raw))
     for start, end, word in spans:
         value, confidence = word["text"], word.get("confidence")
