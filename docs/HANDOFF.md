@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: 1.2.10 Codex 모델 거부
+
+`chatgpt_subscription.SubscriptionClient.request`: 모델을 정하지 않은 요청이 `ModelRefused`(model_not_found · "not supported when using Codex with a ChatGPT account")면 `codex debug models`(계정의 모델 목록, visibility list · image 입력 · priority 순)에서 다음 모델로 다시 시도하고 답한 모델을 `_working_model`로 기억한다. 모두 거부되면 일반 SubscriptionError(세션이 다음 구독으로). `claude_subscription.failure`는 classify(계정 문제)를 요청 거부 낱말보다 먼저 본다.
+
 ## 2026-11-12: 1.2.9 설치·로그인 · 실행 실패 구분 · 쪽 나눠 보내기 기본 켬
 
 `yeone_ocr/plan_setup.py`: 공식 설치 명령(npm 패키지)·npm/winget 찾기·출력 흐름 실행·운영체제별 로그인 창. 창은 「AI 판독기」 ① `plan_setup` 줄(`App.install_plan`·`_run_setup`·`_setup_done`·`open_plan_login`). `gemini_subscription._query_status`는 찾으면 installed(경로 `path`), `--version` 실패는 `runs=False`. `claude_subscription.npm_global_cli`가 PATH 밖 npm 전역 폴더 등을 찾는다(Codex·Gemini). 쪽 나눠 보내기 기본 켬: 설정 `local_ai_split_version`으로 1.2.8 의 저장된 끔을 한 번만 켬으로.
