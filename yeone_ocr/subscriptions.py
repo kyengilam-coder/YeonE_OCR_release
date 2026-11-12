@@ -203,13 +203,27 @@ class Session:
             return f"API 키({self.api.provider} · {self.api.model}, 남은 호출 {self.api.left}회)"
         return "없음"
 
+    def short(self) -> str:
+        """For the window's one line: the plan, or the API key's provider and calls left."""
+        if self.plan:
+            return f"{NAMES[self.plan]} 구독"
+        return f"API 키 · {self.api.provider} · 남은 {self.api.left}회" if self.api is not None else "없음"
+
+    def stop_reason(self) -> str:
+        """Why AI work stopped (available is False), in words a person can act on."""
+        if self.api is None:
+            return "쓸 수 있는 구독 계정도 API 키도 없음 — 구독 계정에 다시 로그인하거나 API 키를 넣으세요"
+        return (f"구독 계정을 쓸 수 없어 넘어간 API 키의 이번 실행 호출 상한({self.api.calls}회)에 도달 — "
+                "[다음 구독으로 넘기기]에서 구독 계정을 직접 고르면 이어서 검증하고, "
+                "상한은 설정 「로컬 뒤 AI 검증」의 횟수로 늘립니다")
+
     def state(self) -> dict:
         """For the GUI: what is connected now and where [다음 구독으로 넘기기] can go."""
         with self._lock:
             targets = [plan for plan in PLANS if plan != self.plan]
             if self.plan is not None and self._api_left():
                 targets.append("api")
-            return {"plan": self.plan, "label": self.describe(), "available": self.available,
+            return {"plan": self.plan, "label": self.short(), "detail": self.describe(), "available": self.available,
                     "targets": targets, "next": self._next_auto()}
 
     def _next_auto(self):
@@ -222,7 +236,7 @@ class Session:
 
     # ---- requests ----
     def request(self, *, model_name, system, prompt, images, schema):
-        from .claude_subscription import SubscriptionError
+        from .claude_subscription import RequestRejected, SubscriptionError
         while True:
             with self._lock:
                 plan, current = self.plan, self._client
@@ -235,8 +249,11 @@ class Session:
             if plan is None:
                 if self.api is None:
                     raise SubscriptionError(self.reason or "쓸 수 있는 구독 계정도 API 키도 없습니다.")
-                return self._as_first(self.api.request(model_name=model_name, system=system, prompt=prompt,
-                                                       images=images, schema=schema))
+                try:
+                    return self._as_first(self.api.request(model_name=model_name, system=system, prompt=prompt,
+                                                           images=images, schema=schema))
+                finally:
+                    _notify(self)                         # the window shows the calls left
             name = model_name if plan == self.first else model(plan)
             try:
                 return self._as_first(current.request(model_name=name, system=system, prompt=prompt,
@@ -245,8 +262,8 @@ class Session:
                 with self._lock:
                     if self.plan != plan or self._client is not current:
                         continue                      # switched while it ran (by the user or another caller): send again
-                    if not isinstance(exc, SubscriptionError):
-                        raise
+                    if not isinstance(exc, SubscriptionError) or isinstance(exc, RequestRejected):
+                        raise                         # this request's own problem: another plan would refuse it too
                     self._fail(plan, exc)
 
     def _as_first(self, result):

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError
+from .claude_subscription import SubscriptionError, failure
 
 SUBSCRIPTION_KEY = "chatgpt-subscription"
 PROVIDER = "openai"
@@ -160,12 +161,14 @@ def _classify(text: str) -> str | None:
         return "Codex CLI 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT
     if any(k in low for k in ("usage limit", "rate limit", "rate_limit", "429", "quota", "limit reached")):
         return "ChatGPT 요금제의 Codex 사용량 한도에 도달했습니다. 한도가 초기화된 뒤 다시 실행하세요."
-    if "invalid_json_schema" in low or "output schema" in low or "output-schema" in low:
-        return "Codex CLI가 검증 스키마를 거부했습니다. `npm install -g @openai/codex`로 최신 버전으로 올리세요."
-    if "model" in low and any(k in low for k in ("not supported", "does not exist", "not found", "unknown")):
+    if _MODEL_REFUSED.search(low):
         return ("이 ChatGPT 요금제에서 쓸 수 없는 모델입니다. YEONE_OCR_CHATGPT_MODEL을 비우면 "
                 "Codex 기본 모델을 씁니다.")
     return None
+
+
+# "The 'x' model is not supported when using Codex with a ChatGPT account", model_not_found, ...
+_MODEL_REFUSED = re.compile(r"model_not_found|unsupported model|model\b[^.\n]{0,80}\b(?:is not supported|does not exist|not found)")
 
 
 class SubscriptionClient:
@@ -224,7 +227,7 @@ class SubscriptionClient:
             if not detail:
                 errors = [str(e.get("message") or "") for e in events if e.get("type") == "error"]
                 detail = errors[-1] if errors else (proc.stderr or proc.stdout or "").strip()[-400:]
-            raise SubscriptionError(_classify(detail or "") or f"Codex CLI 실행 실패(코드 {proc.returncode}): {detail}")
+            raise failure("Codex CLI", detail or "", _classify, f"Codex CLI 실행 실패(코드 {proc.returncode}): {detail}")
         if not text:
             message = next((e.get("item", {}).get("text") for e in reversed(events) if e.get("type") == "item.completed"
                             and e.get("item", {}).get("type") == "agent_message"), "")

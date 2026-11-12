@@ -312,6 +312,13 @@ def _accept_ai(project, number) -> dict:
     return {"accepted": accepted, "held": held}
 
 
+# How a page's review status reads in the log; the record keeps the status values themselves.
+REVIEW_STATUS_LABELS = {"local-complete": "로컬 인식만(AI 검증 안 함)", "blank-page": "빈 쪽",
+                        "no-api-needed": "AI 검증 필요 없음", "needs-local-review": "사람 확인 필요(위치를 못 찾은 의심 구간)",
+                        "pending": "AI 검증 보류", "reviewing": "AI 검증 중", "reviewed": "AI 검증 끝",
+                        "failed": "AI 검증 일부 실패", "cancelled": "중지"}
+
+
 SUBSCRIPTION_DEFAULTS = {"local_ai_page": "prefer", "local_ai_accept": True, "local_ai_detail_tile": 1024, "local_ai_batch": 4}
 PLAIN_DEFAULTS = {"local_ai_page": "off", "local_ai_accept": False, "local_ai_detail_tile": 0, "local_ai_batch": 1}
 
@@ -650,14 +657,16 @@ def _command(args, *, work=None, doc=None, pool=None):
                             session is not None and not session.available):
                         review["status"] = "pending"
                         review["reason"] = ("AI 검증 꺼짐" if not review_enabled else "API 키 없음" if not key else
-                                            "구독 한도에 닿고 API 키도 없거나 상한 도달" if session is not None and not session.available
+                                            session.stop_reason() if session is not None and not session.available
                                             else "이번 실행 호출 상한 도달")
                         if review_enabled:
                             cli.log(f"  {number}쪽: AI 검증 보류 — {review['reason']} (이 쪽 {plan.summary['calls']}회 필요)")
                         if review_enabled:
                             incomplete.append(number)
                     else:
-                        cli.log(f"  {number}쪽: 의심 구간 {plan.summary['targets']}개 · API 최대 {plan.summary['calls']}회")
+                        cli.log(f"  {number}쪽: 의심 구간 {plan.summary['targets']}개 · "
+                                + (f"AI 호출 최대 {plan.summary['calls']}회({session.short()})" if session is not None
+                                   else f"API 최대 {plan.summary['calls']}회"))
                         review["status"] = "reviewing"
                         _save_record(project, number, args, work, started, review, render=False, extras=extras)
                         checkpoints = [0]
@@ -686,7 +695,8 @@ def _command(args, *, work=None, doc=None, pool=None):
                 summaries[str(number)] = review
                 completed.append(number)
                 cli.page_event(number, "done")
-                cli.log(f"  {number}쪽: {review['status']} · 로컬 {(_selected(project, number) or {}).get('engine', '')}")
+                cli.log(f"  {number}쪽: {REVIEW_STATUS_LABELS.get(review['status'], review['status'])} · "
+                        f"로컬 엔진 {(_selected(project, number) or {}).get('engine', '')}")
             except (OCRCancelled, AIReviewCancelled, KeyboardInterrupt):
                 return 130
             except (OCRError, ComparisonError, AIReviewError, OSError, ValueError) as exc:

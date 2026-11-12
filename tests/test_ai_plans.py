@@ -426,3 +426,54 @@ def test_switch_with_nowhere_to_go_keeps_the_plan_in_use():
         assert "그대로 씁니다" in session.switch() and session.plan == "claude"
         assert "claude" not in subscriptions.exhausted()
         assert session.state()["next"] is None
+
+
+# ---- refused requests are not account problems ----
+
+def test_a_refused_schema_fails_that_request_alone_and_keeps_the_plan():
+    from yeone_ocr.claude_subscription import RequestRejected, failure
+
+    def classify(_text):
+        return None
+    error = failure("Claude Code", "schema is not a valid JSON Schema: data/properties/id/enum must NOT have duplicate items",
+                    classify, "fallback")
+    assert isinstance(error, RequestRejected) and "원문: schema is not a valid JSON Schema" in str(error)
+    with _with(_states(claude=True, chatgpt=True)):
+        refused = _Plan("claude")
+        refused.error = None
+        refused.request = mock.Mock(side_effect=error)
+        session = subscriptions.Session("claude", log=lambda _m: None, factory={"claude": refused}.__getitem__)
+        with pytest.raises(RequestRejected):
+            session.request(model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)
+        assert session.plan == "claude" and subscriptions.exhausted() == {}       # no switch for the request's own fault
+
+    settings = SimpleNamespace(provider="anthropic", model="opus", max_output_tokens=4096, timeout_seconds=60)
+    client = SimpleNamespace(subscription=True, transport="x", request=mock.Mock(side_effect=error))
+    with pytest.raises(comparison_ai.AIReviewError) as caught:
+        comparison_ai._request(client, settings, "PROMPT", [])
+    assert caught.value.fatal is False                                           # the run goes on with the next batch
+
+
+def test_account_messages_keep_the_programs_own_words_and_model_needs_a_clear_refusal():
+    from yeone_ocr import chatgpt_subscription as codex_module
+    from yeone_ocr.claude_subscription import failure
+    error = failure("Codex CLI", "You've hit your usage limit. Try again later.", codex_module._classify, "fallback")
+    assert "사용량 한도" in str(error) and "원문: You've hit your usage limit" in str(error)
+    assert codex_module._classify("unknown error from model provider: stream disconnected") is None
+    assert "쓸 수 없는 모델" in codex_module._classify(
+        "The 'gpt-x' model is not supported when using Codex with a ChatGPT account.")
+    assert str(failure("Codex CLI", "boom", codex_module._classify, "Codex CLI 실행 실패(코드 1): boom")) == \
+        "Codex CLI 실행 실패(코드 1): boom"
+
+
+def test_window_label_is_short_and_the_details_stay_available():
+    api = mock.Mock(provider="gemini", model="gemini-3.1-pro-preview", left=20, transport="gemini-api-key")
+    with _with(_states()):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=lambda plan: _Plan(plan))
+        session.plan = None
+        state = session.state()
+    assert state["label"] == "API 키 · gemini · 남은 20회" and "남은 호출 20회" in state["detail"]
+    api.calls, api.left = 20, 0
+    assert "호출 상한(20회)에 도달" in session.stop_reason() and "직접 고르면" in session.stop_reason()
+    session.api = None
+    assert "API 키도 없음" in session.stop_reason()

@@ -286,6 +286,8 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(seen, ["claude"])
         self.assertEqual([call["model"] for call in self.calls], ["synthetic-vision"])   # OpenAI key, chosen model
         self.assertTrue(any("API 키(openai" in line for line in logs))
+        self.assertTrue(any("쪽: AI 검증 끝 · 로컬 엔진 ppocrv6" in line for line in logs))      # 진행 기록은 한국어
+        self.assertFalse(any(": reviewed ·" in line for line in logs))
         seen.clear(); self.calls.clear()
         self.work = self.root / "work-without-key"                                     # a fresh project: nothing reviewed yet
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \

@@ -284,6 +284,34 @@ class SelectiveReviewTests(unittest.TestCase):
         target = plan.batches[0]["targets"][0]
         self.assertEqual((target["start"], target["end"], target["bbox"]), (3, 3, [40, 90, 91, 116]))
 
+    def test_missed_ink_lines_after_the_same_word_get_distinct_targets_in_one_batch(self):
+        """Two missed lines after the same word share the empty span (3, 3); only their boxes differ.
+        Their ids must differ too: one batch (four per call, the subscription default) otherwise
+        repeats a target id, which Claude Code rejects as a schema with a duplicate enum and the
+        project rejects as a duplicate target ("AI 검증 대상 식별자가 올바르지 않습니다")."""
+        with Image.new("RGB", (400, 200), "white") as image:
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((40, 20, 90, 45), fill="black")
+            draw.rectangle((40, 90, 90, 115), fill="black")
+            draw.rectangle((40, 150, 90, 175), fill="black")
+            image.save(self.source)
+        self.project = ComparisonProject.open(self.source)
+        self.add()
+        plan = self.plan(policy=ReviewPolicy(selective=True, batch_size=4))
+        self.assertEqual(plan.summary["difficulty_reasons"], {"unrecognized-ink-region": 2})
+        self.assertEqual(len(plan.batches), 1)
+        targets = plan.batches[0]["targets"]
+        self.assertEqual([(t["start"], t["end"]) for t in targets], [(3, 3), (3, 3)])
+        self.assertNotEqual(targets[0]["id"], targets[1]["id"])
+        from yeone_ocr.comparison_ai import _response_schema
+        enum = _response_schema(plan.batches[0], plan.policy)["properties"]["items"]["items"]["properties"]["target_id"]["enum"]
+        self.assertEqual(len(enum), len(set(enum)))
+        outcome, _ = self.fake_run(plan)
+        self.assertEqual(outcome["completed"], 1)
+        again = self.plan(policy=ReviewPolicy(selective=True, batch_size=4))           # same ids next time: resumes
+        self.assertEqual([t["id"] for t in again.batches[0]["targets"]] if again.batches else [], [])
+        self.assertEqual(again.summary["resumed_batches"], 1)
+
     def test_editorial_phase_stays_in_difficult_span(self):
         words = [{"text": "甲", "bbox": [40, 20, 55, 45], "confidence": 99},
                  {"text": "汉", "bbox": [55, 20, 70, 45], "confidence": 40},
