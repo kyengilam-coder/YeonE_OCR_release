@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure, npm_global_cli
+from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
@@ -137,16 +137,19 @@ def _query_status(runner) -> dict:
               "reason": INSTALL_HINT, "limits": None}
     cli = find_cli()
     if not cli:
+        result["reason"] = not_found_reason("Gemini CLI", "gemini", INSTALL_HINT)
         return result
     result.update(installed=True, path=cli)              # found: a failure below is "won't run", not "missing"
     try:
         proc = runner([cli, "--version"], env=cli_env(), cwd=_empty_dir(), capture_output=True, text=True,
-                      encoding="utf-8", errors="replace", timeout=90, **_NO_WINDOW)
+                      encoding="utf-8", errors="replace", timeout=120, **_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        proc = None                                      # slow first start (Node, antivirus): installed, judge the sign-in
     except (OSError, subprocess.SubprocessError) as exc:
         result.update(runs=False, reason=f"Gemini CLI({cli})를 실행하지 못했습니다: {exc}. "
                                          "PowerShell에서 `gemini --version`이 되는지 확인하세요(Node.js 20 이상 필요).")
         return result
-    if proc.returncode != 0:
+    if proc is not None and proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[-240:]
         result.update(runs=False, reason=f"Gemini CLI({cli})를 실행하지 못했습니다(코드 {proc.returncode})"
                                          + (f": {detail}" if detail else "")

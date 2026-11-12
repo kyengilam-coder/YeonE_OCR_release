@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure, npm_global_cli
+from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli
 
 SUBSCRIPTION_KEY = "chatgpt-subscription"
 PROVIDER = "openai"
@@ -124,6 +124,7 @@ def _query_status(runner) -> dict:
               "reason": INSTALL_HINT, "limits": None}
     cli = find_cli()
     if not cli:
+        result["reason"] = not_found_reason("Codex CLI", "codex", INSTALL_HINT)
         return result
     result.update(installed=True, path=cli)
     try:

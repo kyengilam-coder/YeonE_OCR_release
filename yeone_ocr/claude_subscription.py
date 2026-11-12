@@ -123,36 +123,82 @@ def find_cli() -> str | None:
     return on_path
 
 
-def npm_global_cli(name: str) -> str | None:
-    """A command-line program installed with `npm install -g` (Codex CLI, Gemini CLI) that is not on this
-    process's PATH: npm's global folder, Node installers, nvm, Volta, Homebrew, ~/.local/bin."""
+_npm_prefix_cache: dict = {}
+
+
+def npm_global_prefix(runner=subprocess.run) -> str | None:
+    """npm's own global folder (`npm prefix -g`), which also follows a prefix set in .npmrc. Cached."""
+    if "value" in _npm_prefix_cache:
+        return _npm_prefix_cache["value"]
+    value = None
+    names = ("npm.cmd", "npm") if sys.platform == "win32" else ("npm",)
+    npm = next((found for found in (shutil.which(n) for n in names) if found), None)
+    if npm is None and sys.platform == "win32":
+        base = os.environ.get("ProgramFiles", "").strip()
+        candidate = Path(base) / "nodejs" / "npm.cmd" if base else None
+        npm = str(candidate) if candidate is not None and candidate.is_file() else None
+    if npm:
+        try:
+            proc = runner([npm, "prefix", "-g"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          timeout=30, **_NO_WINDOW)
+            line = (proc.stdout or "").strip().splitlines()
+            value = line[-1].strip() if proc.returncode == 0 and line else None
+        except (OSError, subprocess.SubprocessError):
+            value = None
+    _npm_prefix_cache["value"] = value
+    return value
+
+
+def cli_search_folders(name: str, runner=subprocess.run) -> list:
+    """Where a program installed outside this process's PATH may be: npm's global folder (asked from npm,
+    then the defaults), Node installers, nvm, Volta, pnpm, bun, Scoop, Chocolatey, winget, Homebrew."""
     home = Path.home()
     folders = []
-    prefix = os.environ.get("NPM_CONFIG_PREFIX", "").strip()
+    prefixes = [p for p in (os.environ.get("NPM_CONFIG_PREFIX", "").strip(), npm_global_prefix(runner)) if p]
     if sys.platform == "win32":
-        names = (f"{name}.cmd", f"{name}.exe", f"{name}.ps1")
+        folders += [Path(p) for p in prefixes]
         for variable, tail in (("APPDATA", "npm"), ("ProgramFiles", "nodejs"), ("NVM_SYMLINK", ""), ("VOLTA_HOME", "bin"),
-                               ("LOCALAPPDATA", "Volta/bin"), ("LOCALAPPDATA", "pnpm")):
+                               ("LOCALAPPDATA", "Volta/bin"), ("LOCALAPPDATA", "pnpm"), ("SCOOP", "shims"),
+                               ("ChocolateyInstall", "bin"), ("LOCALAPPDATA", "Microsoft/WinGet/Links"),
+                               ("BUN_INSTALL", "bin")):
             base = os.environ.get(variable, "").strip()
             if base:
                 folders.append(Path(base) / tail if tail else Path(base))
-        if prefix:
-            folders.append(Path(prefix))
+        folders += [home / "scoop" / "shims", home / ".bun" / "bin", Path("C:/ProgramData/chocolatey/bin")]
     else:
-        names = (name,)
-        if prefix:
-            folders.append(Path(prefix) / "bin")
-        folders += [home / ".npm-global" / "bin", home / ".local" / "bin", home / ".volta" / "bin",
+        folders += [Path(p) / "bin" for p in prefixes]
+        folders += [home / ".npm-global" / "bin", home / ".local" / "bin", home / ".volta" / "bin", home / ".bun" / "bin",
                     Path("/usr/local/bin"), Path("/opt/homebrew/bin")]
         nvm = home / ".nvm" / "versions" / "node"
         if nvm.is_dir():
             folders += sorted((version / "bin" for version in nvm.iterdir()), reverse=True)
+    seen, unique = set(), []
     for folder in folders:
+        key = str(folder).lower() if sys.platform == "win32" else str(folder)
+        if key not in seen:
+            seen.add(key)
+            unique.append(folder)
+    return unique
+
+
+def npm_global_cli(name: str, runner=subprocess.run) -> str | None:
+    """A command-line program (Codex CLI, Gemini CLI) found in cli_search_folders but not on PATH."""
+    names = (f"{name}.cmd", f"{name}.exe") if sys.platform == "win32" else (name,)   # Windows: not npm's sh script
+    for folder in cli_search_folders(name, runner):
         for candidate in names:
             path = folder / candidate
-            if path.is_file() and not candidate.endswith(".ps1"):
+            if path.is_file():
                 return str(path)
     return None
+
+
+def not_found_reason(program: str, name: str, hint: str) -> str:
+    """Why a program counts as missing: where it was looked for, and how to install it."""
+    places = ", ".join(str(f) for f in cli_search_folders(name)[:8])
+    return (f"{program}({name})를 찾지 못했습니다 — PATH와 {places} 등을 찾아봤습니다. {hint} "
+            f"다른 곳에 설치했다면 PowerShell에서 `where.exe {name}`(Mac·Linux: `which {name}`)로 위치를 보고 "
+            f"환경 변수 YEONE_OCR_{'GEMINI' if name == 'gemini' else 'CODEX'}_CLI_PATH로 지정하세요. "
+            "`npx`로만 실행했다면 전역 설치가 아니므로 [설치]를 누르세요.")
 
 
 def _is_cmd_shim(path: str) -> bool:

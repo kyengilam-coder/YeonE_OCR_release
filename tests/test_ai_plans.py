@@ -21,7 +21,7 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["lines"]
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
     subscriptions.reset_status_cache(); subscriptions.reset_exhausted()
-    codex.reset_model_choice()
+    codex.reset_model_choice(); claude._npm_prefix_cache.clear()
     for name, binary in (("CODEX", "codex"), ("GEMINI", "gemini"), ("CLAUDE", "claude")):
         path = tmp_path / "bin" / (binary + (".exe" if os.name == "nt" else ""))
         path.parent.mkdir(exist_ok=True)
@@ -632,3 +632,49 @@ def test_model_refusal_is_classified_before_the_request_rejection_words():
     from yeone_ocr.claude_subscription import RequestRejected, failure
     error = failure("Codex CLI", REFUSED, codex._classify, "fallback")
     assert not isinstance(error, RequestRejected) and "쓸 수 없는 모델" in str(error)
+
+
+
+# ---- npm's own global folder · a slow first start · where the program was looked for ----
+
+def test_npm_reports_its_global_folder_set_in_npmrc(monkeypatch, tmp_path):
+    monkeypatch.delenv("YEONE_OCR_GEMINI_CLI_PATH", raising=False)
+    monkeypatch.delenv("NPM_CONFIG_PREFIX", raising=False)
+    for name in ("APPDATA", "ProgramFiles", "NVM_SYMLINK", "VOLTA_HOME", "LOCALAPPDATA", "SCOOP", "ChocolateyInstall", "BUN_INSTALL"):
+        monkeypatch.delenv(name, raising=False)
+    bin_dir = tmp_path / "npm-bin"
+    bin_dir.mkdir()
+    npm = bin_dir / ("npm.cmd" if os.name == "nt" else "npm")
+    npm.write_text("")
+    npm.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    custom = tmp_path / "custom-prefix"                                  # `npm config set prefix …` (.npmrc)
+    program = custom / "gemini.cmd" if os.name == "nt" else custom / "bin" / "gemini"
+    program.parent.mkdir(parents=True)
+    program.write_text("")
+    asked = []
+
+    def run(args, **kwargs):
+        asked.append(args[1:])
+        return SimpleNamespace(returncode=0, stdout=str(custom) + "\n", stderr="")
+    assert claude.npm_global_cli("gemini", runner=run) == str(program)
+    assert asked == [["prefix", "-g"]]
+    assert claude.npm_global_cli("gemini", runner=run) == str(program) and len(asked) == 1     # cached
+
+
+def test_gemini_slow_to_answer_its_version_is_still_installed(_fresh):
+    import subprocess as sp
+    home = _fresh
+    _settings(home, "oauth-personal")
+
+    def slow(args, **kwargs):
+        raise sp.TimeoutExpired(args, kwargs.get("timeout"))
+    state = gemini.status(refresh=True, runner=slow)
+    assert state["installed"] is True and state.get("runs") is not False and state["usable"]
+
+
+def test_a_missing_program_says_where_it_was_looked_for(monkeypatch, tmp_path):
+    monkeypatch.setenv("YEONE_OCR_GEMINI_CLI_PATH", str(tmp_path / "nowhere" / "gemini"))
+    state = gemini.status(refresh=True)
+    assert state["installed"] is False
+    assert "찾아봤습니다" in state["reason"] and "YEONE_OCR_GEMINI_CLI_PATH" in state["reason"] and "npx" in state["reason"]

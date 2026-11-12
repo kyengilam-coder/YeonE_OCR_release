@@ -2504,6 +2504,8 @@ class App(tk.Tk):
             self.l_plans = L(f, "설정 탭을 열면 확인합니다", "CAP", "MUTED")
             self.l_plans.pack(side="left")
             self._plans_tip = Tip(self.l_plans, "", self)                    # 계정마다 이유·찾은 경로·설치·로그인 방법
+            self.l_plans.configure(cursor="hand2")
+            self.l_plans.bind("<Button-1>", lambda _e: App.show_plan_details(self), add="+")
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
                       tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
             return f
@@ -2515,7 +2517,7 @@ class App(tk.Tk):
                     "검증 기록에 남습니다. [다음 구독으로 넘기기]는 첫 계정의 연결을 옮깁니다.", self)
             return cb
         R["ai_split"] = row(b, "쪽 나눠 보내기", "로그인된 구독이 둘 이상일 때 계정마다 쪽을 맡아 함께 진행(기본 켬) · 빠르지만 쪽마다 모델이 다를 수 있음", split)
-        R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 명령줄 yeone-ocr plans 와 같음", plans_status)
+        R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 글자를 누르면 이유·찾아본 곳 · 명령줄 yeone-ocr plans 와 같음", plans_status)
 
         def plan_setup(parent):
             f = boxed(parent)
@@ -4567,6 +4569,11 @@ class App(tk.Tk):
                 details.append(f"{subscriptions.NAMES[plan]} — {mark[2:]}{where}" + (f": {state['reason']}" if state.get("reason") else ""))
             self.q.put(("plans", " · ".join(parts), "\n\n".join(details)))
         threading.Thread(target=work, daemon=True, name="plan-status").start()
+
+    def show_plan_details(self):
+        """로그인 상태 글자를 누르면: 계정마다 찾은 경로·이유·해결 방법(마우스 도움말과 같은 글)을 창으로 — 복사해 물어볼 수 있게."""
+        text = getattr(vars(self).get("_plans_tip"), "text", "") or "아직 확인하지 않았습니다. [상태 확인]을 누르세요."
+        messagebox.showinfo("로그인 상태 자세히", text, parent=self)
 
     def install_plan(self):
         """[설치]: 고른 구독의 공식 프로그램을 이 PC에 설치(확인 뒤 뒤에서 실행 · 과정은 진행 기록).
