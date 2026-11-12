@@ -6,7 +6,8 @@ collect or relay claude.ai credentials. So this module never reads a token: it s
 authenticates through Anthropic's own login, and usage counts against that person's plan limits.
 Personal use only: an app handed to other people should use API keys instead.
 
-Only the selective AI review (comparison_ai) uses it. The request is the same prompt, images and
+The selective AI review (comparison_ai) and the AI page reading (ai_page) use it; subscriptions.py
+chooses between this and the ChatGPT (Codex CLI) and Gemini (Gemini CLI) plans. The request is the same prompt, images and
 JSON schema as the Anthropic API path; the transport is one `claude -p` process per call with every
 tool, MCP server, user setting and session history switched off.
 
@@ -33,6 +34,8 @@ from pathlib import Path
 
 # Not a key: run_plan / create_client take this in place of an API key to mean "the signed-in CLI".
 SUBSCRIPTION_KEY = "claude-subscription"
+PROVIDER = "anthropic"
+TRANSPORT = "claude-code-subscription"
 AUTH_MODES = ("auto", "subscription", "api")
 DEFAULT_MODEL = "opus"
 EFFORTS = ("low", "medium", "high", "max")
@@ -65,6 +68,10 @@ def auth_mode(requested: str | None = None) -> str:
 
 def model(requested: str | None = None) -> str:
     return (requested or os.environ.get("YEONE_OCR_CLAUDE_MODEL", "") or DEFAULT_MODEL).strip()
+
+
+def label(model_name: str) -> str:
+    return model_name or DEFAULT_MODEL
 
 
 def effort() -> str:
@@ -203,6 +210,9 @@ class SubscriptionClient:
     """One `claude -p` call per request; same contract as the Anthropic API branch of comparison_ai._request."""
 
     subscription = True
+    plan = "claude"
+    provider = PROVIDER
+    transport = TRANSPORT
 
     def __init__(self, cli=None, runner=None, timeout_seconds=None, effort_level=None):
         self.cli = cli or find_cli()

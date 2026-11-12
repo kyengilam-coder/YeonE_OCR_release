@@ -190,6 +190,34 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(rec["local_first"]["review"]["ai_accept"], {"accepted": 0, "held": 0})
         self.assertEqual(rec["local_first"]["options"], {"ai_accept": True})
 
+    def test_chatgpt_plan_reviews_through_the_codex_cli_with_its_default_model(self):
+        from yeone_ocr import chatgpt_subscription, claude_subscription
+        self.confidence = 20
+        seen = []
+        harness = self
+
+        class FakeCodex:
+            subscription = True
+            transport = chatgpt_subscription.TRANSPORT
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                data = json.loads(prompt.split("Source DATA (JSON):\n")[1].split("\nReturn JSON")[0])
+                harness.calls.append(model_name)
+                return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
+                                             for t in data["targets"]]}), True, "completed", {"input_tokens": 3}, model_name
+
+        def factory(settings, key):
+            seen.append((settings.provider, settings.model, key))
+            return FakeCodex()
+        signed_in = {"usable": True, "plan": "ChatGPT", "reason": None, "installed": True}
+        with patch("yeone_ocr.comparison_ai.create_client", side_effect=factory), \
+                patch.object(claude_subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
+                patch.object(chatgpt_subscription, "status", return_value=signed_in):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-plan", "chatgpt",
+                                               "--local-ai-page", "off", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
+        self.assertEqual(seen[0], ("openai", "codex-default", chatgpt_subscription.SUBSCRIPTION_KEY))  # Claude is signed in too
+        self.assertEqual(self.calls, ["codex-default"])
+
     def test_subscription_mode_without_sign_in_keeps_the_review_pending(self):
         from yeone_ocr import claude_subscription as subscription
         self.confidence = 20

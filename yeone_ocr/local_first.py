@@ -317,18 +317,19 @@ PLAIN_DEFAULTS = {"local_ai_page": "off", "local_ai_accept": False, "local_ai_de
 
 
 def _resolve_ai_defaults(args, cli):
-    """Default (2026-11, chosen after the vertical measurements): when the signed-in Claude Code
-    (subscription) is usable, read each page with Claude as well (--local-ai-page prefer), review the
+    """Default (2026-11, chosen after the vertical measurements): when a signed-in plan (Claude Code,
+    Codex CLI for ChatGPT or Gemini CLI: subscriptions.pick) is usable, read each page with Claude as well (--local-ai-page prefer), review the
     suspicious spans through it with detail tiles, four spans a call, and apply its certain, checked
     proposals. Without it, the earlier defaults. Options given explicitly always win.
     Returns the values the options were resolved to, for the option record."""
-    from . import claude_subscription as subscription
+    from . import subscriptions
+    from .claude_subscription import auth_mode
+    plan = None
     if getattr(args, "local_ai_page", "auto") in (None, "auto") or any(
             getattr(args, name, None) is None for name in SUBSCRIPTION_DEFAULTS):
-        mode = subscription.auth_mode(getattr(args, "local_ai_auth", None))
-        use = mode != "api" and subscription.choose("subscription", "anthropic", "")[0]
-    else:
-        use = False
+        if auth_mode(getattr(args, "local_ai_auth", None)) != "api":
+            plan = subscriptions.pick(getattr(args, "local_ai_plan", None))[0]
+    use = plan is not None
     chosen = SUBSCRIPTION_DEFAULTS if use else PLAIN_DEFAULTS
     for name, value in chosen.items():
         current = getattr(args, name, None)
@@ -337,29 +338,34 @@ def _resolve_ai_defaults(args, cli):
     if use and getattr(args, "local_ai_auth", None) in (None, "auto"):
         args.local_ai_auth = "subscription"
     if use:
-        cli.log("  Claude 구독에 로그인되어 있어 AI 판독을 함께 합니다(쪽 판독 + 의심 구간 검증, 구독 사용량에서 차감). "
-                "끄려면 --local-ai-page off --local-ai-auth api")
+        cli.log(f"  {subscriptions.NAMES[plan]} 구독에 로그인되어 있어 AI 판독을 함께 합니다(쪽 판독 + 의심 구간 검증, "
+                "구독 사용량에서 차감). 끄려면 --local-ai-page off --local-ai-auth api")
     return {name.removeprefix("local_"): value for name, value in chosen.items()}
 
 
 def _ai_page_reader(args, project, work, cli):
     """(Trial, --local-ai-page) a function number -> AI page reading for extras, or None.
-    Through the signed-in Claude Code (subscription) only; failures leave the engine reading alone."""
+    Through a signed-in plan's CLI (subscriptions) only; failures leave the engine reading alone."""
     mode = getattr(args, "local_ai_page", "off") or "off"
     if mode == "off":
         return None
-    from . import claude_subscription as subscription
-    use, note = subscription.choose("subscription", "anthropic", "")
-    if not use:
-        cli.log("  AI 쪽 판독을 하지 않습니다: " + (note or "Claude 구독 연결을 확인하세요."))
+    from . import subscriptions
+    from .claude_subscription import SubscriptionError
+    plan, reason = subscriptions.pick(getattr(args, "local_ai_plan", None))
+    if not plan:
+        cli.log("  AI 쪽 판독을 하지 않습니다: " + (reason or "구독 계정 연결을 확인하세요."))
         return None
-    client = subscription.SubscriptionClient()
-    model = subscription.model(None)
+    try:
+        client = subscriptions.client(plan)
+    except SubscriptionError as exc:
+        cli.log(f"  AI 쪽 판독을 하지 않습니다: {exc}")
+        return None
+    model = subscriptions.model(plan, None)
     direction = "horizontal" if args.mode == "horizontal_zh" else "vertical"
     import os
     # Readings are keyed by page image, model and prompt; a shared folder (measurement sets) reuses them.
     cache = Path(os.environ.get("YEONE_OCR_AI_PAGE_CACHE") or work.dir / "ai-page")
-    cli.log(f"  AI 쪽 판독({mode}): Claude 구독 · 모델 {model} · 쪽을 원래 해상도 띠로 잘라 처음부터 읽고 엔진 판독과 맞춰 봄")
+    cli.log(f"  AI 쪽 판독({mode}): {subscriptions.NAMES[plan]} 구독 · 모델 {model} · 쪽을 원래 해상도 띠로 잘라 처음부터 읽고 엔진 판독과 맞춰 봄")
 
     def read(number):
         from ab_ocr.ocr import render_page
@@ -368,7 +374,7 @@ def _ai_page_reader(args, project, work, cli):
             with render_page(project.source_path, number, args.dpi, should_stop=cli.CANCEL.is_set) as image:
                 result = read_page(image, direction=direction, profile=args.local_profile, client=client,
                                    model=model, cache_dir=cache)
-        except (subscription.SubscriptionError, TimeoutError, ValueError, OSError) as exc:
+        except (SubscriptionError, TimeoutError, ValueError, OSError) as exc:
             cli.log(f"  {number}쪽: AI 쪽 판독 실패 — {exc} (엔진 판독만 씀)")
             return None
         cli.log(f"  {number}쪽: AI 쪽 판독 {len(result['text'])}자" + (" (저장된 판독)" if result.get("cached") else ""))
@@ -446,20 +452,20 @@ def _command(args, *, work=None, doc=None, pool=None):
         keys = split_keys(args.reader, environment_key(args.reader)) if review_enabled else []
         key = keys[0] if keys else ""
         if review_enabled:
-            # Claude through the signed-in Claude Code CLI (personal plan, no API charge): claude_subscription.
-            from . import claude_subscription as subscription
+            # A signed-in plan's own CLI (personal plan, no API charge): Claude Code, Codex CLI or Gemini CLI.
+            from . import subscriptions
+            from .claude_subscription import auth_mode
             requested = getattr(args, "local_ai_auth", None)
-            provider = "anthropic" if subscription.auth_mode(requested) == "subscription" else args.reader
-            use, note = subscription.choose(requested, provider, key if provider == args.reader else "")
-            if use:
+            plan, note = subscriptions.choose(requested, args.reader, key, getattr(args, "local_ai_plan", None))
+            if plan:
                 chosen = getattr(args, "model", None) or ""
-                args.reader = "anthropic"
-                args.model = subscription.model(chosen if chosen.startswith("claude") or chosen in ("opus", "sonnet", "haiku") else None)
-                key = subscription.SUBSCRIPTION_KEY
-            elif provider != args.reader or subscription.auth_mode(requested) == "subscription":
+                args.reader = subscriptions.PROVIDERS[plan]
+                args.model = subscriptions.model(plan, chosen if subscriptions.accepts_model(plan, chosen) else None)
+                key = subscriptions.KEYS[plan]
+            elif auth_mode(requested) == "subscription":
                 key = ""                    # asked for the plan: never fall back to a paid API key
             if note:
-                cli.log("  " + note + (f" · 모델 {args.model}" if use else ""))
+                cli.log("  " + note + (f" · 모델 {args.model}" if plan else ""))
         calls, failed, incomplete, completed = 0, [], [], []
         cli.LOCAL_API_CALLS = 0
         summaries = {}

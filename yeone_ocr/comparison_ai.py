@@ -1084,13 +1084,16 @@ def _gemini_thinking_level(settings):
 def create_client(settings, api_key):
     """Existing SDK factories, with one explicit key/model and no probing.
 
-    SUBSCRIPTION_KEY instead of a key: Claude through the signed-in Claude Code CLI (claude_subscription)."""
-    from .claude_subscription import SUBSCRIPTION_KEY, SubscriptionClient, SubscriptionError
-    if api_key == SUBSCRIPTION_KEY:
-        if settings.provider != "anthropic":
-            raise AIReviewError("구독 계정 연결은 Claude(Anthropic)에서만 쓸 수 있습니다.")
+    A subscription key (subscriptions.KEYS) instead of a key: the provider's own signed-in CLI —
+    Claude Code, Codex CLI (ChatGPT) or Gemini CLI."""
+    from . import subscriptions
+    from .claude_subscription import SubscriptionError
+    plan = subscriptions.plan_for_key(api_key)
+    if plan:
+        if settings.provider != subscriptions.PROVIDERS[plan]:
+            raise AIReviewError(f"{subscriptions.NAMES[plan]} 구독 연결은 {subscriptions.PROVIDERS[plan]} 검증에서만 쓸 수 있습니다.")
         try:
-            return SubscriptionClient()
+            return subscriptions.client(plan)
         except SubscriptionError as exc:
             raise AIReviewError(str(exc)) from exc
     if not isinstance(api_key, str) or not api_key.strip() or any(c.isspace() for c in api_key.strip()) or "," in api_key:
@@ -1106,7 +1109,20 @@ def _request(client, settings, prompt, images, *, response_schema=None):
     """Single SDK request. Raw text is returned before our JSON validation."""
     refusals, finish_reason = [], None
     response_schema = _wire_schema(response_schema or RESPONSE_SCHEMA, settings.provider)
-    if settings.provider == "openai":
+    if getattr(client, "subscription", False):
+        # The signed-in CLI of the plan (claude_subscription, chatgpt_subscription, gemini_subscription).
+        from types import SimpleNamespace
+        from .claude_subscription import SubscriptionError
+        try:
+            text, complete, finish_reason, tokens, actual = client.request(
+                model_name=settings.model, system=SYSTEM, prompt=prompt, images=images, schema=response_schema)
+        except SubscriptionError as exc:
+            error = AIReviewError(str(exc))
+            error.fatal = True                      # not signed in, plan limit reached, CLI missing
+            raise error from exc
+        usage = SimpleNamespace(**tokens)
+        response = SimpleNamespace(model=actual)
+    elif settings.provider == "openai":
         parts = [{"type": "input_text", "text": prompt}]
         parts += [{"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(content).decode("ascii"), "detail": "high"} for content in images]
         response = client.responses.create(model=settings.model, instructions=SYSTEM,
@@ -1121,18 +1137,6 @@ def _request(client, settings, prompt, images, *, response_schema=None):
         complete = getattr(response, "status", "completed") == "completed" and not refusals
         finish_reason = getattr(response, "status", None)
         usage = getattr(response, "usage", None)
-    elif settings.provider == "anthropic" and getattr(client, "subscription", False):
-        from types import SimpleNamespace
-        from .claude_subscription import SubscriptionError
-        try:
-            text, complete, finish_reason, tokens, actual = client.request(
-                model_name=settings.model, system=SYSTEM, prompt=prompt, images=images, schema=response_schema)
-        except SubscriptionError as exc:
-            error = AIReviewError(str(exc))
-            error.fatal = True                      # not signed in, plan limit reached, CLI missing
-            raise error from exc
-        usage = SimpleNamespace(**tokens)
-        response = SimpleNamespace(model=actual)
     elif settings.provider == "anthropic":
         parts = [{"type": "text", "text": prompt + "\nJSON Schema:\n" + json.dumps(response_schema)}]
         parts += [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64.b64encode(content).decode("ascii")}} for content in images]
@@ -1179,7 +1183,7 @@ def _request(client, settings, prompt, images, *, response_schema=None):
     if isinstance(finish_reason, str) and len(finish_reason) <= 80:
         metadata["finish_reason"] = finish_reason
     if getattr(client, "subscription", False):
-        metadata["transport"] = "claude-code-subscription"   # plan limits, no per-token charge
+        metadata["transport"] = getattr(client, "transport", "claude-code-subscription")   # plan limits, no per-token charge
     if refusals:
         raw_refusal = "\n".join(refusals)
         metadata.update(refusal=True, refusal_text=raw_refusal[:64_000], refusal_text_sha256=_text_hash(raw_refusal),

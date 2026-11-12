@@ -62,6 +62,23 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertIn("--local-easyocr", self.gui.App._strategy_opts(app))
         self.assertIs(self.gui.DEFAULTS["local_easyocr"], False)
 
+    def test_subscription_plan_choice_adds_a_flag_only_when_not_automatic(self):
+        gui = self.gui
+        app = self.app()
+        self.assertNotIn("--local-ai-plan", gui.App._strategy_opts(app))               # 자동: 플래그 없음
+        app.v_local_ai_subscription = Var(True)
+        app.v_local_ai_plan = Var(gui.AI_PLAN_LABELS["chatgpt"])
+        flags = gui.App._strategy_opts(app)
+        self.assertEqual(flags[flags.index("--local-ai-plan") + 1], "chatgpt")
+        app.v_local_ai_plan = Var(gui.AI_PLAN_LABELS["gemini"])
+        self.assertIn("gemini", gui.App._strategy_opts(app))
+        app.v_local_ai_subscription = Var(False)                                        # 구독 끔: 계정 선택은 보내지 않음
+        flags = gui.App._strategy_opts(app)
+        self.assertNotIn("--local-ai-plan", flags)
+        self.assertIn("--local-ai-auth", flags)
+        self.assertEqual(gui.DEFAULTS["local_ai_plan"], "auto")
+        self.assertEqual(set(gui.AI_PLAN_LABELS), {"auto", "claude", "chatgpt", "gemini"})
+
     def test_local_run_allows_no_key_but_legacy_requires_it(self):
         app = self.app()
         app._env_optional_key = True
