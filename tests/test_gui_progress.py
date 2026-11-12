@@ -334,7 +334,10 @@ class ProgressCardRealTk(unittest.TestCase):
         self.assertEqual([int(b.cget("value")) for b in app._tab_buttons], [0, 1, 2, 3])
         self.assertEqual(app.b_comparison.cget("text"), "모델 비교·교정"); self.assertIn(app.b_comparison, app.buttons)
         self.assertEqual(app.b_comparison.winfo_parent(), app.b_open_hwpx.winfo_parent())
-        self.assertFalse(hasattr(app, "b_update"))
+        footer = str(app._footer)
+        self.assertTrue(str(app.b_update).startswith(footer + "."))                   # [업데이트 확인]은 명령 띠가 아니라 설정 바닥 줄에
+        self.assertEqual(app.l_version.cget("text"), f"v{gui.__version__}")            # 판 번호는 이름 옆(명령 띠)
+        self.assertTrue(str(app.l_version).startswith(str(app._header) + "."))
         with mock.patch.object(gui.tk.Menu, "tk_popup") as popup, mock.patch.object(gui.tk.Menu, "grab_release"):
             gui.App._post_menu(app)
             popup.assert_called_once()

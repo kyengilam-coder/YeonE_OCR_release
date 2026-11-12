@@ -76,16 +76,16 @@ class SettingsTabRealTk(unittest.TestCase):
         app = self.app; gui = self.gui; S = app._set_sections
         def column(name):
             col = app._set_cols[name]
-            return [k for k in ("read", "book", "collate", "docs", "auto", "model") if S[k]["card"].grid_info().get("in") == col]
+            return [k for k in ("read", "ai", "book", "docs", "auto", "collate") if S[k]["card"].grid_info().get("in") == col]
         simple = app.v_simple.get()
         app.set_simple_view(False, save=False)                                        # 두 열·한 열은 자세히 보기의 배치(간단히 보기는 갈래 하나씩 — test_1b)
         try:
             gui.App._layout_settings(app, int(1300 * app.scale))
-            self.assertEqual((column("left"), column("right")), (["read", "book", "collate"], ["docs", "auto", "model"]))
-            gui.App._layout_settings(app, int(1000 * app.scale))                      # 논리 1100 미만: 한 열(판독 → 이 책 → 책갈피 → 문서 → 자동 교정 → 모델 단계)
-            self.assertEqual(column("left"), ["read", "book", "collate", "docs", "auto", "model"])
+            self.assertEqual((column("left"), column("right")), (["read", "ai", "book"], ["docs", "auto", "collate"]))   # 읽는 쪽 | 만드는 쪽
+            gui.App._layout_settings(app, int(1000 * app.scale))                      # 논리 1100 미만: 한 열(작업 차례)
+            self.assertEqual(column("left"), ["read", "ai", "book", "docs", "auto", "collate"])
             rows = sorted(column("left"), key=lambda k: int(S[k]["card"].grid_info()["row"]))
-            self.assertEqual(rows, ["read", "book", "collate", "docs", "auto", "model"])
+            self.assertEqual(rows, ["read", "ai", "book", "docs", "auto", "collate"])
             self.assertEqual(app._set_cols["right"].winfo_manager(), "")
         finally:
             gui.App._layout_settings(app, int(1300 * app.scale))
@@ -100,7 +100,7 @@ class SettingsTabRealTk(unittest.TestCase):
             app.set_simple_view(True, save=False); app.select_tab(3); self.settle()
             self.assertTrue(gui.DEFAULTS["simple_view"])                               # 새 설치의 기본은 간단히 보기
             self.assertEqual(app._set_rail.winfo_manager(), "grid")
-            self.assertEqual([text for _key, text in gui.App.SET_RAIL], ["판독", "이 책", "문서 만들기", "자동 교정", "모델 단계", "책갈피 교정"])
+            self.assertEqual([text for _key, text in gui.App.SET_RAIL], ["인식", "AI 판독기", "이 책", "문서 만들기", "자동 교정", "책갈피 교정"])
             self.assertEqual(sorted(app._rail_buttons), sorted(S))                     # 갈래마다 섹션이 하나씩
             for key, _text in gui.App.SET_RAIL:
                 app._rail_buttons[key].invoke(); self.settle()
@@ -140,21 +140,22 @@ class SettingsTabRealTk(unittest.TestCase):
         names = ("v_provider", "v_model", "v_key", "v_force", "v_layout", "v_preset", "v_bold", "v_hl", "v_ctx", "v_pb", "v_join", "v_docx", "v_tlpdf",
                  "v_memo", "v_chk", "v_traditional", "v_yun", "v_punctuation", "v_ctxmodel", "v_suspects", "v_blind", "v_skipany", "v_model2", "v_workers",
                  "v_up", "v_ckpt", "v_chunk", "v_mres", "v_second", "v_cache", "v_think2", "v_think1", "v_mres1", "v_maxcalls", "v_policy", "v_cmemo",
-                 "v_cforce", "v_auto_update", "v_mode", "v_pages", "v_off")
+                 "v_cforce", "v_auto_update", "v_mode", "v_pages", "v_off", "v_local_ai_subscription", "v_local_ai_plan",
+                 "v_local_ai_api_fallback", "v_local_ai_review", "v_local_ai_max_calls")
         missing = [n for n in names if str(getattr(app, n)) not in bound]
         self.assertEqual(missing, [])
         texts = {str(w.cget("text")).strip() for w in self.walk(app._common_frame) if w.winfo_class() == "TButton"}
         for t in ("키 확인·모델 고르기", "보기", "전체", "고르기…", "비우기", "규칙 추가·수정…", "파일에서 고르기…", "기본 규칙", "세부 설정 ▾", "고급 ▸", "책갈피 OCR 교정 ▸"):
             self.assertIn(t, texts)
         foot = [str(w.cget("text")).strip() for w in self.walk(app._footer) if w.winfo_class() in ("TButton", "TCheckbutton")]
-        self.assertEqual(foot, ["설정 저장", "OCR로 돌아가기", "시작할 때 업데이트 확인"])       # 바닥 줄 — 중지(b_stop3)는 없앰
+        self.assertEqual(foot, ["설정 저장", "OCR로 돌아가기", "업데이트 확인", "시작할 때 업데이트 확인"])   # 바닥 줄 — 중지(b_stop3)는 없앰
         self.assertFalse(hasattr(app, "b_stop3"))
 
     def test_3_receipts_and_tags_only_on_rows_that_change_calls(self):
         R = self.app._set_rows
         self.assertEqual({k for k, r in R.items() if r["receipt"] is not None}, {"force", "ctxmodel", "suspects", "blind", "skipany", "cforce"})
         self.assertEqual({k for k, r in R.items() if r["tag"] is not None}, {"ctxmodel"})
-        self.assertEqual(str(self.app._set_sections["model"]["tag"].cget("text")), "[아니요]면 뺌")      # 모델 단계 제목의 꼬리표
+        self.assertEqual(str(self.app._model_stage_tag.cget("text")), "[아니요]면 뺌")               # AI 판독기 안 '판독 뒤 모델 단계' 머리의 꼬리표
         for k in ("rules", "punc"):                                                                # 규칙 셋은 모델 호출 없음
             self.assertIsNone(R[k]["receipt"])
 

@@ -32,7 +32,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
-            "local_ai_subscription": True, "local_ai_plan": "auto",
+            "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
@@ -73,7 +73,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 비용 장부·고급 도구가 함께 보이고, 설정 탭은 모든 섹션을 한 화면에 펼칩니다(간단히 보기에서는 왼쪽 갈래에서 하나씩). 값과 동작은 두 보기에서 같습니다.
 명령 띠 오른쪽 끝의 [더 보기](가로줄 셋)에는 OCR 모델 비교·교정 · 비용 미리 보기 · 고급 도구 · 도움말 · 업데이트 확인 · 패키지 점검이 모여 있습니다.
 일반·이미지 OCR에서 [HWPX 만들기] 또는 [문자 PDF 만들기]를 선택하고 공통 [중지]로 멈출 수 있습니다.
-[설정]에는 판독(판독기·모델·API 키) · 이 책(쪽 범위·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기, 고급의 인쇄 쪽수 보정) · 문서 만들기 · 자동 교정 · 모델 단계 · 책갈피 교정 옵션이 모여 있습니다. 단계별 실행·도구는 작업 탭 기록 카드의 [고급 도구 ▸]에 있습니다.
+[설정]은 기능별 갈래로 나뉩니다: 인식(인식 방식·로컬 엔진) · AI 판독기(① 구독 계정 → ② API 키 → ③ AI 검증과 넘김, 세부 설정, 판독 뒤 모델 단계) · 이 책(쪽 범위·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기, 고급의 인쇄 쪽수 보정) · 문서 만들기(만들 파일·표시·쪽과 문단) · 자동 교정 · 책갈피 교정. 단계별 실행·도구는 작업 탭 기록 카드의 [고급 도구 ▸]에 있습니다.
 [설정 바꾸기]로 이동하고 [설정 저장] 후 [OCR로 돌아가기]로 하던 작업을 계속합니다.
 문서 짜임·양식·짜임 규칙·획 굵기·쪽 범위·인쇄 쪽수 보정·읽기 방향은 책마다 그 결과 폴더의 book_settings.json 에 따로 기억합니다
 (설정 저장·창 닫기·다른 책으로 바꿀 때·실행 직전에 저장, 새 책은 지난 문서 설정을 이어 쓰고 쪽 범위·보정은 비움).
@@ -119,7 +119,7 @@ AI의 답은 제안으로 보존하며 결과 단추의 [모델 비교·교정]�
     인쇄 쪽수 보정은 [설정] 탭 '이 책' 섹션의 [고급 ▸]에 있습니다. 파일 쪽수와 책에 적힌 쪽수를 맞춰 검수할 때 쓰며, 비우면 자동 판정합니다.
     글자를 직접 고칠 때는 [나란히 대조 편집]을 사용합니다. 사람이 대조를 마친 쪽은 [검수 결과 기록…]으로 남깁니다.
  8. 시작할 때 새 버전을 확인하며, [더 보기] → [업데이트 확인]으로 직접 확인할 수도 있습니다. [설치 후 재시작]을 고르면
-    실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 자동 확인은 [설정] 탭 바닥의 '시작할 때 업데이트 확인'으로 끌 수 있습니다.
+    실행 파일만 교체합니다. API 키·설정·판독 기록은 유지됩니다. 지금 확인은 [설정] 탭 바닥의 [업데이트 확인](또는 [더 보기] 메뉴), 자동 확인은 그 옆의 '시작할 때 업데이트 확인'으로 끌 수 있습니다.
 
 결과는 원본 옆의 「<이름>_YeonE_OCR」(이미지는 「<이름>_<확장자>_YeonE_OCR」) 안에 생깁니다.
 붙여넣은 캡처는 Windows의 %LOCALAPPDATA%\\YeonE_OCR\\screenshots에 보관합니다. [결과 폴더]로 결과 위치를 엽니다.
@@ -1975,6 +1975,8 @@ class App(tk.Tk):
                 App._sync_book_label(self)
             self._sync_output_location()
         d = vars(self)
+        if i == 3 and d.get("l_plans") is not None and not d.get("_plans_checked"):
+            App.refresh_plans(self)                          # 설정 탭을 처음 열 때 구독 계정 로그인 상태(모델은 부르지 않음)
         if d.get("v_notice") is not None:
             self.v_notice.set(SETTINGS_NOTE)                 # 설정 탭 알림 줄은 탭을 옮기면 평소 글로
             if d.get("_notice_tip") is not None:
@@ -2016,7 +2018,7 @@ class App(tk.Tk):
         self.select_tab(self._last_ocr_tab)
 
     # ---------- 간단히 보기 ↔ 자세히 보기 ----------
-    SET_RAIL = (("read", "판독"), ("book", "이 책"), ("docs", "문서 만들기"), ("auto", "자동 교정"), ("model", "모델 단계"), ("collate", "책갈피 교정"))
+    SET_RAIL = (("read", "인식"), ("ai", "AI 판독기"), ("book", "이 책"), ("docs", "문서 만들기"), ("auto", "자동 교정"), ("collate", "책갈피 교정"))
 
     def _simple(self) -> bool:
         """간단히 보기인가. 시험의 가짜 창(변수 없음)은 자세히 보기로 본다 — 예전 화면 그대로."""
@@ -2155,6 +2157,20 @@ class App(tk.Tk):
         except (AttributeError, tk.TclError):
             pass
 
+    def _ai_summary(self) -> str:
+        """실행 카드·설정 요약의 AI 연결: 로컬 우선에 구독 계정이 켜져 있으면 실제 차례(구독 → API 키), 아니면 판독기 · 모델."""
+        api = f"{self.v_provider.get()} · {self.v_model.get().strip() or '(모델 없음)'}"
+        d = vars(self)
+        if d.get("v_local_ai_subscription") is None or d.get("v_ocr_strategy") is None or not App._local_first(self) \
+                or not self.v_local_ai_subscription.get():
+            return api
+        plan = _label_key(AI_PLAN_LABELS, self.v_local_ai_plan.get()) or "auto"
+        first = "구독 계정(자동)" if plan == "auto" else AI_TARGET_LABELS.get(plan, plan)
+        fallback = d.get("v_local_ai_api_fallback")
+        if fallback is not None and not fallback.get():
+            return f"{first} 먼저 · API 키로 넘어가지 않음"
+        return f"{first} 먼저 → {api}"
+
     def _sync_settings_summary(self, *_):
         document = "HWPX + DOCX" if self.v_docx.get() else "HWPX"
         if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get():
@@ -2165,7 +2181,7 @@ class App(tk.Tk):
             ref = App.preset_ref(self); lab = preset_label(ref)
             document += " · 짜임 " + (lab.split(" (")[0] if (ref or DEFAULT_PRESET) in BUILTIN or ref in ALIASES else lab)   # 파일은 '(읽지 못함)' 까지 — 실행 전에 보이게
         strategy = "로컬 먼저 · " if vars(self).get("v_ocr_strategy") is not None and App._local_first(self) else ""
-        self.v_settings_summary.set(f"{strategy}{self.v_provider.get()} · {self.v_model.get().strip()} · {self.v_mode.get()} · {document}")
+        self.v_settings_summary.set(f"{strategy}{App._ai_summary(self)} · {self.v_mode.get()} · {document}")
         scope = "이미지 OCR" if self._active_input == 2 else "일반 OCR"
         self.v_force_scope.set(f"{scope}: 기록 있는 쪽도 다시 판독")
 
@@ -2184,6 +2200,12 @@ class App(tk.Tk):
         word = tk.Label(name, text="연어OCR", font=self.fonts["APP"], bg=NAV, fg=C["NAV_INK"], bd=0); word.pack(side="left")
         for lab in (mark, word):
             Tip(lab, f"{APP_NAME} {__version__} — {ABOUT}", self)
+        # 판 번호: 이름 바로 옆 작은 알약(누르면 업데이트 확인) — 어느 판이 떠 있는지 바로 보이게
+        self.l_version = tk.Label(name, text=f"v{__version__}", font=self.fonts["CAP_B"], bg=C["NAV_HI"], fg=C["NAV_INK"],
+                                  bd=0, padx=P(7), pady=P(1), cursor="hand2")
+        self.l_version.pack(side="left", padx=(P(10), 0))
+        self.l_version.bind("<Button-1>", lambda _e: None if self.running else self.check_updates())
+        Tip(self.l_version, f"연어OCR {__version__} · 누르면 새 판이 있는지 확인합니다", self)
         self.v_tab = tk.IntVar(value=0); self.v_tabhint = tk.StringVar(value=TAB_HINTS[0])     # 탭 소개는 탭마다 풍선 도움말로
         select = lambda: self.select_tab(self.v_tab.get())
         tabs = self._tab_bar = self._tabs(hd, [("일반 OCR", 0), ("책갈피 OCR", 1), ("이미지 OCR", 2)], self.v_tab, select)
@@ -2259,7 +2281,7 @@ class App(tk.Tk):
         for variables in self._input_vars.values():
             variables["pdf"].trace_add("write", self._sync_output_location)
 
-        # ---- 설정 탭(디자인 명세 §6.3): 왼쪽 판독 · 이 책(끝에 접힌 고급) · 책갈피 OCR 교정 ▸ | 오른쪽 문서 만들기 · 자동 교정 · 모델 단계 ----
+        # ---- 설정 탭(디자인 명세 §6.3): 왼쪽 인식 · AI 판독기 · 이 책(끝에 접힌 고급) | 오른쪽 문서 만들기 · 자동 교정 · 책갈피 OCR 교정 ▸ ----
         # 변수(설정 열쇠)는 그대로 — 자리만 섹션 줄로 옮겼다(_build_settings_tab)
         self.v_up = tk.StringVar(value=self.cfg["upscale"]); self.v_reader = tk.StringVar(value=self.cfg["reader"])
         self.v_model = tk.StringVar(value=self.cfg["model"]); self.v_key = tk.StringVar(value=self.cfg["api_key"])
@@ -2271,6 +2293,7 @@ class App(tk.Tk):
         self.v_local_easyocr = tk.BooleanVar(value=bool(self.cfg.get("local_easyocr", False)))
         self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
+        self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
         self.v_local_ai_max_calls = tk.StringVar(value=str(self.cfg.get("local_ai_max_calls", 20)))
         self._active_reader = self.v_reader.get()
         self.v_provider = tk.StringVar(value=PROVIDER_LABELS[self._active_reader])
@@ -2349,7 +2372,7 @@ class App(tk.Tk):
         비용 창 [아니요]로 이번 실행에서 빠지는 것(모델 단계 제목·문맥 교정의 모델 사용)에만."""
         C, P = self.colors, self.px
         PANEL = C["PANEL"]
-        # 갈래 줄(간단히 보기 — 한 번에 한 갈래만): 판독 · 이 책 · 문서 만들기 · 자동 교정 · 모델 단계 · 책갈피 교정
+        # 갈래 줄(간단히 보기 — 한 번에 한 갈래만): 인식 · AI 판독기 · 이 책 · 문서 만들기 · 자동 교정 · 책갈피 교정(기능별, 작업 차례)
         rail = self._set_rail = ttk.Frame(common)
         self.v_set_rail = tk.StringVar(value="read")
         self._lab(rail, "설정", "TITLE", bg="BG").pack(anchor="w", padx=(P(14), 0), pady=(0, P(10)))
@@ -2375,44 +2398,30 @@ class App(tk.Tk):
         def check(var):
             return lambda p: ttk.Checkbutton(p, variable=var, style="Bare.TCheckbutton")
 
+        def subhead(parent, title, note="", tag=None):
+            """섹션 안의 묶음 머리(굵은 글 · 꼬리표 · 회색 설명) — 한 섹션 안에서 기능별로 나눈다."""
+            f = boxed(parent); f.pack(fill="x", pady=(P(12), P(2)))
+            L(f, title, "BODY_B").pack(side="left")
+            f.tag = None
+            if tag:
+                f.tag = ttk.Label(f, text=tag, style="Tag.TLabel"); f.tag.pack(side="left", padx=(P(8), 0))
+                Tip(f.tag, TAG_TIP, self)
+            if note:
+                L(f, note, "CAP", "MUTED").pack(side="left", padx=(P(8), 0), pady=(P(2), 0))
+            return f
+
         # ---- 판독(모든 책 공통) ----
         def details_button(parent):
             self.b_details = ttk.Button(parent, text="", command=self.toggle_details, style="Toggle.TButton", cursor="hand2")
             Tip(self.b_details, "2차 판독 모델 · 속도 · 2차 조각 · 판독 단계 · 1차 판독 · 호출 상한", self)
             return self.b_details
-        s = S["read"] = self._settings_section(common, "판독", "모든 책 공통 · 세 OCR 탭이 함께 씀", right=details_button)
+        s = S["read"] = self._settings_section(common, "인식", "인식 방식과 이 PC의 OCR 엔진 · 모든 책 공통 · 세 OCR 탭이 함께 씀")
         b = s["body"]
 
         R["ocr_strategy"] = row(b, "인식 방식", "일반·이미지 OCR의 한 번에 인식에 적용",
             lambda p: ttk.Combobox(p, textvariable=self.v_ocr_strategy, values=list(OCR_STRATEGY_LABELS.values()), state="readonly", width=chars(280)))
         R["local_profile"] = row(b, "로컬 문서 종류", "설치된 엔진 중 해당 언어를 지원하는 엔진을 비교",
             lambda p: ttk.Combobox(p, textvariable=self.v_local_profile, values=list(LOCAL_PROFILE_LABELS.values()), state="readonly", width=chars(220)))
-
-        def local_review(parent):
-            f = boxed(parent)
-            ttk.Checkbutton(f, text="어려운 구간의 이미지·문맥 전송", variable=self.v_local_ai_review).pack(side="left")
-            ttk.Spinbox(f, from_=1, to=100, width=4, textvariable=self.v_local_ai_max_calls).pack(side="left", padx=(P(8), P(4)))
-            L(f, "회까지").pack(side="left")
-            return f
-        R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
-
-        def local_ai_subscription(parent):
-            f = boxed(parent)
-            cb = ttk.Checkbutton(f, text="구독 계정으로 쪽 판독·검증", variable=self.v_local_ai_subscription)
-            cb.pack(side="left")
-            Tip(cb, "이 PC에서 공식 프로그램에 자기 계정으로 로그인되어 있으면, 엔진 판독 뒤에 AI가 쪽 전체를 원래 해상도 띠로 잘라 "
-                    "한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
-                    "Claude: Claude Code(claude auth login) · ChatGPT: Codex CLI(codex login → Sign in with ChatGPT) · "
-                    "Gemini: Gemini CLI(gemini 실행 → Login with Google). 이 프로그램은 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
-                    "세로쓰기 6쪽 측정(Claude)에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초.", self)
-            plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
-                                width=chars(300))
-            plan.pack(side="left", padx=(P(8), 0))
-            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
-                      "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 API 키로 넘어갑니다"
-                      "(API 호출은 「로컬 뒤 AI 검증」의 횟수까지). 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
-            return f
-        R["local_ai_subscription"] = row(b, "구독 계정 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
 
         def local_columns(parent):
             cb = ttk.Checkbutton(parent, text="두 단 본문은 왼쪽 단 먼저", variable=self.v_local_columns)
@@ -2436,6 +2445,41 @@ class App(tk.Tk):
             return cb
         R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
 
+        R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
+
+        # ---- AI 판독기(모든 책 공통): 실제로 연결하는 차례대로 ① 구독 계정 → ② API 키 → ③ 검증 횟수·넘김, 세부 설정(접힘), 판독 뒤 모델 단계 ----
+        s = S["ai"] = self._settings_section(common, "AI 판독기", "위에서부터 차례로 연결 — ① 구독 계정 → ② API 키 · 둘 다 없으면 로컬 결과만 · 모든 책 공통",
+                                             right=details_button)
+        b = ai_body = s["body"]
+        subhead(b, "① 구독 계정", "API 요금 없음 · 이 PC에 로그인된 공식 프로그램을 실행")
+        def local_ai_subscription(parent):
+            f = boxed(parent)
+            cb = ttk.Checkbutton(f, text="구독 계정으로 쪽 판독·검증", variable=self.v_local_ai_subscription)
+            cb.pack(side="left")
+            Tip(cb, "이 PC에서 공식 프로그램에 자기 계정으로 로그인되어 있으면, 엔진 판독 뒤에 AI가 쪽 전체를 원래 해상도 띠로 잘라 "
+                    "한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
+                    "Claude: Claude Code(claude auth login) · ChatGPT: Codex CLI(codex login → Sign in with ChatGPT) · "
+                    "Gemini: Gemini CLI(gemini 실행 → Login with Google). 이 프로그램은 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
+                    "세로쓰기 6쪽 측정(Claude)에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초.", self)
+            plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
+                                width=chars(300))
+            plan.pack(side="left", padx=(P(8), 0))
+            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
+                      "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 API 키로 넘어갑니다"
+                      "(API 호출은 「로컬 뒤 AI 검증」의 횟수까지). 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
+            return f
+        R["local_ai_subscription"] = row(b, "구독 계정 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
+
+
+        def plans_status(parent):
+            f = boxed(parent)
+            self.l_plans = L(f, "설정 탭을 열면 확인합니다", "CAP", "MUTED")
+            self.l_plans.pack(side="left")
+            self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
+                      tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
+            return f
+        R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 명령줄 yeone-ocr plans 와 같음", plans_status)
+        subhead(b, "② API 키", "구독을 쓸 수 없을 때 · AI 전체 쪽 판독(기존 방식)에")
         def provider(parent):
             cb = self.cb_provider = ttk.Combobox(parent, textvariable=self.v_provider, values=list(PROVIDER_LABELS.values()), state="readonly", width=chars(220))
             cb.bind("<<ComboboxSelected>>", self._select_provider)
@@ -2457,7 +2501,17 @@ class App(tk.Tk):
             self._btn(f, "보기", self.toggle_key, tip="키를 가리거나 보입니다. 키는 이 PC의 설정 파일에 제공사별로 저장됩니다.").pack(side="left", padx=(P(6), 0))
             return f
         R["key"] = row(b, "API 키", "이 PC의 설정 파일에 제공사별로 저장", key)
-        R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
+        subhead(b, "③ AI 검증과 넘김", "로컬 인식 뒤 어려운 구간만 AI에")
+        def local_review(parent):
+            f = boxed(parent)
+            ttk.Checkbutton(f, text="어려운 구간의 이미지·문맥 전송", variable=self.v_local_ai_review).pack(side="left")
+            ttk.Spinbox(f, from_=1, to=100, width=4, textvariable=self.v_local_ai_max_calls).pack(side="left", padx=(P(8), P(4)))
+            L(f, "회까지").pack(side="left")
+            return f
+        R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
+
+        R["api_fallback"] = row(b, "API 키로 넘어가기", "구독이 한도에 닿거나 로그인이 풀리면 다른 구독 → API 키(위 횟수까지) · 끄면 API 요금 없음",
+                                check(self.v_local_ai_api_fallback))
         # 세부 설정(펼치면 판독 섹션 아래에 — 보통은 기본값). 3차 판별 세 줄은 '모델 단계' 섹션으로 옮겼다
         d = self.details = boxed(b)
         dh = boxed(d); dh.pack(fill="x")
@@ -2527,6 +2581,26 @@ class App(tk.Tk):
         R["maxcalls"] = row(d, "호출 상한", "0 = 없음 · 재시도 포함, 한 번 실행 전체 · 닿으면 멈추고 다시 누르면 이어서", maxcalls)
         self._gemini_widgets = ((got["mr"], "readonly"), (got["t1"], "readonly"), (got["m1"], "readonly"), (self.ck_cache, "normal"), (self.ck_think2, "normal"))
         self._apply_details()
+
+        # ---- AI 판독기 끝: 판독 뒤 모델 단계 [아니요]면 뺌(판독 뒤 모델을 더 부르는 단계 — 켜거나 끄면 호출 수가 바뀜) ----
+        b = ai_body
+        head = self._model_stage_head = subhead(b, "판독 뒤 모델 단계", tag="[아니요]면 뺌")
+        self._model_stage_tag = head.tag
+        L(b, "판독 뒤 모델을 더 부르는 단계입니다. 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 뺍니다. 켜거나 끄면 호출 수가 바뀌는 설정에는 영수증 표를 "
+             "붙였습니다. 문맥 교정의 모델 사용은 [자동 교정]에 있습니다.", "CAP", "MUTED", wrap=True).pack(fill="x", pady=(P(3), P(6)))
+        R["suspects"] = row(b, "합의 판독도 글자층과 다르면 자형으로 확인(표시만)", "합의 판독 의심 · 쪽당 최대 8곳 · 본문은 그대로", check(self.v_suspects), receipt=True)
+        Tip(R["suspects"]["ctrl"], "1차·2차가 같게 읽어 〔a/b〕 가 없는 글자도, PDF 글자층(기존 OCR)과 한 글자만 다르고 그 두 글자가 入/人·曰/日·問/間 처럼 자형이 헷갈리는 쌍이면 "
+                                   "3차 판별과 같은 방식으로 글자 조각을 묻습니다. 자형이 글자층 쪽이면 본문은 판독대로 두고 확인 항목 「합의 판독 의심」과 문서 메모만 답니다"
+                                   "(지침 20 — 기존 OCR 은 의심만 올림). 이미 물은 자리는 다시 묻지 않습니다. 끄면 〔a/b〕 자리만 묻습니다.", self)
+        R["blind"] = row(b, "3차 판별: 후보 없이 한 번 더 읽어 같을 때만 확정", "호출 조금 더 · 더 엄격 · 책갈피 교정에도 적용(그쪽은 [아니요] 없음)",
+                         check(self.v_blind), receipt=True)
+        Tip(R["blind"]["ctrl"], "3차 판별은 앞뒤 글자를 글로 알려 주지 않고(조각 그림에는 이웃 글자가 보입니다) 후보 차례를 섞어 자형만 묻습니다. "
+                                "이것을 켜면 고른 자리를 후보도 주지 않고 한 번 더 읽게 해, 두 답이 같을 때만 확정합니다. 다르면 표시〔a/b〕를 그대로 남깁니다. "
+                                "호출이 더 듭니다(일반 OCR: 쪽마다 확정 자리 8곳당 1회 · 책갈피 OCR 교정에도 적용: 확정 항목마다 1회).", self)
+        R["skipany"] = row(b, "다른 모델이 이미 물은 자리·후보는 다시 묻지 않기", "3차 판별·문맥 교정 · 끄면 이번 모델로 다시 물음(호출 듦)", check(self.v_skipany), receipt=True)
+        Tip(R["skipany"]["ctrl"], "판독기나 모델을 바꿔도, 앞서 다른 모델이 물어 결론 난 것은 다시 사지 않습니다: 3차 판별에서 그 모델이 고르지 못한 〔a/b〕 자리는 표시대로 두고, "
+                                  "문맥 교정에서 그 모델이 고른 답은 그대로 쓰며 고르지 못한 후보는 원문대로 둡니다. 이번 모델로 다시 물으려면 이것을 끄십시오(호출이 듭니다). "
+                                  "3차 판별을 모두 다시 물으려면 명령줄 --readjudicate.", self)
 
         # ---- 이 책 — {원본 이름}(책별 설정 일곱 가지 — book_settings.json) ----
         card = ttk.Frame(common, style="Card.TFrame", padding=(P(20), P(12), P(20), P(10)))
@@ -2644,11 +2718,13 @@ class App(tk.Tk):
                    "문서를 만들 때 원본 PDF 쪽 위에 판독한 글을 보이지 않는 글자층으로 넣은 사본(out\\<이름>_글자층.pdf)도 만듭니다. 화면은 원본 그대로이고 PDF 뷰어에서 "
                    "찾기·복사가 됩니다. 원본에 다른 OCR 의 숨은 글자층이 있으면 그 쪽에서는 지우고 넣습니다. 원본 PDF 는 고치지 않으며 모델을 부르지 않습니다. "
                    "고급 도구의 [PDF 글자층 넣기]로 따로 만들 수도 있습니다."))
-        for k, title, var, desc, tip in checks:
+        spec = {k: (title, var, desc, tip) for k, title, var, desc, tip in checks}
+
+        def add_check(k):
+            title, var, desc, tip = spec[k]
             R[k] = row(b, title, desc, check(var))
             if tip:
                 Tip(R[k]["ctrl"], tip, self); Tip(R[k]["name"], tip, self)
-        self.cb_pb = R["pb"]["ctrl"]
         wide = chars(240)
 
         def memo(parent):
@@ -2657,13 +2733,24 @@ class App(tk.Tk):
                     "구조 검사 오류, 로컬 인식 의심 구간 — 는 검수 화면(review.html)과 보고에서 확인합니다. 고지 사항만 메모: 그 고지와 첫머리의 표시 범례에 "
                     "한컴 메모를 답니다(의심 구간이 있는 쪽마다 하나). 모든 표시에 메모: 초록·파랑·문맥 밑줄 자리마다 근거 메모. 메모 없이 글 속: 고지를 회색 〔고지: …〕 로.", self)
             return mc
-        R["memo"] = row(b, "메모", "기본은 색상만 — 고지는 검수 화면에서 확인", memo)
 
         def checklist(parent):
             cc = ttk.Combobox(parent, textvariable=self.v_chk, values=list(CHECK_LIST_LABELS.values()), state="readonly", width=wide)
             Tip(cc, "문서 끝에 확인 목록을 넣을지. 기본은 넣지 않으며(문서에는 OCR 본문만), 전체 목록은 검수 화면에 있습니다.", self)
             return cc
+        # 묶음: 만들 파일 → 표시(색·메모·확인 목록) → 쪽·문단
+        subhead(b, "만들 파일", "HWPX는 늘 만듦")
+        for k in ("docx", "tlpdf"):
+            add_check(k)
+        subhead(b, "표시", "불확실한 글자를 문서에 어떻게 보일지")
+        for k in ("hl", "simple", "ctx"):
+            add_check(k)
+        R["memo"] = row(b, "메모", "기본은 색상만 — 고지는 검수 화면에서 확인", memo)
         R["checklist"] = row(b, "쪽 끝 확인 목록", "전체 목록은 검수 화면에 있음", checklist)
+        subhead(b, "쪽·문단")
+        for k in ("pb", "join"):
+            add_check(k)
+        self.cb_pb = R["pb"]["ctrl"]
 
         # ---- 자동 교정(모든 책 공통 · HWPX·DOCX에만) — 규칙 셋은 모델 호출 없음, 돈은 '불확실한 후보에 모델 사용' 한 줄(LINE 으로 갈라 맨 아래) ----
         s = S["auto"] = self._settings_section(common, "자동 교정", "모든 책 공통 · HWPX·DOCX에만 · 판독 기록·문자 PDF는 그대로 · 바꾼 내역은 out의 교정 보고에")
@@ -2698,30 +2785,6 @@ class App(tk.Tk):
         Tip(R["ctxmodel"]["ctrl"], "간체→번체 또는 云/雲 교정을 선택했을 때만 적용합니다. 끄면 규칙으로 확인되는 것만 바꾸고 불확실한 후보는 보고에 남깁니다.", self)
         for v in (self.v_traditional, self.v_yun, self.v_punctuation):
             v.trace_add("write", lambda *_: App._sync_setting_states(self))
-
-        # ---- 모델 단계 [아니요]면 뺌(판독 뒤 모델을 더 부르는 단계 — 셋 다 끄거나 켜면 호출 수가 바뀜) ----
-        card = ttk.Frame(common, style="Card.TFrame", padding=(P(20), P(12), P(20), P(6)))
-        head = boxed(card); head.pack(fill="x")
-        L(head, "모델 단계", "SECTION").pack(side="left")
-        tg = ttk.Label(head, text="[아니요]면 뺌", style="Tag.TLabel"); tg.pack(side="left", padx=(P(8), 0))
-        Tip(tg, TAG_TIP, self)
-        L(card, "판독 뒤 모델을 더 부르는 단계입니다. 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 뺍니다. 켜거나 끄면 호출 수가 바뀌는 설정에는 영수증 표를 "
-                "붙였습니다. 문맥 교정의 모델 사용은 위 [자동 교정]에 있습니다.", "CAP", "MUTED", wrap=True).pack(fill="x", pady=(P(3), P(6)))
-        b = boxed(card); b.pack(fill="x")
-        S["model"] = {"card": card, "head": head, "body": b, "tag": tg}
-        R["suspects"] = row(b, "합의 판독도 글자층과 다르면 자형으로 확인(표시만)", "합의 판독 의심 · 쪽당 최대 8곳 · 본문은 그대로", check(self.v_suspects), receipt=True)
-        Tip(R["suspects"]["ctrl"], "1차·2차가 같게 읽어 〔a/b〕 가 없는 글자도, PDF 글자층(기존 OCR)과 한 글자만 다르고 그 두 글자가 入/人·曰/日·問/間 처럼 자형이 헷갈리는 쌍이면 "
-                                   "3차 판별과 같은 방식으로 글자 조각을 묻습니다. 자형이 글자층 쪽이면 본문은 판독대로 두고 확인 항목 「합의 판독 의심」과 문서 메모만 답니다"
-                                   "(지침 20 — 기존 OCR 은 의심만 올림). 이미 물은 자리는 다시 묻지 않습니다. 끄면 〔a/b〕 자리만 묻습니다.", self)
-        R["blind"] = row(b, "3차 판별: 후보 없이 한 번 더 읽어 같을 때만 확정", "호출 조금 더 · 더 엄격 · 책갈피 교정에도 적용(그쪽은 [아니요] 없음)",
-                         check(self.v_blind), receipt=True)
-        Tip(R["blind"]["ctrl"], "3차 판별은 앞뒤 글자를 글로 알려 주지 않고(조각 그림에는 이웃 글자가 보입니다) 후보 차례를 섞어 자형만 묻습니다. "
-                                "이것을 켜면 고른 자리를 후보도 주지 않고 한 번 더 읽게 해, 두 답이 같을 때만 확정합니다. 다르면 표시〔a/b〕를 그대로 남깁니다. "
-                                "호출이 더 듭니다(일반 OCR: 쪽마다 확정 자리 8곳당 1회 · 책갈피 OCR 교정에도 적용: 확정 항목마다 1회).", self)
-        R["skipany"] = row(b, "다른 모델이 이미 물은 자리·후보는 다시 묻지 않기", "3차 판별·문맥 교정 · 끄면 이번 모델로 다시 물음(호출 듦)", check(self.v_skipany), receipt=True)
-        Tip(R["skipany"]["ctrl"], "판독기나 모델을 바꿔도, 앞서 다른 모델이 물어 결론 난 것은 다시 사지 않습니다: 3차 판별에서 그 모델이 고르지 못한 〔a/b〕 자리는 표시대로 두고, "
-                                  "문맥 교정에서 그 모델이 고른 답은 그대로 쓰며 고르지 못한 후보는 원문대로 둡니다. 이번 모델로 다시 물으려면 이것을 끄십시오(호출이 듭니다). "
-                                  "3차 판별을 모두 다시 물으려면 명령줄 --readjudicate.", self)
 
     def _settings_section(self, parent, title: str, sub: str = "", right=None) -> dict:
         """설정 탭 섹션: 둥근 카드(안쪽 12×20) · 머리(제목 F_SECTION + 부제 F_CAP MUTED — 좁으면 줄바꿈, 오른쪽 끝에 right(틀)이 만든 펼침 단추) · 몸통."""
@@ -2850,8 +2913,8 @@ class App(tk.Tk):
             r["tag"].state(["disabled"] if muted else ["!disabled"])
 
     def _layout_settings(self, width: int | None = None) -> None:
-        """설정 탭 두 열 ↔ 한 열(캔버스 너비 ÷ 배율 < 1100): 두 열은 왼쪽 판독·이 책·책갈피 | 오른쪽 문서 만들기·자동 교정·모델 단계,
-        한 열은 판독 → 이 책 → 책갈피 → 문서 만들기 → 자동 교정 → 모델 단계. 섹션은 설정 탭 틀의 자식이라 열 틀에 grid(in_=…)로 옮긴다."""
+        """설정 탭 두 열 ↔ 한 열(캔버스 너비 ÷ 배율 < 1100): 두 열은 왼쪽 인식·AI 판독기·이 책 | 오른쪽 문서 만들기·자동 교정·책갈피 교정,
+        한 열은 인식 → AI 판독기 → 이 책 → 문서 만들기 → 자동 교정 → 책갈피 교정. 섹션은 설정 탭 틀의 자식이라 열 틀에 grid(in_=…)로 옮긴다."""
         d = vars(self)
         cols, S = d.get("_set_cols"), d.get("_set_sections")
         if not cols or not S:
@@ -2862,7 +2925,7 @@ class App(tk.Tk):
             except (AttributeError, tk.TclError):
                 width = 0
         P = self.px; common = self._common_frame
-        order = [S[k]["card"] for k in ("read", "book", "collate", "docs", "auto", "model") if k in S]
+        order = [S[k]["card"] for k in ("read", "ai", "book", "docs", "auto", "collate") if k in S]   # 작업 차례: 읽기 → 만들기
         rail = d.get("_set_rail")
         if App._simple(self) and rail is not None:
             # 간단히 보기: 왼쪽 갈래 줄(190) | 고른 갈래의 섹션 하나
@@ -3749,7 +3812,7 @@ class App(tk.Tk):
             return
         P = self.px
         running = bool(self.running); has = bool(self.pdf()); res = d.get("_run_result")
-        self.l_run_summary.configure(text=f"{self.v_provider.get()} · {self.v_model.get().strip() or '(모델 없음)'}")
+        self.l_run_summary.configure(text=App._ai_summary(self))
         parts = []
         if running and d.get("_stop_requested"):
             parts = [(self.v_status.get(), "plain")]
@@ -4402,6 +4465,25 @@ class App(tk.Tk):
             self.v_ai_next.set(auto)
         self.b_ai_switch.configure(state="normal" if state["available"] and (following or state["targets"]) else "disabled")
 
+    def refresh_plans(self):
+        """AI 판독기 ① 구독 계정의 '로그인 상태' 줄: 세 공식 프로그램의 설치·로그인을 뒤에서 확인한다(창이 멈추지 않게)."""
+        self._plans_checked = True
+        label = vars(self).get("l_plans")
+        if label is not None:
+            label.configure(text="확인 중…")
+        def work():
+            from . import subscriptions
+            parts = []
+            for plan in subscriptions.PLANS:
+                try:
+                    state = subscriptions.status(plan, refresh=True)
+                except Exception:                    # 상태 확인은 실행을 막지 않는다
+                    state = {"usable": False, "installed": False}
+                mark = ("● 사용 가능" if state.get("usable") else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
+                parts.append(f"{subscriptions.NAMES[plan]} {mark}")
+            self.q.put(("plans", " · ".join(parts)))
+        threading.Thread(target=work, daemon=True, name="plan-status").start()
+
     def switch_subscription(self):
         """[다음 구독으로 넘기기]: 고른 곳(없으면 정해진 순서의 다음)으로 실행 중인 연결을 옮긴다.
         상태 확인(로그인 여부)이 잠깐 걸릴 수 있어 창이 멈추지 않게 뒤에서 한다."""
@@ -4978,7 +5060,7 @@ class App(tk.Tk):
 
     def _build_actions(self) -> None:
         """탭마다의 실행 자리(act_cards — select_tab 이 그 탭의 것만 보인다): 일반·이미지 OCR 은 오른쪽 단의 실행 카드(장부는 _work 의 카드),
-        책갈피 OCR 은 오른쪽 '교정 실행' 카드, 설정 탭은 바닥 고정 줄(스크롤 밖 — [설정 저장](먹) [OCR로 돌아가기] · 알림 줄 · 오른쪽 끝 '시작할 때 업데이트 확인').
+        책갈피 OCR 은 오른쪽 '교정 실행' 카드, 설정 탭은 바닥 고정 줄(스크롤 밖 — [설정 저장](먹) [OCR로 돌아가기] · 알림 줄 · 오른쪽 '시작할 때 업데이트 확인' [업데이트 확인]).
         설정 탭에서는 실행을 시작할 일이 없어 [■ 중지]를 두지 않는다(실행 중에는 탭을 옮길 수 없고, 고급 도구는 작업 탭에 있음)."""
         P = self.px
         act = self._build_run_column(self._run_slot)
@@ -4989,9 +5071,12 @@ class App(tk.Tk):
                       "이 책의 결과 폴더(book_settings.json)에도 — 결과 폴더가 아직 없으면 실행할 때 남깁니다.").pack(side="left")
         self._btn(settings, "OCR로 돌아가기", self.return_to_ocr, style="Foot.TButton").pack(side="left", padx=(P(10), 0))
         self.v_auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
+        self.b_update = self._btn(settings, "업데이트 확인", self.check_updates, style="Foot.TButton",
+                                  tip="지금 새 판이 있는지 확인합니다(명령 띠의 [더 보기] → [업데이트 확인]과 같음). 실행 중에는 잠깁니다.")
+        self.b_update.pack(side="right", padx=(P(10), 0))
         au = ttk.Checkbutton(settings, text="시작할 때 업데이트 확인", variable=self.v_auto_update, command=self._save_update_preference)
         au.pack(side="right", padx=(P(16), 0))
-        Tip(au, "새 판이 있으면 작업이 끝난 뒤 알립니다 · 지금 확인은 명령 띠의 [더 보기] → [업데이트 확인]", self)
+        Tip(au, "새 판이 있으면 작업이 끝난 뒤 알립니다 · 지금 확인은 오른쪽 [업데이트 확인]", self)
         self.v_notice = tk.StringVar(value=SETTINGS_NOTE)                    # 알림 줄(설정 탭에는 기록 카드가 없음 — 상태 글·마지막 기록 줄, _notice)
         self.l_notice = self._lab(settings, "", "CAP", "MUTED", wrap=True, textvariable=self.v_notice)
         self.l_notice.pack(side="left", fill="x", expand=True, padx=(P(16), 0))
@@ -6100,6 +6185,9 @@ class App(tk.Tk):
             plan = (_label_key(AI_PLAN_LABELS, variable.get()) if variable is not None else cfg.get("local_ai_plan")) or "auto"
             if plan in AI_PLAN_LABELS and plan != "auto":
                 options += ["--local-ai-plan", plan]
+            variable = vars(self).get("v_local_ai_api_fallback")
+            if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_api_fallback", True))):
+                options.append("--no-local-ai-api-fallback")
         root = cfg.get("local_engine_root")
         if root:
             options += ["--local-engine-root", str(root)]
@@ -6287,9 +6375,11 @@ class App(tk.Tk):
             self.after(60, lambda: self._reveal(self.details))
 
     def _apply_details(self):
-        """판독 섹션의 세부 설정(2차 판독 모델·속도·2차 조각·판독 단계·1차 판독·호출 상한)을 섹션 아래에 펼치거나 접는다. 보통은 기본값이면 된다."""
+        """AI 판독기 섹션의 세부 설정(2차 판독 모델·속도·2차 조각·판독 단계·1차 판독·호출 상한)을 섹션 아래에 펼치거나 접는다. 보통은 기본값이면 된다."""
         if self.v_details.get():
-            self.details.pack(fill="x"); self.b_details.configure(text="세부 설정 접기 ▴")
+            anchor = vars(self).get("_model_stage_head")                      # AI 판독기 섹션: 세부 설정은 '판독 뒤 모델 단계' 위에
+            self.details.pack(fill="x", **({"before": anchor} if anchor is not None else {}))
+            self.b_details.configure(text="세부 설정 접기 ▴")
         else:
             self.details.pack_forget(); self.b_details.configure(text="세부 설정 ▾")
 
@@ -6502,6 +6592,9 @@ class App(tk.Tk):
                         self.v_hstyles.set(item[1])
                 elif item[0] == "ai_link":
                     App._show_ai_link(self, item[1])
+                elif item[0] == "plans":
+                    if vars(self).get("l_plans") is not None:
+                        self.l_plans.configure(text=item[1])
                 elif item[0] == "progress":
                     self._on_progress(*item[1:])                       # (단계, 끝난 수, 전체 수[, 그때의 호출 수])
                 elif item[0] == "plan_progress":
@@ -7030,6 +7123,8 @@ class App(tk.Tk):
                 self.cfg["local_ai_subscription"] = bool(self.v_local_ai_subscription.get())
             if vars(self).get("v_local_ai_plan") is not None:
                 self.cfg["local_ai_plan"] = _label_key(AI_PLAN_LABELS, self.v_local_ai_plan.get()) or "auto"
+            if vars(self).get("v_local_ai_api_fallback") is not None:
+                self.cfg["local_ai_api_fallback"] = bool(self.v_local_ai_api_fallback.get())
             cap = max_calls_value(self.v_local_ai_max_calls.get())
             if cap is not None and 1 <= cap <= 100:
                 self.cfg["local_ai_max_calls"] = cap
