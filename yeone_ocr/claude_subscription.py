@@ -22,8 +22,10 @@ Environment:
 from __future__ import annotations
 
 import base64
+import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,7 +60,23 @@ _last_limits: dict | None = None
 
 
 class SubscriptionError(RuntimeError):
-    pass
+    """A plan's own program could not answer. `kind` says what a run does next (subscriptions.Session):
+    "limit" (usage limit: the plan rests until `retry_after` seconds have passed, when the program said
+    when it resets), "account" (sign-in, missing program, a model the plan lacks: out for this run) or
+    "temporary" (server trouble, network, anything not recognised: tried again, then a short rest)."""
+    kind = "account"
+    retry_after = None
+
+
+class Problem(str):
+    """What a module's _classify recognised in a program's error text: the message, with its kind."""
+    kind = "account"
+
+
+def problem(kind: str, message: str) -> Problem:
+    value = Problem(message)
+    value.kind = kind
+    return value
 
 
 class RequestRejected(SubscriptionError):
@@ -71,16 +89,50 @@ _REQUEST_REJECTIONS = ("not a valid json schema", "invalid_json_schema", "invali
 
 
 def failure(program: str, detail: str, classify, fallback: str) -> SubscriptionError:
-    """The error for a failed call, with the program's own words kept: RequestRejected for a refused
-    request, else the account problem `classify` recognises (sign-in, plan limit), else `fallback`."""
+    """The error for a failed call, with the program's own words kept: the account problem `classify`
+    recognises (sign-in, plan limit), else RequestRejected for a refused request, else `fallback` as a
+    temporary failure (the plan itself is not at fault as far as this text says)."""
     text = (detail or "").strip()
     raw = f" (원문: {text[:240]})" if text else ""
     message = classify(text)                 # account problems first: sign-in, plan limit, a model the plan lacks
     if message:
-        return SubscriptionError(message + raw)
+        error = SubscriptionError(message + raw)
+        error.kind = getattr(message, "kind", "account")
+        if error.kind == "limit":
+            error.retry_after = reset_after(text)
+        return error
     if any(k in text.lower() for k in _REQUEST_REJECTIONS):
         return RequestRejected(f"{program}가 이번 요청(검증 스키마·입력)을 거부했습니다{raw}")
-    return SubscriptionError(fallback)
+    error = SubscriptionError(fallback)
+    error.kind = "temporary"
+    return error
+
+
+_CLOCK = re.compile(r"\bresets?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b")
+_SPAN = re.compile(r"\b(?:try again|retry|resets?|reset)\s+(?:in|after)\s+((?:[\s,]*(?:about|and)?\s*\d+\s*"
+                   r"(?:days?|hours?|hrs?|minutes?|mins?|seconds?|secs?|d|h|m|s)(?![a-z]))+)")
+_UNIT = re.compile(r"(\d+)\s*(d|h|m|s)")
+
+
+def reset_after(text: str, now=None) -> float | None:
+    """Seconds until a plan limit resets, as the program's message says: "resets 12:10am" (the next
+    such local time), "try again in 3 hours 42 minutes", "reset after 3h12m5s". None when it does not say."""
+    low = (text or "").lower()
+    span = _SPAN.search(low)
+    if span:
+        seconds = sum(int(n) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[u] for n, u in _UNIT.findall(span.group(1)))
+        return float(min(max(seconds + 60, 60), 7 * 86400)) if seconds else None
+    clock = _CLOCK.search(low)
+    if clock:
+        hour, minute = int(clock.group(1)) % 12 + (12 if clock.group(3) == "p" else 0), int(clock.group(2) or 0)
+        if minute > 59:
+            return None
+        now = now or datetime.datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += datetime.timedelta(days=1)
+        return (target - now).total_seconds() + 60
+    return None
 
 
 def auth_mode(requested: str | None = None) -> str:
@@ -294,13 +346,19 @@ def _parse_events(stdout: str) -> list:
     return events
 
 
+# "You've hit your 5-hour limit · resets 12:10am", "weekly limit reached", "usage limit". A bare
+# rate_limit_error / overloaded (too many requests at this moment) is left to the temporary path:
+# the same plan is tried again, and rests only for a short while if it keeps failing.
+_LIMIT = re.compile(r"usage limit|(?<!rate )limit reached|hit your\b[^.\n]{0,40}\blimit|out of (?:extra )?usage")
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
     if any(k in low for k in ("not logged in", "/login", "login expired", "authentication_failed",
                               "invalid api key", "oauth token has expired")):
-        return "Claude Code 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT
-    if any(k in low for k in ("usage limit", "limit reached", "rate_limit", "rate limit")):
-        return "Claude 구독 사용량 한도(5시간 또는 주간)에 도달했습니다. 한도가 초기화된 뒤 다시 실행하세요."
+        return problem("account", "Claude Code 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT)
+    if _LIMIT.search(low):
+        return problem("limit", "Claude 구독 사용량 한도(5시간 또는 주간)에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
     return None
 
 

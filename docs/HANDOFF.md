@@ -1,5 +1,15 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: (다음 판) 엔진 앞서 읽기 · 계정이 여러 쪽 · 쪽 판독과 검증 동시 · 구독 쉬었다 복귀
+
+`local_first._AiWorkers`(이전 `_SplitPlans`): 구독 세션이 있고 AI 검증이 켜져 있으면 늘 쓴다. 엔진을 마친 쪽은 주 스레드가 `_save_record`로 먼저 기록하고(`saved=True`) 쪽 알림 `queued`를 낸 뒤 `submit`으로 대기열(쪽 차례)에 넣고 바로 다음 쪽을 읽는다 — 엔진은 AI의 답을 기다리지 않는다. 연결(crew)은 `--local-ai-split`이면 로그인된 구독마다, 아니면 실행의 한 구독이고, 연결마다 `--local-ai-pages`(기본 2, 창 설정 `local_ai_pages`)개의 스레드가 대기열에서 쪽을 가져간다. `_may_take`: 다음 쪽은 차례상 앞선 연결에 빈 작업자가 있으면 그쪽이 먼저(실행의 첫 구독 우선), 갈 곳 없는 연결(`session.available` 거짓)은 쪽을 가져가지 않는다. [중지]면 대기 중인 쪽은 엔진 판독만 남긴다(다음 실행에서 이어 검증). `ai_stage`는 쪽 판독을 `_Side`(스레드)로 띄우고 `review_stage`(계획·검증·제안 반영)와 함께 진행한 뒤 기록에서 만난다. 진행 막대(`cli.progress("read")`)는 엔진이 읽은 쪽이 아니라 끝난 쪽 수(`page_finished`)다. `state = work.load_state()`는 작업자가 끝난 뒤에 읽는다(먼저 읽으면 작업자의 쪽 상태를 덮어씀). API 키만 쓰는 실행·검증 끔은 예전처럼 쪽 반복 안에서 한다.
+
+`claude_subscription.SubscriptionError.kind`: `limit`(한도 — `retry_after`는 `reset_after`가 원문에서 읽은 초: "resets 12:10am" · "try again in 3 hours 42 minutes" · "reset after 1h2m5s") · `account`(로그인·프로그램 없음·모델 없음) · `temporary`(그 밖: 서버·네트워크·알 수 없는 실패). 모듈의 `_classify`는 `problem(kind, 글)`을 돌려준다. HTTP 숫자(401·429)는 status/http/code/error 옆에 있을 때만 본다(시간 표기·요청 id의 숫자를 로그인·한도로 잘못 읽지 않게). Gemini는 매번 찍히는 "Loaded cached credentials."를 로그인 문제로 읽지 않는다.
+
+`subscriptions.Session.request`: `temporary`는 같은 구독에 `RETRY_WAITS`(3초·10초) 뒤 다시 보내고, 그래도 실패하면 그 구독을 `REST_SECONDS`(10분, 쉴 때마다 두 배) 쉬게 하고 다음 구독으로 보낸다. 같은 요청이 두 번째 구독에서도 일시 실패하면 요청 탓으로 보고 쉬게 한 구독을 풀고(`release`) 그 요청만 실패. `limit`는 `retry_after`(없으면 `LIMIT_REST_SECONDS` 30분, 두 배씩)만큼, `account`는 실행 끝까지. `_exhausted`는 `{plan: {reason, until}}`이고 `exhausted()`는 지난 것을 뺀다. `_come_back`: 요청 전(그리고 `available`에서) 처음 구독의 쉼이 끝났으면 돌아간다 — 사용자가 넘긴 연결(`_stay`)은 돌아가지 않는다. `_as_first(result, plan)`은 답한 구독(요청을 보낼 때의 `plan`)으로 완료 표시를 고친다 — 요청이 나가 있는 동안 같은 연결의 다른 요청이 실패해 연결이 옮겨 가면 `self.plan`은 이미 다른 구독이다(3계정 장애 모의 실행에서 "AI 위치 복원 기록…" 쪽 오류로 드러남). `activate(session, team)`·`state()`: 창의 AI 연결 줄은 모든 연결의 이름과 쉬는 구독(`resting()`: 몇 분 뒤 다시·이유)을 보인다. `switch`는 같은 구독을 쓰던 다른 연결도 함께 옮긴다. `probe(plan)`·`cli.plan_test_lines`·`plans --test`·창 [연결 시험]: 실행 때와 같은 방식의 작은 실제 요청 하나.
+
+`chatgpt_subscription`: `-i`는 뒤따르는 값을 모두 가져가므로 `--output-schema`·`-o`를 마지막 그림과 `-` 사이에 둔다(예전에는 Codex가 `-`를 그림 파일로 읽어 "could not read the local image at `-`"가 프롬프트에 섞였다 — 실제 Codex CLI 0.167.2를 가짜 Responses 서버에 붙여 확인). 모델 거부 때 `codex debug models` 목록 뒤에 `FALLBACK_MODELS`(지금 이름)를 이어 시도한다(오래된 CLI는 옛 이름만 낸다). "requires a newer version"류는 `UPDATE_HINT`.
+
 ## 2026-11-12: 1.2.10 Codex 모델 거부
 
 `chatgpt_subscription.SubscriptionClient.request`: 모델을 정하지 않은 요청이 `ModelRefused`(model_not_found · "not supported when using Codex with a ChatGPT account")면 `codex debug models`(계정의 모델 목록, visibility list · image 입력 · priority 순)에서 다음 모델로 다시 시도하고 답한 모델을 `_working_model`로 기억한다. 모두 거부되면 일반 SubscriptionError(세션이 다음 구독으로). `claude_subscription.failure`는 classify(계정 문제)를 요청 거부 낱말보다 먼저 본다.

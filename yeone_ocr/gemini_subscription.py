@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli
+from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli, problem
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
@@ -172,15 +172,24 @@ def _empty_dir() -> str:
     return str(path)
 
 
+# Words of the failure itself only: "Loaded cached credentials." is printed on every run, and a bare
+# 401/429 also appears in timestamps and ids of an unrelated failure.
+_SIGN_IN = re.compile(r"auth method|please (?:log|sign) ?in|login required|not (?:logged|signed) in|unauthenticated|"
+                      r"authentication (?:failed|required|error)|manual authorization|consent|invalid[_ ]grant|"
+                      r"(?:credentials?|token)\b[^.\n]{0,40}\b(?:expired|invalid|missing|not found|revoked)|"
+                      r"(?:status|http|code|error)\D{0,12}401\b|\b401\s+unauth")
+_LIMIT = re.compile(r"quota|resource_exhausted|resource exhausted|rate[_ ]limit|usage limit|too many requests|"
+                    r"(?:status|http|code|error)\D{0,12}429\b|\b429\s+too")
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
-    if any(k in low for k in ("auth method", "login", "authentication", "unauthenticated", "401",
-                              "consent", "credentials", "manual authorization")):
-        return "Gemini CLI 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT
-    if any(k in low for k in ("quota", "resource_exhausted", "rate limit", "429", "usage limit")):
-        return "Google 계정의 Gemini 사용량 한도에 도달했습니다. 한도가 초기화된 뒤 다시 실행하세요."
+    if _LIMIT.search(low):
+        return problem("limit", "Google 계정의 Gemini 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
+    if _SIGN_IN.search(low):
+        return problem("account", "Gemini CLI 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT)
     if re.search(r"model\b[^.\n]{0,80}\b(?:is not supported|does not exist|not found)|model_not_found", low):
-        return "이 Google 계정에서 쓸 수 없는 모델입니다. YEONE_OCR_GEMINI_MODEL을 비우면 Gemini CLI 기본 선택을 씁니다."
+        return problem("account", "이 Google 계정에서 쓸 수 없는 모델입니다. YEONE_OCR_GEMINI_MODEL을 비우면 Gemini CLI 기본 선택을 씁니다.")
     return None
 
 

@@ -164,6 +164,9 @@ class PageStrip(unittest.TestCase):
         self.assertEqual(k(["done"]), ("done", 1.0))
         self.assertEqual(k(["done", "record", "remain", "remain"]), ("remain", 0.5))
         self.assertEqual(k(["remain"]), ("remain", 0.0))
+        self.assertEqual(k(["done", "queued", "remain", "remain"]), ("queued", 0.25))   # 엔진 끝 · AI 차례 기다림
+        self.assertEqual(k(["queued", "now"]), ("now", 0.0))
+        self.assertEqual(self.G.settle_marks({1: "queued", 2: "done"}), {1: "remain", 2: "done"})   # 멈추면 다음 실행에서 이어 검증
 
     def test_page_marks_from_records_and_status(self):
         from yeone_ocr.state import page_marks

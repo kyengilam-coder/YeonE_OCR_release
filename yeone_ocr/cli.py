@@ -55,7 +55,7 @@ def skip_any(args) -> bool:
 CANCEL = threading.Event()   # 창 프로그램의 [중지] 단추가 켠다. 쪽 사이에서 확인한다.
 PROGRESS = None              # 창 프로그램이 넣는 진행 알림 함수 f(단계, 끝난 수, 전체 수). 명령줄에서는 None.
 PAGE_EVENT = None            # 창 프로그램이 넣는 쪽 알림 함수 f(쪽 번호, 상태) — 쪽 띠의 칸. 상태는 PAGE_STATES. 명령줄에서는 None.
-PAGE_STATES = ("record", "remain", "now", "done", "fail")   # 기록 있어 건너뜀 · 읽을 차례 · 판독 중 · 끝남 · 판독 실패(다시 시도 가능)
+PAGE_STATES = ("record", "remain", "now", "queued", "done", "fail")   # 기록 있어 건너뜀 · 읽을 차례 · 판독 중 · 엔진 끝·AI 차례 기다림 · 끝남 · 판독 실패(다시 시도 가능)
 LOCAL_API_CALLS = 0  # Direct selective-review SDK calls, separate from legacy reader counters.
 DOC_LOCK = threading.Lock()  # PyMuPDF 문서 객체는 스레드 안전하지 않다. 여러 쪽을 동시에 읽을 때 문서 접근을 직렬화한다.
 LOG_LOCK = threading.Lock()
@@ -2726,6 +2726,8 @@ def build_parser():
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태(모델 호출 없음)")
+    p.add_argument("--test", action="store_true",
+                   help="연결 시험: 쓸 수 있는 계정마다 작은 요청 하나를 실제로 보내 답하는지, 어느 모델인지, 실패하면 그 이유를 보임")
     p.set_defaults(fn=cmd_plans)
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
     p = sub.add_parser("read"); common(p); read_opts(p); p.set_defaults(fn=cmd_read)
@@ -2808,6 +2810,9 @@ def build_parser():
                    help="로그인된 구독 계정 여럿(Claude·ChatGPT·Gemini)에 쪽을 나눠 보냄(기본 켬, 끄려면 --no-local-ai-split): 엔진이 다음 쪽을 읽는 동안 "
                         "계정마다 맡은 쪽의 AI 쪽 판독·검증을 함께 진행. 한 쪽은 한 계정이 끝까지 검증. 한도를 나눠 쓰고 빨라지지만 "
                         "쪽마다 검증한 모델이 다를 수 있음(ChatGPT·Gemini의 정확도는 아직 재지 않음)")
+    p.add_argument("--local-ai-pages", type=int, choices=range(1, 5), metavar="1-4", default=2,
+                   help="구독 계정 하나가 AI 판독·검증을 함께 맡는 쪽 수(기본 2, 1 = 한 쪽씩). 엔진은 AI의 답을 기다리지 않고 다음 쪽을 "
+                        "계속 읽고, 엔진을 마친 쪽은 차례대로 계정에 넘어감. 쪽 수만큼 빨라지며 총 사용량은 같고 한도가 그만큼 빨리 참")
     p.add_argument("--local-ai-api-fallback", action=argparse.BooleanOptionalAction, default=True,
                    help="구독 계정의 사용량 한도에 닿거나 로그인이 풀리면 로그인된 다른 구독 계정으로 이어 가고, 쓸 수 있는 구독 계정이 "
                         "없으면 API 키로 넘어감(기본 켬, 이번 실행 API 호출은 --local-ai-max-calls 까지). "
@@ -2895,7 +2900,29 @@ def cmd_plans(args):
         log(line + ("" if state["usable"] else f" — {state.get('reason') or ''}"))
     log(f"자동 선택(YEONE_OCR_AI_PLAN={subscriptions.plan_choice()}): "
         + (subscriptions.NAMES[chosen] if chosen else "없음 — API 키로만 검증"))
+    if getattr(args, "test", False):
+        log("연결 시험(계정마다 작은 요청 하나를 실제로 보냅니다 · 구독 사용량에서 조금 차감):")
+        for line in plan_test_lines():
+            log("  " + line)
     return 0 if chosen else 1
+
+
+def plan_test_lines(plans=None) -> list:
+    """[연결 시험] / `plans --test`: one small real request through each usable plan, as a run sends it."""
+    from . import subscriptions
+    lines = []
+    for plan in plans or subscriptions.PLANS:
+        name = subscriptions.NAMES[plan]
+        state = subscriptions.status(plan)
+        if not state["usable"]:
+            lines.append(f"{name}: 시험 안 함 — {state.get('reason') or '로그인 필요'}")
+            continue
+        result = subscriptions.probe(plan)
+        if result["ok"]:
+            lines.append(f"{name}: 응답함 · 모델 {result['model']} · {result['seconds']:.0f}초")
+        else:
+            lines.append(f"{name}: 실패({result['seconds']:.0f}초) — {result['error']}")
+    return lines
 
 
 def main(argv=None):

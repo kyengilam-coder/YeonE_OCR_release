@@ -480,15 +480,14 @@ def test_window_label_is_short_and_the_details_stay_available():
     assert "API 키도 없음" in session.stop_reason()
 
 
-# ---- 쪽 나눠 보내기 (--local-ai-split) ----
+# ---- AI 작업자: 엔진은 기다리지 않고, 계정마다 여러 쪽을 함께 (--local-ai-split · --local-ai-pages) ----
 
-def _split(stage, plans=("claude", "chatgpt")):
-    from concurrent.futures import ThreadPoolExecutor
-    from yeone_ocr.local_first import _SplitPlans
+def _workers(stage, plans=("claude", "chatgpt"), pages=1, available=None, **hooks):
+    from yeone_ocr.local_first import _AiWorkers
     failed = []
-    workers = [{"plan": p, "session": SimpleNamespace(available=True, plan=p), "reader": None, "future": None,
-                "pool": ThreadPoolExecutor(max_workers=1)} for p in plans]
-    return _SplitPlans(workers, stage, lambda number, exc: failed.append((number, str(exc))), lambda _m: None), failed
+    crews = [{"plan": p, "session": SimpleNamespace(available=(available or {}).get(p, True), plan=p), "reader": None,
+              "pages": pages} for p in plans]
+    return _AiWorkers(crews, stage, lambda number, exc: failed.append((number, str(exc))), lambda _m: None, **hooks), failed
 
 
 def test_split_pages_run_side_by_side_one_plan_per_page():
@@ -496,7 +495,7 @@ def test_split_pages_run_side_by_side_one_plan_per_page():
     import time
     seen, lock, live = [], threading.Lock(), {"now": 0, "most": 0}
 
-    def stage(number, started, review, extras, session, reader):
+    def stage(number, started, review, extras, session, reader, saved):
         with lock:
             live["now"] += 1
             live["most"] = max(live["most"], live["now"])
@@ -504,47 +503,315 @@ def test_split_pages_run_side_by_side_one_plan_per_page():
         with lock:
             live["now"] -= 1
             seen.append((number, session.plan))
-    split, failed = _split(stage)
+    workers, failed = _workers(stage)
     began = time.perf_counter()
     for number in range(1, 5):
-        split.dispatch(number, 0, {}, {})
-    assert split.finish() is None
+        workers.submit(number, 0, {}, {})
+    assert workers.finish() is None
     assert time.perf_counter() - began < 4 * 0.2 * 0.75 and live["most"] == 2       # two plans at a time
     assert sorted(n for n, _ in seen) == [1, 2, 3, 4] and failed == []
     assert {p for _, p in seen} == {"claude", "chatgpt"}
     assert len({n for n, _ in seen}) == 4                                            # each page once, by one plan
 
 
-def test_split_sends_the_next_page_to_the_plan_that_is_free():
+def test_one_plan_takes_several_pages_at_a_time():
     import threading
-    gate = threading.Event()
+    import time
+    lock, live, done = threading.Lock(), {"now": 0, "most": 0}, []
+
+    def stage(number, started, review, extras, session, reader, saved):
+        with lock:
+            live["now"] += 1
+            live["most"] = max(live["most"], live["now"])
+        time.sleep(0.15)
+        with lock:
+            live["now"] -= 1
+    workers, _ = _workers(stage, plans=("claude",), pages=3, on_done=done.append)
+    for number in range(1, 7):
+        workers.submit(number, 0, {}, {})
+    assert workers.finish() is None
+    assert live["most"] == 3 and sorted(done) == [1, 2, 3, 4, 5, 6]                 # --local-ai-pages 3
+
+
+def test_the_engines_do_not_wait_for_the_ai_pages_queue_in_page_order():
+    import threading
+    gate, started, order = threading.Event(), [], []
+
+    def stage(number, started_at, review, extras, session, reader, saved):
+        order.append(number)
+        gate.wait(5)
+    workers, _ = _workers(stage, plans=("claude",), pages=1, on_start=started.append)
+    for number in range(1, 6):
+        workers.submit(number, 0, {}, {}, True)                                       # returns at once: nothing waits for an answer
+    for _ in range(200):
+        if started:
+            break
+        threading.Event().wait(0.01)
+    assert started == [1] and workers.waiting() == 4                                 # four pages read by the engines wait for their AI turn
+    gate.set()
+    assert workers.finish() is None and order == [1, 2, 3, 4, 5]
+
+
+def test_workers_report_a_page_failure_and_a_stop_leaves_the_waiting_pages():
+    from yeone_ocr.comparison import ComparisonError
     seen = []
 
-    def stage(number, started, review, extras, session, reader):
-        if number == 1:
-            gate.wait(5)                                                               # Claude busy with page 1
-        seen.append((number, session.plan))
-    split, _ = _split(stage)
-    split.dispatch(1, 0, {}, {})
-    split.dispatch(2, 0, {}, {})
-    split.dispatch(3, 0, {}, {})                                                       # waits for ChatGPT, not Claude
-    gate.set()
-    split.finish()
-    assert dict(seen)[2] == "chatgpt" and dict(seen)[3] == "chatgpt" and dict(seen)[1] == "claude"
-
-
-def test_split_reports_a_page_failure_and_a_stop():
-    from yeone_ocr.comparison import ComparisonError
-
-    def stage(number, started, review, extras, session, reader):
+    def stage(number, started, review, extras, session, reader, saved):
+        seen.append(number)
         if number == 1:
             raise ComparisonError("쪽 오류")
         return 130 if number == 2 else None
-    split, failed = _split(stage)
-    for number in (1, 2, 3):
-        split.dispatch(number, 0, {}, {})
-    assert split.finish() == 130
-    assert failed == [(1, "쪽 오류")]
+    workers, failed = _workers(stage, plans=("claude",))
+    for number in (1, 2, 3, 4):
+        workers.submit(number, 0, {}, {})
+    assert workers.finish() == 130
+    assert failed == [(1, "쪽 오류")] and seen == [1, 2]                              # 3 and 4 keep their engine reading
+
+
+def test_a_connection_with_no_way_left_leaves_the_pages_to_the_others():
+    seen = []
+    workers, _ = _workers(lambda number, *_a: seen.append((number, _a[3].plan)), available={"chatgpt": False})
+    for number in range(1, 6):
+        workers.submit(number, 0, {}, {})
+    workers.finish()
+    assert [plan for _, plan in seen] == ["claude"] * 5
+
+
+# ---- 일시 오류는 다시 보내고, 한도는 초기화되면 돌아온다 ----
+
+def _error(message, kind, retry_after=None):
+    error = SubscriptionError(message)
+    error.kind, error.retry_after = kind, retry_after
+    return error
+
+
+class _Flaky:
+    """A plan's client that fails with the given errors in turn, then answers."""
+
+    def __init__(self, name, errors=()):
+        self.name, self.errors, self.calls = name, list(errors), 0
+
+    def request(self, **_kwargs):
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return '{"lines": []}', True, "done", {}, self.name
+
+
+def _ask(session):
+    return session.request(model_name="opus", system="s", prompt="p", images=[], schema=SCHEMA)
+
+
+def test_a_temporary_failure_is_sent_again_to_the_same_plan():
+    plans = {"chatgpt": _Flaky("chatgpt", [_error("high demand", "temporary")] * 2), "claude": _Flaky("claude")}
+    logs, waits = [], []
+    with _with(_states(claude=True, chatgpt=True)):
+        session = subscriptions.Session("chatgpt", "chatgpt", log=logs.append, factory=plans.__getitem__, sleep=waits.append)
+        with mock.patch.object(subscriptions, "RETRY_WAITS", (0.01, 0.01)):
+            assert _ask(session)[-1] == "chatgpt"
+        assert session.plan == "chatgpt" and subscriptions.exhausted() == {}          # ChatGPT stays in the run
+        assert plans["chatgpt"].calls == 3 and plans["claude"].calls == 0
+        assert len(logs) == 2 and "일시 오류" in logs[0] and waits
+
+
+def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():
+    now = [1000.0]
+    plans = {"chatgpt": _Flaky("chatgpt", [_error("stream disconnected", "temporary")] * 3), "claude": _Flaky("claude")}
+    logs = []
+    with _with(_states(claude=True, chatgpt=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]), \
+            mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
+        session = subscriptions.Session("chatgpt", "chatgpt", log=logs.append, factory=plans.__getitem__, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "claude" and session.plan == "claude"            # the request itself is answered
+        assert "약 10분 뒤 다시 씁니다" in logs[-1]
+        assert [item["minutes"] for item in subscriptions.resting()] == [10]
+        now[0] += 300
+        assert _ask(session)[-1] == "claude"                                          # still resting
+        now[0] += 301
+        assert _ask(session)[-1] == "chatgpt" and session.plan == "chatgpt"          # back on its own plan
+        assert "다시 씁니다(쉬는 시간이 지남)" in logs[-1] and subscriptions.resting() == []
+
+
+def test_a_request_that_fails_on_two_plans_is_the_requests_own_problem():
+    failure_ = [_error("boom", "temporary")] * 3
+    plans = {"claude": _Flaky("claude", list(failure_)), "chatgpt": _Flaky("chatgpt", list(failure_)), "gemini": _Flaky("gemini")}
+    with _with(_states(claude=True, chatgpt=True, gemini=True)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
+        session = subscriptions.Session("claude", log=lambda _m: None, factory=plans.__getitem__, sleep=lambda _s: None)
+        with pytest.raises(SubscriptionError, match="boom"):
+            _ask(session)
+        assert subscriptions.exhausted() == {} and plans["gemini"].calls == 0         # no plan is lost to one bad request
+        assert _ask(session)[-1] == "claude"                                          # and the next request is back on Claude
+
+
+def test_a_plan_at_its_limit_comes_back_when_the_limit_resets():
+    now = [0.0]
+    plans = {"claude": _Flaky("claude", [_error("5-hour limit", "limit", 3600.0)]), "chatgpt": _Flaky("chatgpt")}
+    logs = []
+    with _with(_states(claude=True, chatgpt=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("claude", log=logs.append, factory=plans.__getitem__)
+        assert _ask(session)[-1] == "chatgpt" and "약 1시간 0분 뒤 다시 씁니다" in logs[-1]
+        now[0] = 3599
+        assert _ask(session)[-1] == "chatgpt"
+        now[0] = 3601
+        assert _ask(session)[-1] == "claude"
+        # without a stated time: looked at again after LIMIT_REST_SECONDS, twice as long the next time
+        plans["claude"].errors = [_error("limit", "limit")]
+        assert _ask(session)[-1] == "chatgpt"
+        assert subscriptions.resting()[0]["minutes"] == round(subscriptions.LIMIT_REST_SECONDS * 2 / 60)
+
+
+def test_the_last_plan_resting_makes_the_connection_available_again_later():
+    now = [0.0]
+    plans = {"claude": _Flaky("claude", [_error("limit", "limit", 600.0)])}
+    with _with(_states(claude=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("claude", log=lambda _m: None, factory=plans.__getitem__)
+        with pytest.raises(SubscriptionError):
+            _ask(session)
+        assert not session.available
+        now[0] = 601
+        assert session.available and session.plan == "claude" and _ask(session)[-1] == "claude"
+
+
+def test_the_users_own_switch_is_not_undone_by_a_rest_that_ends():
+    now = [0.0]
+    plans = {"claude": _Flaky("claude"), "chatgpt": _Flaky("chatgpt")}
+    with _with(_states(claude=True, chatgpt=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("claude", log=lambda _m: None, factory=plans.__getitem__)
+        session.switch("chatgpt")
+        now[0] = 10 ** 6
+        assert _ask(session)[-1] == "chatgpt" and "claude" in subscriptions.exhausted()
+
+
+def test_an_answer_is_recorded_by_the_plan_that_gave_it_even_if_the_connection_moved_on_meanwhile():
+    import threading
+    out, answer, results = threading.Event(), threading.Event(), {}
+
+    class Gemini:
+        calls = 0
+
+        def request(self, **_kwargs):
+            Gemini.calls += 1
+            if Gemini.calls == 1:
+                out.set()
+                answer.wait(5)                                                        # still out when the plan is left
+                return '{"lines": []}', True, "STOP", {}, "gemini"
+            raise _error("limit", "limit", 600.0)
+    plans = {"gemini": Gemini(), "claude": _Flaky("claude")}
+    with _with(_states(claude=True, gemini=True)):
+        session = subscriptions.Session("gemini", "gemini", log=lambda _m: None, factory=plans.__getitem__, record_provider="anthropic")
+        first = threading.Thread(target=lambda: results.update(first=_ask(session)))
+        first.start()
+        assert out.wait(5)
+        assert _ask(session)[-1] == "claude" and session.plan == "claude"            # another request of it hit the limit
+        answer.set()
+        first.join(5)
+    # Gemini's own "STOP" is written in the record's provider's terms (the review record names anthropic)
+    assert results["first"][2] == "end_turn" and results["first"][-1] == "gemini"
+
+
+def test_reset_time_is_read_from_the_programs_own_words():
+    import datetime
+    from yeone_ocr.claude_subscription import reset_after
+    at = datetime.datetime(2026, 11, 12, 22, 40)
+    assert reset_after("You've hit your 5-hour limit · resets 12:10am (Asia/Seoul)", now=at) == 90 * 60 + 60
+    assert reset_after("limit reached, resets 3pm", now=at) == (16 * 60 + 20) * 60 + 60        # tomorrow afternoon
+    assert reset_after("You've hit your usage limit. Try again in 3 hours 42 minutes.") == (3 * 60 + 42) * 60 + 60
+    assert reset_after("Your quota will reset after 1h2m5s.") == 3600 + 125 + 60
+    assert reset_after("try again later") is None and reset_after("") is None
+
+
+def test_claude_limit_words_and_unknown_failures_are_told_apart():
+    from yeone_ocr.claude_subscription import failure
+    error = failure("Claude Code", "You've hit your 5-hour limit · resets 12:10am (Asia/Seoul)", claude._classify, "fallback")
+    assert error.kind == "limit" and error.retry_after and "사용량 한도" in str(error) and "5-hour limit" in str(error)
+    assert failure("Claude Code", "API Error: 529 overloaded", claude._classify, "Claude Code 오류: overloaded").kind == "temporary"
+    assert failure("Claude Code", 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}', claude._classify, "f").kind == "temporary"
+    assert failure("Claude Code", "Claude usage limit reached. Your limit will reset at 3pm.", claude._classify, "f").kind == "limit"
+    assert failure("Claude Code", "Not logged in · Please run /login", claude._classify, "x").kind == "account"
+
+
+def test_a_number_in_an_unrelated_failure_is_not_a_sign_in_or_limit_problem():
+    from yeone_ocr.claude_subscription import failure
+    noise = "2026-11-12T05:28:11.401220Z ERROR codex_api: stream disconnected (request 429f01)"
+    assert codex._classify(noise) is None and failure("Codex CLI", noise, codex._classify, "f").kind == "temporary"
+    assert codex._classify("unexpected status 401 Unauthorized").kind == "account"
+    assert codex._classify("exceeded retry limit, last status: 429 Too Many Requests").kind == "limit"
+    assert "오래되어" in codex._classify("The 'gpt-6.1-sol' model requires a newer version of Codex. Please upgrade.")
+    # Gemini CLI prints "Loaded cached credentials." on every run: not a sign-in problem
+    assert gemini._classify("Loaded cached credentials.\nError: socket hang up") is None
+    assert gemini._classify("Please login again: credentials expired").kind == "account"
+    assert gemini._classify("RESOURCE_EXHAUSTED: quota exceeded").kind == "limit"
+
+
+def test_codex_keeps_an_option_between_the_last_image_and_the_stdin_dash():
+    seen = {}
+
+    def run(args, **kwargs):
+        seen["args"] = args
+        Path(args[args.index("-o") + 1]).write_text('{"lines": []}', encoding="utf-8")
+        return _ok(stdout=json.dumps({"type": "turn.completed", "usage": {}}))
+    codex.SubscriptionClient(runner=run).request(model_name="codex-default", system="s", prompt="p", images=[b"a", b"b"], schema=SCHEMA)
+    args = seen["args"]
+    last_image = max(i for i, a in enumerate(args) if a == "-i") + 1
+    assert args[-1] == "-" and args[-3] == "-o" and last_image < args.index("--output-schema")   # -i takes every value after it
+
+
+def test_codex_tries_current_model_names_after_an_old_clis_own_list():
+    tried = []
+
+    def run(args, **kwargs):
+        if args[1:3] == ["debug", "models"]:
+            return _ok(stdout=json.dumps({"models": [{"slug": "gpt-5.5", "priority": 1}, {"slug": "gpt-5.4", "priority": 2}]}))
+        name = args[args.index("-m") + 1] if "-m" in args else "(default)"
+        tried.append(name)
+        if name in ("(default)", "gpt-5.5", "gpt-5.4"):
+            return _ok(returncode=1, stdout=json.dumps({"type": "turn.failed", "error": {"message": REFUSED}}))
+        Path(args[args.index("-o") + 1]).write_text('{"lines": []}', encoding="utf-8")
+        return _ok(stdout=json.dumps({"type": "turn.completed", "usage": {}}))
+    client = codex.SubscriptionClient(runner=run)
+    assert client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)[-1] == codex.FALLBACK_MODELS[0]
+    assert tried == ["(default)", "gpt-5.4", codex.FALLBACK_MODELS[0]]                # gpt-5.5 was the refused default
+
+
+def test_window_state_names_every_connection_and_the_resting_plans():
+    plans = {"claude": _Flaky("claude"), "chatgpt": _Flaky("chatgpt", [_error("limit", "limit", 1200.0)]), "gemini": _Flaky("gemini")}
+    states = []
+    with _with(_states(claude=True, chatgpt=True, gemini=True)), mock.patch.object(subscriptions, "ON_CHANGE", states.append):
+        first = subscriptions.Session("claude", log=lambda _m: None, factory=plans.__getitem__)
+        second = subscriptions.Session("chatgpt", "chatgpt", log=lambda _m: None, factory=plans.__getitem__)
+        subscriptions.activate(first, [first, second])
+        assert states[-1]["label"] == "Claude 구독 · ChatGPT 구독" and states[-1]["resting"] == []
+        assert _ask(second)[-1] == "claude"                                           # ChatGPT at its limit: its pages go to Claude
+        assert states[-1]["label"] == "Claude 구독"
+        assert [(item["plan"], item["minutes"]) for item in states[-1]["resting"]] == [("chatgpt", 20)]
+        subscriptions.deactivate()
+        assert states[-1] is None
+
+
+def test_connection_test_sends_one_small_real_request():
+    seen = []
+
+    class Client:
+        def request(self, **kwargs):
+            seen.append(kwargs)
+            return '{"ok": true}', True, "completed", {}, "gpt-test"
+    result = subscriptions.probe("chatgpt", client_factory=lambda _plan: Client())
+    assert result["ok"] and result["model"] == "gpt-test" and result["error"] == ""
+    assert seen[0]["images"][0][:8] == b"\x89PNG\r\n\x1a\n" and seen[0]["schema"]["required"] == ["ok"]
+
+    def broken(_plan):
+        raise SubscriptionError("Codex CLI 로그인이 필요합니다")
+    result = subscriptions.probe("chatgpt", client_factory=broken)
+    assert not result["ok"] and "로그인" in result["error"]
+
+
+def test_plans_test_lists_each_plans_answer(capsys):
+    from yeone_ocr import cli
+    with _with(_states(claude=True, chatgpt=True)), \
+            mock.patch.object(subscriptions, "probe", side_effect=lambda plan: {"ok": plan == "claude", "seconds": 4.2, "model": "opus",
+                                                                              "error": "" if plan == "claude" else "원문: boom"}):
+        lines = cli.plan_test_lines()
+    assert lines[0] == "Claude: 응답함 · 모델 opus · 4초" and lines[1] == "ChatGPT: 실패(4초) — 원문: boom"
+    assert lines[2].startswith("Gemini: 시험 안 함")
 
 
 # ---- 찾았지만 실행되지 않는 CLI · PATH 밖의 npm 전역 폴더 ----
