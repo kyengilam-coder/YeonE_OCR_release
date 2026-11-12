@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-12: 1.2.4 겹친 검증 대상 식별자 · 요청 거부
+
+`comparison_ai._target`의 식별자는 (쪽, 종류, 위치, 글자, 출처)로 만들어 상자를 넣지 않는다. 같은 단어 뒤의 '읽지 못한 먹 자국'(unrecognized-ink-region)이나 빈 판독의 먹 자국(empty-ocr-with-ink)은 같은 빈 위치라 식별자가 겹쳤고, 묶음 4개(구독 기본)에서 한 묶음에 들어가면 응답 스키마 enum 중복(Claude Code·엄격 구조화 출력이 거부)과 프로젝트의 검증 기록 거부로 이어졌다. `_unique_ids`가 겹치는 것만 상자로 다시 만든다(첫 식별자는 그대로라 이어 쓰기 유지). CLI가 요청을 거부한 오류는 `claude_subscription.RequestRejected`로 계정 넘김 없이 그 요청만 실패(fatal 아님)로 둔다. 오류 안내는 `failure()`가 원문을 붙인다. 진행 기록의 쪽별 상태는 `local_first.REVIEW_STATUS_LABELS`로 한국어 표기한다(기록 값은 그대로; 측정 도구 정규식도 맞춤).
+
 ## 2026-11-12: 1.2.3 [다음 구독으로 넘기기]
 
 진행 카드의 AI 연결 줄(`gui.App._show_ai_link`, `switch_subscription`)이 실행 중인 `subscriptions.Session`을 옮긴다. `local_first`가 세션을 `subscriptions.activate`로 알리고 실행이 끝나면 `deactivate`한다. 창은 같은 프로세스에서 명령을 돌리므로 `subscriptions.ON_CHANGE`(창이 실행 동안 거는 콜백)로 상태를 받는다. `Session.switch(target)`은 쓰던 계정을 이번 실행의 '넘김'으로 표시하고, 세션이 띄운 CLI(세션의 `_run`으로 실행, Windows는 `taskkill /T`, 그 밖은 프로세스 묶음)를 끈 뒤 고른 계정(로그인 안 됐으면 순서대로)이나 순서의 다음, 남은 구독이 없으면 API 키에 연결한다. 끊긴 요청은 `Session.request`가 계정이 바뀐 것을 보고 새 연결로 다시 보낸다.
