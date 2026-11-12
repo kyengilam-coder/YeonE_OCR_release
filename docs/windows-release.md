@@ -1,3 +1,13 @@
+# Windows 1.2.10 설치판
+
+1.2.10은 1.2.9의 설치 구성을 그대로 쓰고 Codex(ChatGPT 구독)가 기본 모델을 거부할 때 계정의 다른 모델로 다시 시도하도록 고친 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.10**으로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.10`으로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.10), 1.2.9 설치본의 업데이트 확인이 1.2.10을 새 판으로 알리는지, ChatGPT 구독으로 검증할 때 모델 거부 없이 진행되는지, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.10 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.10)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.9 설치판
 
 1.2.9는 1.2.8의 설치 구성을 그대로 쓰고 구독 프로그램 설치·로그인 단추, 로그인 상태 원인 표시, 쪽 나눠 보내기 기본 켬을 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.

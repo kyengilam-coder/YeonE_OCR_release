@@ -75,10 +75,12 @@ def failure(program: str, detail: str, classify, fallback: str) -> SubscriptionE
     request, else the account problem `classify` recognises (sign-in, plan limit), else `fallback`."""
     text = (detail or "").strip()
     raw = f" (원문: {text[:240]})" if text else ""
+    message = classify(text)                 # account problems first: sign-in, plan limit, a model the plan lacks
+    if message:
+        return SubscriptionError(message + raw)
     if any(k in text.lower() for k in _REQUEST_REJECTIONS):
         return RequestRejected(f"{program}가 이번 요청(검증 스키마·입력)을 거부했습니다{raw}")
-    message = classify(text)
-    return SubscriptionError(message + raw) if message else SubscriptionError(fallback)
+    return SubscriptionError(fallback)
 
 
 def auth_mode(requested: str | None = None) -> str:
