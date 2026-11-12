@@ -6,10 +6,15 @@ import socket
 import unittest
 from unittest.mock import patch
 
-import httpx
 from PIL import Image
 
 from yeone_ocr.comparison_ai import AISettings, RESPONSE_SCHEMA, _request, _wire_schema
+
+
+def _genai_wire():
+    """HTTP module google-genai builds its client from: httpx up to 2.x, httpx2 from 3.x."""
+    from google.genai import _api_client
+    return getattr(_api_client, "httpx", None) or _api_client.httpx2
 
 
 class SDKWireTests(unittest.TestCase):
@@ -22,7 +27,9 @@ class SDKWireTests(unittest.TestCase):
         self.guard.start()
         self.addCleanup(self.guard.stop)
 
-    def transport(self, response, wire=httpx, status=200):
+    def transport(self, response, wire, status=200):
+        # wire: the HTTP module the installed SDK itself uses (httpx, or httpx2 in newer
+        # openai/anthropic releases), so the test needs no separate httpx install.
         def handle(request):
             self.requests.append((request.url.path, json.loads(request.content)))
             return wire.Response(status, json=response, headers={"request-id": "offline-sdk-fixture"})
@@ -95,7 +102,7 @@ class SDKWireTests(unittest.TestCase):
         from google import genai
         from google.genai import types
         client = genai.Client(api_key="offline-fixture-key", http_options=types.HttpOptions(
-            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport({
+            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport(wire=_genai_wire(), response={
                 "candidates": [{"finishReason": "STOP", "content": {"role": "model", "parts": [{"text": '{"items":[]}'}]}}],
                 "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 5, "totalTokenCount": 12},
                 "modelVersion": "selected-vision-model", "responseId": "offline-response"})}))
@@ -119,7 +126,7 @@ class SDKWireTests(unittest.TestCase):
         schema = {"type": "object", "properties": {"items": {"type": "array", "maxItems": 1,
                   "items": {"type": "string", "enum": ["approved-target"]}}}, "required": ["items"]}
         client = genai.Client(api_key="offline-fixture-key", http_options=types.HttpOptions(
-            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport({
+            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport(wire=_genai_wire(), response={
                 "candidates": [{"finishReason": "MAX_TOKENS", "content": {"role": "model", "parts": [{"text": '{"items":[]}'}]}}],
                 "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 5, "thoughtsTokenCount": 8,
                                   "totalTokenCount": 20}, "modelVersion": "gemini-3.1-pro-preview"})}))
@@ -166,7 +173,7 @@ class SDKWireTests(unittest.TestCase):
         from google import genai
         from google.genai import types, errors
         client = genai.Client(api_key="offline-fixture-key", http_options=types.HttpOptions(
-            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport({
+            base_url="https://offline.example.invalid", api_version="v1beta", client_args={"transport": self.transport(wire=_genai_wire(), response={
                 "error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Public synthetic rejection"}}, status=400)}))
         self.addCleanup(client.close)
         with self.assertRaises(errors.ClientError):
