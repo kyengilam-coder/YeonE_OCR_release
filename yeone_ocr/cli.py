@@ -2801,6 +2801,9 @@ def build_parser():
                    help="판독 기록이 있는 쪽(중간에 멈춘 실행을 이어서 할 때): unfinished(기본)=끝나고 조건이 같은 쪽은 건너뛰고 "
                         "보류·실패한 검증이나 바뀐 쪽만 다시, continue=앞선 쪽은 점검하지 않고 그대로 둔 채 기록 없는 쪽부터(가장 빠름), "
                         "all=앞선 쪽을 모두 다시 점검한 뒤 이어서(조건 확인·검증 계획·남은 검증, 끝난 검증은 다시 사지 않음)")
+    p.add_argument("--local-ai-parallel", type=int, choices=range(1, 5), metavar="1-4", default=3,
+                   help="구독 계정으로 검증할 때 동시에 보내는 AI 요청 수(기본 3, 1 = 하나씩). 한 쪽의 검증 묶음 여럿을 함께 보내 "
+                        "빨라지며 총 사용량은 같고 한도가 그만큼 빨리 참. 응답 확인·기록은 차례대로. API 키로 검증할 때는 하나씩")
     p.add_argument("--local-ai-api-fallback", action=argparse.BooleanOptionalAction, default=True,
                    help="구독 계정의 사용량 한도에 닿거나 로그인이 풀리면 로그인된 다른 구독 계정으로 이어 가고, 쓸 수 있는 구독 계정이 "
                         "없으면 API 키로 넘어감(기본 켬, 이번 실행 API 호출은 --local-ai-max-calls 까지). "

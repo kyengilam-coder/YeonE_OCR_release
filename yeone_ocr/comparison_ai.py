@@ -1283,8 +1283,11 @@ def _fatal_request_error(exc):
     return getattr(exc, "fatal", False) or code in (400, 401, 403, 404, 422, 429) or isinstance(exc, (OSError, TimeoutError, ConnectionError)) or type(exc).__module__.split(".")[0] in ("httpx", "httpcore")
 
 
-def run_plan(project, plan, *, api_key, should_stop=None, on_result=None, client_factory=None):
-    """Execute exactly an approved plan; append and checkpoint every response."""
+def run_plan(project, plan, *, api_key, should_stop=None, on_result=None, client_factory=None, parallel=1):
+    """Execute exactly an approved plan; append and checkpoint every response.
+
+    parallel (1-4): requests in flight at once. Preparing, validating and recording stay in plan order
+    on the calling thread; only the requests overlap (and only for visual batches)."""
     if not isinstance(plan, ReviewPlan) or plan._integrity != _integrity(plan.settings, plan.policy, plan.pages, plan.fingerprint, plan.batches, plan.summary, plan._scope):
         raise AIReviewError("승인한 검증 계획이 변경됐습니다. 범위를 다시 확인하세요.")
     outcome = {"completed": 0, "failed": 0, "calls": 0, "cancelled": False, "errors": []}
@@ -1294,91 +1297,161 @@ def run_plan(project, plan, *, api_key, should_stop=None, on_result=None, client
     if not isinstance(api_key, str) or not api_key.strip() or any(c.isspace() for c in api_key.strip()) or "," in api_key:
         raise AIReviewError("선택한 제공사의 API 키 하나를 명시하세요.")
     client = None
+    parallel = max(1, min(4, int(parallel or 1)))
+    if any(batch["phase"] == "editorial" for batch in plan.batches):
+        parallel = 1        # editorial batches read the visual proposals recorded before them
+
+    def prepare(batch):
+        """Main thread, in plan order: the exact images and prompt of one batch, and its record."""
+        _cancel(should_stop)
+        _assert_scope(project, plan)
+        batch = copy.deepcopy(batch)  # An in-flight caller cannot alter the response's original request evidence.
+        if outcome["calls"] >= plan.settings.max_calls or (outcome["calls"] + 1) * plan.settings.max_output_tokens > plan.settings.max_total_output_tokens:
+            raise AIReviewError("승인한 AI 호출·토큰 상한에 도달했습니다.")
+        image = ocr.render_page(project.source_path, batch["page_number"], dpi=batch["dpi"], should_stop=should_stop)
+        contents = []
+        try:
+            if image.size != (batch["source_width"], batch["source_height"]):
+                raise AIReviewError("전송할 원본 이미지 크기가 계획과 달라졌습니다.")
+            for descriptor in batch["images"]:
+                content, width, height = _image_bytes(image, descriptor["source_bbox"], plan.policy)
+                if hashlib.sha256(content).hexdigest() != descriptor["sha256"] or (width, height) != (descriptor["width"], descriptor["height"]):
+                    raise AIReviewError("전송할 이미지가 승인한 계획과 다릅니다.")
+                contents.append(content)
+        finally:
+            image.close()
+        _cancel(should_stop)
+        _assert_scope(project, plan)
+        visual = _visual_proposals(project, batch["page_number"], plan.fingerprint, batch, plan.policy) if batch["phase"] == "editorial" else []
+        prompt = _prompt(batch, plan.policy, visual)
+        if len(prompt) > 50_000:
+            raise AIReviewError("검증 문맥이 입력 상한을 넘습니다. 문장 묶음을 나누세요.")
+        record = {"provider": plan.settings.provider, "model": plan.settings.model,
+                  "policy": asdict(plan.policy), "status": "failed", "request": copy.deepcopy(batch),
+                  "response_text": "", "proposals": [], "metadata": {"prompt_version": PROMPT_VERSION,
+                      "prompt_sha256": _text_hash(prompt), "settings": asdict(plan.settings)}, "error": ""}
+        if "refinement_evidence" in batch:
+            record["metadata"]["refinement_evidence_sha256"] = batch["refinement_evidence_sha256"]
+        if visual:
+            record["metadata"]["provisional_visual_proposal_ids"] = sorted(p["id"] for p in visual)
+        return {"batch": batch, "contents": contents, "prompt": prompt, "visual": visual, "record": record}
+
+    def start(ctx):
+        """Main thread, just before sending: the client, the last stop/scope checks, the call count.
+        Returns the exception that ends this batch before any request, or None."""
+        nonlocal client
+        try:
+            if client is None:
+                client = (client_factory or create_client)(plan.settings, api_key)
+            _cancel(should_stop)
+            _assert_scope(project, plan)
+            outcome["calls"] += 1
+        except Exception as exc:
+            return exc
+        return None
+
+    def send(ctx):
+        """The request alone (a worker thread when parallel > 1): the answer, or the exception."""
+        try:
+            return _request(client, plan.settings, ctx["prompt"], ctx["contents"],
+                            response_schema=_response_schema(ctx["batch"], plan.policy))
+        except Exception as exc:
+            return exc
+
+    def finish(ctx, result):
+        """Main thread, in plan order: validate the answer, record it, checkpoint. Returns fatal."""
+        batch, visual, record = ctx["batch"], ctx["visual"], ctx["record"]
+        fatal = False
+        failure_stage = "request"
+        try:
+            if isinstance(result, BaseException):
+                raise result
+            response_text, complete, response_metadata = result
+            record["response_text"] = response_text
+            record["metadata"].update(response_metadata)
+            record["metadata"]["response_complete"] = bool(complete)
+            failure_stage = "completion"
+            if not complete:
+                raise AIReviewError("AI 응답이 완료되지 않았거나 거절되었습니다.")
+            failure_stage = "json_or_anchor"
+            derived_text, recovery = _recover_anchors(response_text, batch)
+            if recovery is not None:
+                record["metadata"]["anchor_recovery"] = recovery
+            failure_stage = "strict_validation"
+            proposals = _validate_response(derived_text, batch, plan.policy, visual)
+            from .comparison_fidelity import assess_source_fidelity
+            fidelity = assess_source_fidelity(batch, proposals, visual, policy=plan.policy)
+            record["metadata"]["source_fidelity"] = fidelity
+            record.update(status="completed", proposals=proposals)
+            allowed = {item["proposal_id"] for item in fidelity["proposals"] if not item["blocked"]}
+            superseded = [old["id"] for old in visual for new in proposals
+                          if new["id"] in allowed and not old.get("uncertain") and not new["uncertain"]
+                          and new["start"] <= old["start"] <= old["end"] <= new["end"]]
+            if superseded:
+                record["metadata"]["superseded_proposal_ids"] = sorted(set(superseded))
+        except (AIReviewCancelled, ocr.OCRCancelled):
+            record.update(status="cancelled", proposals=[], error="다음 AI 요청을 보내기 전에 중지했습니다.")
+            fatal = True
+        except Exception as exc:
+            record["metadata"]["failure_stage"] = failure_stage
+            error = str(exc) if isinstance(exc, AIReviewError) else "AI 검증 응답을 완료하지 못했습니다. 키·모델·연결·응답 형식을 확인하세요. (" + type(exc).__name__ + ")"
+            record.update(status="failed", proposals=[], error=error)
+            fatal = _fatal_request_error(exc) or outcome["calls"] == 0
+        review_id = project.record_ai_review(batch["page_number"], record)
+        if on_result is not None:
+            on_result({"page_number": batch["page_number"], "review_id": review_id, "phase": batch["phase"], "status": record["status"]})
+        if record["status"] == "completed":
+            outcome["completed"] += 1
+        else:
+            outcome["failed"] += 1
+            outcome["errors"].append(record["error"])
+        return fatal
+
     try:
-        for batch in plan.batches:
-            _cancel(should_stop)
-            _assert_scope(project, plan)
-            batch = copy.deepcopy(batch)  # An in-flight caller cannot alter the response's original request evidence.
-            if outcome["calls"] >= plan.settings.max_calls or (outcome["calls"] + 1) * plan.settings.max_output_tokens > plan.settings.max_total_output_tokens:
-                raise AIReviewError("승인한 AI 호출·토큰 상한에 도달했습니다.")
-            image = ocr.render_page(project.source_path, batch["page_number"], dpi=batch["dpi"], should_stop=should_stop)
-            contents = []
-            try:
-                if image.size != (batch["source_width"], batch["source_height"]):
-                    raise AIReviewError("전송할 원본 이미지 크기가 계획과 달라졌습니다.")
-                for descriptor in batch["images"]:
-                    content, width, height = _image_bytes(image, descriptor["source_bbox"], plan.policy)
-                    if hashlib.sha256(content).hexdigest() != descriptor["sha256"] or (width, height) != (descriptor["width"], descriptor["height"]):
-                        raise AIReviewError("전송할 이미지가 승인한 계획과 다릅니다.")
-                    contents.append(content)
-            finally:
-                image.close()
-            _cancel(should_stop)
-            _assert_scope(project, plan)
-            visual = _visual_proposals(project, batch["page_number"], plan.fingerprint, batch, plan.policy) if batch["phase"] == "editorial" else []
-            prompt = _prompt(batch, plan.policy, visual)
-            if len(prompt) > 50_000:
-                raise AIReviewError("검증 문맥이 입력 상한을 넘습니다. 문장 묶음을 나누세요.")
-            record = {"provider": plan.settings.provider, "model": plan.settings.model,
-                      "policy": asdict(plan.policy), "status": "failed", "request": copy.deepcopy(batch),
-                      "response_text": "", "proposals": [], "metadata": {"prompt_version": PROMPT_VERSION,
-                          "prompt_sha256": _text_hash(prompt), "settings": asdict(plan.settings)}, "error": ""}
-            if "refinement_evidence" in batch:
-                record["metadata"]["refinement_evidence_sha256"] = batch["refinement_evidence_sha256"]
-            if visual:
-                record["metadata"]["provisional_visual_proposal_ids"] = sorted(p["id"] for p in visual)
-            fatal = False
-            failure_stage = "request"
-            try:
-                if client is None:
-                    client = (client_factory or create_client)(plan.settings, api_key)
+        if parallel == 1:
+            for batch in plan.batches:
+                ctx = prepare(batch)
+                early = start(ctx)
+                fatal = finish(ctx, early if early is not None else send(ctx))
                 _cancel(should_stop)
                 _assert_scope(project, plan)
-                outcome["calls"] += 1
-                response_text, complete, response_metadata = _request(client, plan.settings, prompt, contents,
-                    response_schema=_response_schema(batch, plan.policy))
-                record["response_text"] = response_text
-                record["metadata"].update(response_metadata)
-                record["metadata"]["response_complete"] = bool(complete)
-                failure_stage = "completion"
-                if not complete:
-                    raise AIReviewError("AI 응답이 완료되지 않았거나 거절되었습니다.")
-                failure_stage = "json_or_anchor"
-                derived_text, recovery = _recover_anchors(response_text, batch)
-                if recovery is not None:
-                    record["metadata"]["anchor_recovery"] = recovery
-                failure_stage = "strict_validation"
-                proposals = _validate_response(derived_text, batch, plan.policy, visual)
-                from .comparison_fidelity import assess_source_fidelity
-                fidelity = assess_source_fidelity(batch, proposals, visual, policy=plan.policy)
-                record["metadata"]["source_fidelity"] = fidelity
-                record.update(status="completed", proposals=proposals)
-                allowed = {item["proposal_id"] for item in fidelity["proposals"] if not item["blocked"]}
-                superseded = [old["id"] for old in visual for new in proposals
-                              if new["id"] in allowed and not old.get("uncertain") and not new["uncertain"]
-                              and new["start"] <= old["start"] <= old["end"] <= new["end"]]
-                if superseded:
-                    record["metadata"]["superseded_proposal_ids"] = sorted(set(superseded))
-            except (AIReviewCancelled, ocr.OCRCancelled):
-                record.update(status="cancelled", proposals=[], error="다음 AI 요청을 보내기 전에 중지했습니다.")
-                fatal = True
-            except Exception as exc:
-                record["metadata"]["failure_stage"] = failure_stage
-                error = str(exc) if isinstance(exc, AIReviewError) else "AI 검증 응답을 완료하지 못했습니다. 키·모델·연결·응답 형식을 확인하세요. (" + type(exc).__name__ + ")"
-                record.update(status="failed", proposals=[], error=error)
-                fatal = _fatal_request_error(exc) or outcome["calls"] == 0
-            review_id = project.record_ai_review(batch["page_number"], record)
-            if on_result is not None:
-                on_result({"page_number": batch["page_number"], "review_id": review_id, "phase": batch["phase"], "status": record["status"]})
-            if record["status"] == "completed":
-                outcome["completed"] += 1
-            else:
-                outcome["failed"] += 1
-                outcome["errors"].append(record["error"])
-            _cancel(should_stop)
-            _assert_scope(project, plan)
-            if fatal:
-                break
+                if fatal:
+                    break
+        else:
+            # Several requests in flight at once (a signed-in plan answers each through its own CLI
+            # process); batches are still prepared, checked and recorded one by one in plan order.
+            from collections import deque
+            from concurrent.futures import ThreadPoolExecutor
+            pending, todo, halted, raised = deque(), iter(plan.batches), False, None
+            with ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="ai-review") as pool:
+                while True:
+                    while not halted and len(pending) < parallel:
+                        batch = next(todo, None)
+                        if batch is None:
+                            break
+                        try:
+                            ctx = prepare(batch)
+                        except (AIReviewCancelled, ocr.OCRCancelled):
+                            halted, outcome["cancelled"] = True, True
+                            break
+                        except Exception as exc:          # e.g. the call cap: raised after the answers in flight are kept
+                            halted, raised = True, exc
+                            break
+                        early = start(ctx)
+                        pending.append((ctx, None if early is not None else pool.submit(send, ctx), early))
+                    if not pending:
+                        break
+                    ctx, future, early = pending.popleft()
+                    fatal = finish(ctx, early if early is not None else future.result())
+                    if fatal:
+                        halted = True                      # no new request; the answers already bought are kept
+                    try:
+                        _cancel(should_stop)
+                        _assert_scope(project, plan)
+                    except (AIReviewCancelled, ocr.OCRCancelled):
+                        halted, outcome["cancelled"] = True, True
+            if raised is not None:
+                raise raised
     except (AIReviewCancelled, ocr.OCRCancelled):
         outcome["cancelled"] = True
     finally:
