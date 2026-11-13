@@ -280,6 +280,35 @@ def test_process_output_is_split_into_lines_and_progress_updates():
     assert ("warning on stderr", False) in lines and ("no newline at end", False) in lines
 
 
+@pytest.mark.parametrize("data, expected, rest", [
+    (b"a\nb\r\nc", [(b"a", False), (b"b", False)], b"c"),
+    (b"10%\r55%\r100%\n", [(b"10%", True), (b"55%", True), (b"100%", False)], b""),
+    (b"windows line\r\r\nnext\n", [(b"windows line", False), (b"next", False)], b""),   # Windows 텍스트 모드의 \r\n
+    (b"split\r", [], b"split\r"),                                                    # \r\n 이 두 조각으로 올 수 있다
+    (b"split\r\r", [], b"split\r\r"),
+])
+def test_output_lines_and_overwritten_progress(data, expected, rest):
+    assert em.split_output(data) == (expected, rest)
+
+
+def test_output_split_across_chunks_and_final_flush():
+    lines, rest = em.split_output(b"windows line\r")
+    lines2, rest = em.split_output(rest + b"\r\n43%\r")
+    assert lines + lines2 == [(b"windows line", False)] and rest == b"43%\r"
+    assert em.split_output(rest, final=True) == ([(b"43%", False)], b"")
+    assert em.split_output(b"tail", final=True) == ([(b"tail", False)], b"")
+
+
+def test_windows_text_mode_output_keeps_every_line_in_the_log():
+    """Windows 자식이 내는 바이트 그대로(\n → \r\n): 줄이 진행 표시로 잘못 읽혀 로그에서 빠지면 안 된다."""
+    data = "pulling 10%\rpulling 55%\rpulling 100%\r\nwindows line\r\r\n한글 줄\r\n".encode()
+    lines = []
+    assert em.run_process([sys.executable, "-c", f"import sys; sys.stdout.buffer.write({data!r})"],
+                          log=lambda line, transient=False: lines.append((line, transient))) == 0
+    assert lines == [("pulling 10%", True), ("pulling 55%", True), ("pulling 100%", False),
+                     ("windows line", False), ("한글 줄", False)]
+
+
 def test_cancel_stops_the_installer_and_its_children(tmp_path):
     marker = tmp_path / "child-survived.txt"
     child = f"import time, pathlib; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('alive')"

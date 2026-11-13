@@ -392,6 +392,39 @@ def installer_environment() -> dict[str, str]:
     return environment
 
 
+def split_output(buffer: bytes, final: bool = False) -> tuple[list[tuple[bytes, bool]], bytes]:
+    """출력 바이트 → ([(줄, 덮어쓰는 진행 표시인가)…], 아직 끝나지 않은 나머지).
+
+    \n 과 \r\n 은 줄 끝, 그 밖의 \r 은 같은 줄을 덮어쓰는 진행 표시(내려받기 %)다. 여러 \r 뒤의 \n 도 줄 끝이다 —
+    Windows 의 Python 은 텍스트 모드에서 \n 을 \r\n 으로 바꾸므로 \r\n 을 쓰면 \r\r\n 이 된다. 버퍼가 \r 로 끝나면
+    다음 조각을 보고 정한다(final 이면 그 줄을 끝난 줄로 본다).
+    """
+    lines: list[tuple[bytes, bool]] = []
+    start = index = 0
+    size = len(buffer)
+    while index < size:
+        byte = buffer[index]
+        if byte == 0x0A:
+            lines.append((buffer[start:index], False))
+            index = start = index + 1
+        elif byte == 0x0D:
+            after = index
+            while after < size and buffer[after] == 0x0D:
+                after += 1
+            if after == size and not final:
+                break
+            newline = after == size or buffer[after] == 0x0A
+            lines.append((buffer[start:index], not newline))
+            index = start = after + 1 if after < size and buffer[after] == 0x0A else after
+        else:
+            index += 1
+    rest = buffer[start:]
+    if final and rest:
+        lines.append((rest, False))
+        rest = b""
+    return lines, rest
+
+
 def run_process(command, cwd=None, *, log, cancel=None, environment=None, timeout=None) -> int:
     """명령을 창 없이 실행하고 출력을 한 줄씩 log(line, transient)로 넘긴다. 종료 코드를 돌려준다.
 
@@ -412,24 +445,13 @@ def run_process(command, cwd=None, *, log, cancel=None, environment=None, timeou
     def pump():
         pending = b""
         while chunk := process.stdout.read1(65536):
-            pending += chunk
-            while True:
-                positions = [index for index in (pending.find(b"\n"), pending.find(b"\r")) if index >= 0]
-                if not positions:
-                    break
-                index = min(positions)
-                line, separator, pending = pending[:index], pending[index:index + 1], pending[index + 1:]
-                if separator == b"\r" and pending[:1] == b"\n":
-                    separator, pending = b"\n", pending[1:]
-                elif separator == b"\r" and not pending:
-                    # \r\n 이 두 조각으로 나뉘어 왔을 수 있다 — 다음 조각을 보고 정한다
-                    pending = line + b"\r"
-                    break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    log(text, separator == b"\r")
-        if text := pending.decode("utf-8", errors="replace").strip():
-            log(text, False)
+            lines, pending = split_output(pending + chunk)
+            for line, transient in lines:
+                if text := line.decode("utf-8", errors="replace").rstrip():
+                    log(text, transient)
+        for line, transient in split_output(pending, final=True)[0]:
+            if text := line.decode("utf-8", errors="replace").strip():
+                log(text, transient)
 
     from ab_ocr.ocr import OCRError
     reader = threading.Thread(target=pump, name="engine-install-output", daemon=True)
