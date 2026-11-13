@@ -2837,6 +2837,10 @@ def build_parser():
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
                    help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
                         "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
+    p.add_argument("--local-gpu-engines", action=argparse.BooleanOptionalAction, default=None,
+                   help="설치된 CUDA 엔진(GLM-OCR·Surya·PaddleOCR server) 중 하나를 쪽마다 함께 돌림. 기본: 켬"
+                        "(환경 변수 YEONE_OCR_GPU_ENGINES=0 이면 끔). 생성형 엔진이라 쪽당 시간이 크게 늘고, "
+                        "켜면 그 엔진 결과가 없는 이미 읽은 쪽도 다시 처리함")
     p.add_argument("--local-exclude-engines", nargs="+", default=[], metavar="ENGINE",
                    choices=("ppocrv6", "rapidocr", "easyocr", "tesseract", "surya", "glmocr", "paddle_server"),
                    help="(시험) 자동 선택에서 뺄 엔진. 예: --local-exclude-engines easyocr")

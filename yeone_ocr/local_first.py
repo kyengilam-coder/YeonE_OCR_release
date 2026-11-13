@@ -705,7 +705,9 @@ def _command(args, *, work=None, doc=None, pool=None):
             if not easyocr_wanted():
                 exclude.add("easyocr")
             exclude = tuple(sorted(exclude))
-            return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu_engines_enabled(),
+            choice = getattr(args, "local_gpu_engines", None)
+            gpu = gpu_engines_enabled() if choice is None else bool(choice)
+            return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu,
                     **({"exclude": exclude} if exclude else {}),
                     **({"input_enhancement": mode} if mode not in (None, "none") else {}),
                     "parallel": lambda engines: engine_parallelism(engines, requested, resident=resident,

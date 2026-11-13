@@ -163,6 +163,22 @@ class LocalFirstTests(unittest.TestCase):
             command(self.args("--local-exclude-engines", "tesseract", "--force"))
         self.assertEqual(seen, [("easyocr",), (), ("easyocr", "tesseract")])
 
+    def test_gpu_engines_follow_the_flag_then_the_environment_variable(self):
+        seen = []
+        original = self.recognize
+
+        def capture(project, number, **kwargs):
+            seen.append(kwargs.get("gpu_engines"))
+            return original(project, number, **kwargs)
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=capture):
+            with patch.dict("os.environ", {"YEONE_OCR_GPU_ENGINES": "1"}):
+                command(self.args())
+                command(self.args("--no-local-gpu-engines", "--force"))
+            with patch.dict("os.environ", {"YEONE_OCR_GPU_ENGINES": "0"}):
+                command(self.args("--force"))
+                command(self.args("--local-gpu-engines", "--force"))   # 설정에서 켠 것이 환경 변수보다 앞선다
+        self.assertEqual(seen, [True, False, False, True])
+
     def test_subscription_review_runs_through_the_signed_in_cli(self):
         from yeone_ocr import claude_subscription as subscription
         self.confidence = 20

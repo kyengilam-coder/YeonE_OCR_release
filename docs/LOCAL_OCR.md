@@ -53,6 +53,7 @@ Tesseract, RapidOCR, EasyOCR는 서로 다른 원시 판독을 반환합니다. 
 - 실제 설치는 아래의 `scripts/install_*.py`가 같은 고정 버전·해시 검증으로 합니다. 창은 그것을 차례로 실행하고 출력을 `local-engines\engine-manager\install-*.log`에 남깁니다.
 - 실패·취소한 항목은 체크된 채 남습니다. [설치]를 다시 누르면 받은 파일을 다시 쓰며 이어집니다.
 - 명령줄: `python -m yeone_ocr.engine_manager`(점검) · `python -m yeone_ocr.engine_manager --install recommended`.
+- 설치한 CUDA 엔진은 로컬 우선 인식에서 쪽마다 하나(번체·간체는 GLM-OCR, 한글·한자 혼용은 Surya)가 더 돕니다. 쪽당 시간이 크게 늘고, 켜 둔 채 이어서 하면 그 엔진 결과가 없는 이미 읽은 쪽도 다시 처리합니다. **[설정] → 인식 → GPU 엔진**에서 끌 수 있습니다(`--no-local-gpu-engines`).
 - Tesseract · RapidOCR · EasyOCR은 이 창의 대상이 아닙니다(아래 명령으로 설치).
 
 ## 새 PC에 설치

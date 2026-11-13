@@ -62,6 +62,20 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertIn("--local-easyocr", self.gui.App._strategy_opts(app))
         self.assertIs(self.gui.DEFAULTS["local_easyocr"], False)
 
+    def test_gpu_engine_setting_follows_the_environment_until_changed(self):
+        gui = self.gui
+        self.assertIsNone(gui.DEFAULTS["local_gpu_engines"])
+        for environment, expected in (("1", True), ("0", False)):
+            with mock.patch.dict("os.environ", {"YEONE_OCR_GPU_ENGINES": environment}):
+                app = self.app()
+                self.assertIs(gui.App._gpu_engines_choice(app.cfg), expected)
+                flags = gui.App._strategy_opts(app)                          # 같으면 플래그 없음(명령 그대로)
+                self.assertFalse({"--local-gpu-engines", "--no-local-gpu-engines"} & set(flags))
+                app.v_local_gpu_engines = Var(not expected)
+                self.assertIn("--local-gpu-engines" if not expected else "--no-local-gpu-engines",
+                              gui.App._strategy_opts(app))
+                self.assertIs(gui.App._gpu_engines_choice(dict(app.cfg, local_gpu_engines=not expected)), not expected)
+
     def test_subscription_plan_choice_adds_a_flag_only_when_not_automatic(self):
         gui = self.gui
         app = self.app()

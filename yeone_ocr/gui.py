@@ -32,6 +32,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
+            "local_gpu_engines": None,                              # None: YEONE_OCR_GPU_ENGINES 를 따름(기본 켬)
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
@@ -2314,6 +2315,7 @@ class App(tk.Tk):
         self.v_local_columns = tk.BooleanVar(value=bool(self.cfg.get("local_columns", True)))
         self.v_local_line_verification = tk.BooleanVar(value=bool(self.cfg.get("local_line_verification", False)))
         self.v_local_easyocr = tk.BooleanVar(value=bool(self.cfg.get("local_easyocr", False)))
+        self.v_local_gpu_engines = tk.BooleanVar(value=App._gpu_engines_choice(self.cfg))
         self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
@@ -2471,6 +2473,15 @@ class App(tk.Tk):
                     "EasyOCR은 문장부호를 원문대로 잘 살리므로, 문장부호 대조가 중요하면 켜십시오. 세로쓰기에서는 늘 씁니다.", self)
             return cb
         R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
+
+        def local_gpu_engines(parent):
+            cb = ttk.Checkbutton(parent, text="GPU 엔진도 함께 읽기 (느림)", variable=self.v_local_gpu_engines)
+            Tip(cb, "엔진 관리로 CUDA 엔진(GLM-OCR · Surya · PaddleOCR server)을 설치했으면 그중 하나를 쪽마다 더 돌립니다"
+                    "(번체·간체는 GLM-OCR, 한글·한자 혼용은 Surya). 생성형 모델이라 쪽당 시간이 크게 늘어납니다. "
+                    "켜 두면 그 엔진 결과가 없는 이미 읽은 쪽도 이어서 할 때 다시 처리합니다 — 기존 엔진으로 읽던 책을 빨리 "
+                    "마치려면 끄십시오. GPU 엔진이 설치되어 있지 않으면 켜도 달라지는 것이 없습니다.", self)
+            return cb
+        R["local_gpu_engines"] = row(b, "GPU 엔진", "설치된 GLM-OCR·Surya 중 하나를 쪽마다 더 읽기(느림)", local_gpu_engines)
 
         def engines(parent):
             return self._btn(parent, "엔진 관리…", lambda: App.open_engine_manager(self), lock=False,
@@ -6343,6 +6354,15 @@ class App(tk.Tk):
         if done:
             self._append("엔진 설치: " + " · ".join(done) + (f" → {outcome['roots'][0]}" if outcome.get("roots") else "") + "\n")
 
+    @staticmethod
+    def _gpu_engines_choice(cfg) -> bool:
+        """GPU 엔진 설정: 저장한 값, 없으면 환경 변수 YEONE_OCR_GPU_ENGINES(기본 켬)."""
+        value = cfg.get("local_gpu_engines")
+        if value is None:
+            from .automatic_ocr import gpu_engines_enabled
+            return gpu_engines_enabled()
+        return bool(value)
+
     def _remember_local_engine_root(self, path):
         self.cfg["local_engine_root"] = str(Path(path).expanduser().resolve())
         self.save_settings(quiet=True)
@@ -6435,6 +6455,11 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_easyocr")
         if bool(variable.get()) if variable is not None else bool(cfg.get("local_easyocr", False)):
             options.append("--local-easyocr")
+        variable = vars(self).get("v_local_gpu_engines")
+        gpu = bool(variable.get()) if variable is not None else App._gpu_engines_choice(cfg)
+        from .automatic_ocr import gpu_engines_enabled
+        if gpu != gpu_engines_enabled():                              # 환경 변수와 같으면 넘기지 않음(명령 그대로)
+            options.append("--local-gpu-engines" if gpu else "--no-local-gpu-engines")
         variable = vars(self).get("v_local_ai_parallel")
         try:
             parallel = int(variable.get() if variable is not None else cfg.get("local_ai_parallel", 3))
@@ -7415,6 +7440,11 @@ class App(tk.Tk):
                 self.cfg["local_line_verification"] = bool(self.v_local_line_verification.get())
             if vars(self).get("v_local_easyocr") is not None:
                 self.cfg["local_easyocr"] = bool(self.v_local_easyocr.get())
+            if vars(self).get("v_local_gpu_engines") is not None:
+                chosen = bool(self.v_local_gpu_engines.get())
+                from .automatic_ocr import gpu_engines_enabled
+                if self.cfg.get("local_gpu_engines") is not None or chosen != gpu_engines_enabled():
+                    self.cfg["local_gpu_engines"] = chosen           # 바꾼 적이 없으면 계속 환경 변수를 따름
             if vars(self).get("v_local_ai_subscription") is not None:
                 self.cfg["local_ai_subscription"] = bool(self.v_local_ai_subscription.get())
             if vars(self).get("v_local_ai_plan") is not None:

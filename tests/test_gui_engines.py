@@ -99,6 +99,17 @@ class EngineManagerRealTk(unittest.TestCase):
         window.close()
         self.assertFalse(window.winfo_exists())
 
+    def test_1b_gpu_engine_setting_row_is_saved_only_once_changed(self):
+        row = self.app._set_rows["local_gpu_engines"]
+        self.assertEqual(row["name"].cget("text"), "GPU 엔진")
+        self.assertIs(self.app.cfg.get("local_gpu_engines"), None)
+        self.app.save_settings(quiet=True)
+        self.assertIs(self.app.cfg.get("local_gpu_engines"), None)          # 바꾸지 않으면 환경 변수를 따름
+        row["ctrl"].invoke()
+        self.app.save_settings(quiet=True)
+        self.assertIs(self.app.cfg["local_gpu_engines"], bool(self.app.v_local_gpu_engines.get()))
+        row["ctrl"].invoke()
+
     def test_2_without_nvidia_gpu_only_cpu_engines_can_be_picked_and_none_is_preselected(self):
         self.probe = {"gpus": [], "message": "NVIDIA GPU를 찾지 못했습니다(nvidia-smi 없음)."}
         window = self.open()
