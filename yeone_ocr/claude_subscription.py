@@ -374,6 +374,13 @@ def _classify(text: str) -> str | None:
     return None
 
 
+# Turns one `claude -p` request may use. The answer comes back through Claude Code's structured output:
+# one turn for the answer, and another each time it fails the JSON Schema and is sent back to be fixed.
+# With 4, long verification batches (100+ spans) ran out (error_max_turns) and the whole request was
+# sent again from the start — slower and costlier than a few more fix-up turns in the same request.
+MAX_TURNS = 10
+
+
 class SubscriptionClient:
     """One `claude -p` call per request; same contract as the Anthropic API branch of comparison_ai._request."""
 
@@ -405,7 +412,7 @@ class SubscriptionClient:
                 "--system-prompt", system,
                 "--model", model_name, "--effort", self.effort,
                 "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
-                "--no-session-persistence", "--max-turns", "4"]
+                "--no-session-persistence", "--max-turns", str(MAX_TURNS)]
         try:
             proc = self._run(args, input=json.dumps(message) + "\n", env=cli_env(), cwd=_workdir(),
                              capture_output=True, text=True, encoding="utf-8", errors="replace",

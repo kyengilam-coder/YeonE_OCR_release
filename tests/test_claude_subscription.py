@@ -84,6 +84,7 @@ def test_request_runs_the_cli_without_tools_or_api_keys(monkeypatch):
     assert args[1] == "-p" and args[args.index("--tools") + 1] == ""
     assert {"--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"} <= set(args)
     assert args[args.index("--model") + 1] == "opus" and args[args.index("--effort") + 1] == "medium"
+    assert int(args[args.index("--max-turns") + 1]) == sub.MAX_TURNS >= 8          # room to fix a long structured answer
     assert "ANTHROPIC_API_KEY" not in seen["env"]
     message = json.loads(seen["input"])["message"]
     assert [part["type"] for part in message["content"]] == ["text", "image"]
