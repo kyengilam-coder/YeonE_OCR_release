@@ -147,5 +147,6 @@ Google은 2026-06-18부터 개인 Google 계정(무료 등급, Google AI Pro·Ul
 
 1. `agy --version`이 되고, `agy`로 Google AI Pro 계정 로그인이 되는지.
 2. 연어OCR [연결 시험]에서 Gemini 줄이 "응답함 · 모델 …"인지.
-3. 실제 쪽 판독·의심 구간 검증에서 이미지를 실제로 보고 답하는지(답에 그 쪽의 글자가 나오는지), `structured_output`이 비지 않는지.
-4. 사용량 한도에 닿았을 때 진행 기록의 분류(한도·쉼)가 맞는지.
+3. `work\windows-release\venv\Scripts\python.exe tools\check_antigravity.py` — 연어OCR의 연결 모듈 그대로 한자 그림(天地玄黃 宇宙洪荒)을 읽혀 모든 글자가 돌아오는지(그림 파일 경로를 주면 그 그림). 2026-11-14: `agy -p "hello" --output-format json`을 파일로 돌려도 JSON(`status`·`response`·`usage.input_tokens`…)이 온전히 나옴(agy 1.5.8, Google AI Pro, 기본 모델 Gemini 4 Argon Medium).
+4. 실제 쪽 판독·의심 구간 검증에서 이미지를 실제로 보고 답하는지(답에 그 쪽의 글자가 나오는지), `structured_output`이 비지 않는지.
+5. 사용량 한도에 닿았을 때 진행 기록의 분류(한도·쉼)가 맞는지.
