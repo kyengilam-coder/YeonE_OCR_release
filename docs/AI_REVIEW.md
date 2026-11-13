@@ -134,7 +134,7 @@ v4 한자 후보는 고유한 양쪽 내용 문자 4자, 최대 8자의 동일 �
 
 # Gemini 구독: Antigravity CLI(agy)로 연결 (2026-11, 미배포)
 
-Google은 2026-06-18부터 개인 Google 계정(무료 등급, Google AI Pro·Ultra)의 Gemini CLI 사용을 끝냈다("This client is no longer supported for Gemini Code Assist for individuals", `reasonCode: UNSUPPORTED_CLIENT`). 후속인 Antigravity CLI(`agy`)가 설치되어 있으면 Gemini 구독은 `yeone_ocr/antigravity_subscription.py`로 `agy`를 실행한다. 없으면 전처럼 Gemini CLI(`gemini_subscription.py`)를 쓰고, 기업용 Code Assist 라이선스로 Gemini CLI를 계속 쓰려면 `YEONE_OCR_GEMINI_TRANSPORT=gemini-cli`.
+Google은 2026-06-18부터 개인 Google 계정(무료 등급, Google AI Pro·Ultra)의 Gemini CLI 사용을 끝냈다("This client is no longer supported for Gemini Code Assist for individuals", `reasonCode: UNSUPPORTED_CLIENT`). 후속인 Antigravity CLI(`agy`)가 설치되어 있으면 Gemini 구독은 `yeone_ocr/antigravity_subscription.py`로 `agy`를 실행한다. 없으면 전처럼 Gemini CLI(`gemini_subscription.py`)를 쓰고, 기업용 Code Assist 라이선스로 Gemini CLI를 계속 쓰려면 `YEONE_OCR_GEMINI_TRANSPORT=gemini-cli`. Gemini CLI만 있는 PC에서 Google이 그 거부(`UNSUPPORTED_CLIENT`)를 답하면, 안내문이 Antigravity CLI [설치] → [로그인 창 열기]를 가리키고 그 뒤로 로그인 상태는 Gemini를 「사용 가능」이 아니라 「지원 종료(Antigravity CLI 설치 필요)」로 보인다(프로그램을 닫을 때까지 — 실행마다 같은 거부를 다시 받지 않게).
 
 - 요청: 요청마다 새 빈 폴더에 이미지를 두고 `agy --input-format stream-json --output-format stream-json --json-schema <스키마> --add-dir <폴더> --print-timeout <초>s`, 표준 입력에 `{"event":"user","message":{"content":…}}` 한 줄. 시스템 지시는 내용 맨 앞에 붙인다(별도 옵션이 확인되지 않음).
 - 이미지: 인쇄 모드에는 첨부 옵션이 없어(google-antigravity/antigravity-cli#1278) 폴더를 열어 주고 그 파일들을 파일 보기 도구로 열라고 지시한다.

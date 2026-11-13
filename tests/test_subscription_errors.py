@@ -50,6 +50,7 @@ def test_gemini_free_tier_that_dropped_the_cli_gets_its_own_explanation():
     error = failure("Gemini CLI", shown, gemini_subscription._classify, "x", full=full)
     assert error.kind == "account"
     assert "개인 Google 계정" in str(error) and "Pro" in str(error) and "API 키" in str(error)
+    assert "Antigravity CLI" in str(error) and "[설치]" in str(error)      # the way that still works, and where to start it
     assert "GOOGLE_CLOUD_PROJECT" not in str(error)
 
 
@@ -60,6 +61,47 @@ def test_gemini_cli_run_reports_an_ineligible_account_as_out_for_this_run(tmp_pa
     with pytest.raises(claude_subscription.SubscriptionError) as caught:
         cli.request(model_name="", system="s", prompt="p", images=[], schema={"type": "object"})
     assert caught.value.kind == "account" and "at async" not in str(caught.value)
+
+
+def test_gemini_cli_refused_for_a_personal_account_is_not_offered_as_usable_again(tmp_path, monkeypatch):
+    """The [연결 시험] of a PC with Gemini CLI signed in and no Antigravity CLI: Google refuses the account,
+    and from then on the status says so instead of '사용 가능' (every run would meet the same refusal)."""
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text('{"security": {"auth": {"selectedType": "oauth-personal"}}}', encoding="utf-8")
+    monkeypatch.setenv("YEONE_OCR_GEMINI_CLI_HOME", str(tmp_path))
+    monkeypatch.setattr(gemini_subscription, "find_cli", lambda: "gemini")
+    monkeypatch.setattr(gemini_subscription, "_refused", False)
+    monkeypatch.setattr(gemini_subscription, "_status_cache", None)
+    refusal = ("Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended "
+               "for a better visual experience.\nError authenticating: IneligibleTierError: This client is no longer "
+               "supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the "
+               "Antigravity suite of products: https://antigravity.google\n" + FRAMES)
+
+    def run(args, **_kwargs):
+        if "--version" in args:
+            return SimpleNamespace(returncode=0, stdout="0.68.0", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr=refusal)
+    assert gemini_subscription.status(refresh=True, runner=run)["usable"] is True      # signed in, as far as the PC shows
+    cli = gemini_subscription.SubscriptionClient(cli="gemini", runner=run, timeout_seconds=30)
+    with pytest.raises(claude_subscription.SubscriptionError) as caught:
+        cli.request(model_name="", system="s", prompt="p", images=[], schema={"type": "object"})
+    assert caught.value.kind == "account" and "Antigravity CLI" in str(caught.value)
+    assert "GOOGLE_CLOUD_PROJECT" not in str(caught.value)
+    state = gemini_subscription.status(runner=run)                                     # not the cached '사용 가능'
+    assert state["usable"] is False and state["installed"] and state["closed"] and "Antigravity CLI" in state["reason"]
+    assert gemini_subscription.status(refresh=True, runner=run)["usable"] is False     # [상태 확인] does not forget it
+
+
+def test_another_gemini_cli_failure_does_not_close_the_plan(tmp_path, monkeypatch):
+    monkeypatch.setattr(gemini_subscription, "_refused", False)
+    monkeypatch.setattr(gemini_subscription, "_status_cache", None)
+
+    def run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr=node_error("Error: socket hang up"))
+    cli = gemini_subscription.SubscriptionClient(cli="gemini", runner=run, timeout_seconds=30)
+    with pytest.raises(claude_subscription.SubscriptionError):
+        cli.request(model_name="", system="s", prompt="p", images=[], schema={"type": "object"})
+    assert gemini_subscription._refused is False
 
 
 def test_claude_failure_without_result_is_judged_on_everything_printed():

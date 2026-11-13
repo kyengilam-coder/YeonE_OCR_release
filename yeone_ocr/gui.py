@@ -4639,6 +4639,7 @@ class App(tk.Tk):
                 except Exception:                    # 상태 확인은 실행을 막지 않는다
                     state = {"usable": False, "installed": False}
                 mark = ("● 사용 가능" if state.get("usable") else "○ 실행 실패" if state.get("runs") is False
+                        else "○ 지원 종료(Antigravity CLI 설치 필요)" if state.get("closed")
                         else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
                 parts.append(f"{subscriptions.NAMES[plan]} {mark}")
                 where = f" ({state['path']})" if state.get("path") else ""

@@ -132,6 +132,13 @@ def reset_status_cache() -> None:
         _status_cache = None
 
 
+def _mark_refused(value: bool = True) -> None:
+    """Google refused this account's Gemini CLI sign-in (UNSUPPORTED_CLIENT): status() says so from now on."""
+    global _refused, _status_cache
+    with _lock:
+        _refused, _status_cache = value, None
+
+
 def _query_status(runner) -> dict:
     result = {"installed": False, "logged_in": False, "billing": None, "plan": None, "usable": False,
               "reason": INSTALL_HINT, "limits": None}
@@ -154,6 +161,9 @@ def _query_status(runner) -> dict:
         result.update(runs=False, reason=f"Gemini CLI({cli})를 실행하지 못했습니다(코드 {proc.returncode})"
                                          + (f": {detail}" if detail else "")
                                          + ". PowerShell에서 `gemini --version`이 되는지 확인하세요(Node.js 20 이상 필요).")
+        return result
+    if _refused:                                         # Google's answer to this account, earlier in this program
+        result.update(closed=True, reason=UNSUPPORTED_CLIENT_HINT)
         return result
     chosen = _sign_in_type()
     if chosen in SIGN_IN_TYPES:
@@ -187,15 +197,25 @@ INELIGIBLE_HINT = ("이 Google 계정은 Gemini CLI를 쓸 수 없다고 Google�
                    "(환경 변수 GOOGLE_CLOUD_PROJECT)가 필요할 수 있습니다.")
 
 
-UNSUPPORTED_CLIENT_HINT = ("Google이 개인 Google 계정(Gemini Code Assist for individuals)의 Gemini CLI 로그인을 끝냈습니다"
-                           "(UNSUPPORTED_CLIENT) — 2026-11 Google AI Pro 구독 계정으로 다시 로그인해도 같은 답이었습니다. "
-                           "Gemini는 구독으로 쓸 수 없으니 Claude·ChatGPT 구독으로 진행하거나, 설정 「AI 판독기」 ②에 "
-                           "Gemini API 키를 넣으십시오(호출마다 요금).")
+UNSUPPORTED_CLIENT_HINT = ("Google이 2026-06-18부터 개인 Google 계정(무료 등급·Google AI Pro·Ultra)의 Gemini CLI 로그인을 끝냈습니다"
+                           "(UNSUPPORTED_CLIENT) — 다시 로그인해도 같은 답입니다. Gemini 구독은 후속 프로그램인 "
+                           "Antigravity CLI(agy)로 연결됩니다: 설정 「AI 판독기」 ①에서 'Gemini (Antigravity CLI)'를 고르고 "
+                           "[설치] → [로그인 창 열기]로 Google 계정에 로그인한 뒤 [상태 확인]을 누르십시오. "
+                           "그때까지는 Claude·ChatGPT 구독으로 진행합니다(②에 Gemini API 키를 넣어도 됩니다 — 호출마다 요금).")
+
+# Google's refusal is about the account type, not this request: once seen, this program stops offering
+# Gemini CLI as usable (status) instead of sending every run into the same refusal.
+_refused = False
+
+
+def _unsupported_client(text: str) -> bool:
+    low = text.lower()
+    return "unsupported_client" in low or "no longer supported for gemini code assist" in low
 
 
 def _classify(text: str) -> str | None:
     low = text.lower()
-    if "unsupported_client" in low or "no longer supported for gemini code assist" in low:
+    if _unsupported_client(low):
         return problem("account", UNSUPPORTED_CLIENT_HINT)
     if re.search(r"ineligible|projectiderror", low):
         return problem("account", INELIGIBLE_HINT)
@@ -286,6 +306,8 @@ class SubscriptionClient:
             message = error.get("message") if isinstance(error, dict) else error
             if message:
                 full, detail = str(message) + "\n" + full, str(message)
+            if _unsupported_client(full):
+                _mark_refused()
             raise failure("Gemini CLI", str(detail), _classify, f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}", full=full)
         text = _json_text(data["response"])
         tokens, actual = {"input_tokens": 0, "output_tokens": 0}, label(model_name)
