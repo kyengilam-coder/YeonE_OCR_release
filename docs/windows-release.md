@@ -3,6 +3,7 @@
 1.2.13 다음 판에는 [엔진 관리](release-notes.md)가 들어간다. 설치 구성에서 바뀌는 것:
 
 - **PP-OCRv6 번들을 다시 만들어야 한다.** `tools/prepare_ppocrv6_bundle.py`가 이제 `Lib/ensurepip`을 빼지 않고, venv 실행기(`Lib/venv/scripts/nt/venvlauncher.exe`)와 pip 휠이 있는지 확인한다. 설치판은 이 Python을 `%LOCALAPPDATA%\YeonE_OCR\local-engines\python313`으로 복사해(`python313._pth`와 PP-OCRv6 전용 `site-packages`는 빼고) 추가 엔진의 venv를 만드는 데 쓴다. 옛 번들로 빌드하면 `tools/verify_ppocrv6_bundle.py`가 "Missing engine-manager base Python file"로 멈춘다.
+  - **이 PC에서 만들기**: `tools\build_ppocrv6_bundle.bat`(더블클릭) 또는 `powershell -ExecutionPolicy Bypass -File tools\build_ppocrv6_bundle.ps1`. 릴리스 워크플로와 같은 단계(엔진 원본 → Microsoft C++ 런타임 → 번들 → 해시 검증)에 더해, 만든 번들의 Python을 앱처럼 복사해 venv + pip가 만들어지는지(`tools/check_ppocrv6_base_python.py`)까지 본다. 엔진 원본은 `tools\ppocrv6`의 venv가 Python 3.13이면 그대로 쓰고, 아니거나 고정 버전과 다르면 Python 3.13(`py -3.13` 또는 `-Python313 경로`, Microsoft Store판 제외)으로 `work\ppocrv6-bundle\engine-source`에 새로 설치한다. 결과는 `work\ppocrv6-bundle\bundle-<시각>`, 로그는 같은 폴더의 `build-<시각>.log`. 끝에 출력되는 경로를 `tools\build_windows.ps1 -PPOCRv6Bundle`에 넘긴다.
 - `packaging/YeonE_OCR.iss`: 추가 작업 "설치 뒤 엔진 관리 열기"(기본 끔)와 그에 따른 실행 항목(`--open-engine-manager`). 엔진·가중치는 여전히 설치파일에 넣지 않는다.
 - `--smoke-test`에 `engine-manager-resources` 검사가 추가됐다(설치 스크립트 5개와 `install_rapidocr.py`가 묶였는지, 번들 Python이 있으면 venv를 만들 수 있는지).
 
