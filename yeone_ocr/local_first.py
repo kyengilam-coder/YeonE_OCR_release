@@ -926,13 +926,23 @@ def _command(args, *, work=None, doc=None, pool=None):
                 saver.save()
                 if outcome.get("cancelled"):
                     return 130
-                from .comparison import _run_profile
+                from .comparison import _run_complete, _run_profile
                 selected = _selected(project, number)
                 successful = set(outcome.get("completed", [])) | set(outcome.get("skipped", []))
                 expected = (args.local_profile, "horizontal" if args.mode == "horizontal_zh" else "vertical")
-                if (selected is None or selected["engine"] not in successful
+                # A baseline kept to protect human or accepted AI work stays even when its engine did not run
+                # this time (e.g. GLM-OCR read the page, then the GPU engine was switched off): it is a complete
+                # reading stored under the same conditions, checked below.
+                page = project.page(number)
+                kept = (selected is not None and selected["engine"] not in successful and _run_complete(selected)
+                        and (page["corrected_text"] is not None or bool(page["edits"]) or page["reviewed"]
+                             or page.get("baseline_choice") == "manual"))
+                if (selected is None or (selected["engine"] not in successful and not kept)
                         or _run_profile(selected) != expected or selected.get("request", {}).get("dpi") != args.dpi):
                     raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
+                if kept:
+                    cli.log(f"  {number}쪽: 기준 판독은 고친 내용을 지키려고 고정한 {selected['engine']} 판독"
+                            "(이번에 돌지 않은 엔진 — 저장된 판독을 그대로 씀)")
                 # A page finished under the same conditions (no engine ran again, same key, review done):
                 # nothing to crop, plan, read or write again.
                 if (resume == "unfinished" and old and not getattr(args, "force", False) and not outcome.get("completed")

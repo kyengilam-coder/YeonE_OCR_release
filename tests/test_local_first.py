@@ -163,6 +163,27 @@ class LocalFirstTests(unittest.TestCase):
             command(self.args("--local-exclude-engines", "tesseract", "--force"))
         self.assertEqual(seen, [("easyocr",), (), ("easyocr", "tesseract")])
 
+    def test_kept_baseline_from_an_engine_that_did_not_run_this_time_is_used(self):
+        """GLM-OCR read the page (GPU on) and an accepted correction pinned that reading; with the GPU engine
+        off only PP-OCRv6 runs. The page must go on from the stored GLM-OCR reading, not stop with an error."""
+        self.assertEqual(command(self.args()), 0)
+        path = next((self.work / "comparison").glob("local-first-*.yeone-compare.json"))
+        project = ComparisonProject.load(path, source_path=self.source)
+        raw = dict(project.page(1)["runs"][0]["raw"], engine="glmocr", text="天地玄黄",
+                   engine_metadata={"generation_complete": True})
+        project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                         "engine_root": None, "policy": "local-three-engine-v1"})
+        project.choose_baseline(1, "glmocr")
+        project.set_text(1, "天地玄黃")
+        project.save(path)
+        logged = []
+        with patch.object(cli, "log", side_effect=logged.append):
+            rc = command(self.args("--force"))
+        self.assertIn(rc, (0, 4), logged)                                     # 4: done, a page left for a person; 3 would be a failed page
+        self.assertTrue(any("고정한 glmocr 판독" in line for line in logged), logged)
+        self.assertFalse(any("성공한 로컬 기준 판독이 없습니다" in line for line in logged))
+        self.assertEqual(ComparisonProject.load(path, source_path=self.source).page(1)["baseline_engine"], "glmocr")
+
     def test_gpu_engines_follow_the_flag_then_the_environment_variable(self):
         seen = []
         original = self.recognize
