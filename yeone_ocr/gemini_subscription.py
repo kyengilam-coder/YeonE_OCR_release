@@ -187,11 +187,10 @@ INELIGIBLE_HINT = ("이 Google 계정은 Gemini CLI를 쓸 수 없다고 Google�
                    "(환경 변수 GOOGLE_CLOUD_PROJECT)가 필요할 수 있습니다.")
 
 
-UNSUPPORTED_CLIENT_HINT = ("Gemini CLI가 이 로그인을 무료 등급(Gemini Code Assist for individuals)으로 보았고, Google은 "
-                           "그 등급에서 Gemini CLI 지원을 끝냈습니다(UNSUPPORTED_CLIENT). Google AI Pro·Ultra 구독이 있으면 "
-                           "Gemini CLI가 그 계정으로 로그인되어 있는지 확인하십시오(PowerShell: gemini 실행 → /auth → Login with "
-                           "Google → 구독 계정). 구독이 없으면 Claude·ChatGPT 구독으로 진행하거나 설정 「AI 판독기」 ②의 "
-                           "Gemini API 키를 쓰십시오.")
+UNSUPPORTED_CLIENT_HINT = ("Google이 개인 Google 계정(Gemini Code Assist for individuals)의 Gemini CLI 로그인을 끝냈습니다"
+                           "(UNSUPPORTED_CLIENT) — 2026-11 Google AI Pro 구독 계정으로 다시 로그인해도 같은 답이었습니다. "
+                           "Gemini는 구독으로 쓸 수 없으니 Claude·ChatGPT 구독으로 진행하거나, 설정 「AI 판독기」 ②에 "
+                           "Gemini API 키를 넣으십시오(호출마다 요금).")
 
 
 def _classify(text: str) -> str | None:

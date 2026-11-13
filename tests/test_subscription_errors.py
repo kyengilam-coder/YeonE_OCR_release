@@ -49,7 +49,7 @@ def test_gemini_free_tier_that_dropped_the_cli_gets_its_own_explanation():
     full, shown = program_error(output, "")
     error = failure("Gemini CLI", shown, gemini_subscription._classify, "x", full=full)
     assert error.kind == "account"
-    assert "무료 등급" in str(error) and "/auth" in str(error) and "API 키" in str(error)
+    assert "개인 Google 계정" in str(error) and "Pro" in str(error) and "API 키" in str(error)
     assert "GOOGLE_CLOUD_PROJECT" not in str(error)
 
 
