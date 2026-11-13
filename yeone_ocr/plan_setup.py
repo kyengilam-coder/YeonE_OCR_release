@@ -12,12 +12,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-NPM_PACKAGES = {"chatgpt": "@openai/codex", "gemini": "@google/gemini-cli"}
-PROGRAMS = {"claude": "claude", "chatgpt": "codex", "gemini": "gemini"}
+# Gemini: Google moved personal accounts from Gemini CLI to Antigravity CLI (agy) on 2026-06-18;
+# agy ships as a native program with Google's own install script, not through npm.
+NPM_PACKAGES = {"chatgpt": "@openai/codex"}
+ANTIGRAVITY_INSTALL = {"win32": ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                                 "irm https://antigravity.google/cli/install.ps1 | iex"],
+                       "posix": ["bash", "-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"]}
+PROGRAMS = {"claude": "claude", "chatgpt": "codex", "gemini": "agy"}
 LOGIN_ARGS = {"claude": ["auth", "login"], "chatgpt": ["login"], "gemini": []}
 LOGIN_NOTES = {"claude": "Claude 계정(Pro/Max)으로 로그인하세요.",
                "chatgpt": "'Sign in with ChatGPT'를 고르고 ChatGPT 계정으로 로그인하세요.",
-               "gemini": "'Login with Google'을 고르고 Google 계정으로 로그인한 뒤 /quit 로 닫으세요."}
+               "gemini": "Antigravity CLI(agy)에서 Google 계정으로 로그인한 뒤 /quit 로 닫으세요(Google AI Pro·Ultra 계정)."}
 CLAUDE_INSTALL = "PowerShell에서 `irm https://claude.ai/install.ps1 | iex` (Mac·Linux: `curl -fsSL https://claude.ai/install.sh | bash`)"
 NODE_PAGE = "https://nodejs.org/"
 _NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
@@ -52,6 +57,8 @@ def find_winget() -> str | None:
 
 def install_command(plan: str) -> list | None:
     """The install command for a plan's program, or None (Claude: its own installer; no npm)."""
+    if plan == "gemini":
+        return list(ANTIGRAVITY_INSTALL["win32" if sys.platform == "win32" else "posix"])
     package = NPM_PACKAGES.get(plan)
     npm = find_npm()
     if package is None or npm is None:

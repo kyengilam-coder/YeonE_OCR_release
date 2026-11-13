@@ -2899,7 +2899,7 @@ def cmd_plans(args):
         state = subscriptions.status(plan, refresh=True)
         mark = ("사용 가능" if state["usable"] else "실행 실패" if state.get("runs") is False
                 else "설치됨" if state.get("installed") else "없음")
-        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.PROGRAMS[plan]}): {mark}"
+        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.program(plan)}): {mark}"
         if state.get("path"):
             line += f" · {state['path']}"
         if state.get("plan") and state["usable"]:

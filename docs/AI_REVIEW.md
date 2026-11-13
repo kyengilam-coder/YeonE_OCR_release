@@ -131,3 +131,21 @@ v4 한자 후보는 고유한 양쪽 내용 문자 4자, 최대 8자의 동일 �
 올바른 보류 41건 중 40건은 부호 폭, 1건은 한자 재검증의 원래 후보 선택 때문이다. 독립 OCR의 정확한 수정 문자 다수결로 폭 14건을 다시 허용한 시험은 14건 전부 오교정이어서 기본 정책에 채택하지 않았다. 올바른 41건은 이번에도 복원하지 못했다. 실패한 재허용 시험·추천 단계의 사후 선택·소폭의 전체 오류 감소를 함께 보고한다.
 
 새 읽기전용 `evaluate_incremental_candidate` API는 원래 후보와 실제 OCR 지문·주소·기존 보호를 다시 검사한다. 기본값은 폭 변경 보류이며 표수는 진단 근거로만 반환한다. `diagnostic_width_consensus=True`는 명시적 개발 비교이고 사용자의 확정이 아니다. 기존 v1 검사·채택 재현, UI 자동 적용 정책과 설치판은 변경하지 않았다. 원시/AI 응답/제안은 불변이고 새 기계 판단은 별도 검토 자료다.
+
+# Gemini 구독: Antigravity CLI(agy)로 연결 (2026-11, 미배포)
+
+Google은 2026-06-18부터 개인 Google 계정(무료 등급, Google AI Pro·Ultra)의 Gemini CLI 사용을 끝냈다("This client is no longer supported for Gemini Code Assist for individuals", `reasonCode: UNSUPPORTED_CLIENT`). 후속인 Antigravity CLI(`agy`)가 설치되어 있으면 Gemini 구독은 `yeone_ocr/antigravity_subscription.py`로 `agy`를 실행한다. 없으면 전처럼 Gemini CLI(`gemini_subscription.py`)를 쓰고, 기업용 Code Assist 라이선스로 Gemini CLI를 계속 쓰려면 `YEONE_OCR_GEMINI_TRANSPORT=gemini-cli`.
+
+- 요청: 요청마다 새 빈 폴더에 이미지를 두고 `agy --input-format stream-json --output-format stream-json --json-schema <스키마> --add-dir <폴더> --print-timeout <초>s`, 표준 입력에 `{"event":"user","message":{"content":…}}` 한 줄. 시스템 지시는 내용 맨 앞에 붙인다(별도 옵션이 확인되지 않음).
+- 이미지: 인쇄 모드에는 첨부 옵션이 없어(google-antigravity/antigravity-cli#1278) 폴더를 열어 주고 그 파일들을 파일 보기 도구로 열라고 지시한다.
+- 결과: 마지막 `result` 이벤트의 `status`가 `SUCCESS`이고 `structured_output`이 있을 때만 답으로 쓴다. `SUCCESS`인데 구조화된 답이 없으면(#1065, #794) 실패로 처리한다.
+- 오류: 로그인(이번 실행에서 뺌), `RESOURCE_EXHAUSTED`·quota(한도 — 쉼), 모델 없음(뺌), 그 밖은 일시 오류. 한도가 시간 초과로만 보고되는 경우가 있다(#1278).
+- 설치: 설정 「AI 판독기」 ①의 Gemini [설치]는 `irm https://antigravity.google/cli/install.ps1 | iex`(Google 공식 설치 스크립트)를 실행한다. 로그인은 [로그인 창 열기]로 `agy`를 열어 Google 화면에서 한다. 이 프로그램은 토큰을 읽지 않는다.
+- 환경 변수: `YEONE_OCR_AGY_MODEL`(예: `gemini-3.8-flash-high`, 기본은 agy의 선택), `YEONE_OCR_AGY_CLI_PATH`, `YEONE_OCR_AGY_TIMEOUT`(기본 300초).
+
+**실제 계정으로 확인하지 않았다** — 개발 환경에서는 agy를 설치할 수 없었다. 배포 전 Windows PC에서:
+
+1. `agy --version`이 되고, `agy`로 Google AI Pro 계정 로그인이 되는지.
+2. 연어OCR [연결 시험]에서 Gemini 줄이 "응답함 · 모델 …"인지.
+3. 실제 쪽 판독·의심 구간 검증에서 이미지를 실제로 보고 답하는지(답에 그 쪽의 글자가 나오는지), `structured_output`이 비지 않는지.
+4. 사용량 한도에 닿았을 때 진행 기록의 분류(한도·쉼)가 맞는지.

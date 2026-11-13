@@ -263,7 +263,7 @@ class LocalFirstGuiTests(unittest.TestCase):
     def test_install_button_asks_first_runs_the_official_command_and_guides_without_node(self):
         import queue
         gui = self.gui
-        app = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["gemini"]), q=queue.Queue(), v_status=Var(""))
+        app = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["chatgpt"]), q=queue.Queue(), v_status=Var(""))
         with mock.patch("yeone_ocr.plan_setup.find_npm", return_value=None), \
                 mock.patch("yeone_ocr.plan_setup.find_winget", return_value=None), \
                 mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask, \
@@ -275,10 +275,22 @@ class LocalFirstGuiTests(unittest.TestCase):
                 mock.patch("yeone_ocr.plan_setup.run", side_effect=lambda command, log: ran.append(command) or 0), \
                 mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask:
             gui.App.install_plan(app)
-            self.assertIn("npm install -g @google/gemini-cli", ask.call_args.args[1])
+            self.assertIn("npm install -g @openai/codex", ask.call_args.args[1])
             self.assertEqual(app.q.get(timeout=5)[0], "log")
-            self.assertEqual(app.q.get(timeout=5), ("setup_done", "Gemini (Gemini CLI) 설치", 0))
-        self.assertEqual(ran, [["npm", "install", "-g", "@google/gemini-cli"]])
+            self.assertEqual(app.q.get(timeout=5), ("setup_done", "ChatGPT (Codex CLI) 설치", 0))
+        self.assertEqual(ran, [["npm", "install", "-g", "@openai/codex"]])
+        # Gemini: Google's own Antigravity CLI installer, no Node.js needed (Gemini CLI no longer serves personal accounts)
+        gemini = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["gemini"]), q=queue.Queue(), v_status=Var(""))
+        ran = []
+        with mock.patch("yeone_ocr.plan_setup.find_npm", return_value=None), \
+                mock.patch("yeone_ocr.plan_setup.run", side_effect=lambda command, log: ran.append(command) or 0), \
+                mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask:
+            gui.App.install_plan(gemini)
+            self.assertIn("antigravity.google/cli/install", ask.call_args.args[1])
+            self.assertEqual(gemini.q.get(timeout=5)[0], "log")
+            self.assertEqual(gemini.q.get(timeout=5), ("setup_done", "Gemini (Antigravity CLI) 설치", 0))
+        self.assertEqual(len(ran), 1)
+        self.assertTrue(any("antigravity.google/cli/install" in part for part in ran[0]))
         app._setup_busy = False
         with mock.patch("yeone_ocr.plan_setup.find_npm", return_value="npm"), \
                 mock.patch("yeone_ocr.plan_setup.run") as run, \
