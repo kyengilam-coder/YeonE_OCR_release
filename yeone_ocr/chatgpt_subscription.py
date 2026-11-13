@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli, problem
+from .claude_subscription import SubscriptionError, failure, not_found_reason, program_error, npm_global_cli, problem
 
 SUBSCRIPTION_KEY = "chatgpt-subscription"
 PROVIDER = "openai"
@@ -319,15 +319,19 @@ class SubscriptionClient:
         if failed is not None or (done is None and not text):
             error = (failed or {}).get("error") or {}
             detail = error.get("message") if isinstance(error, dict) else str(error)
+            full = None
             if not detail:
                 errors = [str(e.get("message") or "") for e in events if e.get("type") == "error"]
-                detail = errors[-1] if errors else (proc.stderr or proc.stdout or "").strip()[-400:]
+                if errors:
+                    detail = errors[-1]
+                else:
+                    full, detail = program_error(proc.stderr, proc.stdout)
             refused = _MODEL_REFUSED.search((detail or "").lower()) or _OLD_CLI.search((detail or "").lower())
             if refused and not _SIGN_IN.search((detail or "").lower()) and not _LIMIT.search((detail or "").lower()):
                 slug = re.search(r"'([^']+)' model", detail or "")
                 raise ModelRefused(slug.group(1) if slug else (model_name or ""),
                                    f"이 ChatGPT 요금제에서 쓸 수 없는 모델입니다 (원문: {(detail or '')[:240]})")
-            raise failure("Codex CLI", detail or "", _classify, f"Codex CLI 실행 실패(코드 {proc.returncode}): {detail}")
+            raise failure("Codex CLI", detail or "", _classify, f"Codex CLI 실행 실패(코드 {proc.returncode}): {detail}", full=full)
         if not text:
             message = next((e.get("item", {}).get("text") for e in reversed(events) if e.get("type") == "item.completed"
                             and e.get("item", {}).get("type") == "agent_message"), "")

@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli, problem
+from .claude_subscription import SubscriptionError, failure, not_found_reason, program_error, npm_global_cli, problem
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
@@ -182,8 +182,15 @@ _LIMIT = re.compile(r"quota|resource_exhausted|resource exhausted|rate[_ ]limit|
                     r"(?:status|http|code|error)\D{0,12}429\b|\b429\s+too")
 
 
+INELIGIBLE_HINT = ("이 Google 계정은 Gemini CLI를 쓸 수 없다고 Google이 답했습니다(IneligibleOrProjectIdError). "
+                   "PowerShell에서 gemini 를 실행해 안내를 확인하십시오 — 회사·학교 계정이면 Google Cloud 프로젝트"
+                   "(환경 변수 GOOGLE_CLOUD_PROJECT)가 필요할 수 있습니다.")
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
+    if re.search(r"ineligible|projectiderror", low):
+        return problem("account", INELIGIBLE_HINT)
     if _LIMIT.search(low):
         return problem("limit", "Google 계정의 Gemini 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
     if _SIGN_IN.search(low):
@@ -267,8 +274,11 @@ class SubscriptionClient:
             data = {}
         error = data.get("error") if isinstance(data, dict) else None
         if proc.returncode != 0 or error or not isinstance(data.get("response"), str):
-            detail = (error.get("message") if isinstance(error, dict) else error) or (proc.stderr or out or "").strip()[-400:]
-            raise failure("Gemini CLI", str(detail), _classify, f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}")
+            full, detail = program_error(proc.stderr, out)
+            message = error.get("message") if isinstance(error, dict) else error
+            if message:
+                full, detail = str(message) + "\n" + full, str(message)
+            raise failure("Gemini CLI", str(detail), _classify, f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}", full=full)
         text = _json_text(data["response"])
         tokens, actual = {"input_tokens": 0, "output_tokens": 0}, label(model_name)
         models = ((data.get("stats") or {}).get("models") or {}) if isinstance(data.get("stats"), dict) else {}
