@@ -9,13 +9,16 @@ import pytest
 from yeone_ocr import plan_setup
 
 
-def test_install_commands_use_the_official_npm_packages(monkeypatch):
+def test_install_commands_use_the_official_installers(monkeypatch):
     monkeypatch.setattr(plan_setup, "find_npm", lambda: "/usr/bin/npm")
-    assert plan_setup.install_command("gemini") == ["/usr/bin/npm", "install", "-g", "@google/gemini-cli"]
     assert plan_setup.install_command("chatgpt") == ["/usr/bin/npm", "install", "-g", "@openai/codex"]
     assert plan_setup.install_command("claude") is None                     # Claude Code: its own installer
+    # Gemini: Google's own Antigravity CLI installer (Gemini CLI no longer serves personal accounts), no npm
+    command = plan_setup.install_command("gemini")
+    assert any("https://antigravity.google/cli/install." in part for part in command)
     monkeypatch.setattr(plan_setup, "find_npm", lambda: None)
-    assert plan_setup.install_command("gemini") is None                     # no Node.js: ask for it first
+    assert plan_setup.install_command("chatgpt") is None                    # no Node.js: ask for it first
+    assert plan_setup.install_command("gemini") == command                  # no Node.js needed
 
 
 def test_npm_is_found_outside_path(monkeypatch, tmp_path):
