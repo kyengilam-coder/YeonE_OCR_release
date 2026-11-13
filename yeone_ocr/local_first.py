@@ -956,9 +956,17 @@ def _command(args, *, work=None, doc=None, pool=None):
                 kept = (selected is not None and selected["engine"] not in successful and _run_complete(selected)
                         and (page["corrected_text"] is not None or bool(page["edits"]) or page["reviewed"]
                              or page.get("baseline_choice") == "manual"))
-                if (selected is None or (selected["engine"] not in successful and not kept)
-                        or _run_profile(selected) != expected or selected.get("request", {}).get("dpi") != args.dpi):
-                    raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
+                why = ("기준 판독이 없음" if selected is None
+                       else f"기준 판독 엔진 {selected['engine']}이 이번에 돌지 않았고 고친 내용으로 고정된 판독도 아님"
+                       if selected["engine"] not in successful and not kept
+                       else f"기준 판독({selected['engine']})의 문서 종류·방향 {'/'.join(map(str, _run_profile(selected)))} ≠ "
+                            f"이번 {'/'.join(expected)}" if _run_profile(selected) != expected
+                       else f"기준 판독({selected['engine']})의 해상도 {selected.get('request', {}).get('dpi')} ≠ 이번 {args.dpi}"
+                       if selected.get("request", {}).get("dpi") != args.dpi else "")
+                if why:
+                    ran = ", ".join(sorted(successful)) or "없음"
+                    raise ComparisonError(f"이번 조건에서 성공한 로컬 기준 판독이 없습니다({why} · 이번에 읽은 엔진: {ran}). "
+                                          "이전 판독은 보존했습니다.")
                 if kept:
                     cli.log(f"  {number}쪽: 기준 판독은 고친 내용을 지키려고 고정한 {selected['engine']} 판독"
                             "(이번에 돌지 않은 엔진 — 저장된 판독을 그대로 씀)")

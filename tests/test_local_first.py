@@ -184,6 +184,25 @@ class LocalFirstTests(unittest.TestCase):
         self.assertFalse(any("성공한 로컬 기준 판독이 없습니다" in line for line in logged))
         self.assertEqual(ComparisonProject.load(path, source_path=self.source).page(1)["baseline_engine"], "glmocr")
 
+    def test_missing_baseline_error_says_which_condition_failed(self):
+        self.assertEqual(command(self.args()), 0)
+        path = next((self.work / "comparison").glob("local-first-*.yeone-compare.json"))
+        project = ComparisonProject.load(path, source_path=self.source)
+        raw = dict(project.page(1)["runs"][0]["raw"], engine="glmocr", engine_metadata={"generation_complete": True})
+        project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                         "engine_root": None, "policy": "local-three-engine-v1"})
+        project.choose_baseline(1, "glmocr", automatic=True)                     # not pinned by an edit
+        project.page(1)["baseline_choice"] = "automatic"
+        project.save(path)
+        logged = []
+        with patch.object(cli, "log", side_effect=logged.append), \
+                patch("yeone_ocr.automatic_ocr.run_automatic_page",
+                      return_value={"cancelled": False, "completed": [], "skipped": ["ppocrv6"], "selection": {}}):
+            command(self.args("--force"))
+        error = next(line for line in logged if "성공한 로컬 기준 판독이 없습니다" in line)
+        self.assertIn("glmocr이 이번에 돌지 않았고", error)
+        self.assertIn("이번에 읽은 엔진: ppocrv6", error)
+
     def test_gpu_engines_follow_the_flag_then_the_environment_variable(self):
         seen = []
         original = self.recognize
