@@ -13,6 +13,7 @@ from pathlib import Path
 import tempfile
 import zipfile
 from xml.etree import ElementTree as ET
+from ab_ocr.fileid import same_file
 
 
 def default_project_path(source, work_dir=None):
@@ -206,8 +207,7 @@ def export_project(project, path, format, page_numbers=None):
         raise ValueError("출력 형식과 확장자가 일치하지 않습니다.")
     protected = [project.source_path, project.project_path]
     for original in protected:
-        if original and (target == Path(original).resolve() or
-                (target.exists() and Path(original).exists() and os.path.samefile(target, original))):
+        if original and same_file(target, original):
             raise ValueError("원본 또는 비교 프로젝트를 덮어쓸 수 없습니다.")
     numbers = list(page_numbers) if page_numbers is not None else list(project.completed_pages)
     if not numbers or len(numbers) != len(set(numbers)):

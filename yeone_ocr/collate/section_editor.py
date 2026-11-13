@@ -11,6 +11,7 @@ import tempfile
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk, messagebox, filedialog
+from ab_ocr.fileid import same_file
 
 
 _PDF_EXECUTOR = None
@@ -1766,8 +1767,7 @@ class BookmarkSectionEditor(tk.Toplevel):
                           corrected.with_suffix(".manual.bak.json")]
             if path.suffix.lower() != ".txt" or path.is_symlink():
                 raise ValueError("별도의 .txt 파일을 선택해 주세요.")
-            if any(path.resolve() == item.resolve() or
-                   (path.exists() and item.exists() and path.samefile(item)) for item in protected):
+            if any(same_file(path, item) for item in protected):
                 raise ValueError("원본·교정본·수정 기록을 보관 파일로 덮어쓸 수 없습니다.")
             text = self.session.export_text(self._changes(), scope=scope)
             descriptor, filename = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)

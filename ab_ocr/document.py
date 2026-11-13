@@ -6,12 +6,12 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import threading
 import uuid
 
 from . import ocr
+from .fileid import same_file
 from .reports import atomic_write
 
 PROJECT_FORMAT = "ab-ocr-document"
@@ -56,7 +56,7 @@ class PageState:
 
 
 def _same_file(first: Path, second: Path) -> bool:
-    return first.resolve() == second.resolve() or (first.exists() and second.exists() and os.path.samefile(first, second))
+    return same_file(first, second)
 
 
 def _read_project(path: Path) -> tuple[dict, str]:

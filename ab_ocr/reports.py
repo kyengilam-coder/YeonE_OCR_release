@@ -12,15 +12,13 @@ from pathlib import Path
 import tempfile
 
 from . import __version__
+from .fileid import same_file
 
 
 def atomic_write(path: str | Path, content: str, *, protected_paths=()) -> Path:
     destination = Path(path).expanduser().resolve()
     protected = {Path(p).expanduser().resolve() for p in protected_paths if p}
-    if destination in protected or any(
-        destination.exists() and p.exists() and os.path.samefile(destination, p)
-        for p in protected
-    ):
+    if destination in protected or any(same_file(destination, p) for p in protected):
         raise ValueError("원본·정답·인식 결과를 덮어쓸 수 없습니다. 다른 저장 이름을 고르십시오.")
     if not destination.parent.is_dir():
         raise ValueError("저장할 폴더가 없습니다.")
