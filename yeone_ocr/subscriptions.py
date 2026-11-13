@@ -45,6 +45,8 @@ def module(plan: str):
         antigravity = importlib.import_module(".antigravity_subscription", __package__)
         if antigravity.find_cli():
             return antigravity
+        gemini = importlib.import_module(".gemini_subscription", __package__)
+        return gemini if gemini.find_cli() else antigravity   # neither installed: point at agy, not the closed CLI
     return importlib.import_module(f".{_MODULES[plan]}", __package__)
 
 

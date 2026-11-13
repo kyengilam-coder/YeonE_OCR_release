@@ -261,8 +261,11 @@ def not_found_reason(program: str, name: str, hint: str) -> str:
     places = ", ".join(str(f) for f in cli_search_folders(name)[:8])
     return (f"{program}({name})를 찾지 못했습니다 — PATH와 {places} 등을 찾아봤습니다. {hint} "
             f"다른 곳에 설치했다면 PowerShell에서 `where.exe {name}`(Mac·Linux: `which {name}`)로 위치를 보고 "
-            f"환경 변수 YEONE_OCR_{'GEMINI' if name == 'gemini' else 'CODEX'}_CLI_PATH로 지정하세요. "
-            "`npx`로만 실행했다면 전역 설치가 아니므로 [설치]를 누르세요.")
+            f"환경 변수 YEONE_OCR_{_ENV_NAMES.get(name, 'CODEX')}_CLI_PATH로 지정하세요."
+            + ("" if name == "agy" else " `npx`로만 실행했다면 전역 설치가 아니므로 [설치]를 누르세요."))
+
+
+_ENV_NAMES = {"gemini": "GEMINI", "agy": "AGY", "codex": "CODEX"}
 
 
 def _is_cmd_shim(path: str) -> bool:

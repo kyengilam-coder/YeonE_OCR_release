@@ -94,8 +94,18 @@ def test_gemini_plan_runs_agy_when_installed_else_gemini_cli(monkeypatch):
     assert subscriptions.module("gemini").__name__.endswith("gemini_subscription")
     monkeypatch.delenv("YEONE_OCR_GEMINI_TRANSPORT")
     monkeypatch.setattr(agy, "find_cli", lambda: None)
-    assert subscriptions.module("gemini").__name__.endswith("gemini_subscription")
+    from yeone_ocr import gemini_subscription
+    monkeypatch.setattr(gemini_subscription, "find_cli", lambda: "gemini")
+    assert subscriptions.module("gemini") is gemini_subscription
     assert subscriptions.program("gemini") == "Gemini CLI" and subscriptions.program("claude") == "Claude Code"
+    monkeypatch.setattr(gemini_subscription, "find_cli", lambda: None)     # neither: the setup hint is agy's
+    assert subscriptions.module("gemini") is agy
+
+
+def test_missing_agy_names_its_own_path_variable(monkeypatch):
+    monkeypatch.setattr(agy, "find_cli", lambda: None)
+    reason = agy.status(refresh=True)["reason"]
+    assert "YEONE_OCR_AGY_CLI_PATH" in reason and "install.ps1" in reason and "npx" not in reason
 
 
 def test_find_cli_looks_in_the_windows_install_folder(tmp_path, monkeypatch):
