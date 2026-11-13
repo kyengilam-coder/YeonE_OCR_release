@@ -80,13 +80,28 @@ def test_frozen_invalid_manifest_does_not_silently_use_saved_copy(tmp_path):
 
 def test_bundle_inventory_rejects_tampering_and_path_escape(tmp_path):
     folder = engine_home(tmp_path)
-    for name in ("runtime/python313.dll", "runtime/python313._pth", "runtime/msvcp140.dll", "runtime/msvcp140_1.dll"):
+    base_python = ("runtime/Lib/venv/__init__.py", "runtime/Lib/ensurepip/__init__.py",
+                   "runtime/Lib/venv/scripts/nt/venvlauncher.exe", "runtime/Lib/ensurepip/_bundled/pip-25.0-py3-none-any.whl")
+    for name in ("runtime/python313.dll", "runtime/python313._pth", "runtime/msvcp140.dll", "runtime/msvcp140_1.dll", *base_python):
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
         (folder / name).write_bytes(b"synthetic")
     files = {p.relative_to(folder).as_posix(): {"bytes": p.stat().st_size,
               "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
              for p in folder.rglob("*") if p.is_file()}
     manifest = {"engine": "ppocrv6", "files": files}
     path = folder / "bundle-manifest.json"
+    path.write_text(json.dumps(manifest))
+    verify(folder)
+    # 엔진 관리가 venv 를 만들 수 없는 옛 번들은 빌드에서 걸러진다
+    for name in base_python:
+        record = manifest["files"].pop(name)
+        saved = (folder / name).read_bytes()
+        (folder / name).unlink()
+        path.write_text(json.dumps(manifest))
+        with pytest.raises(ValueError, match="engine-manager base Python"):
+            verify(folder)
+        (folder / name).write_bytes(saved)
+        manifest["files"][name] = record
     path.write_text(json.dumps(manifest))
     verify(folder)
     (folder / "runtime/python.exe").write_bytes(b"changed")

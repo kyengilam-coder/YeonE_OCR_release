@@ -1,3 +1,24 @@
+# 다음 판(미배포) · 엔진 관리 — GPU 점검과 추가 OCR 엔진 설치
+
+1.2.13 다음에 낼 판에 들어갈 내용이다. 판 번호는 아직 올리지 않았다.
+
+설치판은 앱과 PP-OCRv6만 담고, Surya · GLM-OCR · PaddleOCR server 같은 큰 엔진은 명령줄(`scripts/install_*.py`)과 별도 Python이 있어야 설치할 수 있었다. 이제 창에서 설치한다.
+
+- **[설정] → 인식 → OCR 엔진 [엔진 관리…]**: 이 PC의 NVIDIA GPU(이름 · VRAM · 드라이버)를 점검하고, 설치할 엔진을 고른다. 쓸 만한 GPU가 있으면 전부, 없으면 아무것도 미리 고르지 않는다(GPU 전용 선택지는 고를 수 없음).
+- **고를 수 있는 것**: PaddleOCR server(CPU)와 그 GPU 가속(CUDA 12.8) · Surya OCR 2(CPU)와 그 GPU 가속(CUDA 12.4) · GLM-OCR(GPU). GPU 가속을 고르면 바탕 엔진이 함께 골라진다. 이미 설치한 것은 "설치됨"으로 보인다.
+- **설치 위치**: `%LOCALAPPDATA%\YeonE_OCR\local-engines`(설정에 엔진 폴더를 정해 두었으면 그곳). 앱 폴더 밖이라 업데이트·제거해도 남고, 따로 지정하지 않아도 인식 때 찾는다.
+- **별도 Python이 필요 없다**: 설치판은 함께 설치된 PP-OCRv6의 Python을 `local-engines\python313`으로 복사해 설치용으로 쓴다. 소스로 실행하면 지금의 Python을 쓴다.
+- **진행 · 실패 · 취소**: 단계와 내려받기 진행, 설치기 출력이 창에 보이고 `local-engines\engine-manager\install-*.log`에 남는다. 실패하거나 취소한 것은 체크된 채 남아 [설치]를 다시 누르면 이어서 한다(받은 파일은 다시 쓴다). [취소]는 설치기와 그 하위 프로세스(pip · Ollama)를 함께 끝낸다.
+- **설치 뒤 확인**: 설치 기록과 모델 해시를 확인하고, GPU 가속은 실제로 CUDA로 뜨는지 본다(ONNX Runtime의 CUDA 세션 · llama.cpp의 장치 목록). 확인에 실패하면 "설치됨 · 확인 실패"로 알린다.
+- **설치 프로그램**: 추가 작업에 "설치 뒤 엔진 관리 열기"(기본 끔). 켜면 설치가 끝나고 앱이 엔진 관리 창과 함께 열린다(`YeonE_OCR.exe --open-engine-manager`).
+- **명령줄**: `python -m yeone_ocr.engine_manager`(점검만) · `--install recommended` 또는 선택지 이름.
+- 설치할 때만 공개 파일을 내려받는다. 문서 · 설정 · API 키는 읽지 않는다. 엔진과 가중치는 여전히 설치파일에 넣지 않는다(Surya 가중치는 Modified AI Pubs Open RAIL-M — 설치 전 창에서 알린다).
+- EasyOCR · RapidOCR · Tesseract는 대상이 아니다(GPU 선택지가 없고, 기본 인식은 내장 PP-OCRv6가 맡는다).
+
+**검증**: Linux(Python 3.13, 화면 시험은 Xvfb · Tk 8.6 · Python 3.12)에서 새 시험 `tests/test_engine_manager.py`(nvidia-smi 출력 파싱 · 추천 · 설치 위치 · 명령 구성과 실제 설치기의 인자 대조 · 설치용 Python 복사 · 진짜 프로세스로 실행·취소·다시 시도)와 `tests/test_gui_engines.py`(진짜 Tk 창)를 포함한 `tests/` 전체 — 2,428개 통과 · 29개 건너뜀 · 실패 31개(책갈피·미리 보기·작은 주석 화면 시험 6개 모듈 — 변경 전 소스에서도 같은 환경에서 같은 수로 실패). 엔진 관리로 PaddleOCR server(CPU)를 실제로 설치해 보아 venv 생성과 고정 패키지 설치까지 되는 것을 확인했고, 모델 내려받기는 시험 환경의 네트워크 제한(modelscope.cn 차단)으로 끝내지 못했다. **Windows에서 실제 엔진을 내려받아 설치하는 것, 설치판의 번들 Python으로 venv가 만들어지는 것, GPU 확인 단계는 아직 실기에서 돌려 보지 않았다** — 배포 전 [설치판 문서](windows-release.md)의 확인 목록을 따른다.
+
+---
+
 # 연어OCR 1.2.13 · 중간에 멈춘 뒤 읽은 쪽까지 HWPX 만들기
 
 1.2.12를 갱신하는 판이다.

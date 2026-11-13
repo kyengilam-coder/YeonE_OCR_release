@@ -35,11 +35,31 @@ Tesseract, RapidOCR, EasyOCR는 서로 다른 원시 판독을 반환합니다. 
 
 기본 사용자 설치 폴더는 `%LOCALAPPDATA%\YeonE_OCR\local-engines`입니다. 새 PC에는 아래 설치 작업이 필요합니다. 일반 연어OCR의 AI 판독·책갈피·이미지 입력은 로컬 엔진 설치와 독립적으로 사용할 수 있습니다.
 
+## 엔진 관리 창에서 설치 (Surya · GLM-OCR · PaddleOCR server)
+
+**[설정] → 인식 → OCR 엔진 [엔진 관리…]**에서 GPU를 점검하고 추가 엔진을 골라 설치합니다. 설치판에서도 별도 Python이 필요 없습니다(함께 설치된 PP-OCRv6의 Python을 `local-engines\python313`으로 복사해 씁니다).
+
+| 선택지 | 내용 | 필요 | 내려받기(대략) |
+|---|---|---|---|
+| PaddleOCR server (CPU) | 간체·번체용 서버 크기 모델. 한글 미지원 | — | 0.4 GB |
+| PaddleOCR server GPU 가속 | 같은 모델을 CUDA 12.8로 실행. CPU 설치 보존 | NVIDIA GPU · PaddleOCR server | 2 GB |
+| Surya OCR 2 (CPU) | 한글·한자 혼용 주력. CPU만으로는 느림 | — | 2.5 GB |
+| Surya GPU 가속 | CUDA 12.4 llama.cpp 백엔드 | NVIDIA GPU · Surya | 0.7 GB |
+| GLM-OCR (GPU) | 간체·번체 주력 | NVIDIA GPU | 4 GB |
+
+크기는 안내용 어림값입니다. 추천 기준은 NVIDIA 드라이버가 CUDA 12를 지원하는지(528.33 이상, PaddleOCR GPU 가속은 570.65 이상 권장)와 VRAM(PaddleOCR 2 GB · Surya와 GLM-OCR 4 GB 이상 권장)이며, 기준에 못 미쳐도 고를 수는 있습니다. 여러 프로그램이 GPU를 함께 쓰면 여유 VRAM이 모자랄 수 있으므로 창의 "사용 중" 값을 함께 보십시오.
+
+- 설치 위치는 아래 [엔진 폴더 선택](#엔진-폴더-선택)의 설정 폴더, 없으면 `%LOCALAPPDATA%\YeonE_OCR\local-engines`입니다. 이미 다른 곳에 설치된 엔진의 GPU 가속은 그 자리에 더합니다. 앱 설치 폴더에는 설치하지 않습니다.
+- 실제 설치는 아래의 `scripts/install_*.py`가 같은 고정 버전·해시 검증으로 합니다. 창은 그것을 차례로 실행하고 출력을 `local-engines\engine-manager\install-*.log`에 남깁니다.
+- 실패·취소한 항목은 체크된 채 남습니다. [설치]를 다시 누르면 받은 파일을 다시 쓰며 이어집니다.
+- 명령줄: `python -m yeone_ocr.engine_manager`(점검) · `python -m yeone_ocr.engine_manager --install recommended`.
+- Tesseract · RapidOCR · EasyOCR은 이 창의 대상이 아닙니다(아래 명령으로 설치).
+
 ## 새 PC에 설치
 
 설치 스크립트는 사용자가 실행할 때 공개 패키지·모델만 다운로드합니다. 모델의 SHA-256, 실제 패키지 버전, 내려받은 패키지의 URL·해시를 설치 폴더에 기록합니다. Windows x64 Python 3.14.5에서 검증했으며, 신경망 엔진의 고정 의존성은 별도 환경에 설치합니다. Tesseract 배포 압축을 풀 때는 기존 Bandizip 또는 7-Zip이 필요합니다.
 
-소스 폴더에서 PowerShell로 실행합니다. 설치판에도 `scripts`와 이 문서를 허용 목록으로 포함하며, 설치 스크립트 실행에는 별도 Python이 필요합니다.
+소스 폴더에서 PowerShell로 실행합니다. 설치판에도 `scripts`와 이 문서를 허용 목록으로 포함합니다. 아래 세 엔진의 설치 스크립트를 직접 실행하려면 별도 Python이 필요합니다(Surya · GLM-OCR · PaddleOCR server는 위의 엔진 관리 창을 쓰면 필요 없음).
 
 ```powershell
 $ocrRoot = Join-Path $env:LOCALAPPDATA 'YeonE_OCR\local-engines'

@@ -160,7 +160,7 @@ def _acknowledge_update_ready(path: str | None, token: str | None) -> bool:
                 pass
 
 
-def _normal_gui() -> int:
+def _normal_gui(open_engine_manager: bool = False) -> int:
     stream = None
     original_streams = (sys.stdin, sys.stdout, sys.stderr)
     null_input = None
@@ -186,6 +186,8 @@ def _normal_gui() -> int:
         app = App()
         if ready_path and ready_token:
             app.after_idle(lambda: _acknowledge_update_ready(ready_path, ready_token))
+        if open_engine_manager:
+            app.after(400, app.open_engine_manager)                 # 설치 프로그램의 「엔진 관리 열기」
         app.mainloop()
         return 0
     except Exception:
@@ -357,6 +359,8 @@ def main(argv=None) -> int:
     mode.add_argument("--self-test", action="store_true", help="run an offline packaging smoke test")
     mode.add_argument("--smoke-test", type=Path, help="run the current offline packaging test and write a JSON report")
     parser.add_argument("--output", type=Path, help="self-test output directory; required with --self-test")
+    parser.add_argument("--open-engine-manager", action="store_true",
+                        help="open the engine manager (GPU check, optional OCR engines) after the window appears")
     args = parser.parse_args(argv)
     if args.self_test != (args.output is not None):
         parser.error("--self-test and --output DIRECTORY must be specified together")
@@ -370,4 +374,4 @@ def main(argv=None) -> int:
         return run(args.smoke_test)
     if args.self_test:
         return _self_test(args.output)
-    return _normal_gui()
+    return _normal_gui(open_engine_manager=args.open_engine_manager)

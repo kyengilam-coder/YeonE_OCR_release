@@ -1,5 +1,13 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-13: 엔진 관리(미배포 — 판 번호 그대로 1.2.13)
+
+`yeone_ocr/engine_manager.py`(Tk 없음): `probe_gpus`/`parse_nvidia_smi`(nvidia-smi CSV, `compute_cap` 없는 드라이버는 그 칸 빼고 다시) · `OPTIONS` 5개(paddle_server · paddle_server_gpu · surya · surya_cuda · glmocr — `requires`로 선행 설치) · `statuses`(installation.json만 읽음: `execution_provider`/`backend_device`가 cuda면 GPU 가속 설치됨) · `recommend` · `plan` · `option_root`(이미 설치된 엔진은 그 홈, 아니면 설정 폴더 → 환경 변수 → `user_engine_root()` — `default_engine_root()`를 쓰지 않는 까닭: 설치판 앱 폴더에 ppocrv6가 있어 앱 폴더가 엔진 홈으로 잡힌다) · `base_python`/`prepare_base_python`(설치판: `tools/ppocrv6/runtime` → `local-engines/python313`, `._pth`와 `Lib/site-packages` 제외, 임시 폴더에 복사 후 이름 바꿈, 표식 `yeone-base-python.json`) · `build_command`(`-E -s -X utf8 -u`, **`-I` 금지** — `-P`가 켜져 `install_surya_cuda`의 `from install_surya import`와 `install_paddle_server`의 `import install_rapidocr`이 끊긴다) · `run_process`(`CREATE_NO_WINDOW|CREATE_SUSPENDED` + `runtime.process_tree` 작업 개체, POSIX는 새 세션 + killpg, `\r` 진행 표시는 `transient=True`) · `verify_option`(`ocr.doctor` + GPU 확인) · `run_install`(결과 status: ok · unverified · failed · skipped · cancelled, 로그 `engine-manager/install-*.log`).
+
+창은 `yeone_ocr/gui_engines.py`의 `EngineManagerDialog`(작업 스레드 → `queue` → `after(100)`), 여는 곳은 `App.open_engine_manager`(설정 탭 `R["engines"]` · `--open-engine-manager`). 설치 중 앱을 닫으려 하면 `on_close`가 설치 취소부터 묻는다.
+
+**아직 안 한 것**: (1) Windows 실기 확인 전부(docs/windows-release.md 맨 위 목록). 특히 번들 Python을 `._pth` 없이 복사한 것으로 `venv.EnvBuilder(with_pip=True)`가 되는지, `venvlauncher.exe`의 위치(CPython 3.13 소스의 `Lib/venv/__init__.py`와 `PC/layout/main.py`로는 `Lib/venv/scripts/nt/`이고 번들의 `Lib` 복사에 들어간다 — 실제 설치본에서는 미확인, 없으면 `prepare_ppocrv6_bundle.py`가 base 폴더에서 찾고 그래도 없으면 빌드를 멈춘다). (2) `work\gpu_check\install_gpu_engines.bat` 실행 로그로 설치기 자체 문제 확인 — 로그가 없어 못 했다. 의심되는 곳: `install_surya.py`가 `bootstrap.pypa.io/get-pip.py`를 고정 해시(`surya-lock.json`의 `get_pip_sha256`)로 받는데 이 파일은 pip 새 판마다 바뀐다; `install_glmocr.py`는 빈 폴더만 받는다(엔진 관리는 끊긴 폴더를 지우고 다시 시작 — `clear_incomplete_glmocr`). (3) `recommend`의 드라이버·VRAM 기준과 `Option.download_gb`/`disk_gb`는 측정값이 아닌 어림값. (4) 판 번호 · 설치파일 빌드 · 배포.
+
 ## 2026-11-12: 1.2.13 읽은 쪽까지 HWPX 만들기
 
 중지한 [한 번에 인식 → HWPX] 뒤에 그때까지의 판독 기록으로 문서를 만든다. 새 명령은 없다 — `cli.cmd_build`가 이미 기록 있는 쪽만으로 `이름_pNNN-NNN.hwpx`를 만들고 `latest_result_hwpx`([HWPX 열기])가 그 이름을 안다. 창: `App.do_partial`(`build … --reader R --no-context-model` · 키를 묻지 않음 `_env_need_key=False` · 라벨 `PARTIAL_LABEL`), 실행 카드 `b_partial`(중지 단추 아래 `stops` 틀, `_sync_run_card`가 `_partial_wanted`일 때만 보임: 기록이 있고 남은 쪽이 있거나 방금 중지), `_finish`가 중지된 HWPX 실행 뒤 만들지 묻고(`after(50, do_partial)`) 부분 문서가 끝나면 열지 묻는다. 끝난 `build`도 [HWPX 열기]를 강조한다.

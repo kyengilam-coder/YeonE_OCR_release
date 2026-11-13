@@ -1,3 +1,20 @@
+# 다음 판(미배포) 준비: 엔진 관리
+
+1.2.13 다음 판에는 [엔진 관리](release-notes.md)가 들어간다. 설치 구성에서 바뀌는 것:
+
+- **PP-OCRv6 번들을 다시 만들어야 한다.** `tools/prepare_ppocrv6_bundle.py`가 이제 `Lib/ensurepip`을 빼지 않고, venv 실행기(`Lib/venv/scripts/nt/venvlauncher.exe`)와 pip 휠이 있는지 확인한다. 설치판은 이 Python을 `%LOCALAPPDATA%\YeonE_OCR\local-engines\python313`으로 복사해(`python313._pth`와 PP-OCRv6 전용 `site-packages`는 빼고) 추가 엔진의 venv를 만드는 데 쓴다. 옛 번들로 빌드하면 `tools/verify_ppocrv6_bundle.py`가 "Missing engine-manager base Python file"로 멈춘다.
+- `packaging/YeonE_OCR.iss`: 추가 작업 "설치 뒤 엔진 관리 열기"(기본 끔)와 그에 따른 실행 항목(`--open-engine-manager`). 엔진·가중치는 여전히 설치파일에 넣지 않는다.
+- `--smoke-test`에 `engine-manager-resources` 검사가 추가됐다(설치 스크립트 5개와 `install_rapidocr.py`가 묶였는지, 번들 Python이 있으면 venv를 만들 수 있는지).
+
+배포 전 Windows 설치본에서 확인할 것(이 항목들은 Linux 시험으로 대신하지 못했다):
+
+1. 별도 Python이 없는 PC에서 [설정] → [엔진 관리…] → PaddleOCR server(CPU)만 설치 → `local-engines\python313`이 만들어지고 `tools\paddle_server\venv`가 동작하는지, 창에 "설치 완료"가 뜨는지.
+2. NVIDIA GPU가 있는 PC에서 추천대로 전부 설치 → 각 GPU 확인 단계의 결과, 비교·교정 창과 로컬 우선 인식이 새 엔진을 찾는지.
+3. 내려받는 도중 [취소] → pip · `ollama.exe`가 남지 않는지, 다시 [설치]하면 이어지는지(GLM-OCR은 끊긴 폴더를 지우고 새로 시작).
+4. 앱을 새 판으로 덮어 설치하거나 제거한 뒤에도 `local-engines`의 엔진이 그대로 인식되는지.
+5. 설치 프로그램에서 "설치 뒤 엔진 관리 열기"를 켰을 때 앱이 한 번만 열리고 엔진 관리 창이 뜨는지.
+6. GPU가 없는 PC: GPU 선택지가 꺼져 있고 까닭("NVIDIA GPU 필요")이 보이는지.
+
 # Windows 1.2.13 설치판
 
 1.2.13은 1.2.12의 설치 구성을 그대로 쓰고, 중간에 멈춘 실행의 판독 기록으로 HWPX를 만드는 단추와 물음 창을 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.

@@ -2472,6 +2472,13 @@ class App(tk.Tk):
             return cb
         R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
 
+        def engines(parent):
+            return self._btn(parent, "엔진 관리…", lambda: App.open_engine_manager(self), lock=False,
+                             tip="이 PC의 NVIDIA GPU를 점검하고, Surya · GLM-OCR · PaddleOCR server 와 그 GPU 가속을 골라 내려받아 설치합니다. "
+                                 "사용자 폴더에 설치하므로 앱을 업데이트해도 남고, 설치한 엔진은 로컬 인식의 자동 선택에 들어갑니다. "
+                                 "설치할 때만 공개 파일을 내려받으며 문서와 API 키는 읽지 않습니다.")
+        R["engines"] = row(b, "OCR 엔진", "GPU 점검 · 추가 엔진과 GPU 가속 내려받아 설치", engines)
+
         R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
 
         def resume(parent):
@@ -6319,6 +6326,23 @@ class App(tk.Tk):
         return {"provider": reader, "model": model, "api_key": keys[0] if keys else "",
                 "key_count": len(keys)}
 
+    def open_engine_manager(self):
+        """엔진 관리 창(하나만): GPU 점검 · 추가 로컬 엔진 설치. 인식 작업과 따로 돈다."""
+        if getattr(self, "_closing", False):
+            return
+        existing = vars(self).get("_engine_manager")
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify(); existing.lift(); existing.focus_set()
+            return
+        from .gui_engines import EngineManagerDialog
+        self._engine_manager = EngineManagerDialog(self, selected_root=vars(self).get("cfg", {}).get("local_engine_root") or None,
+                                                   on_installed=lambda outcome: App._engines_installed(self, outcome))
+
+    def _engines_installed(self, outcome):
+        done = [item["label"] for item in outcome.get("results", ()) if item["status"] in ("ok", "unverified")]
+        if done:
+            self._append("엔진 설치: " + " · ".join(done) + (f" → {outcome['roots'][0]}" if outcome.get("roots") else "") + "\n")
+
     def _remember_local_engine_root(self, path):
         self.cfg["local_engine_root"] = str(Path(path).expanduser().resolve())
         self.save_settings(quiet=True)
@@ -8138,6 +8162,11 @@ class App(tk.Tk):
                 pending = True
         if pending:
             self.after(200, self.on_close)
+            return
+        engines = vars(self).get("_engine_manager")
+        if engines is not None and engines.winfo_exists() and engines.busy and engines.worker.name == "engine-install":
+            engines.deiconify(); engines.lift()
+            engines.close()                                         # 설치를 취소할지 묻는다 — 취소가 끝난 뒤 다시 닫으면 닫힌다
             return
         if getattr(self, "_update_installing", False) and not getattr(self, "_closing", False):
             if not messagebox.askyesno(APP_NAME, "업데이트 다운로드를 취소하고 닫을까요?\n현재 실행 파일은 바뀌지 않습니다."):
