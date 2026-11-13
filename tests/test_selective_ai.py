@@ -128,6 +128,23 @@ class SelectiveReviewTests(unittest.TestCase):
         chosen = self.plan(suggestion_ids=[suggestions[0]["id"]])
         self.assertEqual(chosen.summary["difficulty_reasons"], {"engine-disagreement": 1})
 
+    def test_script_only_disagreement_is_neither_sent_nor_painted_red(self):
+        """PP-OCRv6 reads a Traditional book partly in Simplified (one recognizer for both): 会 against
+        another engine's 會 is the same glyph. It costs no AI call and is not a red 'check the source'
+        mark; a variant pair (爲/為) and a real misreading still are both."""
+        from yeone_ocr.local_first import _local_grades
+        self.add(text="會議爲之")
+        self.add("rapidocr", text="会议為之")
+        self.project.compare_page(1, baseline="ppocrv6")
+        pending = {item["baseline_text"]: item for item in self.project.page(1)["suggestions"]}
+        self.assertTrue(pending)
+        plan = self.plan()
+        self.assertEqual(plan.summary["difficulty_reasons"].get("engine-disagreement"), 1, plan.summary)  # 爲/為 only
+        run = next(r for r in self.project.page(1)["runs"] if r["engine"] == "ppocrv6")
+        grades = _local_grades(self.project, 1, run, self.project.text(1))
+        red = {i for g in grades if g["grade"] == "red" for i in range(g["start"], g["end"])}
+        self.assertEqual(red, {2})                                              # 爲, not 會議
+
     def test_neural_engine_thresholds_use_the_worker_percent_scale(self):
         # Workers store 0-100 (rapidocr/ppocrv6/easyocr multiply the native score by 100).
         from yeone_ocr.comparison_ai import LOW_CONFIDENCE_THRESHOLDS

@@ -66,3 +66,34 @@ def test_punctuation_and_uncertain_words_keep_the_engine_reading():
     assert [text[a:b] for a, b in red] == ["穿"]                    # the doubted glyph is painted red
     text, red, _blue, _summary = ai_page.merge("自薦之癖을", "自薦之癖을", uncertain=["自薦之癖"])
     assert text == "自薦之癖을" and [text[a:b] for a, b in red] == ["自", "薦", "之", "癖"]   # agreed but doubted
+
+
+def test_script_differences_align_and_take_the_ai_form():
+    """Engine (PP-OCRv6) wrote Simplified forms in a Traditional book, the AI page reading Traditional.
+    Before: one long difference, engine line kept and painted red. Now the glyphs align, the AI's form
+    is taken (it settles one-to-many characters: 叶→葉, 须→須), and nothing is marked."""
+    from yeone_ocr.ai_page import merge
+    engine = "药有陰陽配合，子母兄弟，根叶華實，草石骨肉。有單行者，有相须者，有相使者，有相恶者"
+    ai = "藥有陰陽配合，子母兄弟，根葉華實，草石骨肉。有單行者，有相須者，有相使者，有相惡者"
+    text, red, blue, summary = merge(engine, ai, "prefer")
+    assert text == ai and red == [] and blue == []
+    assert summary["script_taken"] == 4 and summary["kept_long"] == 0 and summary["ratio"] == 1.0
+    kept, red, blue, summary = merge(engine, ai, "witness")
+    assert kept == engine and red == [] and blue == [] and summary["script_taken"] == 0   # witness never edits
+
+
+def test_variant_forms_still_count_as_differences():
+    from yeone_ocr.ai_page import merge
+    text, red, blue, summary = merge("爲之", "為之", "prefer")
+    assert text == "為之" and summary["taken"] == 1 and summary["script_taken"] == 0
+    text, red, blue, summary = merge("爲之", "為之", "witness")
+    assert text == "爲之" and blue == [(0, 1)]
+
+
+def test_script_pairs_are_one_character_in_two_scripts_only():
+    from yeone_ocr.collate.zh import script_only, script_pair
+    assert script_pair("会", "會") and script_pair("復", "复") and script_pair("复", "複")
+    assert not script_pair("爲", "為") and not script_pair("會", "會") and not script_pair("甲", "乙")
+    assert script_only(["会议", "會議"]) and script_only(["会 ", "會"])
+    assert not script_only(["爲", "為"]) and not script_only(["，", ","]) and not script_only(["會", "会x"])
+    assert not script_only(["會", "會"])

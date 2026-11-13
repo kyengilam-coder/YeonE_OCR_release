@@ -114,6 +114,7 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
     left unpainted rather than guessed.
     """
     import difflib
+    from .collate.zh import script_only, script_pair
     from .comparison import ComparisonError
     from .comparison_ai import LOW_CONFIDENCE_THRESHOLDS, _word_spans
     raw = run["raw"]
@@ -134,8 +135,12 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
             return None
 
     if base != current:
-        for tag, _a0, _a1, b0, b1 in difflib.SequenceMatcher(None, base, current, autojunk=False).get_opcodes():
-            if tag != "equal":
+        for tag, a0, a1, b0, b1 in difflib.SequenceMatcher(None, base, current, autojunk=False).get_opcodes():
+            if tag == "replace" and a1 - a0 == b1 - b0:
+                for k in range(b1 - b0):        # the same glyph in the other script (会→會) is not an edit to check
+                    if not script_pair(base[a0 + k], current[b0 + k]):
+                        paint(b0 + k, b0 + k + 1, "green")
+            elif tag != "equal":
                 paint(b0, b1, "green")
     threshold = LOW_CONFIDENCE_THRESHOLDS.get(run["engine"])
     if threshold is not None:
@@ -154,8 +159,22 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
         paint(start, end, kind)
     page = project.page(number)
     for suggestion in page.get("suggestions", []):
-        if suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace":
-            span = mapped(suggestion["start"], suggestion["end"])
+        if (suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace"
+                and not script_only(suggestion.get("candidates", {}).values())):
+            start, end = suggestion["start"], suggestion["end"]
+            values = list(suggestion.get("candidates", {}).values())
+            if values and end > start and all(len(v) == end - start for v in values):
+                # Adjacent differences are one suggestion: paint only the glyphs some engine really reads
+                # otherwise, not the neighbours that differ only in script (會議爲 / 会议為 → 爲 alone).
+                for k in range(end - start):
+                    glyphs = {v[k] for v in values}
+                    first = next(iter(glyphs))
+                    if len(glyphs) > 1 and not all(g == first or script_pair(g, first) for g in glyphs):
+                        span = mapped(start + k, start + k + 1)
+                        if span:
+                            paint(*span, "red")
+                continue
+            span = mapped(start, end)
             if span:
                 paint(*span, "red")
     for proposal in project.ai_proposals(number):

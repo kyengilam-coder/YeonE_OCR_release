@@ -352,8 +352,9 @@ class LocalFirstTests(unittest.TestCase):
             self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
         rec = self.record()
         self.assertIn("天地玄黃宇宙洪荒", json.dumps(rec["merged"], ensure_ascii=False))
-        self.assertEqual(rec["local_first"]["ai_page"]["taken"], 1)
-        self.assertIn("green", {g["grade"] for g in rec["local_grades"]})
+        # 黄 (engine) / 黃 (AI) is one glyph in two scripts: the AI's form goes in, without a mark to check
+        self.assertEqual((rec["local_first"]["ai_page"]["script_taken"], rec["local_first"]["ai_page"]["taken"]), (1, 0))
+        self.assertEqual(rec["local_grades"], [])
         project = ComparisonProject.load(rec["local_first"]["project_path"])
         self.assertEqual(project.text(1), "天地玄黄宇宙洪荒")                  # engine reading kept for the editor
         self.assertEqual(len(sent), 1)
