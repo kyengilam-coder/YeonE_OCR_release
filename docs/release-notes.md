@@ -15,7 +15,7 @@
 - 설치할 때만 공개 파일을 내려받는다. 문서 · 설정 · API 키는 읽지 않는다. 엔진과 가중치는 여전히 설치파일에 넣지 않는다(Surya 가중치는 Modified AI Pubs Open RAIL-M — 설치 전 창에서 알린다).
 - EasyOCR · RapidOCR · Tesseract는 대상이 아니다(GPU 선택지가 없고, 기본 인식은 내장 PP-OCRv6가 맡는다).
 
-**검증**: Linux(Python 3.13, 화면 시험은 Xvfb · Tk 8.6 · Python 3.12)에서 새 시험 `tests/test_engine_manager.py`(nvidia-smi 출력 파싱 · 추천 · 설치 위치 · 명령 구성과 실제 설치기의 인자 대조 · 설치용 Python 복사 · 진짜 프로세스로 실행·취소·다시 시도)와 `tests/test_gui_engines.py`(진짜 Tk 창)를 포함한 `tests/` 전체 — 2,428개 통과 · 29개 건너뜀 · 실패 31개(책갈피·미리 보기·작은 주석 화면 시험 6개 모듈 — 변경 전 소스에서도 같은 환경에서 같은 수로 실패). 엔진 관리로 PaddleOCR server(CPU)를 실제로 설치해 보아 venv 생성과 고정 패키지 설치까지 되는 것을 확인했고, 모델 내려받기는 시험 환경의 네트워크 제한(modelscope.cn 차단)으로 끝내지 못했다. **Windows에서 실제 엔진을 내려받아 설치하는 것, 설치판의 번들 Python으로 venv가 만들어지는 것, GPU 확인 단계는 아직 실기에서 돌려 보지 않았다** — 배포 전 [설치판 문서](windows-release.md)의 확인 목록을 따른다.
+**검증**: Linux(Python 3.13, 화면 시험은 Xvfb · Tk 8.6 · Python 3.12)에서 새 시험 `tests/test_engine_manager.py`(nvidia-smi 출력 파싱 · 추천 · 설치 위치 · 명령 구성과 실제 설치기의 인자 대조 · 설치용 Python 복사 · 진짜 프로세스로 실행·취소·다시 시도)와 `tests/test_gui_engines.py`(진짜 Tk 창)를 포함한 `tests/` 전체 — 2,428개 통과 · 29개 건너뜀 · 실패 31개(책갈피·미리 보기·작은 주석 화면 시험 6개 모듈 — 변경 전 소스에서도 같은 환경에서 같은 수로 실패). 엔진 관리로 PaddleOCR server(CPU)를 실제로 설치해 보아 venv 생성과 고정 패키지 설치까지 되는 것을 확인했고, 모델 내려받기는 시험 환경의 네트워크 제한(modelscope.cn 차단)으로 끝내지 못했다. GitHub Actions의 Windows 실행기에서 전체 시험(2,488개)이 통과했고, Windows PC에서 새 PP-OCRv6 번들을 만들어 그 Python을 앱처럼 복사한 것으로 venv + pip가 만들어지는 것을 확인했다. **설치본에서 실제 엔진을 내려받아 설치하는 것과 GPU 확인 단계는 아직 실기에서 돌려 보지 않았다** — 배포 전 [설치판 문서](windows-release.md)의 확인 목록을 따른다.
 
 ---
 
