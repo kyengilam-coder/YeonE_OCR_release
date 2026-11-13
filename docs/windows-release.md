@@ -9,6 +9,7 @@
 - `--smoke-test`에 `engine-manager-resources` 검사가 추가됐다(설치 스크립트 5개와 `install_rapidocr.py`가 묶였는지, 번들 Python이 있으면 venv를 만들 수 있는지).
 
 - **이 PC에서 설치판 만들기**: `tools\build_installer.bat`(더블클릭). 64비트 Python 3.14와 Inno Setup 6이 설치되어 있어야 하고(없으면 받을 곳을 알려 주고 아무것도 바꾸지 않은 채 멈춘다), `work\windows-release\venv`를 만들어 `packaging\requirements-windows.lock.txt`를 설치한 뒤(릴리스 워크플로처럼 PyYAML은 순수 Python 휠로) 가장 최근 `work\ppocrv6-bundle\bundle-*`로 `tools\build_windows.ps1`을 돌린다. 결과는 `dist\YeonE_OCR-<판>-Setup-x64.exe`, 로그는 `work\windows-release\installer-build-<시각>.log`. `tools/build_notices.py`는 돌리지 않는다(저장소의 고지 파일을 그대로 쓴다).
+  - 2026-11-14 개발 PC에서 위 번들로 빌드: `YeonE_OCR-1.2.13-Setup-x64.exe` 276 MB(SHA-256 `24c3294c…c5b7edbb`), 자체 검사 통과. 확인용 빌드다(Python 3.14.10 — 배포는 릴리스 워크플로의 3.14.5).
 
 배포 전 Windows 설치본에서 확인할 것(이 항목들은 Linux 시험으로 대신하지 못했다):
 
