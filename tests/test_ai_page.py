@@ -83,17 +83,26 @@ def test_script_differences_align_and_take_the_ai_form():
 
 
 def test_variant_forms_still_count_as_differences():
+    """裏/裡 fold to the same Simplified 里 but neither is it, and both are Korean forms: a real variant."""
     from yeone_ocr.ai_page import merge
-    text, red, blue, summary = merge("爲之", "為之", "prefer")
-    assert text == "為之" and summary["taken"] == 1 and summary["script_taken"] == 0
-    text, red, blue, summary = merge("爲之", "為之", "witness")
-    assert text == "爲之" and blue == [(0, 1)]
+    text, red, blue, summary = merge("裏之", "裡之", "prefer")
+    assert text == "裡之" and summary["taken"] == 1 and summary["script_taken"] == 0
+    text, red, blue, summary = merge("裏之", "裡之", "witness")
+    assert text == "裏之" and blue == [(0, 1)]
+
+
+def test_korean_standard_forms_are_the_same_glyph():
+    """Documents write 爲/眞/說 (KS X 1001) for 為/真/説, so an engine or AI reading either is no difference."""
+    from yeone_ocr.ai_page import merge
+    text, red, blue, summary = merge("為之真", "爲之眞", "prefer")
+    assert (text, red, blue, summary["script_taken"]) == ("爲之眞", [], [], 2)
 
 
 def test_script_pairs_are_one_character_in_two_scripts_only():
     from yeone_ocr.collate.zh import script_only, script_pair
     assert script_pair("会", "會") and script_pair("復", "复") and script_pair("复", "複")
-    assert not script_pair("爲", "為") and not script_pair("會", "會") and not script_pair("甲", "乙")
-    assert script_only(["会议", "會議"]) and script_only(["会 ", "會"])
-    assert not script_only(["爲", "為"]) and not script_only(["，", ","]) and not script_only(["會", "会x"])
+    assert script_pair("爲", "為") and script_pair("真", "眞") and script_pair("説", "說")      # Korean standard forms
+    assert not script_pair("裏", "裡") and not script_pair("會", "會") and not script_pair("甲", "乙")
+    assert script_only(["会议", "會議"]) and script_only(["会 ", "會"]) and script_only(["爲", "為"])
+    assert not script_only(["裏", "裡"]) and not script_only(["，", ","]) and not script_only(["會", "会x"])
     assert not script_only(["會", "會"])

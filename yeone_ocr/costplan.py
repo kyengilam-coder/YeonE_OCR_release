@@ -42,6 +42,7 @@ class PlanInput:
     normalize: bool = True
     normalize_traditional: bool = True
     normalize_yun: bool = True
+    normalize_korean_forms: bool = True
     normalize_punctuation: bool = True
     punctuation_rules: str = ""
     layout: str = "page"
@@ -321,7 +322,7 @@ def count_plan(inp: PlanInput, progress=None, should_stop=None) -> dict:
                 from .normalization import NormalizationOptions, load_punctuation_rules
                 from .readers import TEXT_CHOICE_SYSTEM
                 options = NormalizationOptions(traditional=inp.normalize_traditional, yun=inp.normalize_yun,
-                    punctuation=inp.normalize_punctuation,
+                    punctuation=inp.normalize_punctuation, korean_forms=inp.normalize_korean_forms,
                     punctuation_rules=load_punctuation_rules(inp.punctuation_rules) if inp.normalize_punctuation and inp.punctuation_rules else None)
                 base = have or recs
                 np_ = None

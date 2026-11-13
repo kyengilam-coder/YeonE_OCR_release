@@ -2044,7 +2044,8 @@ def normalization_options(args):
     rules = load_punctuation_rules(path) if punctuation and path else None
     return NormalizationOptions(traditional=enabled and not getattr(args, "no_traditional", False),
                                 yun=enabled and not getattr(args, "no_yun", False),
-                                punctuation=punctuation, punctuation_rules=rules)
+                                punctuation=punctuation, punctuation_rules=rules,
+                                korean_forms=enabled and not getattr(args, "no_korean_forms", False))
 
 
 def _check_document(args) -> str | None:
@@ -2710,6 +2711,8 @@ def build_parser():
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
         p.add_argument("--no-traditional", action="store_true", help="간체→번체 변환과 한자 치환 문맥 후보를 끔(云/雲·부호는 별도)")
         p.add_argument("--no-yun", action="store_true", help="云/雲 문맥 교정을 끔(원래 글자 보존)")
+        p.add_argument("--no-korean-forms", action="store_true",
+                       help="한국 표준 한자체(KS X 1001) 변환을 끔: 爲·眞·說 대신 為·真·説처럼 판독·간체→번체 결과의 자형을 그대로 둠")
         p.add_argument("--no-punctuation", action="store_true", help="중문부호 치환을 끔")
         p.add_argument("--punctuation-rules", help="편집한 중문부호 규칙 JSON: [{\"find\": \"，\", \"replace\": \", \"}, ...], 기본 부호 목록을 대체")
         p.add_argument("--no-context-model", action="store_true",

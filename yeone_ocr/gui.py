@@ -29,7 +29,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "preset": DEFAULT_PRESET, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "none", "memo_mode": "none", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
-            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
+            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "normalize_korean_forms": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
             "local_gpu_engines": None,                              # None: YEONE_OCR_GPU_ENGINES 를 따름(기본 켬)
@@ -2335,6 +2335,7 @@ class App(tk.Tk):
         self.v_preset = tk.StringVar(value=preset_label(self._preset_ref))
         self.v_ctxmodel = tk.BooleanVar(value=bool(self.cfg.get("context_model", True)))
         self.v_traditional = tk.BooleanVar(value=bool(self.cfg.get("normalize_traditional", True)))
+        self.v_korean_forms = tk.BooleanVar(value=bool(self.cfg.get("normalize_korean_forms", True)))
         self.v_yun = tk.BooleanVar(value=bool(self.cfg.get("normalize_yun", True)))
         self.v_punctuation = tk.BooleanVar(value=bool(self.cfg.get("normalize_punctuation", True)))
         self.v_punctuation_rules = tk.StringVar(value=str(self.cfg.get("punctuation_rules", "") or ""))
@@ -2860,9 +2861,14 @@ class App(tk.Tk):
 
         def rules(parent):
             f = boxed(parent)
-            items = (("간체→번체", self.v_traditional), ("云/雲 문맥 판별", self.v_yun), ("중문부호 수정 규칙", self.v_punctuation))
+            items = (("간체→번체", self.v_traditional), ("한국 표준 한자체", self.v_korean_forms), ("云/雲 문맥 판별", self.v_yun),
+                     ("중문부호 수정 규칙", self.v_punctuation))
             for i, (label, variable) in enumerate(items):
-                ttk.Checkbutton(f, text=label, variable=variable).pack(side="left", padx=(0, P(16) if i < len(items) - 1 else 0))
+                cb = ttk.Checkbutton(f, text=label, variable=variable)
+                cb.pack(side="left", padx=(0, P(16) if i < len(items) - 1 else 0))
+                if variable is self.v_korean_forms:
+                    Tip(cb, "판독·간체→번체 결과의 자형을 한국 표준 한자체(KS X 1001)로 맞춥니다: 為→爲, 真→眞, 説→說, 黄→黃, "
+                            "教→敎, 即→卽 등. 한국 자형에 함께 있는 글자(余와 餘 등)는 바꾸지 않습니다. 끄면 읽은 자형 그대로 둡니다.", self)
             return f
         R["rules"] = row(b, "적용할 교정", "규칙으로 바꿈 · 모델 호출 없음", rules)
 
@@ -3219,7 +3225,8 @@ class App(tk.Tk):
 
     def _normalization_opts(self):
         options = []
-        for name, flag in (("v_traditional", "--no-traditional"), ("v_yun", "--no-yun"), ("v_punctuation", "--no-punctuation")):
+        for name, flag in (("v_traditional", "--no-traditional"), ("v_yun", "--no-yun"), ("v_punctuation", "--no-punctuation"),
+                           ("v_korean_forms", "--no-korean-forms")):
             variable = vars(self).get(name)
             if variable is not None and not variable.get():
                 options.append(flag)
@@ -3576,8 +3583,9 @@ class App(tk.Tk):
 
     def _common_line(self) -> str:
         """'모든 책 공통: ChatGPT (OpenAI) gpt-4.1 · 자동 교정 3가지' (+ HWPX와 함께 만드는 것)."""
-        on = [n for n, v in (("간체→번체", self.v_traditional), ("云/雲", self.v_yun), ("중문부호", self.v_punctuation)) if v.get()]
-        fix = "자동 교정 3가지" if len(on) == 3 else ("자동 교정: " + " · ".join(on) if on else "자동 교정 끔")
+        on = [n for n, v in (("간체→번체", self.v_traditional), ("한국 표준 한자체", vars(self).get("v_korean_forms")),
+                             ("云/雲", self.v_yun), ("중문부호", self.v_punctuation)) if v is not None and v.get()]
+        fix = "자동 교정 4가지" if len(on) == 4 else ("자동 교정: " + " · ".join(on) if on else "자동 교정 끔")
         also = [n for n, v in (("DOCX", self.v_docx), ("검색 가능한 PDF", self.v_tlpdf)) if v.get()]
         return (f"모든 책 공통: {self.v_provider.get()} {self.v_model.get().strip()} · {fix}"
                 + (" · HWPX와 함께 " + " · ".join(also) if also else ""))
@@ -7424,7 +7432,7 @@ class App(tk.Tk):
             self.cfg["skip_any_model"] = bool(self.v_skipany.get())
         if getattr(self, "v_tlpdf", None) is not None:
             self.cfg["textlayer_pdf"] = self.v_tlpdf.get()
-        for key, name in (("normalize_traditional", "v_traditional"), ("normalize_yun", "v_yun"),
+        for key, name in (("normalize_traditional", "v_traditional"), ("normalize_yun", "v_yun"), ("normalize_korean_forms", "v_korean_forms"),
                           ("normalize_punctuation", "v_punctuation"), ("punctuation_rules", "v_punctuation_rules")):
             variable = getattr(self, name, None)
             if variable is not None:
@@ -7524,6 +7532,7 @@ class App(tk.Tk):
                          normalize_traditional=bool(self.v_traditional.get()) if getattr(self, "v_traditional", None) is not None else True,
                          normalize_yun=bool(self.v_yun.get()) if getattr(self, "v_yun", None) is not None else True,
                          normalize_punctuation=bool(self.v_punctuation.get()) if getattr(self, "v_punctuation", None) is not None else True,
+                         normalize_korean_forms=bool(self.v_korean_forms.get()) if getattr(self, "v_korean_forms", None) is not None else True,
                          punctuation_rules=self.v_punctuation_rules.get().strip() if getattr(self, "v_punctuation_rules", None) is not None else "",
                          skip_any_model=bool(self.v_skipany.get()))
 

@@ -104,9 +104,9 @@ class BuildNormalization(unittest.TestCase):
         self.assertTrue(audit["complete"])
         self.assertEqual(self.work.record_path(1).read_text(encoding="utf-8"), self.original)
 
-    def test_disabling_all_three_stages_is_equivalent_to_no_normalize(self):
+    def test_disabling_every_stage_is_equivalent_to_no_normalize(self):
         with patch.object(cli, "create_reader") as factory:
-            self.assertEqual(self.run_build(self.args("--no-traditional", "--no-yun", "--no-punctuation")), 0)
+            self.assertEqual(self.run_build(self.args("--no-traditional", "--no-yun", "--no-punctuation", "--no-korean-forms")), 0)
             factory.assert_not_called()
         audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
         self.assertFalse(audit["enabled"])

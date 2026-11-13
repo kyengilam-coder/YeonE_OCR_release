@@ -49,15 +49,22 @@ def script_fold(text: str) -> str:
 
 
 def script_pair(a: str, b: str) -> bool:
-    """The same character in its Simplified and its Traditional form (会/會, 复/復). Two Traditional
-    variants that share a Simplified form (爲/為, both 为) are not: variant forms are kept as read."""
+    """The same character in two forms that a document writes alike: its Simplified and its Traditional
+    form (会/會, 复/復), or a form and its Korean standard form (為/爲, 真/眞, 説/說 — documents use the
+    KS X 1001 form, normalization.korean_forms). Other variants that share a Simplified form (裏/裡,
+    both 里) are not: they are kept as read and still count as a difference."""
+    if a == b:
+        return False
+    from ..korean_forms import KOREAN_FORMS
+    if KOREAN_FORMS.get(a, a) == KOREAN_FORMS.get(b, b):
+        return True
     fa, fb = _fold_char(a), _fold_char(b)
-    return a != b and fa == fb and (a == fa or b == fb)
+    return fa == fb and (a == fa or b == fb)
 
 
 def script_only(values) -> bool:
-    """Readings that differ, but only by Simplified/Traditional script (spaces ignored): e.g. one
-    engine read 會 and another 会. Variant forms (爲/為) and punctuation still count as differences."""
+    """Readings that differ only by script or Korean standard form (spaces ignored): e.g. one engine read
+    會 and another 会, or 爲 and 為. Other variant forms (裏/裡) and punctuation still count as differences."""
     texts = sorted({"".join(str(v).split()) for v in values})
     if len(texts) < 2 or len({len(t) for t in texts}) != 1:
         return False

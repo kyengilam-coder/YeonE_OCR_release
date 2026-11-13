@@ -144,10 +144,12 @@ class NormalizationOptions:
     punctuation: bool = True
     # None=기본 부호 규칙, []=부호 치환 없음. 한자 MSR 후보는 traditional을 따른다.
     punctuation_rules: list[dict] | None = None
+    # 한국 표준 한자체(KS X 1001): 為→爲, 真→眞, 説→說 … 간체→번체 뒤에 적용(korean_forms.py).
+    korean_forms: bool = True
 
     @property
     def enabled(self) -> bool:
-        return self.traditional or self.yun or self.punctuation
+        return self.traditional or self.yun or self.punctuation or self.korean_forms
 
     def rules(self) -> list[dict]:
         bundled = rule_data()["rules"]
@@ -371,6 +373,15 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
             raise ValueError("정자 변환기가 원문에 없는 삽입을 반환했습니다.")
         replacements.append((a, b, after, {}))
     _replace_spans(result, replacements, "opencc_s2t")
+    if options.korean_forms:
+        # OpenCC gives Chinese Traditional forms (为→為, 真 stays 真); a Korean book and its answer files
+        # use the KS X 1001 forms (爲, 眞). One character for one, so positions do not move. Characters
+        # with several Traditional forms (当 → 當/噹) are left to the context step above, as before.
+        from .korean_forms import KOREAN_FORMS
+        forms = [(m.start(), m.end(), KOREAN_FORMS[m.group()], {}) for m in re.finditer(
+                 "[" + "".join(re.escape(c) for c in KOREAN_FORMS if c not in ambiguous) + "]", result.text)]
+        if forms:
+            _replace_spans(result, forms, "korean_forms")
     for rule in rules:
         find, replace = rule["find"], rule["replace"]
         if find == replace or not _punctuation_rule(rule):
