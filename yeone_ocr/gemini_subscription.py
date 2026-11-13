@@ -187,8 +187,15 @@ INELIGIBLE_HINT = ("이 Google 계정은 Gemini CLI를 쓸 수 없다고 Google�
                    "(환경 변수 GOOGLE_CLOUD_PROJECT)가 필요할 수 있습니다.")
 
 
+UNSUPPORTED_CLIENT_HINT = ("Google이 개인용 무료 등급(Gemini Code Assist for individuals)에서 Gemini CLI 지원을 끝냈습니다"
+                           "(UNSUPPORTED_CLIENT). 이 계정으로는 Gemini를 구독으로 쓸 수 없습니다 — Claude·ChatGPT 구독으로 "
+                           "진행하거나, Gemini는 설정 「AI 판독기」 ②의 API 키로 쓰십시오.")
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
+    if "unsupported_client" in low or "no longer supported for gemini code assist" in low:
+        return problem("account", UNSUPPORTED_CLIENT_HINT)
     if re.search(r"ineligible|projectiderror", low):
         return problem("account", INELIGIBLE_HINT)
     if _LIMIT.search(low):

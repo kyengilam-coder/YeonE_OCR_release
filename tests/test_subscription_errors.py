@@ -40,6 +40,18 @@ def test_gemini_failure_kind_is_judged_on_the_whole_output(first_line, kind):
         assert "Gemini CLI를 쓸 수 없다고" in str(error)
 
 
+def test_gemini_free_tier_that_dropped_the_cli_gets_its_own_explanation():
+    """Gemini CLI 0.68.0, personal Google account (2026-11-14): Google ended CLI support for the free tier."""
+    output = ("Error authenticating: IneligibleTierError: This client is no longer supported for Gemini Code Assist for "
+              "individuals. To continue using Gemini, please migrate to the Antigravity suite of products: "
+              "https://antigravity.google\n" + FRAMES + "\n{ ineligibleTiers: [ { reasonCode: 'UNSUPPORTED_CLIENT', "
+              "tierId: 'free-tier', tierName: 'Gemini Code Assist for individuals' } ] }")
+    full, shown = program_error(output, "")
+    error = failure("Gemini CLI", shown, gemini_subscription._classify, "x", full=full)
+    assert error.kind == "account"
+    assert "무료 등급" in str(error) and "API 키" in str(error) and "GOOGLE_CLOUD_PROJECT" not in str(error)
+
+
 def test_gemini_cli_run_reports_an_ineligible_account_as_out_for_this_run(tmp_path, monkeypatch):
     def run(*_args, **_kwargs):
         return SimpleNamespace(returncode=1, stdout="", stderr=node_error("Error: IneligibleOrProjectIdError: not eligible"))
