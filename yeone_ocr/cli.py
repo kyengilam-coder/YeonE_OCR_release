@@ -2044,7 +2044,8 @@ def normalization_options(args):
     rules = load_punctuation_rules(path) if punctuation and path else None
     return NormalizationOptions(traditional=enabled and not getattr(args, "no_traditional", False),
                                 yun=enabled and not getattr(args, "no_yun", False),
-                                punctuation=punctuation, punctuation_rules=rules)
+                                punctuation=punctuation, punctuation_rules=rules,
+                                korean_forms=enabled and not getattr(args, "no_korean_forms", False))
 
 
 def _check_document(args) -> str | None:
@@ -2710,6 +2711,8 @@ def build_parser():
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
         p.add_argument("--no-traditional", action="store_true", help="간체→번체 변환과 한자 치환 문맥 후보를 끔(云/雲·부호는 별도)")
         p.add_argument("--no-yun", action="store_true", help="云/雲 문맥 교정을 끔(원래 글자 보존)")
+        p.add_argument("--no-korean-forms", action="store_true",
+                       help="한국 표준 한자체(KS X 1001) 변환을 끔: 爲·眞·說 대신 為·真·説처럼 판독·간체→번체 결과의 자형을 그대로 둠")
         p.add_argument("--no-punctuation", action="store_true", help="중문부호 치환을 끔")
         p.add_argument("--punctuation-rules", help="편집한 중문부호 규칙 JSON: [{\"find\": \"，\", \"replace\": \", \"}, ...], 기본 부호 목록을 대체")
         p.add_argument("--no-context-model", action="store_true",
@@ -2837,6 +2840,10 @@ def build_parser():
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
                    help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
                         "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
+    p.add_argument("--local-gpu-engines", action=argparse.BooleanOptionalAction, default=None,
+                   help="설치된 CUDA 엔진(GLM-OCR·Surya·PaddleOCR server) 중 하나를 쪽마다 함께 돌림. 기본: 켬"
+                        "(환경 변수 YEONE_OCR_GPU_ENGINES=0 이면 끔). 생성형 엔진이라 쪽당 시간이 크게 늘고, "
+                        "켜면 그 엔진 결과가 없는 이미 읽은 쪽도 다시 처리함")
     p.add_argument("--local-exclude-engines", nargs="+", default=[], metavar="ENGINE",
                    choices=("ppocrv6", "rapidocr", "easyocr", "tesseract", "surya", "glmocr", "paddle_server"),
                    help="(시험) 자동 선택에서 뺄 엔진. 예: --local-exclude-engines easyocr")
@@ -2892,7 +2899,7 @@ def cmd_plans(args):
         state = subscriptions.status(plan, refresh=True)
         mark = ("사용 가능" if state["usable"] else "실행 실패" if state.get("runs") is False
                 else "설치됨" if state.get("installed") else "없음")
-        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.PROGRAMS[plan]}): {mark}"
+        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.program(plan)}): {mark}"
         if state.get("path"):
             line += f" · {state['path']}"
         if state.get("plan") and state["usable"]:

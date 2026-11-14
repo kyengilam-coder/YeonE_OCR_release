@@ -114,6 +114,7 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
     left unpainted rather than guessed.
     """
     import difflib
+    from .collate.zh import script_only, script_pair
     from .comparison import ComparisonError
     from .comparison_ai import LOW_CONFIDENCE_THRESHOLDS, _word_spans
     raw = run["raw"]
@@ -134,8 +135,12 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
             return None
 
     if base != current:
-        for tag, _a0, _a1, b0, b1 in difflib.SequenceMatcher(None, base, current, autojunk=False).get_opcodes():
-            if tag != "equal":
+        for tag, a0, a1, b0, b1 in difflib.SequenceMatcher(None, base, current, autojunk=False).get_opcodes():
+            if tag == "replace" and a1 - a0 == b1 - b0:
+                for k in range(b1 - b0):        # the same glyph in the other script (会→會) is not an edit to check
+                    if not script_pair(base[a0 + k], current[b0 + k]):
+                        paint(b0 + k, b0 + k + 1, "green")
+            elif tag != "equal":
                 paint(b0, b1, "green")
     threshold = LOW_CONFIDENCE_THRESHOLDS.get(run["engine"])
     if threshold is not None:
@@ -154,8 +159,22 @@ def _local_grades(project, number, run, current, witness=None, marks=()):
         paint(start, end, kind)
     page = project.page(number)
     for suggestion in page.get("suggestions", []):
-        if suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace":
-            span = mapped(suggestion["start"], suggestion["end"])
+        if (suggestion.get("decision") == "pending" and suggestion.get("kind") != "whitespace"
+                and not script_only(suggestion.get("candidates", {}).values())):
+            start, end = suggestion["start"], suggestion["end"]
+            values = list(suggestion.get("candidates", {}).values())
+            if values and end > start and all(len(v) == end - start for v in values):
+                # Adjacent differences are one suggestion: paint only the glyphs some engine really reads
+                # otherwise, not the neighbours that differ only in script (會議爲 / 会议為 → 爲 alone).
+                for k in range(end - start):
+                    glyphs = {v[k] for v in values}
+                    first = next(iter(glyphs))
+                    if len(glyphs) > 1 and not all(g == first or script_pair(g, first) for g in glyphs):
+                        span = mapped(start + k, start + k + 1)
+                        if span:
+                            paint(*span, "red")
+                continue
+            span = mapped(start, end)
             if span:
                 paint(*span, "red")
     for proposal in project.ai_proposals(number):
@@ -705,7 +724,9 @@ def _command(args, *, work=None, doc=None, pool=None):
             if not easyocr_wanted():
                 exclude.add("easyocr")
             exclude = tuple(sorted(exclude))
-            return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu_engines_enabled(),
+            choice = getattr(args, "local_gpu_engines", None)
+            gpu = gpu_engines_enabled() if choice is None else bool(choice)
+            return {"recognizer": pool.recognize, "resident": resident, "gpu_engines": gpu,
                     **({"exclude": exclude} if exclude else {}),
                     **({"input_enhancement": mode} if mode not in (None, "none") else {}),
                     "parallel": lambda engines: engine_parallelism(engines, requested, resident=resident,
@@ -924,13 +945,31 @@ def _command(args, *, work=None, doc=None, pool=None):
                 saver.save()
                 if outcome.get("cancelled"):
                     return 130
-                from .comparison import _run_profile
+                from .comparison import _run_complete, _run_profile
                 selected = _selected(project, number)
                 successful = set(outcome.get("completed", [])) | set(outcome.get("skipped", []))
                 expected = (args.local_profile, "horizontal" if args.mode == "horizontal_zh" else "vertical")
-                if (selected is None or selected["engine"] not in successful
-                        or _run_profile(selected) != expected or selected.get("request", {}).get("dpi") != args.dpi):
-                    raise ComparisonError("이번 조건에서 성공한 로컬 기준 판독이 없습니다. 이전 판독은 보존했습니다.")
+                # A baseline kept to protect human or accepted AI work stays even when its engine did not run
+                # this time (e.g. GLM-OCR read the page, then the GPU engine was switched off): it is a complete
+                # reading stored under the same conditions, checked below.
+                page = project.page(number)
+                kept = (selected is not None and selected["engine"] not in successful and _run_complete(selected)
+                        and (page["corrected_text"] is not None or bool(page["edits"]) or page["reviewed"]
+                             or page.get("baseline_choice") == "manual"))
+                why = ("기준 판독이 없음" if selected is None
+                       else f"기준 판독 엔진 {selected['engine']}이 이번에 돌지 않았고 고친 내용으로 고정된 판독도 아님"
+                       if selected["engine"] not in successful and not kept
+                       else f"기준 판독({selected['engine']})의 문서 종류·방향 {'/'.join(map(str, _run_profile(selected)))} ≠ "
+                            f"이번 {'/'.join(expected)}" if _run_profile(selected) != expected
+                       else f"기준 판독({selected['engine']})의 해상도 {selected.get('request', {}).get('dpi')} ≠ 이번 {args.dpi}"
+                       if selected.get("request", {}).get("dpi") != args.dpi else "")
+                if why:
+                    ran = ", ".join(sorted(successful)) or "없음"
+                    raise ComparisonError(f"이번 조건에서 성공한 로컬 기준 판독이 없습니다({why} · 이번에 읽은 엔진: {ran}). "
+                                          "이전 판독은 보존했습니다.")
+                if kept:
+                    cli.log(f"  {number}쪽: 기준 판독은 고친 내용을 지키려고 고정한 {selected['engine']} 판독"
+                            "(이번에 돌지 않은 엔진 — 저장된 판독을 그대로 씀)")
                 # A page finished under the same conditions (no engine ran again, same key, review done):
                 # nothing to crop, plan, read or write again.
                 if (resume == "unfinished" and old and not getattr(args, "force", False) and not outcome.get("completed")

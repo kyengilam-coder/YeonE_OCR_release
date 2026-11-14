@@ -38,7 +38,21 @@ FINISHED = {"anthropic": "end_turn", "openai": "completed", "gemini": "STOP"}
 
 
 def module(plan: str):
+    """The plan's transport module. Gemini: Antigravity CLI (agy) when it is installed — Google stopped
+    serving personal accounts through Gemini CLI on 2026-06-18 — else Gemini CLI as before.
+    YEONE_OCR_GEMINI_TRANSPORT=gemini-cli keeps Gemini CLI (an enterprise Code Assist licence)."""
+    if plan == "gemini" and os.environ.get("YEONE_OCR_GEMINI_TRANSPORT", "").strip().lower() != "gemini-cli":
+        antigravity = importlib.import_module(".antigravity_subscription", __package__)
+        if antigravity.find_cli():
+            return antigravity
+        gemini = importlib.import_module(".gemini_subscription", __package__)
+        return gemini if gemini.find_cli() else antigravity   # neither installed: point at agy, not the closed CLI
     return importlib.import_module(f".{_MODULES[plan]}", __package__)
+
+
+def program(plan: str) -> str:
+    """The program this PC runs for the plan (Gemini: Antigravity CLI or Gemini CLI)."""
+    return getattr(module(plan), "PROGRAM", PROGRAMS[plan])
 
 
 def plan_choice(requested: str | None = None) -> str:
@@ -158,13 +172,13 @@ def pick(requested: str | None = None, prefer: str | None = None, runner=subproc
         if state.get("installed"):
             reasons.append(f"{NAMES[plan]}: {state.get('reason') or ''}")
     if not reasons:
-        reasons.append("Claude Code, Codex CLI, Gemini CLI 중 설치된 것이 없습니다.")
+        reasons.append("Claude Code, Codex CLI, Antigravity CLI(Gemini) 중 설치된 것이 없습니다.")
     return None, " / ".join(reasons)
 
 
 def note(plan: str) -> str:
     state = status(plan)
-    return (f"AI 검증: {NAMES[plan]} 구독({state.get('plan') or '요금제'}) · {PROGRAMS[plan]} 실행 · "
+    return (f"AI 검증: {NAMES[plan]} 구독({state.get('plan') or '요금제'}) · {program(plan)} 실행 · "
             "API 요금 없음(구독 사용량에서 차감)")
 
 

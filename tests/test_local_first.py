@@ -163,6 +163,62 @@ class LocalFirstTests(unittest.TestCase):
             command(self.args("--local-exclude-engines", "tesseract", "--force"))
         self.assertEqual(seen, [("easyocr",), (), ("easyocr", "tesseract")])
 
+    def test_kept_baseline_from_an_engine_that_did_not_run_this_time_is_used(self):
+        """GLM-OCR read the page (GPU on) and an accepted correction pinned that reading; with the GPU engine
+        off only PP-OCRv6 runs. The page must go on from the stored GLM-OCR reading, not stop with an error."""
+        self.assertEqual(command(self.args()), 0)
+        path = next((self.work / "comparison").glob("local-first-*.yeone-compare.json"))
+        project = ComparisonProject.load(path, source_path=self.source)
+        raw = dict(project.page(1)["runs"][0]["raw"], engine="glmocr", text="天地玄黄",
+                   engine_metadata={"generation_complete": True})
+        project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                         "engine_root": None, "policy": "local-three-engine-v1"})
+        project.choose_baseline(1, "glmocr")
+        project.set_text(1, "天地玄黃")
+        project.save(path)
+        logged = []
+        with patch.object(cli, "log", side_effect=logged.append):
+            rc = command(self.args("--force"))
+        self.assertIn(rc, (0, 4), logged)                                     # 4: done, a page left for a person; 3 would be a failed page
+        self.assertTrue(any("고정한 glmocr 판독" in line for line in logged), logged)
+        self.assertFalse(any("성공한 로컬 기준 판독이 없습니다" in line for line in logged))
+        self.assertEqual(ComparisonProject.load(path, source_path=self.source).page(1)["baseline_engine"], "glmocr")
+
+    def test_missing_baseline_error_says_which_condition_failed(self):
+        self.assertEqual(command(self.args()), 0)
+        path = next((self.work / "comparison").glob("local-first-*.yeone-compare.json"))
+        project = ComparisonProject.load(path, source_path=self.source)
+        raw = dict(project.page(1)["runs"][0]["raw"], engine="glmocr", engine_metadata={"generation_complete": True})
+        project.add_result(raw, request={"profile": "traditional", "direction": "horizontal", "dpi": 300,
+                                         "engine_root": None, "policy": "local-three-engine-v1"})
+        project.choose_baseline(1, "glmocr", automatic=True)                     # not pinned by an edit
+        project.page(1)["baseline_choice"] = "automatic"
+        project.save(path)
+        logged = []
+        with patch.object(cli, "log", side_effect=logged.append), \
+                patch("yeone_ocr.automatic_ocr.run_automatic_page",
+                      return_value={"cancelled": False, "completed": [], "skipped": ["ppocrv6"], "selection": {}}):
+            command(self.args("--force"))
+        error = next(line for line in logged if "성공한 로컬 기준 판독이 없습니다" in line)
+        self.assertIn("glmocr이 이번에 돌지 않았고", error)
+        self.assertIn("이번에 읽은 엔진: ppocrv6", error)
+
+    def test_gpu_engines_follow_the_flag_then_the_environment_variable(self):
+        seen = []
+        original = self.recognize
+
+        def capture(project, number, **kwargs):
+            seen.append(kwargs.get("gpu_engines"))
+            return original(project, number, **kwargs)
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=capture):
+            with patch.dict("os.environ", {"YEONE_OCR_GPU_ENGINES": "1"}):
+                command(self.args())
+                command(self.args("--no-local-gpu-engines", "--force"))
+            with patch.dict("os.environ", {"YEONE_OCR_GPU_ENGINES": "0"}):
+                command(self.args("--force"))
+                command(self.args("--local-gpu-engines", "--force"))   # 설정에서 켠 것이 환경 변수보다 앞선다
+        self.assertEqual(seen, [True, False, False, True])
+
     def test_subscription_review_runs_through_the_signed_in_cli(self):
         from yeone_ocr import claude_subscription as subscription
         self.confidence = 20
@@ -315,8 +371,9 @@ class LocalFirstTests(unittest.TestCase):
             self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
         rec = self.record()
         self.assertIn("天地玄黃宇宙洪荒", json.dumps(rec["merged"], ensure_ascii=False))
-        self.assertEqual(rec["local_first"]["ai_page"]["taken"], 1)
-        self.assertIn("green", {g["grade"] for g in rec["local_grades"]})
+        # 黄 (engine) / 黃 (AI) is one glyph in two scripts: the AI's form goes in, without a mark to check
+        self.assertEqual((rec["local_first"]["ai_page"]["script_taken"], rec["local_first"]["ai_page"]["taken"]), (1, 0))
+        self.assertEqual(rec["local_grades"], [])
         project = ComparisonProject.load(rec["local_first"]["project_path"])
         self.assertEqual(project.text(1), "天地玄黄宇宙洪荒")                  # engine reading kept for the editor
         self.assertEqual(len(sent), 1)

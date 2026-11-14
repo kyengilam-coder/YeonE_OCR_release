@@ -69,6 +69,29 @@ class WindowsEntrypointTests(unittest.TestCase):
                  patch("yeone_ocr.gui.App", FakeApp):
                 self.assertEqual(_normal_gui(), 0)
 
+    def test_engine_manager_flag_opens_the_window_after_startup(self):
+        with patch("yeone_ocr.windows_app._normal_gui", return_value=0) as gui:
+            self.assertEqual(main(["--open-engine-manager"]), 0)
+            gui.assert_called_once_with(open_engine_manager=True)
+            self.assertEqual(main([]), 0)
+            gui.assert_called_with(open_engine_manager=False)
+        scheduled = []
+
+        class FakeApp:
+            open_engine_manager = object()
+
+            def after(self, delay, callback):
+                scheduled.append(callback)
+
+            def mainloop(self):
+                pass
+
+        with patch("yeone_ocr.gui.App", FakeApp):
+            self.assertEqual(_normal_gui(open_engine_manager=True), 0)
+            self.assertEqual(scheduled, [FakeApp.open_engine_manager])
+            self.assertEqual(_normal_gui(), 0)
+            self.assertEqual(len(scheduled), 1)
+
     def test_version_does_not_launch_gui_or_self_test(self):
         with patch("yeone_ocr.windows_app._console_message") as message, \
              patch("yeone_ocr.windows_app._normal_gui") as gui, \

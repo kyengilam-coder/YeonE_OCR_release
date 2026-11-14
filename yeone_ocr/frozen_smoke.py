@@ -77,6 +77,30 @@ def comparison_resources_probe() -> dict:
             "external_models_loaded": False, "network_calls": 0}
 
 
+def engine_manager_probe() -> dict:
+    """The engine manager can find every installer and, in an installed build, a base Python. Nothing is installed."""
+    import importlib.util
+    from ab_ocr.runtime import resource_root
+    from . import engine_manager as manager
+    assert importlib.util.find_spec("yeone_ocr.gui_engines") is not None, "Missing engine manager window"
+    scripts = resource_root() / "scripts"
+    assert (scripts / "install_rapidocr.py").is_file(), "Missing installer imported by install_paddle_server.py"
+    commands = {}
+    for option in manager.OPTIONS:
+        assert option.script in COMPARISON_INSTALLER_RESOURCES, f"Installer is not an allowlisted resource: {option.script}"
+        command, _cwd = manager.build_command(option.key, Path("engine-home"), Path("python.exe"))
+        assert "-I" not in command and Path(command[6]).is_file()
+        commands[option.key] = Path(command[6]).name
+    [gpu] = manager.parse_nvidia_smi("NVIDIA GeForce GTX 1660, 610.88, 6144, 512, 7.5\n")
+    assert gpu.memory_mb == 6144 and gpu.driver_version == (610, 88)
+    assert manager.recommend([], {})["glmocr"]["selectable"] is False
+    bundled = manager.bundled_runtime()
+    problems = manager.base_python_problems(bundled) if bundled is not None else None
+    assert not problems, f"Bundled Python cannot create engine environments: {problems}"
+    return {"installers": commands, "bundled_base_python": "ready" if bundled is not None else "not bundled in this build",
+            "installed": False, "network_calls": 0}
+
+
 def source_preservation_probe(folder: Path) -> dict:
     """Exercise the new record policy and exact evaluation without model calls."""
     from PIL import Image
@@ -1767,6 +1791,7 @@ def run(report_path: Path) -> int:
         check("selective-single-ppocrv6-review-offline", selective_single_engine_probe)
 
         check("local-comparison-worker-resources", comparison_resources_probe)
+        check("engine-manager-resources", engine_manager_probe)
 
         def comparison_cli_probe():
             from .comparison_cli import parse_pages

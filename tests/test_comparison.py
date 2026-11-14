@@ -342,8 +342,10 @@ class ComparisonTests(unittest.TestCase):
         target = self.save()
         stop, errors = threading.Event(), []
         def edit():
+            # Bounded: every edit is kept in the history, so an unbounded loop grows the project while each save
+            # gets slower, and on a fast runner it crossed MAX_BYTES (256 MB) before the 25 saves finished.
             count = 0
-            while not stop.is_set():
+            while not stop.is_set() and count < 5000:
                 count += 1
                 try:
                     self.project.set_text(1, "乙" * (count % 50 + 1))

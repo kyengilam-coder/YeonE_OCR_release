@@ -60,7 +60,8 @@ if python_license.is_file():
 binaries = []
 hiddenimports = ["tkinter", "tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox", "tkinter.simpledialog",
                  "PIL.ImageTk", "PIL.ImageGrab", "PIL.IcoImagePlugin", "fitz", "pymupdf", "cv2", "numpy", "lxml.etree",
-                 "pydantic_core", "jiter", "sqlite3", "_sqlite3", "yeone_ocr.launcher", "yeone_ocr.frozen_smoke"]
+                 "pydantic_core", "jiter", "sqlite3", "_sqlite3", "yeone_ocr.launcher", "yeone_ocr.frozen_smoke",
+                 "yeone_ocr.engine_manager", "yeone_ocr.gui_engines"]
 
 def runtime_module(name):
     return name != "google.genai._test_api_client" and not any(

@@ -36,6 +36,42 @@ def _cc(kind: str):
     return c
 
 
+@functools.lru_cache(maxsize=8192)
+def _fold_char(ch: str) -> str:
+    folded = to_simplified(ch)
+    return folded if len(folded) == 1 else ch
+
+
+def script_fold(text: str) -> str:
+    """Each character in its Simplified form, one for one (same length and positions as ``text``).
+    For comparing readings that differ only in script (會/会, 藥/药); never written to a document."""
+    return "".join(_fold_char(ch) for ch in text)
+
+
+def script_pair(a: str, b: str) -> bool:
+    """The same character in two forms that a document writes alike: its Simplified and its Traditional
+    form (会/會, 复/復), or a form and its Korean standard form (為/爲, 真/眞, 説/說 — documents use the
+    KS X 1001 form, normalization.korean_forms). Other variants that share a Simplified form (裏/裡,
+    both 里) are not: they are kept as read and still count as a difference."""
+    if a == b:
+        return False
+    from ..korean_forms import KOREAN_FORMS
+    if KOREAN_FORMS.get(a, a) == KOREAN_FORMS.get(b, b):
+        return True
+    fa, fb = _fold_char(a), _fold_char(b)
+    return fa == fb and (a == fa or b == fb)
+
+
+def script_only(values) -> bool:
+    """Readings that differ only by script or Korean standard form (spaces ignored): e.g. one engine read
+    會 and another 会, or 爲 and 為. Other variant forms (裏/裡) and punctuation still count as differences."""
+    texts = sorted({"".join(str(v).split()) for v in values})
+    if len(texts) < 2 or len({len(t) for t in texts}) != 1:
+        return False
+    first = texts[0]
+    return all(x == y or script_pair(x, y) for other in texts[1:] for x, y in zip(first, other))
+
+
 def available() -> bool:
     return _cc("t2s") is not None
 

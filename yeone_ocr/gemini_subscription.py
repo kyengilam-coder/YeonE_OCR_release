@@ -32,7 +32,7 @@ import threading
 import time
 from pathlib import Path
 
-from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli, problem
+from .claude_subscription import SubscriptionError, failure, not_found_reason, program_error, npm_global_cli, problem
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
@@ -132,6 +132,13 @@ def reset_status_cache() -> None:
         _status_cache = None
 
 
+def _mark_refused(value: bool = True) -> None:
+    """Google refused this account's Gemini CLI sign-in (UNSUPPORTED_CLIENT): status() says so from now on."""
+    global _refused, _status_cache
+    with _lock:
+        _refused, _status_cache = value, None
+
+
 def _query_status(runner) -> dict:
     result = {"installed": False, "logged_in": False, "billing": None, "plan": None, "usable": False,
               "reason": INSTALL_HINT, "limits": None}
@@ -154,6 +161,9 @@ def _query_status(runner) -> dict:
         result.update(runs=False, reason=f"Gemini CLI({cli})를 실행하지 못했습니다(코드 {proc.returncode})"
                                          + (f": {detail}" if detail else "")
                                          + ". PowerShell에서 `gemini --version`이 되는지 확인하세요(Node.js 20 이상 필요).")
+        return result
+    if _refused:                                         # Google's answer to this account, earlier in this program
+        result.update(closed="Antigravity CLI 설치 필요", reason=UNSUPPORTED_CLIENT_HINT)
         return result
     chosen = _sign_in_type()
     if chosen in SIGN_IN_TYPES:
@@ -182,8 +192,33 @@ _LIMIT = re.compile(r"quota|resource_exhausted|resource exhausted|rate[_ ]limit|
                     r"(?:status|http|code|error)\D{0,12}429\b|\b429\s+too")
 
 
+INELIGIBLE_HINT = ("이 Google 계정은 Gemini CLI를 쓸 수 없다고 Google이 답했습니다(IneligibleOrProjectIdError). "
+                   "PowerShell에서 gemini 를 실행해 안내를 확인하십시오 — 회사·학교 계정이면 Google Cloud 프로젝트"
+                   "(환경 변수 GOOGLE_CLOUD_PROJECT)가 필요할 수 있습니다.")
+
+
+UNSUPPORTED_CLIENT_HINT = ("Google이 2026-06-18부터 개인 Google 계정(무료 등급·Google AI Pro·Ultra)의 Gemini CLI 로그인을 끝냈습니다"
+                           "(UNSUPPORTED_CLIENT) — 다시 로그인해도 같은 답입니다. Gemini 구독은 후속 프로그램인 "
+                           "Antigravity CLI(agy)로 연결됩니다: 설정 「AI 판독기」 ①에서 'Gemini (Antigravity CLI)'를 고르고 "
+                           "[설치] → [로그인 창 열기]로 Google 계정에 로그인한 뒤 [상태 확인]을 누르십시오. "
+                           "그때까지는 Claude·ChatGPT 구독으로 진행합니다(②에 Gemini API 키를 넣어도 됩니다 — 호출마다 요금).")
+
+# Google's refusal is about the account type, not this request: once seen, this program stops offering
+# Gemini CLI as usable (status) instead of sending every run into the same refusal.
+_refused = False
+
+
+def _unsupported_client(text: str) -> bool:
+    low = text.lower()
+    return "unsupported_client" in low or "no longer supported for gemini code assist" in low
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
+    if _unsupported_client(low):
+        return problem("account", UNSUPPORTED_CLIENT_HINT)
+    if re.search(r"ineligible|projectiderror", low):
+        return problem("account", INELIGIBLE_HINT)
     if _LIMIT.search(low):
         return problem("limit", "Google 계정의 Gemini 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
     if _SIGN_IN.search(low):
@@ -267,8 +302,13 @@ class SubscriptionClient:
             data = {}
         error = data.get("error") if isinstance(data, dict) else None
         if proc.returncode != 0 or error or not isinstance(data.get("response"), str):
-            detail = (error.get("message") if isinstance(error, dict) else error) or (proc.stderr or out or "").strip()[-400:]
-            raise failure("Gemini CLI", str(detail), _classify, f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}")
+            full, detail = program_error(proc.stderr, out)
+            message = error.get("message") if isinstance(error, dict) else error
+            if message:
+                full, detail = str(message) + "\n" + full, str(message)
+            if _unsupported_client(full):
+                _mark_refused()
+            raise failure("Gemini CLI", str(detail), _classify, f"Gemini CLI 실행 실패(코드 {proc.returncode}): {detail}", full=full)
         text = _json_text(data["response"])
         tokens, actual = {"input_tokens": 0, "output_tokens": 0}, label(model_name)
         models = ((data.get("stats") or {}).get("models") or {}) if isinstance(data.get("stats"), dict) else {}

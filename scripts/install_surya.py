@@ -61,6 +61,21 @@ def extract(archive: Path, target: Path) -> None:
         source.extractall(target)
 
 
+def install_pip(python_root: Path, wheel: Path) -> Path:
+    """Install the pinned pip wheel into the embedded Python's site-packages.
+
+    pip is a pure-Python wheel (Root-Is-Purelib), so unpacking it is a complete
+    install. This replaces bootstrap.pypa.io/get-pip.py, an unversioned URL whose
+    bytes change with every pip release and so could never match a fixed hash.
+    """
+    site_packages = python_root / "Lib" / "site-packages"
+    if not (site_packages / "pip" / "__init__.py").is_file():
+        extract(wheel, site_packages)
+    if not (site_packages / "pip" / "__main__.py").is_file():
+        raise ValueError("pip wheel did not install the pip package")
+    return site_packages
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, default=ROOT / "tools" / "surya")
@@ -78,12 +93,17 @@ def main() -> int:
     path_file = python_root / "python312._pth"
     path_file.write_text("python312.zip\n.\nLib/site-packages\nimport site\n", encoding="utf-8")
     python = python_root / "python.exe"
-    get_pip = target / "get-pip.py"
-    records.append(download("https://bootstrap.pypa.io/get-pip.py", get_pip, lock["get_pip_sha256"]))
+    pip_lock = lock["pip_wheel"]
+    pip_wheel = target / pip_lock["file"]
+    pip_record = download(pip_lock["url"], pip_wheel, pip_lock["sha256"])
+    if pip_record["size"] != pip_lock["size"]:
+        raise ValueError("pip wheel size differs from the lock")
+    records.append(pip_record)
+    install_pip(python_root, pip_wheel)
     environment = dict(os.environ, PYTHONUTF8="1", PIP_DISABLE_PIP_VERSION_CHECK="1")
     environment["TEMP"] = environment["TMP"] = str(target / "temp")
     (target / "temp").mkdir(exist_ok=True)
-    subprocess.run([str(python), str(get_pip), "--no-warn-script-location"], check=True, env=environment)
+    subprocess.run([str(python), "-m", "pip", "--version"], check=True, env=environment)
     report_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     subprocess.run([str(python), "-m", "pip", "install", "--only-binary=:all:",
                     "--index-url", "https://download.pytorch.org/whl/cpu", "torch==2.10.0+cpu",

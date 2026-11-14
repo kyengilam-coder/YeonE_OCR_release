@@ -95,7 +95,7 @@ class ContextNormalization(unittest.TestCase):
 
     def test_macro_hanzi_is_a_proposal_not_a_global_replacement(self):
         result = normalize_text("技術，白術；樹幹，干燥；贏得，羸弱；學校教育。", resolver=keep_valid)
-        self.assertEqual(result.text, "技術, 白術; 樹幹, 干燥; 贏得, 羸弱; 學校教育. ")
+        self.assertEqual(result.text, "技術, 白術; 樹幹, 干燥; 贏得, 羸弱; 學校敎育. ")   # 敎: Korean standard form
         self.assertNotIn("朮", result.text)
         self.assertNotIn("樹乾", result.text)
         self.assertNotIn("羸得", result.text)
@@ -320,3 +320,36 @@ class HwpxNormalizedOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KoreanStandardForms(unittest.TestCase):
+    """문서는 한국 표준 한자체(KS X 1001)로: 為→爲, 真→眞, 説→說. 간체→번체 뒤에 적용하고 보고서에 따로 남긴다."""
+
+    def run_text(self, text, **options):
+        from yeone_ocr.normalization import NormalizationOptions, _opencc_converter, _prepare_text
+        return _prepare_text(text, _opencc_converter(), options=NormalizationOptions(**options))
+
+    def test_forms_follow_the_korean_standard_and_are_reported(self):
+        result = self.run_text("為之真説黄")
+        self.assertEqual(result.text, "爲之眞說黃")
+        stages = {(c["before"], c["after"]): c["stage"] for c in result.changes}
+        self.assertEqual(stages[("為", "爲")], "korean_forms")
+        self.assertEqual(stages[("真", "眞")], "korean_forms")
+        self.assertEqual(stages[("黄", "黃")], "opencc_s2t")
+
+    def test_switch_off_keeps_the_forms_read(self):
+        self.assertEqual(self.run_text("為之真説", korean_forms=False).text, "為之真説")
+
+    def test_korean_forms_alone_and_characters_left_to_context(self):
+        self.assertEqual(self.run_text("為之", traditional=False, punctuation=False, yun=False).text, "爲之")
+        self.assertEqual(self.run_text("当然有余").text, "当然有余")     # 当 → 當/噹, 余 → 餘/余: the context step decides
+        self.assertEqual(self.run_text("〔為〕").text, "〔為〕")          # marks keep the reading
+
+    def test_command_line_and_window_switch(self):
+        from yeone_ocr import cli
+        args = cli.build_parser().parse_args(["build", "x.pdf", "--no-korean-forms"])
+        self.assertFalse(cli.normalization_options(args).korean_forms)
+        args = cli.build_parser().parse_args(["build", "x.pdf"])
+        self.assertTrue(cli.normalization_options(args).korean_forms)
+        args = cli.build_parser().parse_args(["build", "x.pdf", "--no-normalize"])
+        self.assertFalse(cli.normalization_options(args).enabled)

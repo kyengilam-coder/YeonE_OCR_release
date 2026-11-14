@@ -40,7 +40,7 @@ def render_normalization_report(report: dict) -> str:
         [item.get("source", ""), " / ".join(item.get("candidates") or []),
          item.get("choice") or "보류 · 원문 유지", item.get("original_context", item.get("context", ""))]
         for item in report.get("decisions", [])])
-    stages = {"opencc_s2t": "간체→번체", "msr": "중문부호 규칙", "yun_context": "云/雲 문맥", "model_context": "모델 문맥 판정"}
+    stages = {"opencc_s2t": "간체→번체", "korean_forms": "한국 표준 한자체", "msr": "중문부호 규칙", "yun_context": "云/雲 문맥", "model_context": "모델 문맥 판정"}
     changes = table(["위치", "교정 전", "교정 후", "처리", "근거"], [
         [location(item), item.get("before", ""), item.get("after", ""), stages.get(item.get("stage"), "문맥 교정"),
          item.get("reason") or (f"치환 규칙 {item['rule_id']}" if item.get("rule_id") else "간체→번체 변환")]

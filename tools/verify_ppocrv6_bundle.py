@@ -30,6 +30,13 @@ def verify(root):
                  "runtime/msvcp140.dll", "runtime/msvcp140_1.dll"):
         if name not in expected:
             raise ValueError(f"Missing runtime file: {name}")
+    # The engine manager creates optional engine environments from this runtime.
+    for name in ("runtime/Lib/venv/__init__.py", "runtime/Lib/ensurepip/__init__.py",
+                 "runtime/Lib/venv/scripts/nt/venvlauncher.exe"):
+        if name not in expected:
+            raise ValueError(f"Missing engine-manager base Python file: {name}")
+    if not any(name.startswith("runtime/Lib/ensurepip/_bundled/pip-") and name.endswith(".whl") for name in expected):
+        raise ValueError("Missing engine-manager base Python file: bundled pip wheel")
     installation = json.loads((root / "installation.json").read_text(encoding="utf-8"))
     if installation.get("runtime_layout") != "standalone-python":
         raise ValueError("Relocatable runtime required")

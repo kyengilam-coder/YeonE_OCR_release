@@ -21,6 +21,7 @@ import time
 import uuid
 
 from ab_ocr import ocr
+from ab_ocr.fileid import same_file
 from ab_ocr.reading_order import VERTICAL_RTL_ENGINES, VERTICAL_RTL_POLICY
 from ab_ocr.engine_registry import ENGINES, LEGACY_ENGINES, language_for
 
@@ -216,7 +217,7 @@ def _json_copy(value):
 
 
 def _same_file(a, b):
-    return a.resolve() == b.resolve() or (a.exists() and b.exists() and os.path.samefile(a, b))
+    return same_file(a, b)
 
 
 def _read(path):

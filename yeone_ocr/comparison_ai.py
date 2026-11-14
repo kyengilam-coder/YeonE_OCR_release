@@ -20,6 +20,7 @@ import uuid
 
 from ab_ocr import ocr
 from ab_ocr.engine_registry import ENGINES, LEGACY_ENGINES
+from yeone_ocr.collate.zh import script_only
 
 LOCAL_ENGINES = ENGINES
 PROMPT_VERSION = "comparison-ai-v12"
@@ -329,11 +330,12 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
     for item in page.get("suggestions", []):
         if requested_ids is not None and item["id"] not in requested_ids:
             continue
-        if requested_ids is None and item.get("kind") == "whitespace":
+        if requested_ids is None and (item.get("kind") == "whitespace" or script_only(item["candidates"].values())):
             # Engines that only split lines or space text differently agree on
-            # every character. Automatic routing does not spend a paid call on
-            # that; the suggestion stays in the editor and can still be sent
-            # when a person selects it explicitly.
+            # every character, and so do engines that read the same glyph in
+            # Simplified and Traditional form (会/會: one recognizer serves both).
+            # Automatic routing does not spend a call on that; the suggestion
+            # stays in the editor and can still be sent when a person selects it.
             continue
         if blocks_cover_all:
             continue                     # covered, not unlocalized: never counted as an unresolved target

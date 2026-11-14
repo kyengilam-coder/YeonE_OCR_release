@@ -29,22 +29,23 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "api_key": "", "second_pass": True, "docx": False, "textlayer_pdf": False, "layout": "page", "template": "", "bold_split": True, "preset": DEFAULT_PRESET, "context_model": True, "join_pages": True, "force": False, "highlight": True, "page_breaks": True,
             "prices": {}, "fx_krw": "", "workers": 8, "second_model": "auto", "checkpoint": 20, "use_cache": True, "second_thinking_low": True, "adjudicate_blind": False, "skip_any_model": True, "check_list": "none", "last_pdf": "", "hwpx": "", "collate_pdf": "", "anchor_source": "auto", "heading_styles": "", "collate_policy": "sure", "collate_memo": "none", "memo_mode": "none", "context_hint": True, "collate_vertical": False,
             "chunk_lines": 8, "media_res": "high", "mode": "auto", "image_mode": "auto", "advanced_open": False, "details_open": False, "auto_update": True,
-            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "punctuation_rules": "",
+            "normalize_traditional": True, "normalize_yun": True, "normalize_punctuation": True, "normalize_korean_forms": True, "punctuation_rules": "",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
+            "local_gpu_engines": None,                              # None: YEONE_OCR_GPU_ENGINES 를 따름(기본 켬)
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
-                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Gemini CLI)"}
+                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Antigravity CLI)"}
 RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
                  "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
               "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
               "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
               "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
-SETUP_LABELS = {"gemini": "Gemini (Gemini CLI)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
+SETUP_LABELS = {"gemini": "Gemini (Antigravity CLI)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Gemini 구독", "api": "API 키"}
 
@@ -2314,6 +2315,7 @@ class App(tk.Tk):
         self.v_local_columns = tk.BooleanVar(value=bool(self.cfg.get("local_columns", True)))
         self.v_local_line_verification = tk.BooleanVar(value=bool(self.cfg.get("local_line_verification", False)))
         self.v_local_easyocr = tk.BooleanVar(value=bool(self.cfg.get("local_easyocr", False)))
+        self.v_local_gpu_engines = tk.BooleanVar(value=App._gpu_engines_choice(self.cfg))
         self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_api_fallback = tk.BooleanVar(value=bool(self.cfg.get("local_ai_api_fallback", True)))
@@ -2333,6 +2335,7 @@ class App(tk.Tk):
         self.v_preset = tk.StringVar(value=preset_label(self._preset_ref))
         self.v_ctxmodel = tk.BooleanVar(value=bool(self.cfg.get("context_model", True)))
         self.v_traditional = tk.BooleanVar(value=bool(self.cfg.get("normalize_traditional", True)))
+        self.v_korean_forms = tk.BooleanVar(value=bool(self.cfg.get("normalize_korean_forms", True)))
         self.v_yun = tk.BooleanVar(value=bool(self.cfg.get("normalize_yun", True)))
         self.v_punctuation = tk.BooleanVar(value=bool(self.cfg.get("normalize_punctuation", True)))
         self.v_punctuation_rules = tk.StringVar(value=str(self.cfg.get("punctuation_rules", "") or ""))
@@ -2471,6 +2474,22 @@ class App(tk.Tk):
                     "EasyOCR은 문장부호를 원문대로 잘 살리므로, 문장부호 대조가 중요하면 켜십시오. 세로쓰기에서는 늘 씁니다.", self)
             return cb
         R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
+
+        def local_gpu_engines(parent):
+            cb = ttk.Checkbutton(parent, text="GPU 엔진도 함께 읽기 (느림)", variable=self.v_local_gpu_engines)
+            Tip(cb, "엔진 관리로 CUDA 엔진(GLM-OCR · Surya · PaddleOCR server)을 설치했으면 그중 하나를 쪽마다 더 돌립니다"
+                    "(번체·간체는 GLM-OCR, 한글·한자 혼용은 Surya). 생성형 모델이라 쪽당 시간이 크게 늘어납니다. "
+                    "켜 두면 그 엔진 결과가 없는 이미 읽은 쪽도 이어서 할 때 다시 처리합니다 — 기존 엔진으로 읽던 책을 빨리 "
+                    "마치려면 끄십시오. GPU 엔진이 설치되어 있지 않으면 켜도 달라지는 것이 없습니다.", self)
+            return cb
+        R["local_gpu_engines"] = row(b, "GPU 엔진", "설치된 GLM-OCR·Surya 중 하나를 쪽마다 더 읽기(느림)", local_gpu_engines)
+
+        def engines(parent):
+            return self._btn(parent, "엔진 관리…", lambda: App.open_engine_manager(self), lock=False,
+                             tip="이 PC의 NVIDIA GPU를 점검하고, Surya · GLM-OCR · PaddleOCR server 와 그 GPU 가속을 골라 내려받아 설치합니다. "
+                                 "사용자 폴더에 설치하므로 앱을 업데이트해도 남고, 설치한 엔진은 로컬 인식의 자동 선택에 들어갑니다. "
+                                 "설치할 때만 공개 파일을 내려받으며 문서와 API 키는 읽지 않습니다.")
+        R["engines"] = row(b, "OCR 엔진", "GPU 점검 · 추가 엔진과 GPU 가속 내려받아 설치", engines)
 
         R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
 
@@ -2842,9 +2861,14 @@ class App(tk.Tk):
 
         def rules(parent):
             f = boxed(parent)
-            items = (("간체→번체", self.v_traditional), ("云/雲 문맥 판별", self.v_yun), ("중문부호 수정 규칙", self.v_punctuation))
+            items = (("간체→번체", self.v_traditional), ("한국 표준 한자체", self.v_korean_forms), ("云/雲 문맥 판별", self.v_yun),
+                     ("중문부호 수정 규칙", self.v_punctuation))
             for i, (label, variable) in enumerate(items):
-                ttk.Checkbutton(f, text=label, variable=variable).pack(side="left", padx=(0, P(16) if i < len(items) - 1 else 0))
+                cb = ttk.Checkbutton(f, text=label, variable=variable)
+                cb.pack(side="left", padx=(0, P(16) if i < len(items) - 1 else 0))
+                if variable is self.v_korean_forms:
+                    Tip(cb, "판독·간체→번체 결과의 자형을 한국 표준 한자체(KS X 1001)로 맞춥니다: 為→爲, 真→眞, 説→說, 黄→黃, "
+                            "教→敎, 即→卽 등. 한국 자형에 함께 있는 글자(余와 餘 등)는 바꾸지 않습니다. 끄면 읽은 자형 그대로 둡니다.", self)
             return f
         R["rules"] = row(b, "적용할 교정", "규칙으로 바꿈 · 모델 호출 없음", rules)
 
@@ -3201,7 +3225,8 @@ class App(tk.Tk):
 
     def _normalization_opts(self):
         options = []
-        for name, flag in (("v_traditional", "--no-traditional"), ("v_yun", "--no-yun"), ("v_punctuation", "--no-punctuation")):
+        for name, flag in (("v_traditional", "--no-traditional"), ("v_yun", "--no-yun"), ("v_punctuation", "--no-punctuation"),
+                           ("v_korean_forms", "--no-korean-forms")):
             variable = vars(self).get(name)
             if variable is not None and not variable.get():
                 options.append(flag)
@@ -3558,8 +3583,9 @@ class App(tk.Tk):
 
     def _common_line(self) -> str:
         """'모든 책 공통: ChatGPT (OpenAI) gpt-4.1 · 자동 교정 3가지' (+ HWPX와 함께 만드는 것)."""
-        on = [n for n, v in (("간체→번체", self.v_traditional), ("云/雲", self.v_yun), ("중문부호", self.v_punctuation)) if v.get()]
-        fix = "자동 교정 3가지" if len(on) == 3 else ("자동 교정: " + " · ".join(on) if on else "자동 교정 끔")
+        on = [n for n, v in (("간체→번체", self.v_traditional), ("한국 표준 한자체", vars(self).get("v_korean_forms")),
+                             ("云/雲", self.v_yun), ("중문부호", self.v_punctuation)) if v is not None and v.get()]
+        fix = "자동 교정 4가지" if len(on) == 4 else ("자동 교정: " + " · ".join(on) if on else "자동 교정 끔")
         also = [n for n, v in (("DOCX", self.v_docx), ("검색 가능한 PDF", self.v_tlpdf)) if v.get()]
         return (f"모든 책 공통: {self.v_provider.get()} {self.v_model.get().strip()} · {fix}"
                 + (" · HWPX와 함께 " + " · ".join(also) if also else ""))
@@ -4613,6 +4639,8 @@ class App(tk.Tk):
                 except Exception:                    # 상태 확인은 실행을 막지 않는다
                     state = {"usable": False, "installed": False}
                 mark = ("● 사용 가능" if state.get("usable") else "○ 실행 실패" if state.get("runs") is False
+                        else f"○ 쓸 수 없음({state['closed']})" if isinstance(state.get("closed"), str)
+                        else "○ 쓸 수 없음" if state.get("closed")
                         else "○ 로그인 필요" if state.get("installed") else "○ 설치 안 됨")
                 parts.append(f"{subscriptions.NAMES[plan]} {mark}")
                 where = f" ({state['path']})" if state.get("path") else ""
@@ -6319,6 +6347,32 @@ class App(tk.Tk):
         return {"provider": reader, "model": model, "api_key": keys[0] if keys else "",
                 "key_count": len(keys)}
 
+    def open_engine_manager(self):
+        """엔진 관리 창(하나만): GPU 점검 · 추가 로컬 엔진 설치. 인식 작업과 따로 돈다."""
+        if getattr(self, "_closing", False):
+            return
+        existing = vars(self).get("_engine_manager")
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify(); existing.lift(); existing.focus_set()
+            return
+        from .gui_engines import EngineManagerDialog
+        self._engine_manager = EngineManagerDialog(self, selected_root=vars(self).get("cfg", {}).get("local_engine_root") or None,
+                                                   on_installed=lambda outcome: App._engines_installed(self, outcome))
+
+    def _engines_installed(self, outcome):
+        done = [item["label"] for item in outcome.get("results", ()) if item["status"] in ("ok", "unverified")]
+        if done:
+            self._append("엔진 설치: " + " · ".join(done) + (f" → {outcome['roots'][0]}" if outcome.get("roots") else "") + "\n")
+
+    @staticmethod
+    def _gpu_engines_choice(cfg) -> bool:
+        """GPU 엔진 설정: 저장한 값, 없으면 환경 변수 YEONE_OCR_GPU_ENGINES(기본 켬)."""
+        value = cfg.get("local_gpu_engines")
+        if value is None:
+            from .automatic_ocr import gpu_engines_enabled
+            return gpu_engines_enabled()
+        return bool(value)
+
     def _remember_local_engine_root(self, path):
         self.cfg["local_engine_root"] = str(Path(path).expanduser().resolve())
         self.save_settings(quiet=True)
@@ -6411,6 +6465,11 @@ class App(tk.Tk):
         variable = vars(self).get("v_local_easyocr")
         if bool(variable.get()) if variable is not None else bool(cfg.get("local_easyocr", False)):
             options.append("--local-easyocr")
+        variable = vars(self).get("v_local_gpu_engines")
+        gpu = bool(variable.get()) if variable is not None else App._gpu_engines_choice(cfg)
+        from .automatic_ocr import gpu_engines_enabled
+        if gpu != gpu_engines_enabled():                              # 환경 변수와 같으면 넘기지 않음(명령 그대로)
+            options.append("--local-gpu-engines" if gpu else "--no-local-gpu-engines")
         variable = vars(self).get("v_local_ai_parallel")
         try:
             parallel = int(variable.get() if variable is not None else cfg.get("local_ai_parallel", 3))
@@ -7375,7 +7434,7 @@ class App(tk.Tk):
             self.cfg["skip_any_model"] = bool(self.v_skipany.get())
         if getattr(self, "v_tlpdf", None) is not None:
             self.cfg["textlayer_pdf"] = self.v_tlpdf.get()
-        for key, name in (("normalize_traditional", "v_traditional"), ("normalize_yun", "v_yun"),
+        for key, name in (("normalize_traditional", "v_traditional"), ("normalize_yun", "v_yun"), ("normalize_korean_forms", "v_korean_forms"),
                           ("normalize_punctuation", "v_punctuation"), ("punctuation_rules", "v_punctuation_rules")):
             variable = getattr(self, name, None)
             if variable is not None:
@@ -7391,6 +7450,11 @@ class App(tk.Tk):
                 self.cfg["local_line_verification"] = bool(self.v_local_line_verification.get())
             if vars(self).get("v_local_easyocr") is not None:
                 self.cfg["local_easyocr"] = bool(self.v_local_easyocr.get())
+            if vars(self).get("v_local_gpu_engines") is not None:
+                chosen = bool(self.v_local_gpu_engines.get())
+                from .automatic_ocr import gpu_engines_enabled
+                if self.cfg.get("local_gpu_engines") is not None or chosen != gpu_engines_enabled():
+                    self.cfg["local_gpu_engines"] = chosen           # 바꾼 적이 없으면 계속 환경 변수를 따름
             if vars(self).get("v_local_ai_subscription") is not None:
                 self.cfg["local_ai_subscription"] = bool(self.v_local_ai_subscription.get())
             if vars(self).get("v_local_ai_plan") is not None:
@@ -7470,6 +7534,7 @@ class App(tk.Tk):
                          normalize_traditional=bool(self.v_traditional.get()) if getattr(self, "v_traditional", None) is not None else True,
                          normalize_yun=bool(self.v_yun.get()) if getattr(self, "v_yun", None) is not None else True,
                          normalize_punctuation=bool(self.v_punctuation.get()) if getattr(self, "v_punctuation", None) is not None else True,
+                         normalize_korean_forms=bool(self.v_korean_forms.get()) if getattr(self, "v_korean_forms", None) is not None else True,
                          punctuation_rules=self.v_punctuation_rules.get().strip() if getattr(self, "v_punctuation_rules", None) is not None else "",
                          skip_any_model=bool(self.v_skipany.get()))
 
@@ -8138,6 +8203,11 @@ class App(tk.Tk):
                 pending = True
         if pending:
             self.after(200, self.on_close)
+            return
+        engines = vars(self).get("_engine_manager")
+        if engines is not None and engines.winfo_exists() and engines.busy and engines.worker.name == "engine-install":
+            engines.deiconify(); engines.lift()
+            engines.close()                                         # 설치를 취소할지 묻는다 — 취소가 끝난 뒤 다시 닫으면 닫힌다
             return
         if getattr(self, "_update_installing", False) and not getattr(self, "_closing", False):
             if not messagebox.askyesno(APP_NAME, "업데이트 다운로드를 취소하고 닫을까요?\n현재 실행 파일은 바뀌지 않습니다."):

@@ -167,10 +167,13 @@ def merge(base: str, ai: str, mode: str = "prefer", uncertain=()):
     mine = "".join(base[i] for i in positions)
     theirs = "".join(c for c in ai if not c.isspace())
     summary = {"agreed": 0, "taken": 0, "kept_long": 0, "witness": 0, "punctuation_kept": 0,
-               "uncertain_kept": 0, "used": False, "ratio": 0.0}
+               "uncertain_kept": 0, "script_taken": 0, "used": False, "ratio": 0.0}
     if not mine or not theirs:
         return base, [], [], summary
-    matcher = difflib.SequenceMatcher(None, mine, theirs, autojunk=False)
+    from .collate.zh import script_fold, script_pair
+    # Aligned on the Simplified fold, so a glyph read in the other script (engine 会, AI 會) is agreement,
+    # not a long difference that keeps the engine's whole line and paints it red.
+    matcher = difflib.SequenceMatcher(None, script_fold(mine), script_fold(theirs), autojunk=False)
     summary["ratio"] = round(matcher.ratio(), 3)
     if summary["ratio"] < MIN_RATIO:
         return base, [], [], summary
@@ -192,9 +195,23 @@ def merge(base: str, ai: str, mode: str = "prefer", uncertain=()):
             summary["agreed"] += a1 - a0
             copy_to(positions[a1 - 1] + 1)
             for b in range(b0, b1):
+                at = where[positions[a0 + b - b0]]
                 if b in doubtful:
-                    at = where[positions[a0 + b - b0]]
                     red.append((at, at + 1))
+                elif mine[a0 + b - b0] != theirs[b] and not script_pair(mine[a0 + b - b0], theirs[b]):
+                    # Two variant forms that fold together (爲/為) are a real difference, as before:
+                    # one glyph, taken from the AI only in "prefer", and marked like a short difference.
+                    if mode == "prefer":
+                        out[at] = theirs[b]
+                        summary["taken"] += 1
+                    else:
+                        blue.append((at, at + 1))
+                        summary["witness"] += 1
+                elif mode == "prefer" and mine[a0 + b - b0] != theirs[b]:
+                    # Same glyph, other script: the AI read the image, so its form (復 for 复, 葉 for 叶)
+                    # settles a one-to-many character that conversion alone would leave Simplified.
+                    out[at] = theirs[b]
+                    summary["script_taken"] += 1
             continue
         start = positions[a0] if a0 < len(positions) else len(base)
         end = positions[a1 - 1] + 1 if a1 > a0 else start
