@@ -67,7 +67,9 @@ def prepare(source: Path, destination: Path, lock_path: Path, msvc_runtime: Path
         if not (runtime / name).is_file():
             raise ValueError("Required app-local CRT file missing")
     copy(msvc_runtime / "msvc-provenance.json", destination / "msvc-provenance.json")
-    excluded = {"site-packages", "test", "tests", "__pycache__", "idlelib", "tkinter", "turtledemo", "ensurepip"}
+    # venv + ensurepip stay: the app's engine manager copies this runtime to the
+    # user's folder as the base interpreter for optional engine environments.
+    excluded = {"site-packages", "test", "tests", "__pycache__", "idlelib", "tkinter", "turtledemo"}
     for directory in ("Lib", "DLLs"):
         for src in sorted((base / directory).rglob("*")):
             rel = src.relative_to(base)
@@ -78,6 +80,17 @@ def prepare(source: Path, destination: Path, lock_path: Path, msvc_runtime: Path
             if src.suffix.lower() in (".pyc", ".pyo"):
                 continue
             copy(src, runtime / rel)
+    launchers = runtime / "Lib" / "venv" / "scripts" / "nt"
+    for name in ("venvlauncher.exe", "venvwlauncher.exe"):
+        # Python 3.13 keeps them in Lib/venv/scripts/nt (copied above); accept a
+        # layout that has them beside python.exe instead.
+        if not (launchers / name).is_file() and (base / name).is_file():
+            copy(base / name, launchers / name)
+    for required in (runtime / "Lib/venv/__init__.py", runtime / "Lib/ensurepip/__init__.py", launchers / "venvlauncher.exe"):
+        if not required.is_file():
+            raise ValueError(f"Base Python cannot create engine environments: {required.relative_to(runtime)} missing")
+    if not list((runtime / "Lib/ensurepip/_bundled").glob("pip-*.whl")):
+        raise ValueError("Base Python cannot create engine environments: bundled pip wheel missing")
     site = Path(sys.prefix) / "Lib" / "site-packages"
     for name in packages:
         dist = metadata.distribution(name)

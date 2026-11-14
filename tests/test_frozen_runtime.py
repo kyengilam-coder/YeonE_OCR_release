@@ -202,6 +202,21 @@ class FrozenRuntime(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "Missing application-owned worker"):
                 comparison_resources_probe()
 
+    def test_engine_manager_finds_every_installer_and_checks_the_bundled_base_python(self):
+        from yeone_ocr.frozen_smoke import engine_manager_probe
+        from ab_ocr import runtime as engine_runtime
+        result = engine_manager_probe()
+        self.assertEqual(result["installers"], {"paddle_server": "install_paddle_server.py", "paddle_server_gpu": "install_paddle_server_gpu.py",
+                                                "surya": "install_surya.py", "surya_cuda": "install_surya_cuda.py", "glmocr": "install_glmocr.py"})
+        self.assertEqual((result["installed"], result["network_calls"]), (False, 0))
+        # 설치판에 든 Python 이 venv 를 만들 수 없으면(옛 PP-OCRv6 번들) 배포 전 검사에서 걸린다
+        runtime_folder = self.install / "tools" / "ppocrv6" / "runtime"
+        runtime_folder.mkdir(parents=True)
+        (runtime_folder / "python.exe").write_bytes(b"synthetic")
+        with mock.patch.object(engine_runtime, "application_root", return_value=self.install):
+            with self.assertRaisesRegex(AssertionError, "cannot create engine environments"):
+                engine_manager_probe()
+
     def test_release_smoke_preserves_source_codes_and_measures_literal_errors(self):
         from yeone_ocr.frozen_smoke import source_preservation_probe
         result = source_preservation_probe(self.root)

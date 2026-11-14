@@ -1,20 +1,49 @@
-# 연어OCR 1.2.14 · Gemini 구독을 Antigravity CLI로 연결
+# 연어OCR 1.2.15 · Antigravity(Gemini) 구독을 실제 계정에서 확인한 방식으로
 
-1.2.13을 갱신하는 판이다.
+1.2.14를 갱신하는 판이다. 1.2.14에서 Gemini 구독을 Antigravity CLI(`agy`)로 옮겼지만 실제 계정으로는 확인하지 못했다. Windows · agy 1.5.9 · Google AI Pro 계정에서 직접 실행해 본 결과대로 연결을 다시 만들었다.
 
-Google은 2026-06-18부터 **개인 Google 계정(무료 · Google AI Pro/Ultra)의 Gemini CLI 요청을 받지 않고** Antigravity CLI(`agy`)로 옮겼다. 그래서 1.2.13까지의 Gemini 구독은 개인 계정에서 쓸 수 없었다. 이제 Gemini 구독은 Antigravity CLI로 연결한다.
+- **Auto 모드로 돌던 문제**: agy는 저장된 모드가 없으면 **Auto 모드**(파일 수정·명령 실행을 묻지 않고 함)로 시작한다. 1.2.14는 모드를 정하지 않아 요청마다 Auto 모드로 돌았다. 이제 이번 실행에만 쓰고 저장하지 않는 설정(`--settings`)으로 **Default 모드**를 쓴다 — 파일 수정·명령은 승인이 필요해 거절되고, 자기 임시 폴더 안만 읽는다. 사용자의 agy 설정은 바꾸지 않는다. (`--mode`에는 Default가 없다: `default`를 주면 경고만 내고 Auto로 돈다.)
+- **창의 Gemini 모델 이름 때문에 Gemini 구독이 빠지던 문제**: 설정의 Gemini 모델(`gemini-3.1-pro-preview` 등)은 API 키용 이름인데, 1.2.14는 이것을 agy에 그대로 넘겼고 agy는 모르는 모델이라 실행에 실패해 그 실행에서 Gemini 구독을 뺐다. 이제 넘기지 않고 agy가 계정에 맞춰 고른다(Google AI Pro는 지금 Gemini 4 Argon). `YEONE_OCR_AGY_MODEL`로 고른 모델이 그 계정에 없으면 agy의 기본 선택으로 다시 보낸다. API 키로 검증할 때의 모델 설정은 그대로다.
+- **로그인 상태를 실제로 확인**: 1.2.14는 agy가 설치만 되어 있으면 「사용 가능」으로 보였다. 이제 `agy -p /quota`(agy가 직접 답함 · 모델을 부르지 않고 사용량도 쓰지 않음)로 로그인을 확인한다. 로그인이 안 되어 있으면 「로그인 필요」와 방법을 보인다.
+- **요청 방식**: `agy -p … --output-format json --json-schema …`. 그림은 지시문의 `@image1.png`로 첨부된다(실측: 도구를 쓰지 않고 한 번에 답함 — 1.2.14는 에이전트가 파일 보기 도구로 그림을 열게 했다). 답은 스키마에 맞춘 `structured_output`을 쓴다. 지시문이 길면 파일로 넘긴다.
+- **이름**: 화면과 진행 기록에서 이 구독을 **Antigravity**로 보인다 — 로그인 상태 「Antigravity ● 사용 가능」, 계정 선택·설치·로그인 「Antigravity (Google 계정 · Gemini)」, [다음 구독으로 넘기기] 「Antigravity 구독」. 기업용 Gemini CLI로 연결될 때만 「Gemini」.
+- **실행 파일 찾기**: `%LOCALAPPDATA%\agy\bin\agy.exe`(공식 설치 위치)를 먼저 찾고, PATH에서는 `agy.exe`만 쓴다 — Antigravity 데스크톱 앱의 실행기(`agy.cmd`)가 같은 이름이면 창만 열리기 때문이다.
+- **오류 구분**: agy의 `AGY_ERROR` 줄로 한도(주간·5시간 · 크레딧 부족 — 쉬었다 다시), 로그인·자격(`Eligibility check failed` — 이번 실행에서 빼고 다음 구독으로), 모델, 일시 오류를 가린다.
 
-- **고르는 순서**: Antigravity CLI가 설치되고 로그인되어 있으면 그것, 아니면 로그인된 Gemini CLI(Gemini Code Assist Standard/Enterprise 계정은 계속 됨), 둘 다 아니면 Antigravity CLI 설치·로그인을 안내한다. 강제하려면 환경 변수 `YEONE_OCR_GEMINI_PROGRAM=antigravity|gemini-cli`.
-- **이름**: 화면과 진행 기록에서 이 구독은 **Antigravity**로 보인다(로그인 상태 · 계정 선택 「Antigravity (Google 계정 · Gemini)」 · 설치·로그인 · [다음 구독으로 넘기기] · 「Antigravity 구독」). 기업용 Gemini CLI로 연결될 때만 「Gemini」.
-- **설치·로그인**: 설정 「AI 판독기」 ①의 「Antigravity (Google 계정 · Gemini)」 [설치]는 Google의 공식 설치 명령(`irm https://antigravity.google/cli/install.ps1 | iex`)을 보여 주고 물은 뒤 실행한다(Node.js 필요 없음). [로그인 창 열기]는 `agy`를 열고, 브라우저의 Google 로그인 화면에서 로그인한다.
-- **로그인 상태**: `agy --version`과 `agy -p /quota`(프로그램이 직접 답함 · 모델 호출 없음 · 사용량 차감 없음)로 본다. 이 프로그램은 로그인 정보(시스템 키체인)를 읽지 않는다.
-- **요청**: 요청마다 빈 임시 폴더에서 `agy -p … --output-format json --json-schema …`를 실행한다. 이번 실행에만 쓰는 설정(`--settings`, 저장 안 됨)으로 **Default 모드**(파일 수정·명령은 승인이 필요해 헤드리스에서는 거절)를 쓴다 — Antigravity CLI는 설정이 없으면 Auto 모드(묻지 않고 수정·실행)로 시작하기 때문이다. 그림은 `@image1.png` 참조로 첨부되고, 답은 스키마에 맞춘 `structured_output`을 먼저 쓴다.
-- **오류**: 한도(주간·5시간)에 닿으면 쉬었다 다시 쓰고, 로그인·자격 문제(`Eligibility check failed` 등)는 이번 실행에서 빼고 다음 구독으로 넘어간다. Gemini CLI가 개인 계정에 "더 이상 제공하지 않음"이라고 답하면 다시 보내지 않고 Antigravity CLI를 안내한다.
-- **모델**: 설정의 Gemini 모델(`gemini-3.1-pro-preview` 등)은 API 키용 이름이라 Antigravity에 넘기지 않는다 — Antigravity CLI가 계정에 맞춰 고른다(Google AI Pro는 지금 Gemini 4 Argon). 바꾸려면 `YEONE_OCR_GEMINI_MODEL`에 `agy models`의 이름을 넣고, 그 계정에 없는 모델이면 Antigravity의 기본 선택으로 다시 보낸다(구독을 빼지 않음). API 키로 검증할 때의 모델 설정은 그대로다.
-- **기록**: 기본 모델은 기록에 `antigravity-auto`, 전송은 `antigravity-cli-subscription`으로 남는다.
-- **약관**: 개인 PC에서 자기 계정으로만 쓴다. 다른 사람에게 줄 설치본이나 여러 사람이 쓰는 작업에는 API 키를 쓴다.
+**검증**: Windows · Antigravity CLI 1.5.9 · Google AI Pro 계정에서 — `agy -p /quota` 종료 코드 0, `agy -p /config --settings …`에서 `agentMode`가 `auto`에서 빈 값(Default)으로 바뀜, 연어OCR이 보내는 옵션 그대로 빨강·파랑 반쪽 그림을 보낸 요청이 경고 없이 `SUCCESS`와 두 색을 맞힌 `structured_output`(1턴 · 17초 · 종료 코드 0). Linux 가상 화면(Xvfb, Tk 8.6, Python 3.12)에서 `tests/` 전체를 돌렸다(결과는 아래 PR 설명). 설치판 안의 [상태 확인]·[연결 시험]·실제 책 쪽은 아직 누르지 못했다 — [AI 검토 문서](AI_REVIEW.md)의 확인 목록을 따른다. 그 밖의 코드는 1.2.14와 같다.
 
-**검증**: Windows · Antigravity CLI 1.5.9 · Google AI Pro 계정에서 연어OCR이 보내는 옵션 그대로 실행 — `agy -p /quota` 종료 코드 0, 빨강·파랑 반쪽 그림을 첨부한 요청이 경고 없이 `SUCCESS`와 두 색을 맞힌 `structured_output`(1턴 · 17초), `--settings`로 `agentMode`가 Auto에서 Default로 바뀌는 것을 `agy -p /config`로 확인. Linux 가상 화면(Xvfb, Tk 8.6, Python 3.12)에서 `tests/` 전체 — 2,443개 통과 · 29개 건너뜀 · 실패 1개(`test_bookmark_section_editor`의 지연 표시 시험 — 변경 전 소스에서도 같은 환경에서 실패). 설치판 안에서 [설치]·[로그인 창 열기]·[연결 시험]과 실제 책 쪽을 눌러 보지는 못했다 — 배포 CI의 회귀·설치 검사와 설치본 확인이 첫 확인이다. 그 밖의 코드는 1.2.13과 같다.
+---
+
+# 연어OCR 1.2.14 · 엔진 관리, Gemini는 Antigravity CLI로, 구독 연결 시험 바로잡기
+
+설치판에서 큰 OCR 엔진을 설치하고, 막힌 구독 경로를 바르게 알리는 판이다.
+
+설치판은 앱과 PP-OCRv6만 담고, Surya · GLM-OCR · PaddleOCR server 같은 큰 엔진은 명령줄(`scripts/install_*.py`)과 별도 Python이 있어야 설치할 수 있었다. 이제 창에서 설치한다.
+
+- **[설정] → 인식 → OCR 엔진 [엔진 관리…]**: 이 PC의 NVIDIA GPU(이름 · VRAM · 드라이버)를 점검하고, 설치할 엔진을 고른다. 쓸 만한 GPU가 있으면 전부, 없으면 아무것도 미리 고르지 않는다(GPU 전용 선택지는 고를 수 없음).
+- **고를 수 있는 것**: PaddleOCR server(CPU)와 그 GPU 가속(CUDA 12.8) · Surya OCR 2(CPU)와 그 GPU 가속(CUDA 12.4) · GLM-OCR(GPU). GPU 가속을 고르면 바탕 엔진이 함께 골라진다. 이미 설치한 것은 "설치됨"으로 보인다.
+- **설치 위치**: `%LOCALAPPDATA%\YeonE_OCR\local-engines`(설정에 엔진 폴더를 정해 두었으면 그곳). 앱 폴더 밖이라 업데이트·제거해도 남고, 따로 지정하지 않아도 인식 때 찾는다.
+- **별도 Python이 필요 없다**: 설치판은 함께 설치된 PP-OCRv6의 Python을 `local-engines\python313`으로 복사해 설치용으로 쓴다. 소스로 실행하면 지금의 Python을 쓴다.
+- **진행 · 실패 · 취소**: 단계와 내려받기 진행, 설치기 출력이 창에 보이고 `local-engines\engine-manager\install-*.log`에 남는다. 실패하거나 취소한 것은 체크된 채 남아 [설치]를 다시 누르면 이어서 한다(받은 파일은 다시 쓴다). [취소]는 설치기와 그 하위 프로세스(pip · Ollama)를 함께 끝낸다.
+- **설치 뒤 확인**: 설치 기록과 모델 해시를 확인하고, GPU 가속은 실제로 CUDA로 뜨는지 본다(ONNX Runtime의 CUDA 세션 · llama.cpp의 장치 목록). 확인에 실패하면 "설치됨 · 확인 실패"로 알린다.
+- **설치 프로그램**: 추가 작업에 "설치 뒤 엔진 관리 열기"(기본 끔). 켜면 설치가 끝나고 앱이 엔진 관리 창과 함께 열린다(`YeonE_OCR.exe --open-engine-manager`).
+- **명령줄**: `python -m yeone_ocr.engine_manager`(점검만) · `--install recommended` 또는 선택지 이름.
+- 설치할 때만 공개 파일을 내려받는다. 문서 · 설정 · API 키는 읽지 않는다. 엔진과 가중치는 여전히 설치파일에 넣지 않는다(Surya 가중치는 Modified AI Pubs Open RAIL-M — 설치 전 창에서 알린다).
+- **GPU 엔진 켜고 끄기**: [설정] → 인식에 **GPU 엔진 — GPU 엔진도 함께 읽기 (느림)**를 넣었다. 엔진 관리로 CUDA 엔진을 설치하면 로컬 우선 인식이 쪽마다 그중 하나(번체·간체는 GLM-OCR, 한글·한자 혼용은 Surya)를 더 돌리는데, 생성형 모델이라 쪽당 시간이 크게 늘고 그 엔진 결과가 없는 이미 읽은 쪽도 이어서 할 때 다시 처리한다(GTX 1660에서 이어 읽던 462쪽 책이 1쪽부터 다시 시작했다). 끄면 기존 엔진만 읽고 이미 읽은 쪽은 저장된 결과로 건너뛴다. 명령줄 `--local-gpu-engines` / `--no-local-gpu-engines`. 설정에서 바꾸지 않았으면 전처럼 환경 변수 `YEONE_OCR_GPU_ENGINES`(기본 켬)를 따른다.
+- **Gemini 구독을 Antigravity CLI로**: Google이 2026-06-18부터 개인 계정(무료, Google AI Pro·Ultra)의 Gemini CLI를 끝내 Gemini 구독이 "no longer supported for Gemini Code Assist for individuals"로 실패했다. 후속인 Antigravity CLI(`agy`)가 설치되어 있으면 그것으로 Gemini 구독을 쓴다(답 형식 강제·이미지는 폴더로 전달). 설정 「AI 판독기」 ①의 Gemini [설치]는 Google 공식 설치 스크립트로 agy를 설치하고, [로그인 창 열기]는 agy를 연다. 실제 계정으로는 아직 확인하지 않았다 — 확인 목록은 docs/AI_REVIEW.md 끝.
+- **문서는 한국 표준 한자체로**: 자동 교정에 **한국 표준 한자체**(기본 켬)를 더했다. 간체→번체 변환 뒤에 KS X 1001 자형으로 맞춘다 — 為→爲, 真→眞, 説→說, 教→敎, 即→卽, 黄→黃 등(`korean_forms.py`의 표). 한국 자형에 함께 있는 글자(余·餘 등)는 바꾸지 않고, 번체가 여럿인 글자(当→當/噹)는 전처럼 문맥 판단에 맡긴다. 바꾼 글자는 교정 보고에 "한국 표준 한자체"로 남는다. 끄려면 설정 「자동 교정」의 체크 또는 `--no-korean-forms`. 판독 기록과 비교 프로젝트의 원문은 그대로다. 엔진·AI가 為와 爲처럼 이 표로 같아지는 자형으로 갈려 읽은 자리도 고칠 곳으로 표시하지 않는다(裏/裡처럼 표에 없는 이체자는 전처럼 표시).
+- **간체·번체 차이를 "고칠 곳"으로 표시하지 않음**: PP-OCRv6는 간체·번체가 한 인식 모델이라 번체 책을 일부 간체(会·药·叶…)로 읽는다. 다른 엔진이 같은 자리를 번체로 읽으면 엔진끼리 다르다며 빨강(원본 확인 필수)으로 칠하고 AI 검증에도 보냈고, AI 쪽 판독(번체)과 맞춰 볼 때는 문단 전체가 길게 어긋나 엔진 줄을 통째로 빨강으로 남겼다. 이제 한쪽이 간체 글자이고 간체로 접으면 같아지는 차이(会/會, 复/復)는 같은 글자로 본다 — 빨강도 AI 검증 대상도 아니고, AI 쪽 판독과는 글자끼리 맞춰 AI가 원본을 보고 고른 번체(叶→葉, 复→復)를 쓴다(표시 없음). 이체자(爲/為)·문장부호·진짜 다른 글자는 전처럼 표시한다. 붙어 있는 차이 덩어리 안에서도 진짜 다른 글자만 빨강으로 칠한다. 판독 원문(비교 프로젝트의 엔진 판독)은 그대로다. 이미 읽은 쪽은 "이어서 할 때: 모두 다시 점검한 뒤 이어가기"로 한 번 돌리면 표시가 바뀐다(엔진·AI 쪽 판독은 저장된 것을 씀).
+- **GPU 엔진을 끈 뒤 "성공한 로컬 기준 판독이 없습니다"로 쪽이 실패하던 문제 수정**: GPU 엔진(GLM-OCR)으로 읽은 쪽에 AI 교정이 반영되면 사람·AI 작업을 지키려고 그 판독을 기준으로 고정하는데, GPU 엔진을 끄고 이어서 하면 그 엔진이 이번에 돌지 않았다는 이유로 쪽이 실패했다. 같은 조건(문서 종류·방향·해상도)으로 끝까지 읽어 저장된 판독이면 그대로 기준으로 쓴다.
+- **Claude 구독 `error_max_turns` 줄이기**: 의심 구간이 100개가 넘는 쪽에서 Claude Code가 형식(JSON 스키마)에 맞는 답을 다듬다 턴 상한(4)을 다 써 실패하고, 같은 요청을 처음부터 다시 보냈다. 상한을 10으로 올렸다.
+- **구독 오류를 끝없이 다시 보내던 문제 수정**: Gemini CLI·Claude Code·Codex CLI가 실패하면 오류 출력의 끝 400자만 보고 종류를 가렸다. Node 프로그램은 오류 이름·이유를 맨 앞에, 긴 호출 경로를 뒤에 쓰므로 계정 문제(Gemini `IneligibleOrProjectIdError`)나 사용량 한도도 "일시 오류"로 보여 3초·10초 간격으로 계속 다시 보냈다. 이제 출력 전체로 가리고, 진행 기록에는 호출 경로 줄을 빼고 오류 내용만 보인다. Gemini가 "이 계정은 쓸 수 없다"고 답하면 다시 보내지 않고 이번 실행에서 뺀다.
+- **네트워크 드라이브의 책에서 [한 번에 인식]이 멈추던 문제 수정**: `Z:`처럼 드라이브 문자로 연결한 NAS·SMB 공유에 있는 PDF는 "프로젝트와 원본은 다른 파일이어야 합니다"로 중단됐다. 이런 공유는 모든 파일의 파일 번호를 0으로 알려 주어, 원본 덮어쓰기를 막는 검사가 서로 다른 파일을 같은 파일로 보았다. 이제 파일 번호가 없으면 크기와 수정 시각으로 가린다(같은 파일을 다른 경로로 가리킨 경우는 여전히 막는다). 비교·교정, 책갈피 교정(메모 정리·구획 편집), 보고서 저장의 같은 검사도 함께 고쳤다.
+- **[연결 시험]에서 「사용 가능」인데 실패하던 구독을 바르게 알림**: 로그인 상태는 세 구독 모두 「사용 가능」인데 [연결 시험]에서 ChatGPT·Gemini가 실패했다.
+  - Gemini CLI만 설치된 PC: Google이 개인 계정을 거부하면(`UNSUPPORTED_CLIENT`) 안내가 Antigravity CLI [설치] → [로그인 창 열기]를 가리키고, 로그인 상태는 「쓸 수 없음(Antigravity CLI 설치 필요)」로 바뀐다(예전에는 "GOOGLE_CLOUD_PROJECT가 필요할 수 있다"는 틀린 안내나 호출 경로만 보였다).
+  - ChatGPT(Codex): 기본 모델(`gpt-5.5`)이 "not supported when using Codex with a ChatGPT account"로 거부되면, Codex가 OpenAI에서 받아 둔 이 계정의 모델 목록(`~/.codex/models_cache.json`)부터 차례로 시도한다. 모두 거부되면 OpenAI가 "새 Codex가 필요하다"고 답했을 때는 설치된 Codex CLI(버전)가 오래되었다며 [설치]로 올리라고, 아니면 요금제와 `codex` → /model 확인을 안내한다. 로그인 상태는 「쓸 수 없음(Codex CLI 업데이트 필요 / 모델 거부)」로 바뀌고, Codex를 업데이트하면 저절로 풀린다.
+- **Surya 설치 오류 수정**: Surya 설치기가 판 번호 없는 `get-pip.py`를 고정 해시로 확인해, pip 새 판이 나온 뒤로 "Public download SHA-256 mismatch"로 멈췄다. 이제 판 번호·해시가 고정된 pip 휠(26.2.1)을 쓴다.
+- EasyOCR · RapidOCR · Tesseract는 대상이 아니다(GPU 선택지가 없고, 기본 인식은 내장 PP-OCRv6가 맡는다).
+
+**검증**: Linux(Python 3.13, 화면 시험은 Xvfb · Tk 8.6 · Python 3.12)에서 새 시험 `tests/test_engine_manager.py`(nvidia-smi 출력 파싱 · 추천 · 설치 위치 · 명령 구성과 실제 설치기의 인자 대조 · 설치용 Python 복사 · 진짜 프로세스로 실행·취소·다시 시도)와 `tests/test_gui_engines.py`(진짜 Tk 창)를 포함한 `tests/` 전체 — 2,428개 통과 · 29개 건너뜀 · 실패 31개(책갈피·미리 보기·작은 주석 화면 시험 6개 모듈 — 변경 전 소스에서도 같은 환경에서 같은 수로 실패). 엔진 관리로 PaddleOCR server(CPU)를 실제로 설치해 보아 venv 생성과 고정 패키지 설치까지 되는 것을 확인했고, 모델 내려받기는 시험 환경의 네트워크 제한(modelscope.cn 차단)으로 끝내지 못했다. GitHub Actions의 Windows 실행기에서 전체 시험(2,488개)이 통과했고, Windows PC에서 새 PP-OCRv6 번들을 만들어 그 Python을 앱처럼 복사한 것으로 venv + pip가 만들어지는 것을 확인했다. 개발 PC(GTX 1660, 별도 Python 없음)의 설치본에서 다섯 선택지를 모두 설치했고, Surya GPU 가속은 llama.cpp가 CUDA 장치(GTX 1660)를 찾는 것까지 확인했다. **새 엔진으로 실제 문서를 인식하는 확인은 아직이다** — 배포 전 [설치판 문서](windows-release.md)의 확인 목록을 따른다.
 
 ---
 

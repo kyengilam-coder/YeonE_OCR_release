@@ -131,3 +131,41 @@ v4 한자 후보는 고유한 양쪽 내용 문자 4자, 최대 8자의 동일 �
 올바른 보류 41건 중 40건은 부호 폭, 1건은 한자 재검증의 원래 후보 선택 때문이다. 독립 OCR의 정확한 수정 문자 다수결로 폭 14건을 다시 허용한 시험은 14건 전부 오교정이어서 기본 정책에 채택하지 않았다. 올바른 41건은 이번에도 복원하지 못했다. 실패한 재허용 시험·추천 단계의 사후 선택·소폭의 전체 오류 감소를 함께 보고한다.
 
 새 읽기전용 `evaluate_incremental_candidate` API는 원래 후보와 실제 OCR 지문·주소·기존 보호를 다시 검사한다. 기본값은 폭 변경 보류이며 표수는 진단 근거로만 반환한다. `diagnostic_width_consensus=True`는 명시적 개발 비교이고 사용자의 확정이 아니다. 기존 v1 검사·채택 재현, UI 자동 적용 정책과 설치판은 변경하지 않았다. 원시/AI 응답/제안은 불변이고 새 기계 판단은 별도 검토 자료다.
+
+# Gemini 구독: Antigravity CLI(agy)로 연결 (1.2.14, 1.2.15에서 실측대로 고침)
+
+Google은 2026-06-18부터 개인 Google 계정(무료 등급, Google AI Pro·Ultra)의 Gemini CLI 사용을 끝냈다("This client is no longer supported for Gemini Code Assist for individuals", `reasonCode: UNSUPPORTED_CLIENT`). 후속인 Antigravity CLI(`agy`)가 설치되어 있으면 Gemini 구독은 `yeone_ocr/antigravity_subscription.py`로 `agy`를 실행한다. 없으면 전처럼 Gemini CLI(`gemini_subscription.py`)를 쓰고, 기업용 Code Assist 라이선스로 Gemini CLI를 계속 쓰려면 `YEONE_OCR_GEMINI_TRANSPORT=gemini-cli`. Gemini CLI만 있는 PC에서 Google이 그 거부(`UNSUPPORTED_CLIENT`)를 답하면, 안내문이 Antigravity CLI [설치] → [로그인 창 열기]를 가리키고 그 뒤로 로그인 상태는 Gemini를 「사용 가능」이 아니라 「지원 종료(Antigravity CLI 설치 필요)」로 보인다(프로그램을 닫을 때까지 — 실행마다 같은 거부를 다시 받지 않게).
+
+1.2.15는 Windows · agy 1.5.9 · Google AI Pro 계정에서 실제로 확인한 방식으로 바꿨다(1.2.14의 `stream-json` 입력과 파일 보기 도구로 그림 보기는 실제 계정으로 확인되지 않았다).
+
+- 요청: 요청마다 새 빈 폴더에 그림·스키마·실행 설정을 두고 `agy -p <지시문> --output-format json --settings yeone-settings.json --disable-slash-commands --json-schema schema.json [--model 모델]`. 표준 입력은 빈 채로 닫는다. 시스템 지시는 지시문 맨 앞에 붙인다(바꾸는 옵션이 없음). 16,000자가 넘는 지시문은 `request.md`로 넘긴다(Windows 명령줄 32,767자).
+- **모드**: agy는 저장된 모드가 없으면 **Auto 모드**(파일 수정·명령 실행을 묻지 않음)로 시작하고, `--mode`는 `accept-edits`·`auto`·`plan`만 받는다(`--mode default`는 경고만 내고 Auto로 돈다 — 실측). 그래서 이번 실행에만 쓰고 저장하지 않는 `--settings`로 `{"agentMode": "", "toolPermission": "request-review"}`(Default 모드)를 준다. `agy -p /config --settings …`에서 `agentMode`가 `auto`에서 빈 값으로 바뀌는 것을 확인했다. 사용자의 `settings.json`은 바꾸지 않는다.
+- 그림: 지시문의 `@image1.png`로 첨부된다(실측: 도구 호출 없이 1턴). 붙어 오지 않을 때를 위해 파일 보기 도구로 열라고도 적는다.
+- 결과: 한 줄 JSON `{conversation_id, status, response, duration_seconds, num_turns, structured_output, json_schema, usage: {input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens}}`(모델 이름 없음 — 기록에는 `agy-auto`). `status`가 `SUCCESS`이고 `structured_output`(없으면 `response`의 JSON)이 있을 때만 답. `finished_reason`이 있으면 끊긴 답.
+- 로그인 상태: `agy --version` 뒤 `agy -p /quota`(agy가 직접 답함 · 모델 호출·사용량 차감 없음)가 종료 코드 0이면 로그인된 것. 실측: 주간·5시간 한도 표, 종료 코드 0. 1.2.14는 설치만 되어 있으면 「사용 가능」으로 보였다.
+- 모델: 창의 Gemini 모델(`gemini-3.1-pro-preview` 등)은 API 키용 이름이다. 1.2.14는 이것을 `--model`로 넘겨 agy가 모르는 모델로 실행이 실패했고 Gemini 구독이 그 실행에서 빠졌다. 이제 넘기지 않고 agy가 계정에 맞춰 고른다(Google AI Pro: Gemini 4 Argon). `YEONE_OCR_AGY_MODEL`이 그 계정에 없는 모델이면 `--model` 없이 다시 보낸다.
+- 오류: 종료 코드 3의 `AGY_ERROR: {...}` 줄(상태·HTTP 코드)과 오류 문구로 가른다 — 로그인·자격(`authentication required`, `Eligibility check failed` — 이번 실행에서 뺌), `RESOURCE_EXHAUSTED`·quota·크레딧 부족(한도 — 쉼), 모델 없음, 그 밖은 일시 오류.
+- 실행 파일: `YEONE_OCR_AGY_CLI_PATH` → (Windows) `%LOCALAPPDATA%\agy\bin\agy.exe` → PATH의 `agy.exe`만(데스크톱 앱의 `agy.cmd` 실행기가 같은 이름일 수 있음) → `~/.local/bin/agy`.
+- 이름: 화면과 진행 기록에서 이 구독은 「Antigravity」(Gemini CLI로 연결될 때만 「Gemini」).
+- 설치: 설정 「AI 판독기」 ①의 [설치]는 `irm https://antigravity.google/cli/install.ps1 | iex`(Google 공식 설치 스크립트)를 실행한다. 로그인은 [로그인 창 열기]로 `agy`를 열어 Google 화면에서 한다. 이 프로그램은 토큰을 읽지 않는다.
+- 환경 변수: `YEONE_OCR_AGY_MODEL`(`agy models`의 이름, 기본은 agy의 선택), `YEONE_OCR_AGY_CLI_PATH`, `YEONE_OCR_AGY_TIMEOUT`(기본 300초).
+
+**실측(2026-11-15, Windows, agy 1.5.9, Google AI Pro)**: `agy -p "/quota"` 종료 코드 0. 연어OCR이 보내는 옵션 그대로 빨강·파랑 반쪽 그림을 `@image1.png`로 보낸 요청이 경고 없이 `SUCCESS`, `structured_output: {"left": "red", "right": "blue"}`, 1턴, 17초, 종료 코드 0.
+
+배포 전 설치본에서 남은 확인:
+
+1. [상태 확인]에서 「Antigravity ● 사용 가능」, [연결 시험]에서 「Antigravity: 응답함 · 모델 agy-auto」.
+2. `work\windows-release\venv\Scripts\python.exe tools\check_antigravity.py` — 연결 모듈 그대로 한자 그림(天地玄黃 宇宙洪荒)을 읽혀 모든 글자가 돌아오는지.
+3. 계정을 「Antigravity」로 골라 실제 책 한 쪽의 쪽 판독·의심 구간 검증(창의 Gemini 모델 이름이 넘어가 실패하지 않는지).
+4. 로그인하지 않은 PC에서 [상태 확인]이 브라우저를 열지 않고 「로그인 필요」로 끝나는지.
+5. 사용량 한도에 닿았을 때 진행 기록의 분류(한도·쉼)가 맞는지.
+
+# ChatGPT 구독: Codex가 모든 모델을 거부할 때 (2026-11)
+
+[연결 시험]에서 Codex 기본 모델이 "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account"로 거부되면, 다른 모델을 차례로 시도한다. 순서는 ① Codex가 OpenAI에서 받아 둔 이 계정의 모델 목록(`CODEX_HOME/models_cache.json`, 기본 `~/.codex` — 토큰이 없는 파일이며 `auth.json`은 읽지 않는다) ② 설치된 CLI가 아는 목록(`codex debug models`) ③ 코드의 `FALLBACK_MODELS`.
+
+모두 거부되면 원인에 따라 안내가 다르다.
+- OpenAI가 "requires a newer version of Codex"라고 답한 모델이 있으면: 설치된 Codex CLI(버전 표시)가 오래되었다고 먼저 말하고 [설치](최신으로 올림)를 안내한다.
+- 그런 답이 없으면: 요금제(Plus 이상·만료·관리자 설정)를 확인하고 `codex` → /model 로 본 이름을 `YEONE_OCR_CHATGPT_MODEL`에 넣으라고 안내한다.
+
+그 뒤 로그인 상태는 ChatGPT를 「사용 가능」이 아니라 「쓸 수 없음(Codex CLI 업데이트 필요)」 또는 「쓸 수 없음(모델 거부)」로 보인다. Codex CLI 파일이 바뀌면(업데이트) 이 표시는 저절로 풀린다. 실제 계정으로는 확인하지 않았다 — Windows PC에서 Codex를 최신으로 올린 뒤 [연결 시험]으로 확인할 것.

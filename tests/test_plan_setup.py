@@ -9,28 +9,16 @@ import pytest
 from yeone_ocr import plan_setup
 
 
-def test_install_commands_use_the_official_npm_packages(monkeypatch):
+def test_install_commands_use_the_official_installers(monkeypatch):
     monkeypatch.setattr(plan_setup, "find_npm", lambda: "/usr/bin/npm")
     assert plan_setup.install_command("chatgpt") == ["/usr/bin/npm", "install", "-g", "@openai/codex"]
     assert plan_setup.install_command("claude") is None                     # Claude Code: its own installer
+    # Gemini: Google's own Antigravity CLI installer (Gemini CLI no longer serves personal accounts), no npm
+    command = plan_setup.install_command("gemini")
+    assert any("https://antigravity.google/cli/install." in part for part in command)
     monkeypatch.setattr(plan_setup, "find_npm", lambda: None)
     assert plan_setup.install_command("chatgpt") is None                    # no Node.js: ask for it first
-
-
-def test_gemini_installs_antigravity_cli_with_googles_installer(monkeypatch):
-    """Gemini CLI stopped serving personal Google accounts on 2026-06-18: [설치] installs Antigravity CLI,
-    with Google's own script (no Node.js needed)."""
-    monkeypatch.setattr(plan_setup, "find_npm", lambda: None)
-    found = {"powershell.exe": "C:/Windows/powershell.exe", "bash": "/bin/bash", "curl": "/usr/bin/curl"}
-    monkeypatch.setattr(plan_setup.shutil, "which", lambda name: found.get(name))
-    monkeypatch.setattr(plan_setup.sys, "platform", "win32")
-    assert plan_setup.install_command("gemini") == ["C:/Windows/powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                                                    "-Command", "irm https://antigravity.google/cli/install.ps1 | iex"]
-    monkeypatch.setattr(plan_setup.sys, "platform", "linux")
-    assert plan_setup.install_command("gemini") == ["/bin/bash", "-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"]
-    found.pop("curl")
-    assert plan_setup.install_command("gemini") is None                     # no curl: the person runs it
-    assert "install.ps1" in plan_setup.manual_install("gemini") and "install.sh" in plan_setup.manual_install("gemini")
+    assert plan_setup.install_command("gemini") == command                  # no Node.js needed
 
 
 def test_npm_is_found_outside_path(monkeypatch, tmp_path):

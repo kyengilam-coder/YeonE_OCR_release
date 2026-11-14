@@ -1,5 +1,4 @@
-"""Which signed-in AI plan reads and reviews: Claude (Claude Code), ChatGPT (Codex CLI) or Gemini
-(Antigravity CLI for personal Google accounts, Gemini CLI for Code Assist Standard/Enterprise).
+"""Which signed-in AI plan reads and reviews: Claude (Claude Code), ChatGPT (Codex CLI) or Gemini (Gemini CLI).
 
 Every plan follows the same rule: this program only starts the provider's own, unmodified command-line
 program, which the person signed in to with their own account; it never reads, stores or relays a
@@ -36,14 +35,14 @@ class _Names(dict):
     def __getitem__(self, plan):
         if plan == "gemini":
             try:
-                return "Antigravity" if module("gemini").program() == "antigravity" else "Gemini"
+                return "Antigravity" if module("gemini").__name__.endswith("antigravity_subscription") else "Gemini"
             except Exception:                     # a name must never stop a run
                 pass
         return super().__getitem__(plan)
 
 
 NAMES = _Names({"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"})
-PROGRAMS = {"claude": "Claude Code", "chatgpt": "Codex CLI", "gemini": "Antigravity CLI"}
+PROGRAMS = {"claude": "Claude Code", "chatgpt": "Codex CLI", "gemini": "Gemini CLI"}
 PROVIDERS = {"claude": "anthropic", "chatgpt": "openai", "gemini": "gemini"}
 _MODULES = {"claude": "claude_subscription", "chatgpt": "chatgpt_subscription", "gemini": "gemini_subscription"}
 KEYS = {"claude": "claude-subscription", "chatgpt": "chatgpt-subscription", "gemini": "gemini-subscription"}
@@ -52,7 +51,21 @@ FINISHED = {"anthropic": "end_turn", "openai": "completed", "gemini": "STOP"}
 
 
 def module(plan: str):
+    """The plan's transport module. Gemini: Antigravity CLI (agy) when it is installed — Google stopped
+    serving personal accounts through Gemini CLI on 2026-06-18 — else Gemini CLI as before.
+    YEONE_OCR_GEMINI_TRANSPORT=gemini-cli keeps Gemini CLI (an enterprise Code Assist licence)."""
+    if plan == "gemini" and os.environ.get("YEONE_OCR_GEMINI_TRANSPORT", "").strip().lower() != "gemini-cli":
+        antigravity = importlib.import_module(".antigravity_subscription", __package__)
+        if antigravity.find_cli():
+            return antigravity
+        gemini = importlib.import_module(".gemini_subscription", __package__)
+        return gemini if gemini.find_cli() else antigravity   # neither installed: point at agy, not the closed CLI
     return importlib.import_module(f".{_MODULES[plan]}", __package__)
+
+
+def program(plan: str) -> str:
+    """The program this PC runs for the plan (Gemini: Antigravity CLI or Gemini CLI)."""
+    return getattr(module(plan), "PROGRAM", PROGRAMS[plan])
 
 
 def plan_choice(requested: str | None = None) -> str:
@@ -70,12 +83,6 @@ def plan_for_key(key) -> str | None:
 
 def is_key(key) -> bool:
     return plan_for_key(key) is not None
-
-
-def program(plan: str) -> str:
-    """The name of the program a plan runs now (Gemini: Antigravity CLI or Gemini CLI)."""
-    named = getattr(module(plan), "program_name", None)
-    return named() if callable(named) else PROGRAMS[plan]
 
 
 def status(plan: str, refresh: bool = False, runner=subprocess.run) -> dict:
@@ -178,7 +185,7 @@ def pick(requested: str | None = None, prefer: str | None = None, runner=subproc
         if state.get("installed"):
             reasons.append(f"{NAMES[plan]}: {state.get('reason') or ''}")
     if not reasons:
-        reasons.append("Claude Code, Codex CLI, Antigravity CLI(또는 Gemini CLI) 중 설치된 것이 없습니다.")
+        reasons.append("Claude Code, Codex CLI, Antigravity CLI(Gemini) 중 설치된 것이 없습니다.")
     return None, " / ".join(reasons)
 
 
@@ -203,8 +210,7 @@ def choose(requested_mode: str | None, provider: str, api_key: str, plan: str | 
 
 
 def model(plan: str, requested: str | None = None) -> str:
-    """The model name to record and pass on; the CLI's own default has a label (codex-default,
-    antigravity-auto, gemini-cli-auto)."""
+    """The model name to record and pass on; the CLI's own default has a label (codex-default, gemini-cli-auto)."""
     return module(plan).label(module(plan).model(requested))
 
 
@@ -221,10 +227,9 @@ def accepts_model(plan: str, name: str | None) -> bool:
         return name.startswith("claude") or name in ("opus", "sonnet", "haiku", "fable")
     if plan == "chatgpt":
         return name.startswith(("gpt", "codex", "o1", "o3", "o4"))
-    if module("gemini").program() == "antigravity":
-        # The run's Gemini model is an API model name (gemini-3.1-pro-preview …); Antigravity CLI has its
-        # own model list, and an unknown --model fails the run. It chooses for the account unless
-        # YEONE_OCR_GEMINI_MODEL names one of its models.
+    if module("gemini").__name__.endswith("antigravity_subscription"):
+        # The run's Gemini model is an API model name (gemini-3.1-pro-preview …); agy has its own model list
+        # and fails a run on a model it does not know. It chooses for the account (YEONE_OCR_AGY_MODEL names one).
         return False
     return name.startswith("gemini")
 
@@ -275,8 +280,7 @@ class Session:
     @property
     def transport(self) -> str:
         if self.plan is not None:
-            # The client answering now (Gemini: Antigravity CLI or Gemini CLI), else the plan's own.
-            return getattr(self._client, "transport", None) or module(self.plan).TRANSPORT
+            return module(self.plan).TRANSPORT
         return getattr(self.api, "transport", "none")
 
     @property
@@ -502,8 +506,7 @@ class Session:
 
 
 def _kill_tree(proc):
-    """Stop a CLI and what it started (npm's codex.cmd / gemini.cmd run node, which runs the program;
-    agy starts its own helper processes)."""
+    """Stop a CLI and what it started (npm's codex.cmd / gemini.cmd run node, which runs the program)."""
     if proc.poll() is not None:
         return
     try:

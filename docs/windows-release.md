@@ -1,10 +1,42 @@
+# Windows 1.2.15 설치판
+
+1.2.15는 1.2.14의 설치 구성을 그대로 쓰고(엔진 관리 · 새 PP-OCRv6 번들 — 아래 「다음 판 준비」 절과 1.2.14 절), Antigravity(Gemini) 구독 연결을 실제 계정에서 확인한 방식으로 바꾼 판이다. Antigravity CLI는 설치판에 넣지 않는다 — 사용자가 설정 「AI 판독기」 ①의 [설치](Google 공식 설치 명령)로 설치하고 자기 계정으로 로그인한다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.15**로 맞춘다. 빌드 절차를 사용할 때 `OutputDirectory`는 `dist/1.2.15`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.15), [AI 검토 문서](AI_REVIEW.md)의 Antigravity 확인 목록 — 「Antigravity ● 사용 가능」, [연결 시험] 「Antigravity: 응답함 · 모델 agy-auto」, `tools\check_antigravity.py`, 계정을 「Antigravity」로 골라 실제 책 한 쪽 — 그리고 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.15 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.15)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
+# 다음 판(미배포) 준비: 엔진 관리
+
+1.2.13 다음 판에는 [엔진 관리](release-notes.md)가 들어간다. 설치 구성에서 바뀌는 것:
+
+- **PP-OCRv6 번들을 다시 만들어야 한다.** `tools/prepare_ppocrv6_bundle.py`가 이제 `Lib/ensurepip`을 빼지 않고, venv 실행기(`Lib/venv/scripts/nt/venvlauncher.exe`)와 pip 휠이 있는지 확인한다. 설치판은 이 Python을 `%LOCALAPPDATA%\YeonE_OCR\local-engines\python313`으로 복사해(`python313._pth`와 PP-OCRv6 전용 `site-packages`는 빼고) 추가 엔진의 venv를 만드는 데 쓴다. 옛 번들로 빌드하면 `tools/verify_ppocrv6_bundle.py`가 "Missing engine-manager base Python file"로 멈춘다.
+  - **이 PC에서 만들기**: `tools\build_ppocrv6_bundle.bat`(더블클릭) 또는 `powershell -ExecutionPolicy Bypass -File tools\build_ppocrv6_bundle.ps1`. 릴리스 워크플로와 같은 단계(엔진 원본 → Microsoft C++ 런타임 → 번들 → 해시 검증)에 더해, 만든 번들의 Python을 앱처럼 복사해 venv + pip가 만들어지는지(`tools/check_ppocrv6_base_python.py`)까지 본다. 엔진 원본은 `tools\ppocrv6`의 venv가 Python 3.13이면 그대로 쓰고, 아니거나 고정 버전과 다르면 Python 3.13(`py -3.13` 또는 `-Python313 경로`, Microsoft Store판 제외)으로 `work\ppocrv6-bundle\engine-source`에 새로 설치한다. 결과는 `work\ppocrv6-bundle\bundle-<시각>`, 로그는 같은 폴더의 `build-<시각>.log`. 끝에 출력되는 경로를 `tools\build_windows.ps1 -PPOCRv6Bundle`에 넘긴다.
+  - 2026-11-14 개발 PC에서 이 스크립트로 만든 번들: 파일 2,752개 · 432 MB, Python 3.13.15, `bundle-manifest.json` SHA-256 `28a56949497724fe3d96c9d5fd1ecc55b6e9bbf7ff45ba83cb22d0a1a1cce2a9`. 해시 검증과 엔진 관리용 venv + pip 생성 확인을 통과했다(위 확인 목록 1번의 바탕 — 설치본에서의 실제 엔진 설치는 아직).
+- `packaging/YeonE_OCR.iss`: 추가 작업 "설치 뒤 엔진 관리 열기"(기본 끔)와 그에 따른 실행 항목(`--open-engine-manager`). 엔진·가중치는 여전히 설치파일에 넣지 않는다.
+- `--smoke-test`에 `engine-manager-resources` 검사가 추가됐다(설치 스크립트 5개와 `install_rapidocr.py`가 묶였는지, 번들 Python이 있으면 venv를 만들 수 있는지).
+
+- **이 PC에서 설치판 만들기**: `tools\build_installer.bat`(더블클릭). 64비트 Python 3.14와 Inno Setup 6이 설치되어 있어야 하고(없으면 받을 곳을 알려 주고 아무것도 바꾸지 않은 채 멈춘다), `work\windows-release\venv`를 만들어 `packaging\requirements-windows.lock.txt`를 설치한 뒤(릴리스 워크플로처럼 PyYAML은 순수 Python 휠로) 가장 최근 `work\ppocrv6-bundle\bundle-*`로 `tools\build_windows.ps1`을 돌린다. 결과는 `dist\YeonE_OCR-<판>-Setup-x64.exe`, 로그는 `work\windows-release\installer-build-<시각>.log`. `tools/build_notices.py`는 돌리지 않는다(저장소의 고지 파일을 그대로 쓴다).
+  - 2026-11-14 개발 PC에서 위 번들로 빌드: `YeonE_OCR-1.2.13-Setup-x64.exe` 276 MB(SHA-256 `24c3294c…c5b7edbb`), 자체 검사 통과. 확인용 빌드다(Python 3.14.10 — 배포는 릴리스 워크플로의 3.14.5).
+
+배포 전 Windows 설치본에서 확인할 것(이 항목들은 Linux 시험으로 대신하지 못했다). 2026-11-14 개발 PC(GTX 1660)에서 1번과 2번의 설치는 확인했다 — 다섯 선택지 모두 설치, Surya GPU 가속의 CUDA 장치 확인 통과. 2번의 실제 인식과 3~6번은 아직이다.
+
+1. 별도 Python이 없는 PC에서 [설정] → [엔진 관리…] → PaddleOCR server(CPU)만 설치 → `local-engines\python313`이 만들어지고 `tools\paddle_server\venv`가 동작하는지, 창에 "설치 완료"가 뜨는지.
+2. NVIDIA GPU가 있는 PC에서 추천대로 전부 설치 → 각 GPU 확인 단계의 결과, 비교·교정 창과 로컬 우선 인식이 새 엔진을 찾는지.
+3. 내려받는 도중 [취소] → pip · `ollama.exe`가 남지 않는지, 다시 [설치]하면 이어지는지(GLM-OCR은 끊긴 폴더를 지우고 새로 시작).
+4. 앱을 새 판으로 덮어 설치하거나 제거한 뒤에도 `local-engines`의 엔진이 그대로 인식되는지.
+5. 설치 프로그램에서 "설치 뒤 엔진 관리 열기"를 켰을 때 앱이 한 번만 열리고 엔진 관리 창이 뜨는지.
+6. GPU가 없는 PC: GPU 선택지가 꺼져 있고 까닭("NVIDIA GPU 필요")이 보이는지.
+
 # Windows 1.2.14 설치판
 
-1.2.14는 1.2.13의 설치 구성을 그대로 쓰고, Gemini 구독을 Google Antigravity CLI(`agy`)로 연결한 판이다. Antigravity CLI는 설치판에 넣지 않는다 — 사용자가 설정 「AI 판독기」 ①의 [설치](Google 공식 설치 명령)로 자기 PC에 설치하고 자기 계정으로 로그인한다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+1.2.14는 1.2.13의 설치 구성에 엔진 관리(추가 OCR 엔진 설치 · GPU 점검), Gemini 구독의 Antigravity CLI 연결, 구독 [연결 시험] 안내 수정을 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
 
 버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.14**로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.14`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
 
-배포 전 설치본에서 확인할 것: 판 번호(v1.2.14), 설정 「AI 판독기」 ①의 「Antigravity (Google 계정 · Gemini)」 — [설치]가 Google 설치 명령을 보여 주고 묻는지, [상태 확인]이 `agy`가 있는 PC에서 「Antigravity ● 사용 가능」과 경로(`%LOCALAPPDATA%\agy\bin\agy.exe`)를 보이는지, [연결 시험]이 「Antigravity: 응답함 · 모델 antigravity-auto」인지, 계정을 「Antigravity」로 골라 한 쪽을 검증하는지(설정의 Gemini 모델 이름이 넘어가 실패하지 않는지), 사용자 자료 보존.
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.14), [엔진 관리…] 창, Gemini [설치](agy) → [로그인 창 열기] → [연결 시험], Codex 최신판으로 ChatGPT [연결 시험], 거부된 구독의 로그인 상태가 「쓸 수 없음(…)」으로 바뀌는지, 사용자 자료 보존.
 
 공개 게시 대상은 [v1.2.14 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.14)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
 

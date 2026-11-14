@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "1.2.14"
+#define AppVersion "1.2.15"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\work\windows-release\dist\YeonE_OCR"
@@ -46,6 +46,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "바탕 화면에 바로가기 만들기"; GroupDescription: "바로가기:"; Flags: unchecked
+Name: "enginemanager"; Description: "설치 뒤 엔진 관리 열기 (GPU 점검 · 추가 OCR 엔진 내려받기)"; GroupDescription: "OCR 엔진:"; Flags: unchecked
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -58,4 +59,6 @@ Name: "{group}\연어OCR"; Filename: "{app}\YeonE_OCR.exe"; WorkingDir: "{userdo
 Name: "{autodesktop}\연어OCR"; Filename: "{app}\YeonE_OCR.exe"; WorkingDir: "{userdocs}"; Tasks: desktopicon; AppUserModelID: "YeonE.OCR.Desktop"
 
 [Run]
-Filename: "{app}\YeonE_OCR.exe"; Description: "연어OCR 실행"; Flags: nowait postinstall skipifsilent
+; 큰 엔진·가중치는 설치파일에 넣지 않는다. 고르면 앱의 [엔진 관리] 창이 열려 사용자가 직접 내려받는다.
+Filename: "{app}\YeonE_OCR.exe"; Description: "연어OCR 실행"; Flags: nowait postinstall skipifsilent; Tasks: not enginemanager
+Filename: "{app}\YeonE_OCR.exe"; Parameters: "--open-engine-manager"; Description: "연어OCR 실행 · 엔진 관리 열기"; Flags: nowait postinstall skipifsilent; Tasks: enginemanager

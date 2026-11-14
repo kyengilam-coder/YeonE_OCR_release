@@ -20,7 +20,7 @@
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
   compare-engines 선택한 로컬 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
-  plans    구독 계정(Claude Code·Codex CLI·Antigravity CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
+  plans    구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
@@ -2044,7 +2044,8 @@ def normalization_options(args):
     rules = load_punctuation_rules(path) if punctuation and path else None
     return NormalizationOptions(traditional=enabled and not getattr(args, "no_traditional", False),
                                 yun=enabled and not getattr(args, "no_yun", False),
-                                punctuation=punctuation, punctuation_rules=rules)
+                                punctuation=punctuation, punctuation_rules=rules,
+                                korean_forms=enabled and not getattr(args, "no_korean_forms", False))
 
 
 def _check_document(args) -> str | None:
@@ -2710,6 +2711,8 @@ def build_parser():
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
         p.add_argument("--no-traditional", action="store_true", help="간체→번체 변환과 한자 치환 문맥 후보를 끔(云/雲·부호는 별도)")
         p.add_argument("--no-yun", action="store_true", help="云/雲 문맥 교정을 끔(원래 글자 보존)")
+        p.add_argument("--no-korean-forms", action="store_true",
+                       help="한국 표준 한자체(KS X 1001) 변환을 끔: 爲·眞·說 대신 為·真·説처럼 판독·간체→번체 결과의 자형을 그대로 둠")
         p.add_argument("--no-punctuation", action="store_true", help="중문부호 치환을 끔")
         p.add_argument("--punctuation-rules", help="편집한 중문부호 규칙 JSON: [{\"find\": \"，\", \"replace\": \", \"}, ...], 기본 부호 목록을 대체")
         p.add_argument("--no-context-model", action="store_true",
@@ -2725,7 +2728,7 @@ def build_parser():
                        help="문서와 함께 검색 가능한 PDF(out/<이름>_글자층.pdf — 원본 쪽 위에 판독 글을 보이지 않는 글자층으로)도 만듦")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
-    p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Antigravity CLI)의 설치·로그인 상태(모델 호출 없음)")
+    p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태(모델 호출 없음)")
     p.add_argument("--test", action="store_true",
                    help="연결 시험: 쓸 수 있는 계정마다 작은 요청 하나를 실제로 보내 답하는지, 어느 모델인지, 실패하면 그 이유를 보임")
     p.set_defaults(fn=cmd_plans)
@@ -2791,12 +2794,12 @@ def build_parser():
     p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",
                    help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
     p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
-                   help="AI 검증 연결 방식. subscription=PC에 로그인된 구독 계정 프로그램(Claude Code·Codex CLI·Antigravity CLI)으로 "
+                   help="AI 검증 연결 방식. subscription=PC에 로그인된 구독 계정 프로그램(Claude Code·Codex CLI·Gemini CLI)으로 "
                         "구독 사용량에서 차감(API 요금 없음, 개인 사용), api=API 키만, auto(기본)=API 키가 없으면 로그인된 구독 계정. "
                         "환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
     p.add_argument("--local-ai-plan", choices=("auto", "claude", "chatgpt", "gemini"), default=None,
                    help="구독 계정: claude=Claude Code(claude -p), chatgpt=OpenAI Codex CLI(codex exec, ChatGPT 로그인), "
-                        "gemini=Antigravity CLI(agy -p, Google 계정 로그인 · 없으면 Gemini CLI). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
+                        "gemini=Gemini CLI(gemini -p, Google 로그인). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
                         "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
                         "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
     p.add_argument("--local-resume", choices=("unfinished", "continue", "all"), default="unfinished",
@@ -2837,6 +2840,10 @@ def build_parser():
     p.add_argument("--local-line-verification", action=argparse.BooleanOptionalAction, default=False,
                    help="PP-OCRv6의 줄 다시 읽기와 EasyOCR의 글꼴 대조(가로쓰기 한문)를 함(기본 끔). 측정한 4개 문서 19쪽에서 "
                         "결과 글자는 같고 번체 쪽당 시간만 30~37%% 늘었음. 흐린 스캔본에서 비슷한 글자를 더 가리고 싶을 때 켬")
+    p.add_argument("--local-gpu-engines", action=argparse.BooleanOptionalAction, default=None,
+                   help="설치된 CUDA 엔진(GLM-OCR·Surya·PaddleOCR server) 중 하나를 쪽마다 함께 돌림. 기본: 켬"
+                        "(환경 변수 YEONE_OCR_GPU_ENGINES=0 이면 끔). 생성형 엔진이라 쪽당 시간이 크게 늘고, "
+                        "켜면 그 엔진 결과가 없는 이미 읽은 쪽도 다시 처리함")
     p.add_argument("--local-exclude-engines", nargs="+", default=[], metavar="ENGINE",
                    choices=("ppocrv6", "rapidocr", "easyocr", "tesseract", "surya", "glmocr", "paddle_server"),
                    help="(시험) 자동 선택에서 뺄 엔진. 예: --local-exclude-engines easyocr")

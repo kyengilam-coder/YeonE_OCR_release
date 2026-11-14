@@ -7,61 +7,13 @@
 | --- | --- | --- | --- |
 | Claude (Pro/Max) | Claude Code `claude -p` | `irm https://claude.ai/install.ps1 \| iex` | `claude auth login` |
 | ChatGPT (Plus/Pro/Business/Edu/Enterprise) | OpenAI Codex CLI `codex exec` | `npm install -g @openai/codex` | `codex login` → **Sign in with ChatGPT** |
-| Gemini (개인 Google 계정: 무료, Google AI Pro/Ultra) | Google Antigravity CLI `agy -p` | `irm https://antigravity.google/cli/install.ps1 \| iex` | `agy` 실행 → 열리는 Google 로그인 화면에서 로그인 |
+| Antigravity (개인 Google 계정: 무료, Google AI Pro/Ultra) | Google Antigravity CLI `agy -p` | `irm https://antigravity.google/cli/install.ps1 \| iex` | `agy` 실행 → 열리는 Google 로그인 화면 |
 | Gemini (Gemini Code Assist Standard/Enterprise) | Gemini CLI `gemini -p` | `npm install -g @google/gemini-cli` | `gemini` 실행 → **Login with Google** → `/quit` |
 
-Codex CLI와 Gemini CLI는 Node.js(20 이상)가 필요하다. Antigravity CLI는 Node.js 없이 실행 파일 하나(`agy.exe`,
-`%LOCALAPPDATA%\agy\bin`)로 설치된다. 로그인 상태는 `yeone-ocr plans`로 확인한다
+2026-06-18부터 Gemini CLI는 개인 Google 계정을 받지 않는다. 그래서 Google 계정 구독은 Antigravity CLI가 있으면 그것으로 연결하고, 화면에는 「Antigravity」로 보인다(자세한 방식과 실측은 [AI 검토 문서](AI_REVIEW.md)의 「Gemini 구독」 절). 창의 Gemini 모델 이름(API 키용)은 Antigravity에 넘기지 않는다 — Antigravity가 계정에 맞춰 고른다(`YEONE_OCR_AGY_MODEL`로 바꿈).
+
+Codex CLI와 Gemini CLI는 Node.js(20 이상)가 필요하다. Antigravity CLI는 Node.js 없이 실행 파일 하나(`%LOCALAPPDATA%\agy\bin\agy.exe`)다. 로그인 상태는 `yeone-ocr plans`로 확인한다
 (상태 명령만 실행하며 모델은 부르지 않는다).
-
-## Gemini: Antigravity CLI (2026-06-18부터)
-
-Google은 2026-06-18부터 **개인 Google 계정(무료, Google AI Pro/Ultra, Gemini Code Assist for individuals)의 Gemini CLI
-요청을 받지 않고** Antigravity CLI(`agy`)로 옮겼다. 그래서 연어OCR의 Gemini 구독은 다음 순서로 프로그램을 고른다
-(`yeone_ocr/gemini_subscription.py`, 환경 변수 `YEONE_OCR_GEMINI_PROGRAM` = `auto`(기본) | `antigravity` | `gemini-cli`).
-
-1. Antigravity CLI가 설치되고 로그인되어 있으면 그것(`yeone_ocr/antigravity_subscription.py`).
-2. 아니면 로그인된 Gemini CLI(Code Assist Standard/Enterprise 계정은 계속 쓸 수 있다).
-3. 둘 다 아니면 Antigravity CLI 설치·로그인을 안내한다. 설정 「AI 판독기」 ①의 [설치]는 Google의 공식 설치 명령을
-   보여 주고 물은 뒤 실행하고, [로그인 창 열기]는 `agy`를 새 창으로 연다.
-
-Gemini CLI가 개인 계정에 "더 이상 제공하지 않음"이라고 답하면 일시 오류로 다시 보내지 않고, 이번 실행에서 그
-계정을 빼며 Antigravity CLI 설치를 안내한다.
-
-요청마다 `agy`를 한 번 실행한다:
-`agy -p <지시문> --output-format json --settings yeone-settings.json --disable-slash-commands --json-schema schema.json [--model 모델]`.
-
-- **`--settings`** (이번 실행에만 · 저장 안 됨) `{"agentMode": "", "toolPermission": "request-review"}`: 1.5.7부터 저장된
-  모드가 없는 실행은 Auto 모드(파일 수정·명령 실행을 묻지 않고 함)로 시작하고, `--mode`는 `accept-edits`·`auto`·`plan`만
-  받는다(1.5.9에서 `--mode default`는 경고만 내고 Auto로 돈다). `agentMode: ""`가 Default 모드다. Default 모드의 헤드리스
-  실행은 자기 폴더 안을 읽기만 하고, 승인이 필요한 일(수정·명령·폴더 밖 접근)은 거절한다. 사용자의 `settings.json`은
-  바꾸지 않는다(1.5.9에서 `agy -p /config --settings …`로 확인).
-- **`--disable-slash-commands`**: 지시문을 `/명령`이나 스킬로 풀지 않는다.
-  `--dangerously-skip-permissions`는 쓰지 않는다.
-- **답**: `--output-format json`의 `structured_output`(스키마에 맞춘 답)을 먼저, 없으면 `response`를 JSON으로 검사한다.
-  `status`가 `SUCCESS`가 아니거나 `finished_reason`(시간 초과 · 중단 · 오류)이 있으면 완료되지 않은 답으로 남긴다.
-- **그림**: 요청 폴더의 `image1.png …`를 지시문에서 `@image1.png`로 가리키면 그림으로 첨부된다(1.5.9 실측: 도구 호출 없이
-  한 번에 답함). 붙어 오지 않았을 때를 위해 파일 보기 도구로 열어 보라고도 적는다(그것만 허용).
-- **긴 지시문**: Windows 명령줄 길이 제한(32,767자) 때문에 16,000자가 넘으면 `request.md`에 적고 그 파일을 읽게 한다.
-- **표준 입력**: 빈 채로 닫는다(`agy -p`는 읽지 않으며, 열린 채면 Windows에서 멈춘 일이 있다).
-- **지시문**: `agy`에는 자체 시스템 지시문을 바꾸는 옵션이 없어 우리 지시문을 메시지 맨 앞에 둔다.
-  사용자의 전역 규칙(`~/.gemini/GEMINI.md`, `AGENTS.md`)은 Antigravity CLI가 그대로 읽는다.
-- **환경 변수**: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AGY_ADC_AUTH`, `GOOGLE_APPLICATION_CREDENTIALS`,
-  `GOOGLE_GEMINI_BASE_URL`은 넘기지 않는다 — 넘기면 구독 대신 API·Cloud 요금이 나간다.
-- **로그인 상태**: `agy --version` 뒤 `agy -p /quota`(CLI가 직접 답하는 명령 · 모델 호출 없음 · 사용량 차감 없음)가
-  성공하면 로그인된 것으로 본다. 로그인 정보는 시스템 키체인에 있고 연어OCR은 읽지 않는다.
-- **오류**: 종료 코드 3의 `AGY_ERROR: {...}` 줄(상태 · HTTP 코드)과 오류 문구로 한도(`RESOURCE_EXHAUSTED`, 크레딧 부족) ·
-  로그인(`authentication required`, `Eligibility check failed`) · 모델(`unknown model`) · 일시 오류를 가른다.
-- **모델**: 기본은 Antigravity CLI가 계정에 맞춰 고른다(기록에는 `antigravity-auto`, Google AI Pro는 지금 Gemini 4 Argon).
-  설정의 Gemini 모델(`gemini-3.1-pro-preview` 등)은 API 키용 이름이라 넘기지 않는다(`subscriptions.accepts_model`).
-  바꾸려면 `YEONE_OCR_GEMINI_MODEL`에 `agy models`의 이름을 넣는다. 그 계정에 없는 모델이면 `--model` 없이 다시 보낸다.
-- **이름**: 화면과 진행 기록에서는 「Antigravity」(`subscriptions.NAMES["gemini"]`이 지금 쓰는 프로그램을 따름 —
-  Gemini CLI로 연결될 때만 「Gemini」).
-- **실행 파일 찾기**: `YEONE_OCR_ANTIGRAVITY_CLI_PATH` → (Windows) `%LOCALAPPDATA%\agy\bin\agy.exe` → PATH의 `agy.exe`
-  → WinGet 링크 폴더 / (Mac·Linux) PATH → `~/.local/bin/agy`. Windows에서는 `agy.cmd`·`agy.bat`를 쓰지 않는다 —
-  Antigravity 데스크톱 앱의 실행기가 같은 이름이면 창만 열린다.
-- **약관**: Google의 Antigravity 안내는 소비자 요금제에서 `agy`를 다른 프로그램으로 감싸 쓰는 것을 지원하지 않는다고 적고
-  있다는 보고가 있다. 개인 PC에서 자기 계정으로만 쓰고, 다른 사람에게 줄 설치본이나 여러 사람이 쓰는 작업에는 API 키를 쓴다.
 
 ## 고르기
 
@@ -111,16 +63,16 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`.
 - 검증만 자동(`--local-ai-auth auto`)에 두고 그 제공사의 API 키가 없으면, 그 제공사의 구독을 먼저 찾는다.
 
 모델: Claude는 `opus`(`YEONE_OCR_CLAUDE_MODEL`). ChatGPT와 Gemini는 각 프로그램이 요금제에 맞춰 고르는 기본 모델을
-쓰고(기록에는 `codex-default`, `antigravity-auto` 또는 `gemini-cli-auto`로 남는다), 바꾸려면 `YEONE_OCR_CHATGPT_MODEL`,
+쓰고(기록에는 `codex-default`, `gemini-cli-auto`로 남는다), 바꾸려면 `YEONE_OCR_CHATGPT_MODEL`,
 `YEONE_OCR_GEMINI_MODEL`. 그 밖의 환경 변수는 각 모듈 머리글(`yeone_ocr/chatgpt_subscription.py`,
-`yeone_ocr/gemini_subscription.py`, `yeone_ocr/antigravity_subscription.py`, `yeone_ocr/claude_subscription.py`)에 있다.
+`yeone_ocr/gemini_subscription.py`, `yeone_ocr/claude_subscription.py`)에 있다.
 
 ## 이 프로그램이 하는 일과 하지 않는 일
 
 - 하는 일: 요청마다 공식 프로그램을 한 번 실행한다. 새 빈 폴더에 그 요청의 그림·지시문·검증 스키마만 두고,
   도구·MCP 서버·확장·사용자 설정·세션 기록을 끈다(Codex: `--ephemeral --ignore-user-config --ignore-rules`,
-  읽기 전용 샌드박스, 승인 없음, 웹 검색 끔 / Gemini CLI: `--approval-mode plan -e none --allowed-mcp-server-names none`,
-  `GEMINI_SYSTEM_MD`로 지시문 교체 / Antigravity CLI: `--settings`로 Default 모드, 위 절). 환경 변수의 API 키(`OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
+  읽기 전용 샌드박스, 승인 없음, 웹 검색 끔 / Gemini: `--approval-mode plan -e none --allowed-mcp-server-names none`,
+  `GEMINI_SYSTEM_MD`로 지시문 교체). 환경 변수의 API 키(`OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
   `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY` 등)는 자식 프로그램에 넘기지 않는다 — 넘기면 구독 대신 API 요금이 나간다.
 - 하지 않는 일: 로그인 토큰(`~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, Claude 자격 증명)을 읽거나
   저장하거나 다른 곳으로 보내지 않는다. Gemini는 어느 로그인 방식을 골랐는지 보려고 `~/.gemini/settings.json`만 읽는다.
@@ -133,11 +85,10 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`.
 ## 다른 점
 
 - Claude Code는 검증 스키마를 직접 받는다(`--json-schema`). Codex CLI도 받는다(`--output-schema`).
-  Antigravity CLI도 받는다(`--json-schema`, 지시문에도 넣음). Gemini CLI는 스키마 옵션이 없어 지시문에 스키마를 넣고, 받은 답을 JSON으로 검사한다(``` 울타리는 벗긴다).
+  Gemini CLI는 스키마 옵션이 없어 지시문에 스키마를 넣고, 받은 답을 JSON으로 검사한다(``` 울타리는 벗긴다).
   JSON이 아니면 그 호출은 "완료되지 않음"으로 남고 엔진 판독을 쓴다.
-- 그림: Claude는 stream-json 입력에 base64로, Codex는 `-i 파일`, Gemini(두 프로그램 모두)는 지시문의 `@image1.png` 참조로 보낸다.
-- 지시문은 Claude · Codex · Gemini CLI 모두 표준 입력으로 넘겨 Windows 명령줄 길이 제한(cmd.exe 8191자)에 걸리지 않는다.
-  Antigravity CLI는 표준 입력을 읽지 않아 명령줄로 넘기고, 길면 `request.md` 파일로 넘긴다(위 절).
+- 그림: Claude는 stream-json 입력에 base64로, Codex는 `-i 파일`, Gemini는 지시문의 `@image1.png` 참조로 보낸다.
+- 지시문은 셋 다 표준 입력으로 넘겨 Windows 명령줄 길이 제한(cmd.exe 8191자)에 걸리지 않는다.
   npm으로 설치한 `codex.cmd`, `gemini.cmd`도 그래서 쓸 수 있다.
 
 ## 동시 AI 요청 (1.2.7)
@@ -164,7 +115,6 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`.
 
 설정 「AI 판독기」 ①의 「로그인 상태」에 마우스를 올리면 계정마다 찾은 프로그램 경로와 이유가 나온다(명령줄 `yeone-ocr plans`도 같음).
 
-- **설치 안 됨**: 그 회사의 공식 프로그램(Codex CLI · Antigravity CLI · Gemini CLI)을 찾지 못함. 개인 Google 계정(무료 · Google AI Pro/Ultra)은 **Antigravity CLI**가 필요하다 — PowerShell에서 `irm https://antigravity.google/cli/install.ps1 | iex` 뒤 `agy`를 한 번 실행해 로그인(다른 곳에 있으면 `YEONE_OCR_ANTIGRAVITY_CLI_PATH`). Code Assist Standard/Enterprise 계정은 Gemini CLI도 된다: `npm install -g @google/gemini-cli` 뒤 `gemini`를 한 번 실행해 'Login with Google'. Gemini CLI는 PATH에 없어도 npm 전역 폴더(`%APPDATA%\npm`)·Node 설치 폴더·nvm·Volta에서 찾는다. 다른 곳에 있으면 환경 변수 `YEONE_OCR_GEMINI_CLI_PATH`로 지정.
-- **실행 실패**: 찾았지만 `agy --version`·`gemini --version`이 실패함 — 이유(종료 코드·오류 문구)가 함께 나온다. 흔한 원인은 Node.js가 20보다 낮음.
-- **로그인 필요**: 설치됐지만 Google 계정 로그인이 아님 — `agy`를 실행해 로그인(로그인 정보를 지우려면 `/logout`). Gemini CLI는 `gemini`에서 /auth로 'Login with Google'.
-- **로그인은 됐는데 「Eligibility check failed」**: 그 Google 계정이 Antigravity를 쓸 수 없다는 Antigravity CLI의 답이다. `agy`를 실행해 화면의 안내(확인 주소)를 따르거나 다른 계정으로 로그인한다.
+- **설치 안 됨**: 그 회사의 공식 프로그램(Codex CLI · Gemini CLI)을 찾지 못함. 개인 Google 계정(무료 · Google AI Pro/Ultra)은 **Antigravity CLI**가 필요하다 — PowerShell에서 `irm https://antigravity.google/cli/install.ps1 | iex` 뒤 `agy`를 한 번 실행해 로그인(다른 곳에 있으면 `YEONE_OCR_AGY_CLI_PATH`). Gemini CLI(Code Assist Standard/Enterprise)는 `npm install -g @google/gemini-cli` 뒤 `gemini`를 한 번 실행해 'Login with Google'. PATH에 없어도 npm 전역 폴더(`%APPDATA%\npm`)·Node 설치 폴더·nvm·Volta에서 찾는다. 다른 곳에 있으면 환경 변수 `YEONE_OCR_GEMINI_CLI_PATH`로 지정.
+- **실행 실패**: 찾았지만 `gemini --version`이 실패함 — 이유(종료 코드·오류 문구)가 함께 나온다. 흔한 원인은 Node.js가 20보다 낮음.
+- **로그인 필요**: 설치됐지만 Google 계정 로그인이 아님 — `gemini`에서 /auth로 'Login with Google'.

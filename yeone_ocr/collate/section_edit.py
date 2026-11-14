@@ -23,6 +23,7 @@ import zipfile
 
 from lxml import etree
 
+from ab_ocr.fileid import same_file
 from .hwpx_edit import HP, HH, INLINE_ATOMS, Editor, _local, _slots, _tag_of, paragraph_text
 from .sections import HwpxBook, normalize_name, resolve_anchor_index
 from . import zh
@@ -877,7 +878,7 @@ class SectionEditSession:
             raise SectionEditError("처음 생성한 OCR 결과 HWPX를 선택하십시오. 기존 교정본은 자동으로 이어서 엽니다.")
         self.corrected_path = Path(corrected_path(str(self.source_path))).resolve()
         if (_path(self.source_path) == _path(self.corrected_path)
-                or self.corrected_path.exists() and os.path.samefile(self.source_path, self.corrected_path)):
+                or same_file(self.source_path, self.corrected_path)):
             raise SectionEditError("교정본과 OCR 결과가 같은 파일입니다.")
         self._source_bytes = self.source_path.read_bytes()
         self._target_bytes = self.corrected_path.read_bytes() if self.corrected_path.exists() else None
@@ -938,7 +939,7 @@ class SectionEditSession:
             raise SectionEditError("원본 HWPX를 선택해 주십시오. 교정본 자체를 원본으로 지정하면 원본 보존을 확인할 수 없습니다.")
         self.corrected_path = Path(corrected_path(str(self.source_path))).resolve()
         if (_path(self.source_path) == _path(self.corrected_path)
-                or self.corrected_path.exists() and os.path.samefile(self.source_path, self.corrected_path)):
+                or same_file(self.source_path, self.corrected_path)):
             raise SectionEditError("교정본과 원본이 같은 파일입니다. 별도의 원본을 선택해 주십시오.")
         self.section_name, self.start, self.end = section_name, start, end
         self._source_bytes = self.source_path.read_bytes()

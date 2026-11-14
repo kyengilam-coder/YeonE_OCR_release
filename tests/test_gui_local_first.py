@@ -62,6 +62,20 @@ class LocalFirstGuiTests(unittest.TestCase):
         self.assertIn("--local-easyocr", self.gui.App._strategy_opts(app))
         self.assertIs(self.gui.DEFAULTS["local_easyocr"], False)
 
+    def test_gpu_engine_setting_follows_the_environment_until_changed(self):
+        gui = self.gui
+        self.assertIsNone(gui.DEFAULTS["local_gpu_engines"])
+        for environment, expected in (("1", True), ("0", False)):
+            with mock.patch.dict("os.environ", {"YEONE_OCR_GPU_ENGINES": environment}):
+                app = self.app()
+                self.assertIs(gui.App._gpu_engines_choice(app.cfg), expected)
+                flags = gui.App._strategy_opts(app)                          # 같으면 플래그 없음(명령 그대로)
+                self.assertFalse({"--local-gpu-engines", "--no-local-gpu-engines"} & set(flags))
+                app.v_local_gpu_engines = Var(not expected)
+                self.assertIn("--local-gpu-engines" if not expected else "--no-local-gpu-engines",
+                              gui.App._strategy_opts(app))
+                self.assertIs(gui.App._gpu_engines_choice(dict(app.cfg, local_gpu_engines=not expected)), not expected)
+
     def test_subscription_plan_choice_adds_a_flag_only_when_not_automatic(self):
         gui = self.gui
         app = self.app()
@@ -265,26 +279,18 @@ class LocalFirstGuiTests(unittest.TestCase):
             self.assertEqual(app.q.get(timeout=5)[0], "log")
             self.assertEqual(app.q.get(timeout=5), ("setup_done", "ChatGPT (Codex CLI) 설치", 0))
         self.assertEqual(ran, [["npm", "install", "-g", "@openai/codex"]])
-        # Gemini: Google's Antigravity CLI installer, shown and asked first; no Node.js needed.
-        app._setup_busy = False
-        app.v_setup_plan = Var(gui.SETUP_LABELS["gemini"])
-        ran.clear()
-        script = ["powershell", "-Command", "irm https://antigravity.google/cli/install.ps1 | iex"]
-        with mock.patch("yeone_ocr.plan_setup.antigravity_install_command", return_value=script), \
+        # Gemini: Google's own Antigravity CLI installer, no Node.js needed (Gemini CLI no longer serves personal accounts)
+        gemini = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["gemini"]), q=queue.Queue(), v_status=Var(""))
+        ran = []
+        with mock.patch("yeone_ocr.plan_setup.find_npm", return_value=None), \
                 mock.patch("yeone_ocr.plan_setup.run", side_effect=lambda command, log: ran.append(command) or 0), \
                 mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask:
-            gui.App.install_plan(app)
-            self.assertIn("install.ps1", ask.call_args.args[1])
-            self.assertEqual(app.q.get(timeout=5)[0], "log")
-            self.assertEqual(app.q.get(timeout=5), ("setup_done", "Antigravity (Google 계정 · Gemini) 설치", 0))
-        self.assertEqual(ran, [script])
-        app._setup_busy = False
-        with mock.patch("yeone_ocr.plan_setup.antigravity_install_command", return_value=None), \
-                mock.patch.object(gui.messagebox, "showinfo") as info, \
-                mock.patch("yeone_ocr.plan_setup.run") as run:
-            gui.App.install_plan(app)                                                  # no shell: the command to run by hand
-        run.assert_not_called(); self.assertIn("install.ps1", info.call_args.args[1])
-        app.v_setup_plan = Var(gui.SETUP_LABELS["chatgpt"])
+            gui.App.install_plan(gemini)
+            self.assertIn("antigravity.google/cli/install", ask.call_args.args[1])
+            self.assertEqual(gemini.q.get(timeout=5)[0], "log")
+            self.assertEqual(gemini.q.get(timeout=5), ("setup_done", "Antigravity (Google 계정 · Gemini) 설치", 0))
+        self.assertEqual(len(ran), 1)
+        self.assertTrue(any("antigravity.google/cli/install" in part for part in ran[0]))
         app._setup_busy = False
         with mock.patch("yeone_ocr.plan_setup.find_npm", return_value="npm"), \
                 mock.patch("yeone_ocr.plan_setup.run") as run, \

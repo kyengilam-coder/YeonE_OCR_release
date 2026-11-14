@@ -88,20 +88,32 @@ _REQUEST_REJECTIONS = ("not a valid json schema", "invalid_json_schema", "invali
                        "response_format", "output_schema", "text.format")
 
 
-def failure(program: str, detail: str, classify, fallback: str) -> SubscriptionError:
+def program_error(*outputs) -> tuple[str, str]:
+    """(all of a failed program's output, the part to show). Node CLIs print the error name and reason first
+    and then a long stack trace ("at async CodeAssistServer.requestPost ..."): the last few hundred characters
+    hold only frames, so they are neither shown nor used to tell what kind of failure it was."""
+    full = "\n".join(str(part).strip() for part in outputs if part and str(part).strip())
+    lines = [line.strip() for line in full.splitlines() if line.strip() and not line.strip().startswith("at ")]
+    shown = " / ".join(lines)
+    return full, (shown[:400] if shown else full[-400:])
+
+
+def failure(program: str, detail: str, classify, fallback: str, *, full: str | None = None) -> SubscriptionError:
     """The error for a failed call, with the program's own words kept: the account problem `classify`
     recognises (sign-in, plan limit), else RequestRejected for a refused request, else `fallback` as a
-    temporary failure (the plan itself is not at fault as far as this text says)."""
+    temporary failure (the plan itself is not at fault as far as this text says). `full` is the whole output
+    when `detail` is only the part shown: the kind is judged on all of it."""
     text = (detail or "").strip()
     raw = f" (원문: {text[:240]})" if text else ""
-    message = classify(text)                 # account problems first: sign-in, plan limit, a model the plan lacks
+    whole = (full or "").strip() or text
+    message = classify(whole)                # account problems first: sign-in, plan limit, a model the plan lacks
     if message:
         error = SubscriptionError(message + raw)
         error.kind = getattr(message, "kind", "account")
         if error.kind == "limit":
-            error.retry_after = reset_after(text)
+            error.retry_after = reset_after(whole)
         return error
-    if any(k in text.lower() for k in _REQUEST_REJECTIONS):
+    if any(k in whole.lower() for k in _REQUEST_REJECTIONS):
         return RequestRejected(f"{program}가 이번 요청(검증 스키마·입력)을 거부했습니다{raw}")
     error = SubscriptionError(fallback)
     error.kind = "temporary"
@@ -249,8 +261,11 @@ def not_found_reason(program: str, name: str, hint: str) -> str:
     places = ", ".join(str(f) for f in cli_search_folders(name)[:8])
     return (f"{program}({name})를 찾지 못했습니다 — PATH와 {places} 등을 찾아봤습니다. {hint} "
             f"다른 곳에 설치했다면 PowerShell에서 `where.exe {name}`(Mac·Linux: `which {name}`)로 위치를 보고 "
-            f"환경 변수 YEONE_OCR_{'GEMINI' if name == 'gemini' else 'CODEX'}_CLI_PATH로 지정하세요. "
-            "`npx`로만 실행했다면 전역 설치가 아니므로 [설치]를 누르세요.")
+            f"환경 변수 YEONE_OCR_{_ENV_NAMES.get(name, 'CODEX')}_CLI_PATH로 지정하세요."
+            + ("" if name == "agy" else " `npx`로만 실행했다면 전역 설치가 아니므로 [설치]를 누르세요."))
+
+
+_ENV_NAMES = {"gemini": "GEMINI", "agy": "AGY", "codex": "CODEX"}
 
 
 def _is_cmd_shim(path: str) -> bool:
@@ -362,6 +377,13 @@ def _classify(text: str) -> str | None:
     return None
 
 
+# Turns one `claude -p` request may use. The answer comes back through Claude Code's structured output:
+# one turn for the answer, and another each time it fails the JSON Schema and is sent back to be fixed.
+# With 4, long verification batches (100+ spans) ran out (error_max_turns) and the whole request was
+# sent again from the start — slower and costlier than a few more fix-up turns in the same request.
+MAX_TURNS = 10
+
+
 class SubscriptionClient:
     """One `claude -p` call per request; same contract as the Anthropic API branch of comparison_ai._request."""
 
@@ -393,7 +415,7 @@ class SubscriptionClient:
                 "--system-prompt", system,
                 "--model", model_name, "--effort", self.effort,
                 "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
-                "--no-session-persistence", "--max-turns", "4"]
+                "--no-session-persistence", "--max-turns", str(MAX_TURNS)]
         try:
             proc = self._run(args, input=json.dumps(message) + "\n", env=cli_env(), cwd=_workdir(),
                              capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -408,8 +430,8 @@ class SubscriptionClient:
                 _last_limits = event["rate_limit_info"]
         result = next((e for e in reversed(events) if e.get("type") == "result"), None)
         if result is None:
-            detail = (proc.stderr or proc.stdout or "").strip()[-400:]
-            raise failure("Claude Code", detail, _classify, f"Claude Code 실행 실패(코드 {proc.returncode}): {detail}")
+            full, detail = program_error(proc.stderr, proc.stdout)
+            raise failure("Claude Code", detail, _classify, f"Claude Code 실행 실패(코드 {proc.returncode}): {detail}", full=full)
         structured = result.get("structured_output")
         if result.get("is_error") or structured is None:
             text = str(result.get("result") or "")

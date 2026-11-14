@@ -15,6 +15,7 @@ import zipfile
 
 from lxml import etree
 
+from ab_ocr.fileid import same_file
 from .hwpx_edit import HP, MEMO_HEADS, legend_head, paragraph_text, remove_collate_memos
 from .section_edit import (
     _Archive, _fingerprint, _path, _sha, _signature, _stage_bytes,
@@ -110,8 +111,7 @@ def clean_corrected_memos(original_hwpx) -> CleanupResult:
             raise MemoCleanupError("원본 HWPX를 찾을 수 없습니다.")
         if not target.is_file():
             raise MemoCleanupError("기존 교정본이 없습니다. 먼저 책갈피 OCR로 교정본을 만들어 주십시오.")
-        if (target.is_symlink() or _path(source) == _path(target)
-                or os.path.samefile(source, target)):
+        if target.is_symlink() or _path(source) == _path(target) or same_file(source, target):
             raise MemoCleanupError("교정본과 원본이 같은 파일이거나 연결된 경로입니다. 정리하지 않았습니다.")
         target = target.resolve()
         history_path = manual_history_path(target)

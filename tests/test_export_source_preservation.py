@@ -55,7 +55,7 @@ class ExportSourcePreservation(unittest.TestCase):
         cli.CANCEL.clear()
 
     def test_main_build_keeps_source_codepoints_with_all_editing_disabled(self):
-        for flags in (("--no-normalize",), ("--no-traditional", "--no-yun", "--no-punctuation")):
+        for flags in (("--no-normalize",), ("--no-traditional", "--no-yun", "--no-punctuation", "--no-korean-forms")):
             with self.subTest(flags=flags):
                 args = cli.build_parser().parse_args(["build", str(self.pdf), "--work", str(self.work.dir),
                     "--docx", "--no-context", "--no-highlight", *flags])
