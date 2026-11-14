@@ -1,4 +1,5 @@
-"""Which signed-in AI plan reads and reviews: Claude (Claude Code), ChatGPT (Codex CLI) or Gemini (Gemini CLI).
+"""Which signed-in AI plan reads and reviews: Claude (Claude Code), ChatGPT (Codex CLI) or Gemini
+(Antigravity CLI for personal Google accounts, Gemini CLI for Code Assist Standard/Enterprise).
 
 Every plan follows the same rule: this program only starts the provider's own, unmodified command-line
 program, which the person signed in to with their own account; it never reads, stores or relays a
@@ -29,7 +30,7 @@ import time
 PLANS = ("claude", "chatgpt", "gemini")
 PLAN_CHOICES = ("auto",) + PLANS
 NAMES = {"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"}
-PROGRAMS = {"claude": "Claude Code", "chatgpt": "Codex CLI", "gemini": "Gemini CLI"}
+PROGRAMS = {"claude": "Claude Code", "chatgpt": "Codex CLI", "gemini": "Antigravity CLI"}
 PROVIDERS = {"claude": "anthropic", "chatgpt": "openai", "gemini": "gemini"}
 _MODULES = {"claude": "claude_subscription", "chatgpt": "chatgpt_subscription", "gemini": "gemini_subscription"}
 KEYS = {"claude": "claude-subscription", "chatgpt": "chatgpt-subscription", "gemini": "gemini-subscription"}
@@ -56,6 +57,12 @@ def plan_for_key(key) -> str | None:
 
 def is_key(key) -> bool:
     return plan_for_key(key) is not None
+
+
+def program(plan: str) -> str:
+    """The name of the program a plan runs now (Gemini: Antigravity CLI or Gemini CLI)."""
+    named = getattr(module(plan), "program_name", None)
+    return named() if callable(named) else PROGRAMS[plan]
 
 
 def status(plan: str, refresh: bool = False, runner=subprocess.run) -> dict:
@@ -158,13 +165,13 @@ def pick(requested: str | None = None, prefer: str | None = None, runner=subproc
         if state.get("installed"):
             reasons.append(f"{NAMES[plan]}: {state.get('reason') or ''}")
     if not reasons:
-        reasons.append("Claude Code, Codex CLI, Gemini CLI 중 설치된 것이 없습니다.")
+        reasons.append("Claude Code, Codex CLI, Antigravity CLI(또는 Gemini CLI) 중 설치된 것이 없습니다.")
     return None, " / ".join(reasons)
 
 
 def note(plan: str) -> str:
     state = status(plan)
-    return (f"AI 검증: {NAMES[plan]} 구독({state.get('plan') or '요금제'}) · {PROGRAMS[plan]} 실행 · "
+    return (f"AI 검증: {NAMES[plan]} 구독({state.get('plan') or '요금제'}) · {program(plan)} 실행 · "
             "API 요금 없음(구독 사용량에서 차감)")
 
 
@@ -183,7 +190,8 @@ def choose(requested_mode: str | None, provider: str, api_key: str, plan: str | 
 
 
 def model(plan: str, requested: str | None = None) -> str:
-    """The model name to record and pass on; the CLI's own default has a label (codex-default, gemini-cli-auto)."""
+    """The model name to record and pass on; the CLI's own default has a label (codex-default,
+    antigravity-auto, gemini-cli-auto)."""
     return module(plan).label(module(plan).model(requested))
 
 
@@ -249,7 +257,8 @@ class Session:
     @property
     def transport(self) -> str:
         if self.plan is not None:
-            return module(self.plan).TRANSPORT
+            # The client answering now (Gemini: Antigravity CLI or Gemini CLI), else the plan's own.
+            return getattr(self._client, "transport", None) or module(self.plan).TRANSPORT
         return getattr(self.api, "transport", "none")
 
     @property
@@ -475,7 +484,8 @@ class Session:
 
 
 def _kill_tree(proc):
-    """Stop a CLI and what it started (npm's codex.cmd / gemini.cmd run node, which runs the program)."""
+    """Stop a CLI and what it started (npm's codex.cmd / gemini.cmd run node, which runs the program;
+    agy starts its own helper processes)."""
     if proc.poll() is not None:
         return
     try:

@@ -20,7 +20,7 @@
   eval     평가: 저장된 판독 기록을 사람이 입력한 원본 HWPX(--hwpx, 교정본은 안 됨)와 맞춰 단계별 CER·표시 밖 오류율·3차 정밀도 (모델 호출 없음)
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
   compare-engines 선택한 로컬 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
-  plans    구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
+  plans    구독 계정(Claude Code·Codex CLI·Antigravity CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
@@ -2725,7 +2725,7 @@ def build_parser():
                        help="문서와 함께 검색 가능한 PDF(out/<이름>_글자층.pdf — 원본 쪽 위에 판독 글을 보이지 않는 글자층으로)도 만듦")
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
-    p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태(모델 호출 없음)")
+    p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Antigravity CLI)의 설치·로그인 상태(모델 호출 없음)")
     p.add_argument("--test", action="store_true",
                    help="연결 시험: 쓸 수 있는 계정마다 작은 요청 하나를 실제로 보내 답하는지, 어느 모델인지, 실패하면 그 이유를 보임")
     p.set_defaults(fn=cmd_plans)
@@ -2791,12 +2791,12 @@ def build_parser():
     p.add_argument("--local-enhance", choices=("none", "contrast"), default="none",
                    help="(시험) 엔진 입력 보정: contrast=자동 대비(0.5%% 자름, 크기·좌표 그대로). 미리보기·AI 조각도 같은 화소")
     p.add_argument("--local-ai-auth", choices=("auto", "subscription", "api"), default=None,
-                   help="AI 검증 연결 방식. subscription=PC에 로그인된 구독 계정 프로그램(Claude Code·Codex CLI·Gemini CLI)으로 "
+                   help="AI 검증 연결 방식. subscription=PC에 로그인된 구독 계정 프로그램(Claude Code·Codex CLI·Antigravity CLI)으로 "
                         "구독 사용량에서 차감(API 요금 없음, 개인 사용), api=API 키만, auto(기본)=API 키가 없으면 로그인된 구독 계정. "
                         "환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
     p.add_argument("--local-ai-plan", choices=("auto", "claude", "chatgpt", "gemini"), default=None,
                    help="구독 계정: claude=Claude Code(claude -p), chatgpt=OpenAI Codex CLI(codex exec, ChatGPT 로그인), "
-                        "gemini=Gemini CLI(gemini -p, Google 로그인). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
+                        "gemini=Antigravity CLI(agy -p, Google 계정 로그인 · 없으면 Gemini CLI). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
                         "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
                         "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
     p.add_argument("--local-resume", choices=("unfinished", "continue", "all"), default="unfinished",
@@ -2892,7 +2892,7 @@ def cmd_plans(args):
         state = subscriptions.status(plan, refresh=True)
         mark = ("사용 가능" if state["usable"] else "실행 실패" if state.get("runs") is False
                 else "설치됨" if state.get("installed") else "없음")
-        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.PROGRAMS[plan]}): {mark}"
+        line = f"{subscriptions.NAMES[plan]:8} ({subscriptions.program(plan)}): {mark}"
         if state.get("path"):
             line += f" · {state['path']}"
         if state.get("plan") and state["usable"]:

@@ -241,7 +241,7 @@ def test_review_client_follows_the_subscription_key():
     client = comparison_ai.create_client(settings, subscriptions.KEYS["chatgpt"])
     assert isinstance(client, codex.SubscriptionClient) and client.transport == codex.TRANSPORT
     client = comparison_ai.create_client(SimpleNamespace(provider="gemini", model="gemini-cli-auto"), subscriptions.KEYS["gemini"])
-    assert isinstance(client, gemini.SubscriptionClient)
+    assert isinstance(client, gemini.GeminiCliClient)                         # no Antigravity CLI here: Gemini CLI
     assert isinstance(comparison_ai.create_client(SimpleNamespace(provider="anthropic", model="opus"), claude.SUBSCRIPTION_KEY),
                       claude.SubscriptionClient)
     with pytest.raises(comparison_ai.AIReviewError, match="ChatGPT"):
@@ -942,6 +942,11 @@ def test_gemini_slow_to_answer_its_version_is_still_installed(_fresh):
 
 def test_a_missing_program_says_where_it_was_looked_for(monkeypatch, tmp_path):
     monkeypatch.setenv("YEONE_OCR_GEMINI_CLI_PATH", str(tmp_path / "nowhere" / "gemini"))
-    state = gemini.status(refresh=True)
+    state = gemini.cli_status(refresh=True)
     assert state["installed"] is False
     assert "찾아봤습니다" in state["reason"] and "YEONE_OCR_GEMINI_CLI_PATH" in state["reason"] and "npx" in state["reason"]
+    # Neither program: the Gemini plan asks for Antigravity CLI, which personal Google accounts need.
+    state = gemini.status(refresh=True)
+    assert state["installed"] is False and state["program"] == "antigravity"
+    assert "찾아봤습니다" in state["reason"] and "YEONE_OCR_ANTIGRAVITY_CLI_PATH" in state["reason"]
+    assert "install.ps1" in state["reason"]

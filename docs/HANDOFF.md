@@ -1,5 +1,11 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-14: Gemini 구독을 Antigravity CLI로 (미출시)
+
+Google은 2026-06-18부터 개인 Google 계정(무료 · AI Pro/Ultra)의 Gemini CLI 요청을 받지 않고 Antigravity CLI(`agy`)로 옮겼다. 그래서 Gemini 구독은 `yeone_ocr/antigravity_subscription.py`(`agy -p <지시문> --output-format json --mode default --json-schema schema.json`)를 먼저 쓰고, 로그인된 Gemini CLI(Code Assist Standard/Enterprise)는 그다음이다. 고르는 곳은 `gemini_subscription.status()`(`program` 키) · `program()` · `find_cli()` · `label()` · `SubscriptionClient()`(공장 함수: `antigravity_subscription.SubscriptionClient` 또는 `GeminiCliClient`), 강제는 `YEONE_OCR_GEMINI_PROGRAM=antigravity|gemini-cli`. `subscriptions.program(plan)`이 지금 쓰는 프로그램 이름을, `Session.transport`가 답하는 클라이언트의 전송(`antigravity-cli-subscription`)을 준다. [설치]는 Google 설치 명령(`plan_setup.antigravity_install_command`), 로그인 창은 `agy`. 상태는 `agy --version` → `agy -p /quota`(CLI가 답함 · 모델 호출 없음). Gemini CLI가 개인 계정에 "더 이상 제공하지 않음"이라고 답하면 `account`로 빼고 Antigravity를 안내한다.
+
+`agy`의 옵션·출력·오류 형식은 공개 저장소 google-antigravity/antigravity-cli의 CHANGELOG(1.5.9까지)로 맞췄다. 이 개발 환경에는 `agy` 실물이 없고(npm 패키지가 아닌 네이티브 설치본) antigravity.google에 닿지 않아 실제 호출은 하지 못했다. 확인이 필요한 것: ① `-p`에서 `@image1.png`가 첨부로 풀리는지(아니면 지시대로 파일 보기 도구로 연다 — Default 모드는 작업 폴더 읽기를 묻지 않음) ② `--output-format json`의 `usage` 키 이름 ③ 로그인 안 된 PC에서 `agy -p /quota`가 브라우저를 열지 않고 바로 실패하는지. Windows에서 `yeone-ocr plans --test` 뒤 한 쪽으로 첫 실측이 필요하다. 시험: `tests/test_antigravity_subscription.py`(가짜 agy), `tests/conftest.py`가 `YEONE_OCR_ANTIGRAVITY_CLI_PATH`도 없는 파일로 돌린다. 안내: `docs/SUBSCRIPTION_PLANS.md` 「Gemini: Antigravity CLI」.
+
 ## 2026-11-12: 1.2.13 읽은 쪽까지 HWPX 만들기
 
 중지한 [한 번에 인식 → HWPX] 뒤에 그때까지의 판독 기록으로 문서를 만든다. 새 명령은 없다 — `cli.cmd_build`가 이미 기록 있는 쪽만으로 `이름_pNNN-NNN.hwpx`를 만들고 `latest_result_hwpx`([HWPX 열기])가 그 이름을 안다. 창: `App.do_partial`(`build … --reader R --no-context-model` · 키를 묻지 않음 `_env_need_key=False` · 라벨 `PARTIAL_LABEL`), 실행 카드 `b_partial`(중지 단추 아래 `stops` 틀, `_sync_run_card`가 `_partial_wanted`일 때만 보임: 기록이 있고 남은 쪽이 있거나 방금 중지), `_finish`가 중지된 HWPX 실행 뒤 만들지 묻고(`after(50, do_partial)`) 부분 문서가 끝나면 열지 묻는다. 끝난 `build`도 [HWPX 열기]를 강조한다.

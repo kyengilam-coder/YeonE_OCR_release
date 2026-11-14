@@ -37,14 +37,14 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
-                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Gemini CLI)"}
+                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Antigravity CLI)"}
 RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
                  "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
               "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
               "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
               "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
-SETUP_LABELS = {"gemini": "Gemini (Gemini CLI)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
+SETUP_LABELS = {"gemini": "Gemini (Antigravity CLI)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Gemini 구독", "api": "API 키"}
 
@@ -2492,7 +2492,7 @@ class App(tk.Tk):
             Tip(cb, "이 PC에서 공식 프로그램에 자기 계정으로 로그인되어 있으면, 엔진 판독 뒤에 AI가 쪽 전체를 원래 해상도 띠로 잘라 "
                     "한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
                     "Claude: Claude Code(claude auth login) · ChatGPT: Codex CLI(codex login → Sign in with ChatGPT) · "
-                    "Gemini: Gemini CLI(gemini 실행 → Login with Google). 이 프로그램은 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
+                    "Gemini: Antigravity CLI(agy 실행 → Google 계정 로그인 · Gemini CLI는 기업용 계정만). 이 프로그램은 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
                     "세로쓰기 6쪽 측정(Claude)에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초.", self)
             plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
                                 width=chars(300))
@@ -2512,7 +2512,7 @@ class App(tk.Tk):
             self.l_plans.configure(cursor="hand2")
             self.l_plans.bind("<Button-1>", lambda _e: App.show_plan_details(self), add="+")
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
-                      tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
+                      tip="Claude Code · Codex CLI · Antigravity CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
             self.b_plan_test = self._btn(f, "연결 시험", lambda: App.test_plans(self), lock=False,
                                          tip="쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 봅니다(실행 때와 같은 방식 · 구독 사용량에서 조금 차감). "
                                              "답하는지, 어느 모델인지, 실패하면 그 프로그램이 말한 이유를 보여 줍니다. 긴 작업 전에 눌러 보세요.")
@@ -2545,8 +2545,8 @@ class App(tk.Tk):
             ttk.Combobox(f, textvariable=self.v_setup_plan, values=list(SETUP_LABELS.values()), state="readonly",
                          width=chars(170)).pack(side="left")
             self.b_plan_install = self._btn(f, "설치", lambda: App.install_plan(self),
-                                            tip="고른 구독의 공식 프로그램을 이 PC에 설치합니다(ChatGPT·Gemini: npm install -g …). "
-                                                "Node.js가 없으면 먼저 설치를 안내합니다. 실행 전에 명령을 보여 주고 묻습니다.")
+                                            tip="고른 구독의 공식 프로그램을 이 PC에 설치합니다(ChatGPT: npm install -g … · Gemini: Google의 Antigravity CLI 설치 명령). "
+                                                "Node.js가 필요하면 먼저 설치를 안내합니다. 실행 전에 명령을 보여 주고 묻습니다.")
             self.b_plan_install.pack(side="left", padx=(P(8), 0))
             self._btn(f, "로그인 창 열기", lambda: App.open_plan_login(self),
                       tip="고른 구독의 공식 프로그램을 새 창으로 열어 그 회사 화면에서 직접 로그인합니다(이 프로그램은 비밀번호·토큰을 보지 않음). "
@@ -4638,6 +4638,10 @@ class App(tk.Tk):
             return
         command = plan_setup.install_command(plan)
         name = SETUP_LABELS[plan]
+        if command is None and plan not in plan_setup.NPM_PACKAGES:      # Gemini: Google's installer script
+            messagebox.showinfo(f"{name} 설치", "이 PC에서 설치 명령을 실행할 수 없습니다. 직접 실행하세요:\n\n"
+                                + plan_setup.manual_install(plan) + "\n\n설치한 뒤 [로그인 창 열기]로 로그인하세요.", parent=self)
+            return
         if command is None:
             node = plan_setup.node_install_command()
             if node is not None:

@@ -1,5 +1,12 @@
-"""Gemini subscription (Google account sign-in: Google AI Pro/Ultra, Gemini Code Assist, free tier)
-transport: runs the user's own, unmodified Google Gemini CLI (`gemini -p`).
+"""Gemini subscription (Google account sign-in): which official Google program answers, and the
+Gemini CLI (`gemini -p`) transport.
+
+Since 2026-06-18 Gemini CLI no longer serves personal Google accounts (free, Google AI Pro/Ultra,
+Gemini Code Assist for individuals); those use Google Antigravity CLI (`agy`), in
+antigravity_subscription.py. Gemini CLI still serves Gemini Code Assist Standard/Enterprise.
+YEONE_OCR_GEMINI_PROGRAM = auto (default) | antigravity | gemini-cli: auto uses Antigravity CLI when
+it is installed and signed in, else a signed-in Gemini CLI, else reports what Antigravity CLI needs.
+status(), find_cli(), label() and SubscriptionClient() follow that choice.
 
 Google lets a person use the official Gemini CLI with "Login with Google", with that account's
 plan quotas. Its terms do not let a third-party program use the Gemini CLI sign-in (OAuth) itself,
@@ -14,6 +21,7 @@ The CLI has no response-schema option, so the schema goes in the prompt and the 
 as JSON here.
 
 Environment:
+  YEONE_OCR_GEMINI_PROGRAM     auto (default) | antigravity | gemini-cli
   YEONE_OCR_GEMINI_MODEL       model for the CLI (default: the CLI's own automatic choice)
   YEONE_OCR_GEMINI_CLI_PATH    gemini executable (default: PATH)
   YEONE_OCR_GEMINI_CLI_HOME    separate Gemini CLI sign-in for this app only (GEMINI_CLI_HOME)
@@ -32,12 +40,17 @@ import threading
 import time
 from pathlib import Path
 
+from . import antigravity_subscription as antigravity
 from .claude_subscription import SubscriptionError, failure, not_found_reason, npm_global_cli, problem
 
 SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
 TRANSPORT = "gemini-cli-subscription"
 DEFAULT_MODEL = ""                      # the CLI chooses (auto routing for the signed-in plan)
+DEFAULT_LABEL = "gemini-cli-auto"
+PROGRAM_CHOICES = ("auto", "antigravity", "gemini-cli")
+PROGRAM_NAMES = {"antigravity": "Antigravity CLI", "gemini-cli": "Gemini CLI"}
+_DEFAULT_LABELS = {DEFAULT_LABEL, antigravity.DEFAULT_LABEL}
 SIGN_IN_TYPES = {"oauth-personal"}      # "Login with Google"
 # An API key or Vertex settings in the environment would replace the Google sign-in: drop them.
 _STRIP_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GEMINI_BASE_URL",
@@ -49,18 +62,49 @@ _NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sy
 LOGIN_HINT = ("PowerShell에서 `gemini`를 한 번 실행해 'Login with Google'로 Google 계정에 로그인한 뒤 /quit로 닫고 "
               "다시 실행하세요. 로그인은 Google 공식 화면에서 하며 이 프로그램은 토큰을 보지 않습니다.")
 INSTALL_HINT = ("Gemini CLI가 설치되어 있지 않습니다. PowerShell에서 `npm install -g @google/gemini-cli`로 설치한 뒤 "
-                "`gemini`를 실행해 'Login with Google'로 로그인하세요.")
+                "`gemini`를 실행해 'Login with Google'로 로그인하세요(Gemini Code Assist Standard/Enterprise 계정). "
+                "개인 Google 계정(무료 · Google AI Pro/Ultra)은 Antigravity CLI(agy)를 설치하세요.")
+PERSONAL_NOTE = ("2026-06-18부터 Gemini CLI는 개인 Google 계정(무료 · Google AI Pro/Ultra)의 요청을 받지 않습니다. "
+                 "그런 계정이면 Antigravity CLI를 설치하세요: PowerShell에서 `" + antigravity.INSTALL_COMMAND_WINDOWS
+                 + "` 뒤 `agy`를 한 번 실행해 로그인.")
 
 _lock = threading.Lock()
 _status_cache: tuple[float, dict] | None = None
+_chosen: str | None = None               # the program the last auto status picked
 
 
 def model(requested: str | None = None) -> str:
     return (requested or os.environ.get("YEONE_OCR_GEMINI_MODEL", "") or DEFAULT_MODEL).strip()
 
 
+def program_choice() -> str:
+    value = os.environ.get("YEONE_OCR_GEMINI_PROGRAM", "").strip().lower()
+    return value if value in PROGRAM_CHOICES else "auto"
+
+
+def program() -> str:
+    """"antigravity" or "gemini-cli": the program requests go to. Runs nothing: the last status says,
+    else whichever is installed (Antigravity CLI first)."""
+    choice = program_choice()
+    if choice != "auto":
+        return choice
+    with _lock:
+        cached = _chosen
+    if cached:
+        return cached
+    if antigravity.find_cli():
+        return "antigravity"
+    return "gemini-cli" if find_gemini_cli() else "antigravity"
+
+
+def program_name() -> str:
+    return PROGRAM_NAMES[program()]
+
+
 def label(model_name: str) -> str:
-    return model_name or "gemini-cli-auto"
+    if model_name:
+        return model_name
+    return antigravity.DEFAULT_LABEL if program() == "antigravity" else DEFAULT_LABEL
 
 
 def timeout() -> float:
@@ -72,6 +116,11 @@ def timeout() -> float:
 
 
 def find_cli() -> str | None:
+    """The executable of program(): what the window's [로그인 창 열기] opens."""
+    return antigravity.find_cli() if program() == "antigravity" else find_gemini_cli()
+
+
+def find_gemini_cli() -> str | None:
     configured = os.environ.get("YEONE_OCR_GEMINI_CLI_PATH", "").strip()
     if configured:
         path = Path(configured).expanduser()
@@ -116,7 +165,33 @@ def _sign_in_type() -> str | None:
 
 
 def status(refresh: bool = False, runner=subprocess.run) -> dict:
-    """installed, logged_in, billing, plan, usable, reason. Never raises; runs nothing but `gemini --version`."""
+    """The Gemini plan's state through the program it uses: installed, logged_in, billing, plan,
+    usable, reason, program, path. Never raises. auto: Antigravity CLI when usable, else a usable
+    Gemini CLI, else Antigravity CLI's state (what to install or sign in to); a Gemini CLI that is
+    the only one installed reports its own state."""
+    global _chosen
+    choice = program_choice()
+    if choice == "gemini-cli":
+        state = cli_status(refresh, runner)
+    elif choice == "antigravity":
+        state = antigravity.status(refresh=refresh, runner=runner)
+    else:
+        state = antigravity.status(refresh=refresh, runner=runner)
+        if not state["usable"]:
+            other = cli_status(refresh, runner)
+            if other["usable"] or (other.get("installed") and not state.get("installed")):
+                if not other["usable"]:
+                    other["reason"] = f"{other.get('reason') or ''} {antigravity.not_found_reason()}".strip()
+                state = other
+            elif other.get("installed"):
+                state["reason"] = (f"{state.get('reason') or ''} (Gemini CLI도 쓸 수 없음: {other.get('reason') or ''})").strip()
+    with _lock:
+        _chosen = state.get("program") if choice == "auto" else None
+    return state
+
+
+def cli_status(refresh: bool = False, runner=subprocess.run) -> dict:
+    """Gemini CLI alone. Never raises; runs nothing but `gemini --version`."""
     global _status_cache
     with _lock:
         if not refresh and _status_cache and time.monotonic() - _status_cache[0] < _STATUS_TTL:
@@ -127,15 +202,16 @@ def status(refresh: bool = False, runner=subprocess.run) -> dict:
 
 
 def reset_status_cache() -> None:
-    global _status_cache
+    global _status_cache, _chosen
     with _lock:
-        _status_cache = None
+        _status_cache, _chosen = None, None
+    antigravity.reset_status_cache()
 
 
 def _query_status(runner) -> dict:
     result = {"installed": False, "logged_in": False, "billing": None, "plan": None, "usable": False,
-              "reason": INSTALL_HINT, "limits": None}
-    cli = find_cli()
+              "reason": INSTALL_HINT, "limits": None, "program": "gemini-cli"}
+    cli = find_gemini_cli()
     if not cli:
         result["reason"] = not_found_reason("Gemini CLI", "gemini", INSTALL_HINT)
         return result
@@ -157,7 +233,8 @@ def _query_status(runner) -> dict:
         return result
     chosen = _sign_in_type()
     if chosen in SIGN_IN_TYPES:
-        result.update(logged_in=True, billing="subscription", plan="Google 계정", usable=True, reason=None)
+        result.update(logged_in=True, billing="subscription", plan="Google 계정 · Gemini CLI", usable=True, reason=None,
+                      note=PERSONAL_NOTE)
     elif chosen:
         result.update(billing="other", reason="Gemini CLI가 Google 계정이 아니라 API 키나 Vertex AI로 설정되어 있습니다. "
                                               "`gemini`에서 /auth로 'Login with Google'을 고르세요.")
@@ -182,8 +259,15 @@ _LIMIT = re.compile(r"quota|resource_exhausted|resource exhausted|rate[_ ]limit|
                     r"(?:status|http|code|error)\D{0,12}429\b|\b429\s+too")
 
 
+# What Gemini CLI says to a personal account after 2026-06-18 (moved to Antigravity CLI).
+_RETIRED = re.compile(r"antigravity|no longer (?:available|supported|serv)|(?:has been|is being) (?:retired|discontinued|shut down|deprecated)|"
+                      r"stop(?:ped)? serving|not (?:available|supported) for (?:your|this) (?:account|tier|plan)")
+
+
 def _classify(text: str) -> str | None:
     low = text.lower()
+    if _RETIRED.search(low):
+        return problem("account", "Gemini CLI가 이 Google 계정의 요청을 받지 않습니다. " + PERSONAL_NOTE)
     if _LIMIT.search(low):
         return problem("limit", "Google 계정의 Gemini 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
     if _SIGN_IN.search(low):
@@ -217,7 +301,14 @@ def _json_text(text: str) -> str:
     return text
 
 
-class SubscriptionClient:
+def SubscriptionClient(cli=None, runner=None, timeout_seconds=None):
+    """The client of program(): Antigravity CLI or Gemini CLI (same contract)."""
+    if cli is None and program() == "antigravity":
+        return antigravity.SubscriptionClient(runner=runner, timeout_seconds=timeout_seconds)
+    return GeminiCliClient(cli=cli, runner=runner, timeout_seconds=timeout_seconds)
+
+
+class GeminiCliClient:
     """One `gemini -p` call per request; same contract as claude_subscription.SubscriptionClient."""
 
     subscription = True
@@ -226,7 +317,7 @@ class SubscriptionClient:
     transport = TRANSPORT
 
     def __init__(self, cli=None, runner=None, timeout_seconds=None):
-        self.cli = cli or find_cli()
+        self.cli = cli or find_gemini_cli()
         if not self.cli:
             raise SubscriptionError(INSTALL_HINT)
         self._run = runner or subprocess.run
@@ -248,7 +339,7 @@ class SubscriptionClient:
                        + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
             args = [self.cli, "-p", "Follow the instructions above. Do not use any tools.", "-o", "json",
                     "--approval-mode", "plan", "-e", "none", "--allowed-mcp-server-names", "none", "--skip-trust"]
-            if model_name and model_name != label(""):         # the label of the default is not a model name
+            if model_name and model_name not in _DEFAULT_LABELS:   # the label of the default is not a model name
                 args += ["-m", model_name]
             env = cli_env()
             env["GEMINI_SYSTEM_MD"] = str(system_md)        # replaces the CLI's own agent system prompt
