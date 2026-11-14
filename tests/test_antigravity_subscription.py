@@ -274,7 +274,7 @@ def test_neither_signed_in_reports_antigravity_and_the_gemini_cli_reason(tmp_pat
     monkeypatch.setenv("YEONE_OCR_GEMINI_CLI_PATH", str(cli))
     state = gemini.status(refresh=True, runner=_both(agy_quota_code=1))
     assert not state["usable"] and state["program"] == "antigravity"
-    assert "Antigravity CLI 로그인" in state["reason"] and "Gemini CLI도 쓸 수 없음" in state["reason"]
+    assert "Antigravity CLI에 로그인" in state["reason"] and "Gemini CLI도 쓸 수 없음" in state["reason"]
 
 
 def test_gemini_cli_refusing_a_personal_account_points_to_antigravity():
