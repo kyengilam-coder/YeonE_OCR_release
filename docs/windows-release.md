@@ -20,6 +20,16 @@
 5. 설치 프로그램에서 "설치 뒤 엔진 관리 열기"를 켰을 때 앱이 한 번만 열리고 엔진 관리 창이 뜨는지.
 6. GPU가 없는 PC: GPU 선택지가 꺼져 있고 까닭("NVIDIA GPU 필요")이 보이는지.
 
+# Windows 1.2.14 설치판
+
+1.2.14는 1.2.13의 설치 구성에 엔진 관리(추가 OCR 엔진 설치 · GPU 점검), Gemini 구독의 Antigravity CLI 연결, 구독 [연결 시험] 안내 수정을 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.14**로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.14`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.14), [엔진 관리…] 창, Gemini [설치](agy) → [로그인 창 열기] → [연결 시험], Codex 최신판으로 ChatGPT [연결 시험], 거부된 구독의 로그인 상태가 「쓸 수 없음(…)」으로 바뀌는지, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.14 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.14)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.13 설치판
 
 1.2.13은 1.2.12의 설치 구성을 그대로 쓰고, 중간에 멈춘 실행의 판독 기록으로 HWPX를 만드는 단추와 물음 창을 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.

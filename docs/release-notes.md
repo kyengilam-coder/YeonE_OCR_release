@@ -1,6 +1,6 @@
-# 다음 판(미배포) · 엔진 관리 — GPU 점검과 추가 OCR 엔진 설치
+# 연어OCR 1.2.14 · 엔진 관리, Gemini는 Antigravity CLI로, 구독 연결 시험 바로잡기
 
-1.2.13 다음에 낼 판에 들어갈 내용이다. 판 번호는 아직 올리지 않았다.
+설치판에서 큰 OCR 엔진을 설치하고, 막힌 구독 경로를 바르게 알리는 판이다.
 
 설치판은 앱과 PP-OCRv6만 담고, Surya · GLM-OCR · PaddleOCR server 같은 큰 엔진은 명령줄(`scripts/install_*.py`)과 별도 Python이 있어야 설치할 수 있었다. 이제 창에서 설치한다.
 
@@ -21,6 +21,9 @@
 - **Claude 구독 `error_max_turns` 줄이기**: 의심 구간이 100개가 넘는 쪽에서 Claude Code가 형식(JSON 스키마)에 맞는 답을 다듬다 턴 상한(4)을 다 써 실패하고, 같은 요청을 처음부터 다시 보냈다. 상한을 10으로 올렸다.
 - **구독 오류를 끝없이 다시 보내던 문제 수정**: Gemini CLI·Claude Code·Codex CLI가 실패하면 오류 출력의 끝 400자만 보고 종류를 가렸다. Node 프로그램은 오류 이름·이유를 맨 앞에, 긴 호출 경로를 뒤에 쓰므로 계정 문제(Gemini `IneligibleOrProjectIdError`)나 사용량 한도도 "일시 오류"로 보여 3초·10초 간격으로 계속 다시 보냈다. 이제 출력 전체로 가리고, 진행 기록에는 호출 경로 줄을 빼고 오류 내용만 보인다. Gemini가 "이 계정은 쓸 수 없다"고 답하면 다시 보내지 않고 이번 실행에서 뺀다.
 - **네트워크 드라이브의 책에서 [한 번에 인식]이 멈추던 문제 수정**: `Z:`처럼 드라이브 문자로 연결한 NAS·SMB 공유에 있는 PDF는 "프로젝트와 원본은 다른 파일이어야 합니다"로 중단됐다. 이런 공유는 모든 파일의 파일 번호를 0으로 알려 주어, 원본 덮어쓰기를 막는 검사가 서로 다른 파일을 같은 파일로 보았다. 이제 파일 번호가 없으면 크기와 수정 시각으로 가린다(같은 파일을 다른 경로로 가리킨 경우는 여전히 막는다). 비교·교정, 책갈피 교정(메모 정리·구획 편집), 보고서 저장의 같은 검사도 함께 고쳤다.
+- **[연결 시험]에서 「사용 가능」인데 실패하던 구독을 바르게 알림**: 로그인 상태는 세 구독 모두 「사용 가능」인데 [연결 시험]에서 ChatGPT·Gemini가 실패했다.
+  - Gemini CLI만 설치된 PC: Google이 개인 계정을 거부하면(`UNSUPPORTED_CLIENT`) 안내가 Antigravity CLI [설치] → [로그인 창 열기]를 가리키고, 로그인 상태는 「쓸 수 없음(Antigravity CLI 설치 필요)」로 바뀐다(예전에는 "GOOGLE_CLOUD_PROJECT가 필요할 수 있다"는 틀린 안내나 호출 경로만 보였다).
+  - ChatGPT(Codex): 기본 모델(`gpt-5.5`)이 "not supported when using Codex with a ChatGPT account"로 거부되면, Codex가 OpenAI에서 받아 둔 이 계정의 모델 목록(`~/.codex/models_cache.json`)부터 차례로 시도한다. 모두 거부되면 OpenAI가 "새 Codex가 필요하다"고 답했을 때는 설치된 Codex CLI(버전)가 오래되었다며 [설치]로 올리라고, 아니면 요금제와 `codex` → /model 확인을 안내한다. 로그인 상태는 「쓸 수 없음(Codex CLI 업데이트 필요 / 모델 거부)」로 바뀌고, Codex를 업데이트하면 저절로 풀린다.
 - **Surya 설치 오류 수정**: Surya 설치기가 판 번호 없는 `get-pip.py`를 고정 해시로 확인해, pip 새 판이 나온 뒤로 "Public download SHA-256 mismatch"로 멈췄다. 이제 판 번호·해시가 고정된 pip 휠(26.2.1)을 쓴다.
 - EasyOCR · RapidOCR · Tesseract는 대상이 아니다(GPU 선택지가 없고, 기본 인식은 내장 PP-OCRv6가 맡는다).
 

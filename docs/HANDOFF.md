@@ -1,6 +1,6 @@
 # 연어OCR 개발 인수인계
 
-## 2026-11-13: 엔진 관리(미배포 — 판 번호 그대로 1.2.13)
+## 2026-11-13: 1.2.14 엔진 관리 · Gemini는 Antigravity CLI로 · 구독 연결 시험 바로잡기
 
 `yeone_ocr/engine_manager.py`(Tk 없음): `probe_gpus`/`parse_nvidia_smi`(nvidia-smi CSV, `compute_cap` 없는 드라이버는 그 칸 빼고 다시) · `OPTIONS` 5개(paddle_server · paddle_server_gpu · surya · surya_cuda · glmocr — `requires`로 선행 설치) · `statuses`(installation.json만 읽음: `execution_provider`/`backend_device`가 cuda면 GPU 가속 설치됨) · `recommend` · `plan` · `option_root`(이미 설치된 엔진은 그 홈, 아니면 설정 폴더 → 환경 변수 → `user_engine_root()` — `default_engine_root()`를 쓰지 않는 까닭: 설치판 앱 폴더에 ppocrv6가 있어 앱 폴더가 엔진 홈으로 잡힌다) · `base_python`/`prepare_base_python`(설치판: `tools/ppocrv6/runtime` → `local-engines/python313`, `._pth`와 `Lib/site-packages` 제외, 임시 폴더에 복사 후 이름 바꿈, 표식 `yeone-base-python.json`) · `build_command`(`-E -s -X utf8 -u`, **`-I` 금지** — `-P`가 켜져 `install_surya_cuda`의 `from install_surya import`와 `install_paddle_server`의 `import install_rapidocr`이 끊긴다) · `run_process`(`CREATE_NO_WINDOW|CREATE_SUSPENDED` + `runtime.process_tree` 작업 개체, POSIX는 새 세션 + killpg, `\r` 진행 표시는 `transient=True`) · `verify_option`(`ocr.doctor` + GPU 확인) · `run_install`(결과 status: ok · unverified · failed · skipped · cancelled, 로그 `engine-manager/install-*.log`).
 
