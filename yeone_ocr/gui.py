@@ -36,17 +36,17 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
-AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Gemini)", "claude": "Claude (Claude Code)",
-                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Gemini (Antigravity CLI)"}
+AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Antigravity)", "claude": "Claude (Claude Code)",
+                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Antigravity (Google 계정 · Gemini)"}
 RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
                  "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
               "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
               "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
               "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
-SETUP_LABELS = {"gemini": "Gemini (Antigravity CLI)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
+SETUP_LABELS = {"gemini": "Antigravity (Google 계정 · Gemini)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
-AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Gemini 구독", "api": "API 키"}
+AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Antigravity 구독", "api": "API 키"}
 
 
 def _label_key(labels: dict, shown: str):

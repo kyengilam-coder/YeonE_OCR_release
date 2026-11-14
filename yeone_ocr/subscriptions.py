@@ -29,7 +29,20 @@ import time
 
 PLANS = ("claude", "chatgpt", "gemini")
 PLAN_CHOICES = ("auto",) + PLANS
-NAMES = {"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"}
+class _Names(dict):
+    """Plan names for people: the Google plan is shown by the program it runs on — "Antigravity" for
+    Antigravity CLI (personal Google accounts), "Gemini" for Gemini CLI (Code Assist Standard/Enterprise)."""
+
+    def __getitem__(self, plan):
+        if plan == "gemini":
+            try:
+                return "Antigravity" if module("gemini").program() == "antigravity" else "Gemini"
+            except Exception:                     # a name must never stop a run
+                pass
+        return super().__getitem__(plan)
+
+
+NAMES = _Names({"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"})
 PROGRAMS = {"claude": "Claude Code", "chatgpt": "Codex CLI", "gemini": "Antigravity CLI"}
 PROVIDERS = {"claude": "anthropic", "chatgpt": "openai", "gemini": "gemini"}
 _MODULES = {"claude": "claude_subscription", "chatgpt": "chatgpt_subscription", "gemini": "gemini_subscription"}
@@ -208,6 +221,11 @@ def accepts_model(plan: str, name: str | None) -> bool:
         return name.startswith("claude") or name in ("opus", "sonnet", "haiku", "fable")
     if plan == "chatgpt":
         return name.startswith(("gpt", "codex", "o1", "o3", "o4"))
+    if module("gemini").program() == "antigravity":
+        # The run's Gemini model is an API model name (gemini-3.1-pro-preview …); Antigravity CLI has its
+        # own model list, and an unknown --model fails the run. It chooses for the account unless
+        # YEONE_OCR_GEMINI_MODEL names one of its models.
+        return False
     return name.startswith("gemini")
 
 

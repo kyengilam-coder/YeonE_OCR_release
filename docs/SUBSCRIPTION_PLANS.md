@@ -52,8 +52,11 @@ Gemini CLI가 개인 계정에 "더 이상 제공하지 않음"이라고 답하�
   성공하면 로그인된 것으로 본다. 로그인 정보는 시스템 키체인에 있고 연어OCR은 읽지 않는다.
 - **오류**: 종료 코드 3의 `AGY_ERROR: {...}` 줄(상태 · HTTP 코드)과 오류 문구로 한도(`RESOURCE_EXHAUSTED`, 크레딧 부족) ·
   로그인(`authentication required`, `Eligibility check failed`) · 모델(`unknown model`) · 일시 오류를 가른다.
-- **모델**: 기본은 Antigravity CLI가 계정에 맞춰 고른다(기록에는 `antigravity-auto`). 바꾸려면 `YEONE_OCR_GEMINI_MODEL`
-  (`agy models`로 목록 확인).
+- **모델**: 기본은 Antigravity CLI가 계정에 맞춰 고른다(기록에는 `antigravity-auto`, Google AI Pro는 지금 Gemini 4 Argon).
+  설정의 Gemini 모델(`gemini-3.1-pro-preview` 등)은 API 키용 이름이라 넘기지 않는다(`subscriptions.accepts_model`).
+  바꾸려면 `YEONE_OCR_GEMINI_MODEL`에 `agy models`의 이름을 넣는다. 그 계정에 없는 모델이면 `--model` 없이 다시 보낸다.
+- **이름**: 화면과 진행 기록에서는 「Antigravity」(`subscriptions.NAMES["gemini"]`이 지금 쓰는 프로그램을 따름 —
+  Gemini CLI로 연결될 때만 「Gemini」).
 - **실행 파일 찾기**: `YEONE_OCR_ANTIGRAVITY_CLI_PATH` → (Windows) `%LOCALAPPDATA%\agy\bin\agy.exe` → PATH의 `agy.exe`
   → WinGet 링크 폴더 / (Mac·Linux) PATH → `~/.local/bin/agy`. Windows에서는 `agy.cmd`·`agy.bat`를 쓰지 않는다 —
   Antigravity 데스크톱 앱의 실행기가 같은 이름이면 창만 열린다.

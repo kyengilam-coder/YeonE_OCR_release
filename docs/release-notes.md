@@ -1,3 +1,23 @@
+# 연어OCR 1.2.14 · Gemini 구독을 Antigravity CLI로 연결
+
+1.2.13을 갱신하는 판이다.
+
+Google은 2026-06-18부터 **개인 Google 계정(무료 · Google AI Pro/Ultra)의 Gemini CLI 요청을 받지 않고** Antigravity CLI(`agy`)로 옮겼다. 그래서 1.2.13까지의 Gemini 구독은 개인 계정에서 쓸 수 없었다. 이제 Gemini 구독은 Antigravity CLI로 연결한다.
+
+- **고르는 순서**: Antigravity CLI가 설치되고 로그인되어 있으면 그것, 아니면 로그인된 Gemini CLI(Gemini Code Assist Standard/Enterprise 계정은 계속 됨), 둘 다 아니면 Antigravity CLI 설치·로그인을 안내한다. 강제하려면 환경 변수 `YEONE_OCR_GEMINI_PROGRAM=antigravity|gemini-cli`.
+- **이름**: 화면과 진행 기록에서 이 구독은 **Antigravity**로 보인다(로그인 상태 · 계정 선택 「Antigravity (Google 계정 · Gemini)」 · 설치·로그인 · [다음 구독으로 넘기기] · 「Antigravity 구독」). 기업용 Gemini CLI로 연결될 때만 「Gemini」.
+- **설치·로그인**: 설정 「AI 판독기」 ①의 「Antigravity (Google 계정 · Gemini)」 [설치]는 Google의 공식 설치 명령(`irm https://antigravity.google/cli/install.ps1 | iex`)을 보여 주고 물은 뒤 실행한다(Node.js 필요 없음). [로그인 창 열기]는 `agy`를 열고, 브라우저의 Google 로그인 화면에서 로그인한다.
+- **로그인 상태**: `agy --version`과 `agy -p /quota`(프로그램이 직접 답함 · 모델 호출 없음 · 사용량 차감 없음)로 본다. 이 프로그램은 로그인 정보(시스템 키체인)를 읽지 않는다.
+- **요청**: 요청마다 빈 임시 폴더에서 `agy -p … --output-format json --json-schema …`를 실행한다. 이번 실행에만 쓰는 설정(`--settings`, 저장 안 됨)으로 **Default 모드**(파일 수정·명령은 승인이 필요해 헤드리스에서는 거절)를 쓴다 — Antigravity CLI는 설정이 없으면 Auto 모드(묻지 않고 수정·실행)로 시작하기 때문이다. 그림은 `@image1.png` 참조로 첨부되고, 답은 스키마에 맞춘 `structured_output`을 먼저 쓴다.
+- **오류**: 한도(주간·5시간)에 닿으면 쉬었다 다시 쓰고, 로그인·자격 문제(`Eligibility check failed` 등)는 이번 실행에서 빼고 다음 구독으로 넘어간다. Gemini CLI가 개인 계정에 "더 이상 제공하지 않음"이라고 답하면 다시 보내지 않고 Antigravity CLI를 안내한다.
+- **모델**: 설정의 Gemini 모델(`gemini-3.1-pro-preview` 등)은 API 키용 이름이라 Antigravity에 넘기지 않는다 — Antigravity CLI가 계정에 맞춰 고른다(Google AI Pro는 지금 Gemini 4 Argon). 바꾸려면 `YEONE_OCR_GEMINI_MODEL`에 `agy models`의 이름을 넣고, 그 계정에 없는 모델이면 Antigravity의 기본 선택으로 다시 보낸다(구독을 빼지 않음). API 키로 검증할 때의 모델 설정은 그대로다.
+- **기록**: 기본 모델은 기록에 `antigravity-auto`, 전송은 `antigravity-cli-subscription`으로 남는다.
+- **약관**: 개인 PC에서 자기 계정으로만 쓴다. 다른 사람에게 줄 설치본이나 여러 사람이 쓰는 작업에는 API 키를 쓴다.
+
+**검증**: Windows · Antigravity CLI 1.5.9 · Google AI Pro 계정에서 연어OCR이 보내는 옵션 그대로 실행 — `agy -p /quota` 종료 코드 0, 빨강·파랑 반쪽 그림을 첨부한 요청이 경고 없이 `SUCCESS`와 두 색을 맞힌 `structured_output`(1턴 · 17초), `--settings`로 `agentMode`가 Auto에서 Default로 바뀌는 것을 `agy -p /config`로 확인. Linux 가상 화면(Xvfb, Tk 8.6, Python 3.12)에서 `tests/` 전체 — 2,443개 통과 · 29개 건너뜀 · 실패 1개(`test_bookmark_section_editor`의 지연 표시 시험 — 변경 전 소스에서도 같은 환경에서 실패). 설치판 안에서 [설치]·[로그인 창 열기]·[연결 시험]과 실제 책 쪽을 눌러 보지는 못했다 — 배포 CI의 회귀·설치 검사와 설치본 확인이 첫 확인이다. 그 밖의 코드는 1.2.13과 같다.
+
+---
+
 # 연어OCR 1.2.13 · 중간에 멈춘 뒤 읽은 쪽까지 HWPX 만들기
 
 1.2.12를 갱신하는 판이다.

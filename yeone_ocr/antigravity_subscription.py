@@ -346,6 +346,16 @@ class SubscriptionClient:
         self._run = runner or subprocess.run
         self.timeout = timeout_seconds or timeout()
 
+    def _call(self, args, root):
+        try:
+            # input="": stdin is an empty, closed pipe (agy -p reads no stdin; an open one has hung it).
+            return self._run(args, input="", env=cli_env(), cwd=str(root), capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=self.timeout, **_NO_WINDOW)
+        except FileNotFoundError as exc:
+            raise SubscriptionError(INSTALL_HINT) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"Antigravity CLI 응답이 {self.timeout:.0f}초 안에 오지 않았습니다.") from exc
+
     def request(self, *, model_name, system, prompt, images, schema):
         """-> (text, complete, finish_reason, usage dict, actual model). Images are PNG bytes."""
         with tempfile.TemporaryDirectory(prefix="yeone-ocr-agy-") as folder:
@@ -375,16 +385,11 @@ class SubscriptionClient:
             if isinstance(schema, dict) and schema.get("type") == "object":   # agy accepts only an object root
                 (root / "schema.json").write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
                 args += ["--json-schema", str(root / "schema.json")]
-            if model_name and model_name not in _DEFAULT_LABELS:     # a default's label is not a model slug
-                args += ["--model", model_name]
-            try:
-                # input="": stdin is an empty, closed pipe (agy -p reads no stdin; an open one has hung it).
-                proc = self._run(args, input="", env=cli_env(), cwd=str(root), capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=self.timeout, **_NO_WINDOW)
-            except FileNotFoundError as exc:
-                raise SubscriptionError(INSTALL_HINT) from exc
-            except subprocess.TimeoutExpired as exc:
-                raise TimeoutError(f"Antigravity CLI 응답이 {self.timeout:.0f}초 안에 오지 않았습니다.") from exc
+            chosen = model_name if model_name and model_name not in _DEFAULT_LABELS else ""   # a label is not a slug
+            proc = self._call(args + (["--model", chosen] if chosen else []), root)
+            if chosen and proc.returncode != 0 and _MODEL.search(_error_text(proc.stdout, proc.stderr).lower()):
+                # A model this account's Antigravity CLI does not have: its own choice instead of losing the plan.
+                proc, model_name = self._call(args, root), ""
         data = _envelope(proc.stdout)
         state = str((data or {}).get("status") or "").upper()
         reply = (data or {}).get("response")

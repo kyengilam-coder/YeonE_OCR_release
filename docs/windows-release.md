@@ -1,3 +1,13 @@
+# Windows 1.2.14 설치판
+
+1.2.14는 1.2.13의 설치 구성을 그대로 쓰고, Gemini 구독을 Google Antigravity CLI(`agy`)로 연결한 판이다. Antigravity CLI는 설치판에 넣지 않는다 — 사용자가 설정 「AI 판독기」 ①의 [설치](Google 공식 설치 명령)로 자기 PC에 설치하고 자기 계정으로 로그인한다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.14**로 맞춘다. 아래 빌드 절차를 사용할 때 `WorkRoot`는 `work/windows-1.2/build`, `OutputDirectory`는 `dist/1.2.14`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일(지금은 v1.0.6)에서 올린다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.14), 설정 「AI 판독기」 ①의 「Antigravity (Google 계정 · Gemini)」 — [설치]가 Google 설치 명령을 보여 주고 묻는지, [상태 확인]이 `agy`가 있는 PC에서 「Antigravity ● 사용 가능」과 경로(`%LOCALAPPDATA%\agy\bin\agy.exe`)를 보이는지, [연결 시험]이 「Antigravity: 응답함 · 모델 antigravity-auto」인지, 계정을 「Antigravity」로 골라 한 쪽을 검증하는지(설정의 Gemini 모델 이름이 넘어가 실패하지 않는지), 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.14 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.14)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.13 설치판
 
 1.2.13은 1.2.12의 설치 구성을 그대로 쓰고, 중간에 멈춘 실행의 판독 기록으로 HWPX를 만드는 단추와 물음 창을 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.

@@ -97,6 +97,27 @@ def test_a_chosen_model_is_passed_and_the_answer_text_is_used_without_structured
     assert "Attached images" not in seen["args"][seen["args"].index("-p") + 1]
 
 
+def test_a_model_this_account_lacks_falls_back_to_the_clis_own_choice():
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if "--model" in args:
+            return _done("", "error: unknown model 'gemini-9'. Available models: gemini-4-argon, gemini-4-hydrogen", 1)
+        return _done(_envelope(response='{"lines": []}', structured_output={"lines": []}))
+    text, complete, _, _, actual = agy.SubscriptionClient(runner=run).request(
+        model_name="gemini-9", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert complete and actual == "antigravity-auto" and len(calls) == 2 and "--model" not in calls[1]
+
+
+def test_the_api_model_setting_is_not_passed_to_antigravity():
+    """The window's Gemini model (gemini-3.1-pro-preview, an API model) is not an Antigravity model slug."""
+    gemini.status(refresh=True, runner=_both())
+    assert not subscriptions.accepts_model("gemini", "gemini-3.1-pro-preview")
+    assert subscriptions.model("gemini", None) == "antigravity-auto"
+    assert subscriptions.NAMES["gemini"] == "Antigravity"
+
+
 def test_a_long_request_goes_in_a_file_and_a_cut_off_answer_is_incomplete():
     seen = {}
 
