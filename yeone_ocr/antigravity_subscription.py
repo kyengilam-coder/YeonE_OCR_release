@@ -11,12 +11,16 @@ schema and, for a long request, its text:
 - `--output-format json` gives one JSON envelope (status, response, structured_output, usage,
   finished_reason); `--json-schema schema.json` makes the agent return the answer in
   `structured_output`, and the text is checked as JSON here as well.
-- `--mode default`: since 1.5.7 a run with no saved mode starts in Auto mode, which edits files and
-  runs commands without asking. In Default mode a headless run only reads inside its own folder and
-  refuses everything that needs approval (edits, commands, access outside the folder).
+- `--settings yeone-settings.json` = {"agentMode": "", "toolPermission": "request-review"}: settings
+  for this run only, never saved. Since 1.5.7 a run with no saved mode starts in Auto mode, which
+  edits files and runs commands without asking, and `--mode` takes only accept-edits, auto or plan
+  (1.5.9 warns about "default" and runs in Auto). agentMode "" is the Default mode (`/config` saves
+  that), and request-review asks before edits and commands: a headless run reads inside its own
+  folder and refuses everything that needs approval. Checked on 1.5.9 with `agy -p /config --settings`.
+- `--disable-slash-commands`: the request text is never read as a slash command or a skill.
 - stdin is an empty, closed pipe: `agy -p` does not read it, and an open one has hung it on Windows.
-- Images are files in that folder, named with @ references in the prompt; the prompt also asks the
-  agent to open them with its file viewer if they did not arrive attached.
+- Images are files in that folder, named with @ references in the prompt, which attach them (1.5.9:
+  one turn, no tool call); the prompt also asks the agent to open them with its file viewer if not.
 - The agent keeps its own system prompt (agy has no option to replace it): ours goes first in the message.
 
 Environment:
@@ -49,6 +53,8 @@ _STRIP_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "AGY_ADC_AUTH", "GOOGLE_APPLIC
               "GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI", "GEMINI_MODEL")
 _STATUS_TTL = 60.0
 _NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
+# This run's settings: the Default mode (agentMode "") and approval asked for edits and commands.
+RUN_SETTINGS = {"agentMode": "", "toolPermission": "request-review"}
 # Longest request text passed on the command line; longer text goes in request.md (Windows: 32,767
 # characters for the whole command line; elsewhere one argument may hold 128 KiB).
 _ARG_LIMIT_WINDOWS = 16_000
@@ -363,7 +369,9 @@ class SubscriptionClient:
                 message = ("Read the file request.md in the current folder with your file viewing tool and follow "
                            "its instructions exactly. It names the image files to view. Do not run commands, edit "
                            "or create files, or use any other tool. Answer with exactly one JSON object.")
-            args = [self.cli, "-p", message, "--output-format", "json", "--mode", "default"]
+            (root / "yeone-settings.json").write_text(json.dumps(RUN_SETTINGS), encoding="utf-8")
+            args = [self.cli, "-p", message, "--output-format", "json", "--settings", str(root / "yeone-settings.json"),
+                    "--disable-slash-commands"]
             if isinstance(schema, dict) and schema.get("type") == "object":   # agy accepts only an object root
                 (root / "schema.json").write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
                 args += ["--json-schema", str(root / "schema.json")]

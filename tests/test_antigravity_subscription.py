@@ -39,7 +39,8 @@ def _done(stdout="", stderr="", code=0):
 
 
 def _envelope(**fields):
-    data = {"conversation_id": "c1", "status": "SUCCESS", "response": "", "duration_seconds": 4.2, "num_turns": 1,
+    """The shape agy 1.5.9 printed on Windows (Google AI Pro, one image, --json-schema)."""
+    data = {"conversation_id": "c1", "status": "SUCCESS", "response": "", "duration_seconds": 12.88, "num_turns": 1,
             "usage": {"input_tokens": 1500, "output_tokens": 40, "thinking_tokens": 200, "cache_read_tokens": 0,
                       "total_tokens": 1740}}
     data.update(fields)
@@ -56,6 +57,7 @@ def test_request_runs_agy_headless_read_only_with_the_schema_and_images(monkeypa
     def run(args, *, input, env, cwd, timeout, **kwargs):
         folder = Path(cwd)
         seen.update(args=args, input=input, env=env, files=sorted(p.name for p in folder.iterdir()),
+                    settings=json.loads(Path(args[args.index("--settings") + 1]).read_text(encoding="utf-8")),
                     image=(folder / "image1.png").read_bytes(),
                     schema=json.loads(Path(args[args.index("--json-schema") + 1]).read_text(encoding="utf-8")))
         return _done(_envelope(response='{"lines": ["宇宙洪荒"]}', structured_output={"lines": ["宇宙洪荒"]}))
@@ -71,9 +73,12 @@ def test_request_runs_agy_headless_read_only_with_the_schema_and_images(monkeypa
     assert "SYSTEM TEXT" in message and "PROMPT" in message and "@image1.png @image2.png" in message
     assert '"lines"' in message                                             # the schema is in the words as well
     assert args[args.index("--output-format") + 1] == "json"
-    assert args[args.index("--mode") + 1] == "default"                     # not Auto: no edits, no commands
+    # Not Auto: 1.5.9's --mode has no "default" (it warns and runs in Auto); --settings sets the Default mode.
+    assert "--mode" not in args and seen["settings"] == {"agentMode": "", "toolPermission": "request-review"}
+    assert "--disable-slash-commands" in args
     assert "--dangerously-skip-permissions" not in args and "--model" not in args
-    assert seen["schema"] == SCHEMA and seen["files"] == ["image1.png", "image2.png", "schema.json"]
+    assert seen["schema"] == SCHEMA
+    assert seen["files"] == ["image1.png", "image2.png", "schema.json", "yeone-settings.json"]
     assert seen["image"] == b"png-1" and seen["input"] == ""               # stdin: empty and closed
     assert "GEMINI_API_KEY" not in env and "AGY_ADC_AUTH" not in env and env["NO_COLOR"] == "1"
 

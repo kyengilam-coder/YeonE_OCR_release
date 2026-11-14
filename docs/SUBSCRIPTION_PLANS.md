@@ -29,15 +29,19 @@ Gemini CLI가 개인 계정에 "더 이상 제공하지 않음"이라고 답하�
 계정을 빼며 Antigravity CLI 설치를 안내한다.
 
 요청마다 `agy`를 한 번 실행한다:
-`agy -p <지시문> --output-format json --mode default --json-schema schema.json [--model 모델]`.
+`agy -p <지시문> --output-format json --settings yeone-settings.json --disable-slash-commands --json-schema schema.json [--model 모델]`.
 
-- **`--mode default`**: 1.5.7부터 저장된 모드가 없는 실행은 Auto 모드(파일 수정·명령 실행을 묻지 않고 함)로 시작한다.
-  Default 모드의 헤드리스 실행은 자기 폴더 안을 읽기만 하고, 승인이 필요한 일(수정·명령·폴더 밖 접근)은 거절한다.
+- **`--settings`** (이번 실행에만 · 저장 안 됨) `{"agentMode": "", "toolPermission": "request-review"}`: 1.5.7부터 저장된
+  모드가 없는 실행은 Auto 모드(파일 수정·명령 실행을 묻지 않고 함)로 시작하고, `--mode`는 `accept-edits`·`auto`·`plan`만
+  받는다(1.5.9에서 `--mode default`는 경고만 내고 Auto로 돈다). `agentMode: ""`가 Default 모드다. Default 모드의 헤드리스
+  실행은 자기 폴더 안을 읽기만 하고, 승인이 필요한 일(수정·명령·폴더 밖 접근)은 거절한다. 사용자의 `settings.json`은
+  바꾸지 않는다(1.5.9에서 `agy -p /config --settings …`로 확인).
+- **`--disable-slash-commands`**: 지시문을 `/명령`이나 스킬로 풀지 않는다.
   `--dangerously-skip-permissions`는 쓰지 않는다.
 - **답**: `--output-format json`의 `structured_output`(스키마에 맞춘 답)을 먼저, 없으면 `response`를 JSON으로 검사한다.
   `status`가 `SUCCESS`가 아니거나 `finished_reason`(시간 초과 · 중단 · 오류)이 있으면 완료되지 않은 답으로 남긴다.
-- **그림**: 요청 폴더의 `image1.png …`를 지시문에서 `@image1.png`로 가리키고, 붙어 오지 않았으면 파일 보기 도구로
-  열어 보라고 적는다(그것만 허용).
+- **그림**: 요청 폴더의 `image1.png …`를 지시문에서 `@image1.png`로 가리키면 그림으로 첨부된다(1.5.9 실측: 도구 호출 없이
+  한 번에 답함). 붙어 오지 않았을 때를 위해 파일 보기 도구로 열어 보라고도 적는다(그것만 허용).
 - **긴 지시문**: Windows 명령줄 길이 제한(32,767자) 때문에 16,000자가 넘으면 `request.md`에 적고 그 파일을 읽게 한다.
 - **표준 입력**: 빈 채로 닫는다(`agy -p`는 읽지 않으며, 열린 채면 Windows에서 멈춘 일이 있다).
 - **지시문**: `agy`에는 자체 시스템 지시문을 바꾸는 옵션이 없어 우리 지시문을 메시지 맨 앞에 둔다.
@@ -113,7 +117,7 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`.
 - 하는 일: 요청마다 공식 프로그램을 한 번 실행한다. 새 빈 폴더에 그 요청의 그림·지시문·검증 스키마만 두고,
   도구·MCP 서버·확장·사용자 설정·세션 기록을 끈다(Codex: `--ephemeral --ignore-user-config --ignore-rules`,
   읽기 전용 샌드박스, 승인 없음, 웹 검색 끔 / Gemini CLI: `--approval-mode plan -e none --allowed-mcp-server-names none`,
-  `GEMINI_SYSTEM_MD`로 지시문 교체 / Antigravity CLI: `--mode default`, 위 절). 환경 변수의 API 키(`OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
+  `GEMINI_SYSTEM_MD`로 지시문 교체 / Antigravity CLI: `--settings`로 Default 모드, 위 절). 환경 변수의 API 키(`OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
   `GOOGLE_API_KEY`, `ANTHROPIC_API_KEY` 등)는 자식 프로그램에 넘기지 않는다 — 넘기면 구독 대신 API 요금이 나간다.
 - 하지 않는 일: 로그인 토큰(`~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, Claude 자격 증명)을 읽거나
   저장하거나 다른 곳으로 보내지 않는다. Gemini는 어느 로그인 방식을 골랐는지 보려고 `~/.gemini/settings.json`만 읽는다.
