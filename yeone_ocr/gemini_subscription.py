@@ -163,7 +163,7 @@ def _query_status(runner) -> dict:
                                          + ". PowerShell에서 `gemini --version`이 되는지 확인하세요(Node.js 20 이상 필요).")
         return result
     if _refused:                                         # Google's answer to this account, earlier in this program
-        result.update(closed=True, reason=UNSUPPORTED_CLIENT_HINT)
+        result.update(closed="Antigravity CLI 설치 필요", reason=UNSUPPORTED_CLIENT_HINT)
         return result
     chosen = _sign_in_type()
     if chosen in SIGN_IN_TYPES:

@@ -150,3 +150,13 @@ Google은 2026-06-18부터 개인 Google 계정(무료 등급, Google AI Pro·Ul
 3. `work\windows-release\venv\Scripts\python.exe tools\check_antigravity.py` — 연어OCR의 연결 모듈 그대로 한자 그림(天地玄黃 宇宙洪荒)을 읽혀 모든 글자가 돌아오는지(그림 파일 경로를 주면 그 그림). 2026-11-14: `agy -p "hello" --output-format json`을 파일로 돌려도 JSON(`status`·`response`·`usage.input_tokens`…)이 온전히 나옴(agy 1.5.8, Google AI Pro, 기본 모델 Gemini 4 Argon Medium).
 4. 실제 쪽 판독·의심 구간 검증에서 이미지를 실제로 보고 답하는지(답에 그 쪽의 글자가 나오는지), `structured_output`이 비지 않는지.
 5. 사용량 한도에 닿았을 때 진행 기록의 분류(한도·쉼)가 맞는지.
+
+# ChatGPT 구독: Codex가 모든 모델을 거부할 때 (2026-11)
+
+[연결 시험]에서 Codex 기본 모델이 "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account"로 거부되면, 다른 모델을 차례로 시도한다. 순서는 ① Codex가 OpenAI에서 받아 둔 이 계정의 모델 목록(`CODEX_HOME/models_cache.json`, 기본 `~/.codex` — 토큰이 없는 파일이며 `auth.json`은 읽지 않는다) ② 설치된 CLI가 아는 목록(`codex debug models`) ③ 코드의 `FALLBACK_MODELS`.
+
+모두 거부되면 원인에 따라 안내가 다르다.
+- OpenAI가 "requires a newer version of Codex"라고 답한 모델이 있으면: 설치된 Codex CLI(버전 표시)가 오래되었다고 먼저 말하고 [설치](최신으로 올림)를 안내한다.
+- 그런 답이 없으면: 요금제(Plus 이상·만료·관리자 설정)를 확인하고 `codex` → /model 로 본 이름을 `YEONE_OCR_CHATGPT_MODEL`에 넣으라고 안내한다.
+
+그 뒤 로그인 상태는 ChatGPT를 「사용 가능」이 아니라 「쓸 수 없음(Codex CLI 업데이트 필요)」 또는 「쓸 수 없음(모델 거부)」로 보인다. Codex CLI 파일이 바뀌면(업데이트) 이 표시는 저절로 풀린다. 실제 계정으로는 확인하지 않았다 — Windows PC에서 Codex를 최신으로 올린 뒤 [연결 시험]으로 확인할 것.

@@ -33,6 +33,7 @@ def _fresh(tmp_path, monkeypatch):
     for name in ("YEONE_OCR_AI_PLAN", "YEONE_OCR_CLAUDE_AUTH", "YEONE_OCR_CHATGPT_MODEL", "YEONE_OCR_GEMINI_MODEL",
                  "YEONE_OCR_CHATGPT_EFFORT", "YEONE_OCR_CODEX_HOME"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))      # never the real ~/.codex/models_cache.json
     yield home
     subscriptions.reset_status_cache(); subscriptions.reset_exhausted()
 
@@ -888,7 +889,7 @@ def test_codex_with_no_model_left_is_an_account_problem_not_a_refused_request():
     with pytest.raises(SubscriptionError) as caught:
         client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
     assert not isinstance(caught.value, RequestRejected)                        # the session moves to the next plan
-    assert "쓸 수 없는 모델" in str(caught.value) and "npm install -g @openai/codex" in str(caught.value)
+    assert "모델을 모두 거부" in str(caught.value) and "npm install -g @openai/codex" in str(caught.value)
     calls.clear()
     with pytest.raises(SubscriptionError):
         client.request(model_name="gpt-5.5", system="s", prompt="p", images=[], schema=SCHEMA)
@@ -945,3 +946,67 @@ def test_a_missing_program_says_where_it_was_looked_for(monkeypatch, tmp_path):
     state = gemini.status(refresh=True)
     assert state["installed"] is False
     assert "찾아봤습니다" in state["reason"] and "YEONE_OCR_GEMINI_CLI_PATH" in state["reason"] and "npx" in state["reason"]
+
+
+# ---- Codex: every model refused (2026-11-14 연결 시험: an old CLI whose default gpt-5.5 was retired) ----
+
+NEWER = "The '{}' model requires a newer version of Codex. Please upgrade to the latest app or CLI."
+
+
+def _refusing_runner(calls, newer=(), accepted=(), version="codex-cli 0.130.0"):
+    def run(args, **kwargs):
+        if args[1:] == ["--version"]:
+            return _ok(stdout=version)
+        if args[1:3] == ["debug", "models"]:
+            return _ok(stdout=json.dumps({"models": [{"slug": "gpt-5.5", "priority": 1}, {"slug": "gpt-5.4", "priority": 2}]}))
+        if args[1:3] == ["login", "status"]:
+            return _ok(stdout="Logged in using ChatGPT")
+        name = args[args.index("-m") + 1] if "-m" in args else "gpt-5.5"
+        calls.append(name)
+        if name in accepted:
+            Path(args[args.index("-o") + 1]).write_text('{"lines": []}', encoding="utf-8")
+            return _ok(stdout=json.dumps({"type": "turn.completed", "usage": {}}))
+        message = NEWER.format(name) if name in newer else REFUSED.replace("gpt-5.5", name)
+        return _ok(returncode=1, stdout=json.dumps({"type": "turn.failed", "error": {"message": message}}))
+    return run
+
+
+def test_codex_tries_the_accounts_own_cached_models_first(tmp_path):
+    """Codex keeps the list OpenAI serves this account in CODEX_HOME/models_cache.json: those names come first."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "models_cache.json").write_text(json.dumps({"fetched_at": "2026-11-14T00:00:00Z", "models": [
+        {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 2, "input_modalities": ["text", "image"]},
+        {"slug": "gpt-5.6-sol", "visibility": "list", "priority": 1, "input_modalities": ["text", "image"]},
+        {"slug": "codex-auto-review", "visibility": "hide", "priority": 0}]}), encoding="utf-8")
+    calls = []
+    client = codex.SubscriptionClient(runner=_refusing_runner(calls, accepted={"gpt-5.6-terra"}))
+    assert client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)[-1] == "gpt-5.6-terra"
+    assert calls == ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"]
+
+
+def test_codex_whose_models_need_a_newer_cli_says_so_and_is_not_offered_as_usable(tmp_path):
+    calls = []
+    run = _refusing_runner(calls, newer=set(codex.FALLBACK_MODELS))
+    assert codex.status(refresh=True, runner=run)["usable"] is True
+    client = codex.SubscriptionClient(runner=run)
+    with pytest.raises(SubscriptionError) as caught:
+        client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
+    text = str(caught.value)
+    assert text.startswith("설치된 Codex CLI 0.130.0가 오래되었습니다") and "[설치]" in text and "@openai/codex@latest" in text
+    state = codex.status(runner=run)                                               # not the cached '사용 가능'
+    assert state["usable"] is False and state["closed"] == "Codex CLI 업데이트 필요" and state["reason"] == text
+    assert codex.status(refresh=True, runner=run)["usable"] is False               # [상태 확인] keeps it
+    Path(client.cli).write_text("updated")                                         # [설치] replaced the CLI
+    os.utime(client.cli, ns=(1, 1))
+    assert codex.status(refresh=True, runner=run)["usable"] is True
+
+
+def test_codex_refused_by_the_plan_points_at_the_plan_not_the_cli(tmp_path):
+    client = codex.SubscriptionClient(runner=_refusing_runner([]))
+    with pytest.raises(SubscriptionError) as caught:
+        client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
+    text = str(caught.value)
+    assert text.startswith("이 ChatGPT 계정이 Codex에서 시도한 모델을 모두 거부했습니다") and "Plus 이상" in text
+    assert "/model" in text and "YEONE_OCR_CHATGPT_MODEL" in text
+    assert codex.status(refresh=True, runner=_refusing_runner([]))["closed"] == "모델 거부"

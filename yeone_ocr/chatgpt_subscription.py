@@ -87,6 +87,12 @@ def find_cli() -> str | None:
     return found or npm_global_cli("codex")
 
 
+def codex_home() -> Path:
+    """The Codex home this app's `codex` uses (CODEX_HOME, else ~/.codex)."""
+    home = os.environ.get("YEONE_OCR_CODEX_HOME", "").strip() or os.environ.get("CODEX_HOME", "").strip()
+    return Path(home).expanduser() if home else Path.home() / ".codex"
+
+
 def cli_env() -> dict:
     env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
     home = os.environ.get("YEONE_OCR_CODEX_HOME", "").strip()
@@ -134,7 +140,10 @@ def _query_status(runner) -> dict:
         result["reason"] = f"Codex CLI 상태를 읽지 못했습니다: {exc}"
         return result
     text = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
-    if "logged in using chatgpt" in text:
+    refused = _refusal_for(cli)
+    if "logged in using chatgpt" in text and refused:
+        result.update(logged_in=True, billing="subscription", plan="ChatGPT", closed=refused[1], reason=refused[0])
+    elif "logged in using chatgpt" in text:
         result.update(logged_in=True, billing="subscription", plan="ChatGPT", usable=True, reason=None)
     elif "logged in" in text and "not logged in" not in text:
         result.update(logged_in=True, billing="other",
@@ -191,9 +200,11 @@ _MODEL_REFUSED = re.compile(r"model_not_found|unsupported model|model\b[^.\n]{0,
 class ModelRefused(SubscriptionError):
     """The ChatGPT account does not serve this model through Codex (model_not_found)."""
 
-    def __init__(self, model, message):
+    def __init__(self, model, message, detail="", newer=False):
         super().__init__(message)
         self.model = model
+        self.detail = detail          # OpenAI's own words
+        self.newer = newer            # "requires a newer version of Codex": the CLI, not the plan
 
 
 # Tried after the models `codex debug models` lists, when Codex's own default is refused (2026-11 names).
@@ -201,6 +212,58 @@ FALLBACK_MODELS = ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol")
 _working_model: str | None = None        # the model that answered after the default was refused (this process)
 _catalog_cache: list | None = None
 _model_lock = threading.Lock()
+# Every model refused: (the CLI file's stamp, the message). status() shows it instead of '사용 가능' until the
+# CLI file changes ([설치] updated it) or the program restarts.
+_refusal: tuple | None = None
+
+
+def _stamp(cli: str):
+    try:
+        info = os.stat(cli)
+        return (str(cli), info.st_size, info.st_mtime_ns)
+    except OSError:
+        return (str(cli), None, None)
+
+
+def _refusal_for(cli: str) -> tuple | None:
+    """(message, short mark) of the refusal remembered for this CLI file, or None."""
+    global _refusal, _catalog_cache, _working_model
+    with _model_lock:
+        if _refusal is None:
+            return None
+        if _refusal[0] != _stamp(cli):                   # a new Codex CLI: its own list and default may work
+            _refusal, _catalog_cache, _working_model = None, None, None
+            return None
+        return _refusal[1], _refusal[2]
+
+
+def _mark_refused(cli: str, message: str, mark: str) -> None:
+    global _refusal, _status_cache
+    with _model_lock:
+        _refusal = (_stamp(cli), message, mark)
+    with _lock:
+        _status_cache = None
+
+
+def cached_models(home: Path | None = None) -> list:
+    """The account's own models as Codex last fetched them from OpenAI (CODEX_HOME/models_cache.json), in
+    Codex's order: image-capable, listed ones. Not a credential file (no token in it); [] when absent."""
+    path = (home or codex_home()) / "models_cache.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return _slugs(data)
+
+
+def _slugs(data) -> list:
+    entries = data.get("models", data.get("data", [])) if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    listed = [m for m in entries if isinstance(m, dict) and isinstance(m.get("slug") or m.get("id"), str)
+              and m.get("visibility", "list") == "list" and "image" in (m.get("input_modalities") or ["image"])]
+    ordered = sorted(listed, key=lambda m: m.get("priority", 999) if isinstance(m.get("priority"), (int, float)) else 999)
+    return [m.get("slug") or m.get("id") for m in ordered]
 
 
 def _remember(model_name: str) -> None:
@@ -210,9 +273,9 @@ def _remember(model_name: str) -> None:
 
 
 def reset_model_choice() -> None:
-    global _working_model, _catalog_cache
+    global _working_model, _catalog_cache, _refusal
     with _model_lock:
-        _working_model, _catalog_cache = None, None
+        _working_model, _catalog_cache, _refusal = None, None, None
 
 
 class SubscriptionClient:
@@ -245,20 +308,49 @@ class SubscriptionClient:
         except ModelRefused as refused:
             if not default:
                 raise SubscriptionError(str(refused)) from refused          # a named model: the person's choice
-            tried = {refused.model, first}
+            tried = [m for m in dict.fromkeys((refused.model, first)) if m and m != label("")]
+            newer = [refused.model] if refused.newer else []
             for candidate in self._catalog():
                 if candidate in tried:
                     continue
-                tried.add(candidate)
+                tried.append(candidate)
                 try:
                     result = self._request_once(candidate, system, prompt, images, schema)
-                except ModelRefused:
+                except ModelRefused as again:
+                    if again.newer:
+                        newer.append(candidate)
                     continue
                 _remember(candidate)
                 return result
-            raise SubscriptionError(str(refused) + " 이 계정에서 쓸 수 있는 다른 모델도 찾지 못했습니다(시도: "
-                                    + ", ".join(sorted(m for m in tried if m)) + "). " + UPDATE_HINT
-                                    + " 모델을 직접 정하려면 YEONE_OCR_CHATGPT_MODEL.") from refused
+            message = self._all_refused(refused, tried, newer)
+            _mark_refused(self.cli, message, "Codex CLI 업데이트 필요" if newer else "모델 거부")
+            raise SubscriptionError(message) from refused
+
+    def _version(self) -> str:
+        try:
+            proc = self._run([self.cli, "--version"], env=cli_env(), cwd=_empty_dir(), capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=60, **_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        found = re.search(r"\d+\.\d+\.\d+", proc.stdout or "")
+        return found.group(0) if found else ""
+
+    def _all_refused(self, refused, tried, newer) -> str:
+        """Why no model answered, in the order of what to do: an old CLI (OpenAI said so) first, then the plan."""
+        version = self._version()
+        cli = f"Codex CLI{f' {version}' if version else ''}"
+        listed = ", ".join(tried) or "없음"
+        if newer:
+            head = (f"설치된 {cli}가 오래되었습니다 — OpenAI가 {', '.join(newer[:3])}{' 등' if len(newer) > 3 else ''}은 "
+                    f"새 Codex가 필요하다고 답했고, 이 CLI의 기본 모델({refused.model or '기본값'})은 ChatGPT 계정에서 더 이상 쓰지 않습니다. ")
+            return (head + "설정 「AI 판독기」 ①에서 'ChatGPT (Codex CLI)'를 고르고 [설치]를 눌러 최신으로 올린 뒤 "
+                    "[상태 확인] → [연결 시험]을 다시 하십시오(PowerShell: npm install -g @openai/codex@latest). "
+                    f"(시도한 모델: {listed} · 원문: {refused.detail[:200]})")
+        return (f"이 ChatGPT 계정이 Codex에서 시도한 모델을 모두 거부했습니다({cli} · 시도: {listed}). "
+                "ChatGPT 요금제가 Plus 이상이고 만료되지 않았는지 확인하고(Free·Go는 쓸 수 없는 모델이 많고, "
+                "Business·Enterprise·Edu는 관리자가 Codex를 켜야 함), PowerShell에서 `codex`를 실행해 /model 로 "
+                "쓸 수 있는 모델을 본 뒤 그 이름을 환경 변수 YEONE_OCR_CHATGPT_MODEL에 넣으십시오. Codex CLI가 오래되었다면 "
+                f"[설치]로 최신으로 올리십시오(PowerShell: npm install -g @openai/codex@latest). (원문: {refused.detail[:200]})")
 
     def _catalog(self) -> list:
         """The account's image-capable models in Codex's own order (`codex debug models`), then a short
@@ -266,20 +358,17 @@ class SubscriptionClient:
         global _catalog_cache
         if _catalog_cache is not None:
             return _catalog_cache
+        account = cached_models()                     # what OpenAI says this account serves (Codex's own cache)
         models = []
         try:
             proc = self._run([self.cli, "debug", "models"], env=cli_env(), cwd=_empty_dir(), capture_output=True,
                              text=True, encoding="utf-8", errors="replace", timeout=60, **_NO_WINDOW)
-            data = json.loads(proc.stdout or "{}")
-            entries = data.get("models", data) if isinstance(data, dict) else data
-            listed = [m for m in entries if isinstance(m, dict) and m.get("visibility", "list") == "list"
-                      and "image" in (m.get("input_modalities") or ["image"]) and isinstance(m.get("slug"), str)]
-            models = [m["slug"] for m in sorted(listed, key=lambda m: m.get("priority", 999))]
+            models = _slugs(json.loads(proc.stdout or "{}"))
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
             models = []
         # An old CLI lists only the models of its own time, which the account may no longer serve:
-        # the current names follow its list.
-        _catalog_cache = models[:6] + [name for name in FALLBACK_MODELS if name not in models[:6]]
+        # the account's cached list leads, then the CLI's, then the current names.
+        _catalog_cache = list(dict.fromkeys([*account[:8], *models[:6], *FALLBACK_MODELS]))
         return _catalog_cache
 
     def _request_once(self, model_name, system, prompt, images, schema):
@@ -330,7 +419,8 @@ class SubscriptionClient:
             if refused and not _SIGN_IN.search((detail or "").lower()) and not _LIMIT.search((detail or "").lower()):
                 slug = re.search(r"'([^']+)' model", detail or "")
                 raise ModelRefused(slug.group(1) if slug else (model_name or ""),
-                                   f"이 ChatGPT 요금제에서 쓸 수 없는 모델입니다 (원문: {(detail or '')[:240]})")
+                                   f"이 ChatGPT 요금제에서 쓸 수 없는 모델입니다 (원문: {(detail or '')[:240]})",
+                                   detail=detail or "", newer=bool(_OLD_CLI.search((detail or "").lower())))
             raise failure("Codex CLI", detail or "", _classify, f"Codex CLI 실행 실패(코드 {proc.returncode}): {detail}", full=full)
         if not text:
             message = next((e.get("item", {}).get("text") for e in reversed(events) if e.get("type") == "item.completed"
