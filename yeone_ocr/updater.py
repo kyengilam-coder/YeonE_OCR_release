@@ -25,6 +25,7 @@ import uuid
 
 REPOSITORY = "kyengilam-coder/YeonE_OCR_release"
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+REPOSITORY_API_URL = f"https://api.github.com/repos/{REPOSITORY}"
 RELEASE_ROOT = f"https://github.com/{REPOSITORY}/releases"
 ASSET_NAME = "YeonE_OCR-Windows-x64.exe"
 MANIFEST_NAME = "update.json"
@@ -97,14 +98,14 @@ class _PinnedRedirect(HTTPRedirectHandler):
 
 
 def _open_url(url: str):
-    if url != API_URL:
+    if url not in (API_URL, REPOSITORY_API_URL):
         prefix = RELEASE_ROOT + "/download/"
         remainder = url[len(prefix):] if url.startswith(prefix) else ""
         parts = remainder.split("/")
         if len(parts) != 2 or not _VERSION.fullmatch(parts[0]) or parts[1] not in (ASSET_NAME, MANIFEST_NAME):
             raise UpdateError("지정된 GitHub 저장소의 릴리스 파일만 받을 수 있습니다.")
     _safe_url(url, initial=url)
-    request = Request(url, headers={"User-Agent": "YeonE-OCR-Updater", "Accept": "application/vnd.github+json" if url == API_URL else "application/octet-stream",
+    request = Request(url, headers={"User-Agent": "YeonE-OCR-Updater", "Accept": "application/vnd.github+json" if url in (API_URL, REPOSITORY_API_URL) else "application/octet-stream",
                                     "X-GitHub-Api-Version": "2022-11-28", "Accept-Encoding": "identity"})
     response = build_opener(_PinnedRedirect(url)).open(request, timeout=NETWORK_TIMEOUT)
     try:
@@ -179,6 +180,7 @@ def check_update(current_version: str) -> UpdateInfo | None:
             release = _read_json(API_URL, MAX_API_BYTES)
         except HTTPError as exc:
             if exc.code == 404:
+                _repository_reachable()     # a public repository with no release yet: nothing to install
                 return None
             raise
         if release.get("draft") is not False or release.get("prerelease") is not False:
@@ -210,6 +212,20 @@ def check_update(current_version: str) -> UpdateInfo | None:
         raise
     except (OSError, URLError, HTTPError) as exc:
         raise UpdateError("업데이트 서버에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 시도하십시오.") from exc
+
+
+def _repository_reachable() -> None:
+    """After a 404 for the latest release: GitHub answers 404 both for a public repository with no release
+    and for a private (or renamed) one, which an app without a sign-in can never read. The second must not
+    look like "this is the latest version"."""
+    try:
+        with _open_url(REPOSITORY_API_URL):
+            return
+    except HTTPError as exc:
+        if exc.code != 404:
+            raise
+    raise UpdateError(f"업데이트 저장소({REPOSITORY})를 찾을 수 없습니다 — 비공개로 바뀌었거나 주소가 바뀌었습니다. "
+                      f"새 버전이 있는지는 이 프로그램이 확인할 수 없습니다. 릴리스 페이지({RELEASE_ROOT})에서 직접 확인하십시오.")
 
 
 def _update_dir() -> Path:

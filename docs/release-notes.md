@@ -8,6 +8,7 @@
 - **요청 방식**: `agy -p … --output-format json --json-schema …`. 그림은 지시문의 `@image1.png`로 첨부된다(실측: 도구를 쓰지 않고 한 번에 답함 — 1.2.14는 에이전트가 파일 보기 도구로 그림을 열게 했다). 답은 스키마에 맞춘 `structured_output`을 쓴다. 지시문이 길면 파일로 넘긴다.
 - **이름**: 화면과 진행 기록에서 이 구독을 **Antigravity**로 보인다 — 로그인 상태 「Antigravity ● 사용 가능」, 계정 선택·설치·로그인 「Antigravity (Google 계정 · Gemini)」, [다음 구독으로 넘기기] 「Antigravity 구독」. 기업용 Gemini CLI로 연결될 때만 「Gemini」.
 - **실행 파일 찾기**: `%LOCALAPPDATA%\agy\bin\agy.exe`(공식 설치 위치)를 먼저 찾고, PATH에서는 `agy.exe`만 쓴다 — Antigravity 데스크톱 앱의 실행기(`agy.cmd`)가 같은 이름이면 창만 열리기 때문이다.
+- **[업데이트 확인]이 새 판을 못 보고 「최신 버전입니다」라고 하던 문제**: 릴리스 저장소(`kyengilam-coder/YeonE_OCR_release`)가 비공개면 GitHub는 로그인하지 않은 프로그램에 404로 답한다. 연어OCR은 이것을 "아직 릴리스 없음"으로 읽어 v1.2.14가 올라와 있는데도 「현재 버전 1.2.13이 최신 버전입니다」라고 했다. 이제 저장소 자체도 확인해, 찾을 수 없으면 「업데이트 저장소를 찾을 수 없습니다 — 비공개로 바뀌었거나 주소가 바뀌었습니다」와 릴리스 페이지를 알린다. **업데이트 확인이 되려면 릴리스 저장소가 공개여야 한다** — 이미 설치된 1.2.13·1.2.14도 저장소가 공개되면 그대로 새 판을 찾는다.
 - **오류 구분**: agy의 `AGY_ERROR` 줄로 한도(주간·5시간 · 크레딧 부족 — 쉬었다 다시), 로그인·자격(`Eligibility check failed` — 이번 실행에서 빼고 다음 구독으로), 모델, 일시 오류를 가린다.
 
 **검증**: Windows · Antigravity CLI 1.5.9 · Google AI Pro 계정에서 — `agy -p /quota` 종료 코드 0, `agy -p /config --settings …`에서 `agentMode`가 `auto`에서 빈 값(Default)으로 바뀜, 연어OCR이 보내는 옵션 그대로 빨강·파랑 반쪽 그림을 보낸 요청이 경고 없이 `SUCCESS`와 두 색을 맞힌 `structured_output`(1턴 · 17초 · 종료 코드 0). Linux 가상 화면(Xvfb, Tk 8.6, Python 3.12)에서 `tests/` 전체를 돌렸다(결과는 아래 PR 설명). 설치판 안의 [상태 확인]·[연결 시험]·실제 책 쪽은 아직 누르지 못했다 — [AI 검토 문서](AI_REVIEW.md)의 확인 목록을 따른다. 그 밖의 코드는 1.2.14와 같다.
