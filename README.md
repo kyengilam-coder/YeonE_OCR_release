@@ -81,7 +81,7 @@ python -m yeone_ocr compare-engines "D:\문헌\원본.pdf" --pages 1-3 --profile
 
 0.9.0 다운로드 주소는 [v0.9.0 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)입니다. 배포 완료 후 설치 파일·포터블·소스·라이선스 ZIP과 SHA-256 목록을 이 주소에서 받습니다. 로컬 빌드 위치는 `dist/0.9.0`이며 검증 범위는 [릴리스 기록](docs/release-notes.md)에 정리했습니다.
 
-통합 전 AB_OCR 0.3.0의 공개 소스는 [원본 코드 보존 안내](references/README.md)에 따라 소스 저장소와 소스 ZIP에 함께 보관합니다. 이 보존 사본은 실행에 사용하지 않습니다. 실제 앱은 `yeone_ocr`와 루트의 `ab_ocr` 통합 코드를 사용하며, 보존 사본에는 개인 문서·작업 기록·엔진 실행 환경·모델 가중치를 넣지 않습니다.
+실제 앱은 `yeone_ocr`와 루트의 `ab_ocr` 통합 코드를 사용합니다. 통합 전 AB_OCR 0.3.0의 보존 사본(`references/`)은 1.2.17에서 저장소와 소스 ZIP에서 뺐습니다(1.2.16 이하의 소스 ZIP에는 남아 있습니다).
 
 ## 화면 구성 — 간단히 보기와 자세히 보기
 

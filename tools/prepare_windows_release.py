@@ -43,26 +43,6 @@ SOURCE_TEST_FIXTURES = {f"tests/golden/{name}.json" for name in (
     "page_default", "page_default_plain")}
 SOURCE_LICENSE_SUPPLEMENTS = {"packaging/license_supplements/hanja/LICENSE.txt",
                               "packaging/license_supplements/hanja/provenance.txt"}
-AB_REFERENCE_ROOT = "references/AB_OCR_0.3.0/"
-AB_REFERENCE_MANIFEST = AB_REFERENCE_ROOT + "SOURCE_MANIFEST.json"
-# Original source, documentation and synthetic examples only.  Deliberately do
-# not accept arbitrary files from references/, even if a manifest lists them.
-AB_REFERENCE_FILES = frozenset("""
-.gitignore AB_OCR.bat AB_OCR.pyw AGENTS.md README.md pyproject.toml
-ab_ocr/__init__.py ab_ocr/__main__.py ab_ocr/benchmark.py ab_ocr/document.py
-ab_ocr/easyocr_worker.py ab_ocr/editor_gui.py ab_ocr/evaluation.py ab_ocr/gui.py
-ab_ocr/local_engines.py ab_ocr/ocr.py ab_ocr/rapidocr_worker.py ab_ocr/reports.py
-docs/ARCHITECTURE.md docs/HANDOFF.md docs/LOCAL_OCR.md docs/REQUIREMENTS.md docs/VALIDATION.md
-examples/benchmark/README.md examples/benchmark/blank.a.txt examples/benchmark/blank.b.txt
-examples/benchmark/blank.reference.txt examples/benchmark/manifest.json examples/benchmark/manifest.schema.json
-examples/benchmark/mixed.a.txt examples/benchmark/mixed.b.txt examples/benchmark/mixed.reference.txt
-examples/benchmark/variants.a.txt examples/benchmark/variants.b.txt examples/benchmark/variants.reference.txt
-scripts/easyocr-lock.json scripts/install_easyocr.py scripts/install_rapidocr.py
-scripts/install_tesseract.py scripts/tesseract-lock.json
-tests/test_benchmark.py tests/test_cli.py tests/test_document.py tests/test_easyocr_worker.py
-tests/test_editor_gui.py tests/test_evaluation.py tests/test_gui.py tests/test_local_engines.py
-tests/test_ocr.py tests/test_ocr_document.py tests/test_rapidocr_worker.py tests/test_reports.py
-""".split())
 SOURCE_PACKAGING = {"packaging/YeonE_OCR.spec", "packaging/YeonE_OCR.iss",
                     "packaging/THIRD_PARTY_NOTICES.txt", "packaging/requirements-windows.lock.txt",
                     "packaging/msvc-runtime-lock.json"}
@@ -86,9 +66,6 @@ def source_allowed(name: str) -> bool:
         return False
     if len(path.parts) == 1:
         return name in SOURCE_TOP_FILES
-    if path.parts[0] == "references":
-        return (name in {"references/README.md", AB_REFERENCE_MANIFEST}
-                or (name.startswith(AB_REFERENCE_ROOT) and name[len(AB_REFERENCE_ROOT):] in AB_REFERENCE_FILES))
     if path.parts[0] not in SOURCE_TOP_DIRS:
         return False
     if path.parts[0] == "ab_ocr":
@@ -174,8 +151,6 @@ def create_source_archive(repo: Path, output: Path, version: str, revision: str 
     archive = _git(repo, "archive", "--format=zip", f"--prefix={prefix}", commit)
     copied = []
     with ZipFile(io.BytesIO(archive)) as original:
-        _validate_reference_archive(original, prefix)
-        # Validate the committed reference snapshot before creating any output.
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as target:
             for entry in original.infolist():
                 if entry.is_dir() or not entry.filename.startswith(prefix):
@@ -189,32 +164,6 @@ def create_source_archive(repo: Path, output: Path, version: str, revision: str 
     if "yeone_ocr/__init__.py" not in copied:
         raise ValueError("Source archive is missing the application package.")
     return {"commit": commit, "files": len(copied)}
-
-
-def _validate_reference_archive(archive: ZipFile, prefix: str) -> None:
-    entries = {entry.filename[len(prefix):]: entry for entry in archive.infolist()
-               if not entry.is_dir() and entry.filename.startswith(prefix)}
-    if not any(name == AB_REFERENCE_MANIFEST or name.startswith(AB_REFERENCE_ROOT) for name in entries):
-        return  # Older releases did not contain the reference project.
-    required = {AB_REFERENCE_ROOT + name for name in AB_REFERENCE_FILES} | {AB_REFERENCE_MANIFEST, "references/README.md"}
-    if not required <= entries.keys():
-        raise ValueError("Committed AB_OCR reference snapshot is incomplete.")
-    if any(stat.S_ISLNK(entries[name].external_attr >> 16) for name in required):
-        raise ValueError("Committed AB_OCR reference snapshot contains a symbolic link.")
-    try:
-        manifest = json.loads(archive.read(entries[AB_REFERENCE_MANIFEST]))
-    except (ValueError, UnicodeError) as exc:
-        raise ValueError("Committed AB_OCR reference manifest is invalid.") from exc
-    if (not isinstance(manifest, dict) or type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1
-            or manifest.get("source_project") != "AB_OCR" or manifest.get("source_version") != "0.3.0"
-            or manifest.get("private_documents_included") is not False or manifest.get("model_files_included") is not False
-            or not isinstance(manifest.get("files"), dict) or set(manifest["files"]) != AB_REFERENCE_FILES):
-        raise ValueError("Committed AB_OCR reference manifest has an unexpected file inventory.")
-    for name, expected in manifest["files"].items():
-        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
-            raise ValueError("Committed AB_OCR reference manifest has an invalid SHA-256.")
-        if hashlib.sha256(archive.read(entries[AB_REFERENCE_ROOT + name])).hexdigest() != expected:
-            raise ValueError("Committed AB_OCR reference file differs from its manifest: " + name)
 
 
 def create_licenses_archive(repo: Path, output: Path) -> int:

@@ -82,4 +82,4 @@ python -m yeone_ocr compare-engines "D:\문헌\원본.pdf" --pages 1-3 --profile
 
 0.9.0 소스와 Windows 배포 구성을 포함한다. 배포 대상은 설치 파일·포터블·소스 ZIP·라이선스 ZIP·업데이트 manifest·SHA-256 목록이며, 배포 후 [v0.9.0 다운로드 주소](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v0.9.0)에서 확인한다. 로컬 산출물은 `dist/0.9.0`, 빌드·자체 검사 보고서는 `work/windows-ai-0.9`에 둔다. 소스·설치용 실행 파일·포터블 자체 검사는 각각 26개 통과했고, 두 실행 파일의 앱 모듈 각각 75개와 리소스 17개·라이선스 참조 162개의 일치를 확인했다. 이전 0.8.0·0.7.x 기록과 파일은 별도로 보존한다.
 
-통합 전 AB_OCR 0.3.0의 공개 소스 보존 위치는 `references/AB_OCR_0.3.0`이다. [보존 안내](../references/README.md)에 따라 소스 저장소·소스 ZIP에 포함하며, 이 사본을 실행하거나 런타임에 import하지 않는다. 현재 앱의 실행 코드는 `yeone_ocr`와 루트의 `ab_ocr`다.
+통합 전 AB_OCR 0.3.0의 보존 사본(`references/AB_OCR_0.3.0`)은 1.2.17에서 저장소·소스 ZIP·CI에서 뺐다. 1.2.16 이하의 소스 ZIP과 Git 이력에는 남아 있다. 현재 앱의 실행 코드는 `yeone_ocr`와 루트의 `ab_ocr`다.
