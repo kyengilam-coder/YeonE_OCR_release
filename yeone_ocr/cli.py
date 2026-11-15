@@ -2823,7 +2823,7 @@ def build_parser():
                         "환경 변수 YEONE_OCR_CLAUDE_AUTH 로도 지정")
     p.add_argument("--local-ai-plan", choices=("auto", "claude", "chatgpt", "gemini"), default=None,
                    help="구독 계정: claude=Claude Code(claude -p), chatgpt=OpenAI Codex CLI(codex exec, ChatGPT 로그인), "
-                        "gemini=Gemini CLI(gemini -p, Google 로그인). auto(기본)=로그인된 것 중 Claude → ChatGPT → Gemini 순. "
+                        "gemini=Antigravity CLI(agy -p, Google 계정 · 없으면 Gemini CLI). auto(기본)=로그인된 것 중 Antigravity(Google) → ChatGPT → Claude 순. "
                         "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
                         "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
     p.add_argument("--local-resume", choices=("unfinished", "continue", "all"), default="unfinished",

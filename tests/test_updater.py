@@ -66,8 +66,22 @@ class ReleaseChecks(unittest.TestCase):
                 with metadata(release, manifest) as get:
                     self.assertIsNone(U.check_update("0.7.0"))
                     self.assertEqual(get.call_count, 1)
-        with mock.patch.object(U, "_open_url", side_effect=HTTPError(U.API_URL, 404, "not found", {}, None)):
+        def empty_public(url):                                  # no release yet in a public repository
+            if url == U.API_URL:
+                raise HTTPError(url, 404, "not found", {}, None)
+            return mock.MagicMock()
+        with mock.patch.object(U, "_open_url", side_effect=empty_public):
             self.assertIsNone(U.check_update("0.7.0"))
+
+    def test_a_private_or_missing_repository_is_not_reported_as_up_to_date(self):
+        """GitHub answers 404 to an app without a sign-in for a private repository: 1.2.13 then said
+        "현재 버전이 최신 버전입니다" although v1.2.14 was published (the release repository was private)."""
+        with mock.patch.object(U, "_open_url", side_effect=lambda url: (_ for _ in ()).throw(HTTPError(url, 404, "not found", {}, None))) as get:
+            with self.assertRaisesRegex(U.UpdateError, "비공개"):
+                U.check_update("0.7.0")
+        self.assertEqual([c.args[0] for c in get.call_args_list], [U.API_URL, U.REPOSITORY_API_URL])
+        with self.assertRaises(U.UpdateError):                  # only the GitHub API and release files are opened
+            U._open_url("https://api.github.com/repos/someone/else")
 
     def test_version_comparison_is_numeric_and_rejects_nonstable_tag(self):
         release, manifest = release_data("0.10.0")

@@ -5,20 +5,28 @@ Since 2026-06-18 Gemini CLI no longer serves personal Google accounts (free tier
 Antigravity CLI. This module runs the user's own, unmodified `agy`, which signs in through Google's
 own login and keeps its credentials in the system keyring: no token is read here. Personal use only.
 
-One `agy` process per request, in a new empty folder that holds only that request's images.
-Headless protocol (documented "stream prompts from stdin"; the same calls a Windows Python program
-made through pipes in google-antigravity/antigravity-cli#1166): one {"event": "user"} line on stdin,
-`--input-format stream-json --output-format stream-json --json-schema <schema>`; the answer is the
-`result` event's `structured_output`. Print mode has no image attachment flag (#1278): the images'
-folder is opened with `--add-dir` and the prompt asks the agent to view those files. A result that
-reports SUCCESS without structured output (#1065, #794) is a failure here, never an answer.
-
-Not verified on a real account from this code's development environment (agy could not be
-installed there): docs/AI_REVIEW.md lists the checks to run on a PC.
+One `agy -p` run per request, in a new empty folder that holds only that request's images, its JSON
+schema and run settings (and, for a long request, its text). Checked on Windows with agy 1.5.9 and a
+Google AI Pro account (docs/AI_REVIEW.md):
+- `--output-format json` prints one JSON line: {conversation_id, status ("SUCCESS"), response,
+  duration_seconds, num_turns, structured_output, json_schema, usage {input_tokens, output_tokens,
+  thinking_tokens, cache_read_tokens, total_tokens}, finished_reason (only when cut short)}; no model name.
+  `--json-schema schema.json` makes `structured_output` the answer.
+- `--settings yeone-settings.json` = {"agentMode": "", "toolPermission": "request-review"}, for this run
+  only and never saved. agy starts a run with no saved mode in Auto mode (edits files and runs commands
+  without asking), and `--mode` takes only accept-edits, auto or plan ("default" is warned about and
+  runs in Auto). agentMode "" is the Default mode: a headless run reads inside its own folder and
+  refuses what needs approval (edits, commands, access outside the folder). `agy -p /config` shows it.
+- `--disable-slash-commands`: the request text is never read as a slash command or a skill.
+- Images: `@image1.png` in the prompt attaches the file (one turn, no tool call).
+- stdin is an empty, closed pipe: `agy -p` does not read it, and an open one has hung it on Windows.
+- The sign-in: `agy -p /quota` is answered by the CLI itself (no model call, no quota spent) and fails
+  without a sign-in.
+- The agent keeps its own system prompt (no option replaces it): ours goes first in the message.
 
 Environment:
-  YEONE_OCR_AGY_MODEL       model for agy (default: agy's own choice), e.g. gemini-3.8-flash-high
-  YEONE_OCR_AGY_CLI_PATH    agy executable (default: PATH, then %LOCALAPPDATA%\\agy\\bin\\agy.exe)
+  YEONE_OCR_AGY_MODEL       model for agy (`agy models`; default: agy's own choice for the account)
+  YEONE_OCR_AGY_CLI_PATH    agy executable (default: %LOCALAPPDATA%\\agy\\bin\\agy.exe, PATH, ~/.local/bin/agy)
   YEONE_OCR_AGY_TIMEOUT     seconds per call (default 300)
 """
 from __future__ import annotations
@@ -40,13 +48,22 @@ SUBSCRIPTION_KEY = "gemini-subscription"
 PROVIDER = "gemini"
 TRANSPORT = "antigravity-cli-subscription"
 PROGRAM = "Antigravity CLI"
-DEFAULT_MODEL = ""                      # agy chooses
-_STRIP_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS")
+DEFAULT_MODEL = ""                      # agy chooses for the signed-in account
+# A key, Application Default Credentials or another endpoint would bill an API or Cloud project instead
+# of the signed-in account.
+_STRIP_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS",
+              "AGY_ADC_AUTH", "GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "GEMINI_MODEL")
+# This run's settings: the Default mode and approval asked for edits and commands (see above).
+RUN_SETTINGS = {"agentMode": "", "toolPermission": "request-review"}
 _STATUS_TTL = 60.0
 _NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
+# Longest request text on the command line (Windows: 32,767 characters for all of it; elsewhere one
+# argument holds 128 KiB); a longer one goes in request.md.
+_ARG_LIMIT_WINDOWS = 16_000
+_ARG_LIMIT_BYTES = 100_000
 
-LOGIN_HINT = ("PowerShell에서 `agy`를 한 번 실행해 Google 계정으로 로그인한 뒤 /quit로 닫고 다시 실행하세요. "
-              "로그인은 Google 공식 화면에서 하며 이 프로그램은 토큰을 보지 않습니다.")
+LOGIN_HINT = ("PowerShell에서 `agy`를 한 번 실행해 열리는 Google 로그인 화면에서 Google 계정(무료 · Google AI Pro/Ultra)으로 "
+              "로그인한 뒤 창을 닫고 다시 실행하세요. 로그인은 Google 공식 화면에서 하며 이 프로그램은 토큰을 보지 않습니다.")
 INSTALL_HINT = ("Antigravity CLI(agy)가 설치되어 있지 않습니다. PowerShell에서 "
                 "`irm https://antigravity.google/cli/install.ps1 | iex`로 설치한 뒤 `agy`를 실행해 로그인하세요.")
 
@@ -71,21 +88,32 @@ def timeout() -> float:
 
 
 def find_cli() -> str | None:
+    """The agy executable: the installer's own folder first, then PATH. On Windows only the native agy.exe —
+    an `agy.cmd`/`agy.bat` on PATH can be another program's launcher (the Antigravity desktop app's)."""
     configured = os.environ.get("YEONE_OCR_AGY_CLI_PATH", "").strip()
     if configured:
         path = Path(configured).expanduser()
         return str(path) if path.exists() else None
-    found = (shutil.which("agy.exe") or shutil.which("agy")) if sys.platform == "win32" else shutil.which("agy")
-    if found:
-        return found
-    local = os.environ.get("LOCALAPPDATA", "")
-    candidates = [Path(local) / "agy" / "bin" / "agy.exe"] if local else []
-    candidates.append(Path.home() / ".local" / "bin" / "agy")
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    installed = [Path(local) / "agy" / "bin" / "agy.exe"] if local else []
+    if sys.platform == "win32":
+        first = next((str(p) for p in installed if p.is_file()), None)
+        if first:
+            return first
+        found = shutil.which("agy.exe")
+        if found and Path(found).suffix.lower() == ".exe":
+            return found
+    else:
+        found = shutil.which("agy")
+        if found:
+            return found
+    candidates = installed + [Path.home() / ".local" / "bin" / "agy"]
     return next((str(p) for p in candidates if p.is_file()), None)
 
 
 def cli_env() -> dict:
     env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}   # an API key would replace the sign-in
+    env["NO_COLOR"] = "1"
     env.setdefault("PYTHONUTF8", "1")
     return env
 
@@ -97,9 +125,8 @@ def _empty_dir() -> str:
 
 
 def status(refresh: bool = False, runner=subprocess.run) -> dict:
-    """installed, logged_in, billing, plan, usable, reason. Never raises; runs nothing but `agy --version`.
-    agy keeps its sign-in in the system keyring and has no status command, so an installed agy that
-    runs counts as usable; a missing sign-in shows on the first request and takes this plan out of the run."""
+    """installed, logged_in, billing, plan, usable, reason. Never raises. Runs `agy --version` and
+    `agy -p /quota` (answered by agy itself: no model call, no quota spent, but it needs the sign-in)."""
     global _status_cache
     with _lock:
         if not refresh and _status_cache and time.monotonic() - _status_cache[0] < _STATUS_TTL:
@@ -115,6 +142,11 @@ def reset_status_cache() -> None:
         _status_cache = None
 
 
+def _quiet(runner, args, seconds):
+    return runner(args, env=cli_env(), cwd=_empty_dir(), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                  encoding="utf-8", errors="replace", timeout=seconds, **_NO_WINDOW)
+
+
 def _query_status(runner) -> dict:
     result = {"installed": False, "logged_in": False, "billing": None, "plan": None, "usable": False,
               "reason": INSTALL_HINT, "limits": None}
@@ -123,92 +155,146 @@ def _query_status(runner) -> dict:
         result["reason"] = not_found_reason(PROGRAM, "agy", INSTALL_HINT)
         return result
     result.update(installed=True, path=cli)
+    version = ""
     try:
-        proc = runner([cli, "--version"], env=cli_env(), cwd=_empty_dir(), capture_output=True, text=True,
-                      encoding="utf-8", errors="replace", timeout=120, **_NO_WINDOW)
+        proc = _quiet(runner, [cli, "--version"], 60)
+        if proc.returncode != 0:
+            detail = program_error(proc.stderr, proc.stdout)[1]
+            result.update(runs=False, reason=f"{PROGRAM}({cli})를 실행하지 못했습니다(코드 {proc.returncode})"
+                                             + (f": {detail}" if detail else "") + ". PowerShell에서 `agy --version`이 되는지 확인하세요.")
+            return result
+        version = ((proc.stdout or "").strip().splitlines() or [""])[0][:40]
     except subprocess.TimeoutExpired:
-        proc = None
+        pass                                             # a slow first start: the sign-in check below decides
     except (OSError, subprocess.SubprocessError) as exc:
         result.update(runs=False, reason=f"{PROGRAM}({cli})를 실행하지 못했습니다: {exc}. PowerShell에서 `agy --version`이 되는지 확인하세요.")
         return result
-    if proc is not None and proc.returncode != 0:
-        detail = program_error(proc.stderr, proc.stdout)[1]
-        result.update(runs=False, reason=f"{PROGRAM}({cli})를 실행하지 못했습니다(코드 {proc.returncode})"
-                                         + (f": {detail}" if detail else "") + ". PowerShell에서 `agy --version`이 되는지 확인하세요.")
+    try:
+        proc = _quiet(runner, [cli, "-p", "/quota"], 90)
+    except subprocess.TimeoutExpired:
+        result["reason"] = (f"{PROGRAM}가 90초 안에 로그인 상태를 알려 주지 않았습니다. " + LOGIN_HINT
+                            + " 로그인되어 있다면 [상태 확인]을 다시 누르세요.")
         return result
-    result.update(logged_in=True, billing="subscription", plan="Google 계정(Antigravity)", usable=True, reason=None)
+    except (OSError, subprocess.SubprocessError) as exc:
+        result.update(runs=False, reason=f"{PROGRAM}({cli})를 실행하지 못했습니다: {exc}.")
+        return result
+    plan = "Google 계정 · Antigravity" + (f" {version}" if version else "")
+    if proc.returncode == 0:
+        result.update(logged_in=True, billing="subscription", plan=plan, usable=True, reason=None)
+        return result
+    full, detail = program_error(proc.stderr, proc.stdout)
+    low = full.lower()
+    if _SIGN_IN.search(low):                             # first: the failed command is /quota, so its text may say "quota"
+        result["reason"] = f"{PROGRAM}에 로그인되어 있지 않거나 로그인이 만료되었습니다. " + LOGIN_HINT + (f" (원문: {detail[:200]})" if detail else "")
+    elif _LIMIT.search(low):                             # signed in; a run rests until the limit resets
+        result.update(logged_in=True, billing="subscription", plan=plan, usable=True, reason=None, limits=detail[:200])
+    else:
+        result["reason"] = (f"{PROGRAM}의 로그인 상태를 확인하지 못했습니다(코드 {proc.returncode})"
+                            + (f": {detail[:240]}" if detail else "") + ". " + LOGIN_HINT)
     return result
 
 
+# agy prints `AGY_ERROR: {...}` on stderr (canonical status, HTTP code, retryability) and exits with 3 when a
+# turn fails on the model or agent; startup and sign-in problems are words on stderr.
 _SIGN_IN = re.compile(r"please (?:log|sign) ?in|login required|not (?:logged|signed) in|unauthenticated|"
-                      r"authentication (?:failed|required|error)|sign[- ]in (?:required|failed)|no active session|"
+                      r"authentication (?:failed|required|error)|sign[- ]in (?:required|failed|update needed)|no active session|"
+                      r"eligibility check failed|not eligible|run `?/login|/logout|"
                       r"invalid[_ ]grant|(?:credentials?|token)\b[^.\n]{0,40}\b(?:expired|invalid|missing|revoked)|"
                       r"(?:status|http|code|error)\D{0,12}401\b")
 _LIMIT = re.compile(r"resource_exhausted|resource exhausted|quota|rate[_ ]limit|usage limit|too many requests|"
-                    r"(?:status|http|code|error)\D{0,12}429\b")
-_MODEL = re.compile(r"unknown model|model not found|model_not_found|failed to construct executor")
+                    r"credits? balance is too low|(?:status|http|code|error)\D{0,12}429\b")
+_MODEL = re.compile(r"unknown model|model not found|model_not_found|failed to construct executor|available models|"
+                    r"model\b[^.\n]{0,80}\b(?:is not supported|does not exist|not available)")
+_AGY_ERROR = re.compile(r"AGY_ERROR:\s*(\{.*\})")
 
 
 def _classify(text: str) -> str | None:
     low = text.lower()
     if _SIGN_IN.search(low):
-        return problem("account", "Antigravity CLI 로그인이 필요하거나 만료되었습니다. " + LOGIN_HINT)
+        return problem("account", f"{PROGRAM} 로그인이 필요하거나 만료되었거나, 이 Google 계정을 쓸 수 없습니다. " + LOGIN_HINT)
     if _LIMIT.search(low):
-        return problem("limit", "Google 계정의 Antigravity(Gemini) 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
+        return problem("limit", "Google 계정의 Antigravity 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
     if _MODEL.search(low):
-        return problem("account", "Antigravity CLI가 이 모델을 쓸 수 없습니다. YEONE_OCR_AGY_MODEL을 비우면 agy의 기본 선택을 씁니다.")
+        return problem("account", f"{PROGRAM}에 없는 모델입니다. YEONE_OCR_AGY_MODEL을 비우면 agy의 기본 선택을 씁니다"
+                                  "(`agy models`로 목록 확인).")
     return None
 
 
-def _events(stdout: str) -> list[dict]:
-    events = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
+def _envelope(stdout):
+    """The `--output-format json` line: the last line of stdout that is a JSON object."""
+    out = (stdout or "").strip()
+    for candidate in [out] + [line.strip() for line in reversed(out.splitlines())]:
+        if candidate.startswith("{"):
+            try:
+                data = json.loads(candidate)
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                return data
+    return None
+
+
+def _error_text(stdout, stderr, data) -> tuple[str, str]:
+    """(all of the failure's words, the part to show): the AGY_ERROR line, the JSON error, stderr."""
+    parts = []
+    found = _AGY_ERROR.search(stderr or "")
+    if found:
         try:
-            value = json.loads(line)
+            error = json.loads(found.group(1))
+            if isinstance(error, dict):
+                parts.append(" · ".join(str(error[k]) for k in ("status", "code", "http_status", "message", "error") if error.get(k)))
         except ValueError:
-            continue
-        if isinstance(value, dict):
-            events.append(value)
-    return events
+            pass
+    error = data.get("error") if isinstance(data, dict) else None
+    said = error.get("message") if isinstance(error, dict) else error
+    if said:
+        parts.append(str(said))
+    full, detail = program_error(*parts, stderr, "" if data else stdout)
+    return full, (" / ".join(p for p in parts if p)[:400] if any(parts) else detail)
 
 
-def _kind(event: dict) -> str:
-    return str(event.get("event") or event.get("type") or "")
+_FENCE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?\s*```\s*$", re.DOTALL)
 
 
-def _result(events: list[dict]) -> dict | None:
-    """The last `result` event's payload (the event itself when the fields sit at its top level)."""
-    for event in reversed(events):
-        if _kind(event) == "result":
-            payload = event.get("result")
-            return payload if isinstance(payload, dict) else event
-    return None
-
-
-def _usage(result: dict) -> dict:
-    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-    tokens = {"input_tokens": 0, "output_tokens": 0}
+def _json_text(text: str) -> str:
+    """The answer as a JSON object string: strips a ``` fence or words around the one object."""
+    text = (text or "").strip()
+    fenced = _FENCE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
     try:
-        tokens["input_tokens"] = int(usage.get("input") or usage.get("input_tokens") or 0)
-        tokens["output_tokens"] = int(usage.get("output") or usage.get("output_tokens") or 0)
+        json.loads(text)
+        return text
+    except ValueError:
+        start, end = text.find("{"), text.rfind("}")
+        if 0 <= start < end:
+            try:
+                json.loads(text[start:end + 1])
+                return text[start:end + 1]
+            except ValueError:
+                pass
+    return text
+
+
+def _usage(data: dict) -> dict:
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    tokens = {"input_tokens": 0, "output_tokens": 0}
+    try:                                                 # informational only
+        tokens["input_tokens"] = int(usage.get("input_tokens") or usage.get("input") or 0)
+        tokens["output_tokens"] = int(usage.get("output_tokens") or usage.get("output") or 0)
     except (TypeError, ValueError):
         pass
     return tokens
 
 
-def _model_used(events: list[dict], result: dict, requested: str) -> str:
-    for source in (result, *[e for e in events if _kind(e) == "init"]):
-        name = source.get("model") if isinstance(source, dict) else None
-        if isinstance(name, str) and name:
-            return name
-    return label(requested)
+def _fits_argument(text: str) -> bool:
+    if sys.platform == "win32":
+        return len(text) <= _ARG_LIMIT_WINDOWS
+    return len(text.encode("utf-8")) <= _ARG_LIMIT_BYTES
 
 
 class SubscriptionClient:
-    """One `agy` call per request; same contract as claude_subscription.SubscriptionClient."""
+    """One `agy -p` run per request; same contract as claude_subscription.SubscriptionClient."""
 
     subscription = True
     plan = "gemini"
@@ -222,53 +308,72 @@ class SubscriptionClient:
         self._run = runner or subprocess.run
         self.timeout = timeout_seconds or timeout()
 
+    def _call(self, args, root):
+        try:
+            # input="": stdin is an empty, closed pipe (agy -p reads no stdin; an open one has hung it).
+            return self._run(args, input="", env=cli_env(), cwd=str(root), capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=self.timeout, **_NO_WINDOW)
+        except FileNotFoundError as exc:
+            raise SubscriptionError(INSTALL_HINT) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"{PROGRAM} 응답이 {self.timeout:.0f}초 안에 오지 않았습니다.") from exc
+
     def request(self, *, model_name, system, prompt, images, schema):
         """-> (text, complete, finish_reason, usage dict, actual model). Images are PNG bytes."""
         with tempfile.TemporaryDirectory(prefix="yeone-ocr-agy-") as folder:
             root = Path(folder).resolve()
-            paths = []
+            names = []
             for index, data in enumerate(images, 1):
-                path = root / f"image{index}.png"
-                path.write_bytes(data)
-                paths.append(str(path))
-            looked = ""
-            if paths:
-                looked = ("Before answering, open and look at each of these image files with your file viewing tool, "
-                          "in this order (they are the only files you need; do not edit or run anything):\n"
-                          + "\n".join(f"{i}. {p}" for i, p in enumerate(paths, 1)) + "\n\n")
-            content = (f"{system}\n\n---\n\n{looked}{prompt}\n\n"
-                       "Finish with the answer as the structured output required by the JSON Schema. "
-                       "Do not write, edit or run anything.")
-            message = json.dumps({"event": "user", "message": {"content": content}}, ensure_ascii=False) + "\n"
-            limit = int(self.timeout)
-            args = [self.cli, "--input-format", "stream-json", "--output-format", "stream-json",
-                    "--json-schema", json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
-                    "--add-dir", str(root), "--print-timeout", f"{limit}s"]
-            if model_name and model_name != label(""):
-                args += ["--model", model_name]
-            try:
-                proc = self._run(args, input=message, env=cli_env(), cwd=str(root), capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=limit + 60, **_NO_WINDOW)
-            except FileNotFoundError as exc:
-                raise SubscriptionError(INSTALL_HINT) from exc
-            except subprocess.TimeoutExpired as exc:
-                raise TimeoutError(f"{PROGRAM} 응답이 {limit}초 안에 오지 않았습니다.") from exc
-        events = _events(proc.stdout)
-        result = _result(events) or {}
-        structured = result.get("structured_output")
-        status_text = str(result.get("status") or "")
-        if proc.returncode == 0 and status_text.upper() == "SUCCESS" and structured is not None:
-            text = structured if isinstance(structured, str) else json.dumps(structured, ensure_ascii=False)
-            try:
-                json.loads(text)
-            except ValueError:
-                return text, False, "invalid_json", _usage(result), _model_used(events, result, model_name)
-            return text, True, "STOP", _usage(result), _model_used(events, result, model_name)
-        error = result.get("error")
-        said = error.get("message") if isinstance(error, dict) else error
-        full, detail = program_error(proc.stderr, *(json.dumps(e, ensure_ascii=False) for e in events if _kind(e) in ("error", "result")))
-        if said:
-            full, detail = f"{said}\n{full}", str(said)
-        if not detail:
-            detail = (f"상태 {status_text or '없음'} · 구조화된 답 없음" if events else "출력 없음")
-        raise failure(PROGRAM, detail, _classify, f"{PROGRAM} 실행 실패(코드 {proc.returncode}): {detail}", full=full)
+                (root / f"image{index}.png").write_bytes(data)
+                names.append(f"@image{index}.png")
+            attached = ""
+            if names:
+                attached = ("Attached images, in order: " + " ".join(names) + "\n"
+                            "They are image files in the current folder. If they are not already visible to you as "
+                            "images, open each of them with your file viewing tool before answering; that is the only "
+                            "tool you may use.\n\n")
+            message = (f"{system}\n\n---\n\n{attached}{prompt}\n\nDo not run commands, edit or create files, search "
+                       "the web or use any tool other than viewing the attached images. Answer with exactly one JSON "
+                       "object and nothing else (no code fence) that validates against this JSON Schema:\n"
+                       + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+            if not _fits_argument(message):
+                (root / "request.md").write_text(message, encoding="utf-8")
+                message = ("Read the file request.md in the current folder with your file viewing tool and follow "
+                           "its instructions exactly. It names the image files to view. Do not run commands, edit "
+                           "or create files, or use any other tool. Answer with exactly one JSON object.")
+            (root / "yeone-settings.json").write_text(json.dumps(RUN_SETTINGS), encoding="utf-8")
+            args = [self.cli, "-p", message, "--output-format", "json",
+                    "--settings", str(root / "yeone-settings.json"), "--disable-slash-commands"]
+            if isinstance(schema, dict) and schema.get("type") == "object":   # agy takes only an object root
+                (root / "schema.json").write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+                args += ["--json-schema", str(root / "schema.json")]
+            chosen = model_name if model_name and model_name != label("") else ""
+            proc = self._call(args + (["--model", chosen] if chosen else []), root)
+            if chosen and proc.returncode != 0 and _MODEL.search(
+                    _error_text(proc.stdout, proc.stderr, _envelope(proc.stdout))[0].lower()):
+                # A model this account's agy does not have: its own choice instead of losing the plan.
+                proc, model_name = self._call(args, root), ""
+        data = _envelope(proc.stdout)
+        state = str((data or {}).get("status") or "").upper()
+        reply = (data or {}).get("response")
+        structured = (data or {}).get("structured_output")
+        if proc.returncode != 0 or data is None or state != "SUCCESS" or (not isinstance(reply, str) and structured is None):
+            full, detail = _error_text(proc.stdout, proc.stderr, data)
+            if not detail:
+                detail = (f"상태 {state or '없음'} · 답 없음" if data else
+                          "출력 없음 — `agy`를 최신으로 올리세요(PowerShell에서 `agy update`)")
+            raise failure(PROGRAM, detail, _classify, f"{PROGRAM} 실행 실패(코드 {proc.returncode}): {detail}", full=full)
+        actual = data["model"] if isinstance(data.get("model"), str) and data.get("model") else label(model_name)
+        tokens = _usage(data)
+        if isinstance(structured, (dict, list)):
+            text = json.dumps(structured, ensure_ascii=False)
+        else:
+            text = _json_text(structured if isinstance(structured, str) else reply if isinstance(reply, str) else "")
+        ended = data.get("finished_reason")
+        if isinstance(ended, str) and ended:               # print_timeout / interrupted / error: a partial answer
+            return text, False, ended[:80], tokens, actual
+        try:
+            json.loads(text)
+        except ValueError:
+            return text, False, "invalid_json", tokens, actual
+        return text, True, "STOP", tokens, actual

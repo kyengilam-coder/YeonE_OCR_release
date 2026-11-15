@@ -5,8 +5,8 @@ program, which the person signed in to with their own account; it never reads, s
 token, and usage counts against that person's plan limits (no per-call API charge). Personal use only.
 
 Plan choice: --local-ai-plan or YEONE_OCR_AI_PLAN = auto (default) | claude | chatgpt | gemini.
-auto takes the first plan that is installed and signed in, in the order Claude, ChatGPT, Gemini
-(Claude first: the 2026-11 defaults were measured with it); a named plan is tried first, then the
+auto takes the first plan that is installed and signed in, in the order Google (Antigravity), ChatGPT,
+Claude (the user's choice, 2026-11: a run on one plan uses the Google account first); a named plan is tried first, then the
 others. Only a review left on auto without an API key looks at that provider's own plan first.
 
 During a run (Session): when a plan stops working — usage limit reached, sign-in expired, CLI
@@ -26,9 +26,22 @@ import sys
 import threading
 import time
 
-PLANS = ("claude", "chatgpt", "gemini")
+PLANS = ("gemini", "chatgpt", "claude")      # the automatic order: Google (Antigravity) → ChatGPT → Claude
 PLAN_CHOICES = ("auto",) + PLANS
-NAMES = {"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"}
+class _Names(dict):
+    """Plan names for people: the Google plan is shown by the program it runs on — "Antigravity" for
+    Antigravity CLI (personal Google accounts), "Gemini" for Gemini CLI (Code Assist Standard/Enterprise)."""
+
+    def __getitem__(self, plan):
+        if plan == "gemini":
+            try:
+                return "Antigravity" if module("gemini").__name__.endswith("antigravity_subscription") else "Gemini"
+            except Exception:                     # a name must never stop a run
+                pass
+        return super().__getitem__(plan)
+
+
+NAMES = _Names({"claude": "Claude", "chatgpt": "ChatGPT", "gemini": "Gemini"})
 PROGRAMS = {"claude": "Claude Code", "chatgpt": "Codex CLI", "gemini": "Gemini CLI"}
 PROVIDERS = {"claude": "anthropic", "chatgpt": "openai", "gemini": "gemini"}
 _MODULES = {"claude": "claude_subscription", "chatgpt": "chatgpt_subscription", "gemini": "gemini_subscription"}
@@ -151,7 +164,7 @@ def _minutes(seconds: float) -> str:
 
 def order(requested: str | None = None, prefer: str | None = None) -> list:
     """Plans in the order they are tried: the named plan (or `prefer`, a provider or a plan), then
-    Claude, ChatGPT, Gemini."""
+    Google (Antigravity), ChatGPT, Claude."""
     choice = plan_choice(requested)
     first = choice if choice != "auto" else (prefer if prefer in PLANS else plan_for_provider(prefer))
     return ([first] if first else []) + [plan for plan in PLANS if plan != first]
@@ -189,7 +202,7 @@ def choose(requested_mode: str | None, provider: str, api_key: str, plan: str | 
     mode = auth_mode(requested_mode)
     if mode == "api" or (mode == "auto" and api_key):
         return None, ""
-    # auto without a key: that provider's own plan first; subscription: the fixed order (Claude first).
+    # auto without a key: that provider's own plan first; subscription: the fixed order (Google first).
     chosen, reason = pick(plan, prefer=provider if mode == "auto" else None, runner=runner)
     if chosen:
         return chosen, note(chosen)
@@ -214,6 +227,10 @@ def accepts_model(plan: str, name: str | None) -> bool:
         return name.startswith("claude") or name in ("opus", "sonnet", "haiku", "fable")
     if plan == "chatgpt":
         return name.startswith(("gpt", "codex", "o1", "o3", "o4"))
+    if module("gemini").__name__.endswith("antigravity_subscription"):
+        # The run's Gemini model is an API model name (gemini-3.1-pro-preview …); agy has its own model list
+        # and fails a run on a model it does not know. It chooses for the account (YEONE_OCR_AGY_MODEL names one).
+        return False
     return name.startswith("gemini")
 
 

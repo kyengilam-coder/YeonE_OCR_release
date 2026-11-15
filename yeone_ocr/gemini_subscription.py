@@ -199,7 +199,7 @@ INELIGIBLE_HINT = ("이 Google 계정은 Gemini CLI를 쓸 수 없다고 Google�
 
 UNSUPPORTED_CLIENT_HINT = ("Google이 2026-06-18부터 개인 Google 계정(무료 등급·Google AI Pro·Ultra)의 Gemini CLI 로그인을 끝냈습니다"
                            "(UNSUPPORTED_CLIENT) — 다시 로그인해도 같은 답입니다. Gemini 구독은 후속 프로그램인 "
-                           "Antigravity CLI(agy)로 연결됩니다: 설정 「AI 판독기」 ①에서 'Gemini (Antigravity CLI)'를 고르고 "
+                           "Antigravity CLI(agy)로 연결됩니다: 설정 「AI 판독기」 ①에서 'Antigravity (Google 계정 · Gemini)'를 고르고 "
                            "[설치] → [로그인 창 열기]로 Google 계정에 로그인한 뒤 [상태 확인]을 누르십시오. "
                            "그때까지는 Claude·ChatGPT 구독으로 진행합니다(②에 Gemini API 키를 넣어도 됩니다 — 호출마다 요금).")
 

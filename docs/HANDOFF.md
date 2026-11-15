@@ -1,10 +1,8 @@
 # 연어OCR 개발 인수인계
 
-## 2026-11-15: 1.2.15 엔진 혼동 장부 · 글자 이미지 조각
+## 2026-11-15: 1.2.15 Antigravity 구독을 실측대로
 
-`yeone_ocr/confusion_memory.py`: `aligned_page(page)`(기준 판독 ↔ 현재 교정문, 교정 이력을 되돌려 글자마다 넣은 주체 'engine'/human/ai_confirmed/ai_auto — 고친 뒤 들어온 기준 판독, 다른 기준에서 나온 AI 채택, 30% 넘게 바뀐 쪽은 None) · `page_observations` · `harvest_project`(문서 `_id` 단위로 바꿔 넣음) · `LearnedConfusions`(집계, `risky(engine)`, `hints`) · `load_for_review`(비었거나 꺼졌으면 None → 계획 불변). 장부 경로 `YEONE_OCR_CONFUSIONS_PATH`. `comparison_ai.prepare_plan(confusions=)` → `_selective_targets(learned)` → `_learned_targets`(신뢰도 통과한 낱말, `quiet=True`라 unlocalized로 세지 않음), 시각 단계 대상에 `learned_confusions`, 프롬프트에 LEARNED CONFUSIONS 문단(힌트가 있을 때만). `ReviewPolicy`에 넣지 않은 까닭: `asdict(policy)`가 지문에 들어가 기존 프로젝트의 이어하기가 모두 다시 호출된다. `accept_candidate`/`accept_ai_proposal(actor=)`: 비교 창 human, `local_first._accept_ai`·`local_options.apply_votes` auto.
-
-`yeone_ocr/glyph_samples.py`: `page_samples`(엔진 낱말 상자 + 여백 4, `_map`으로 낱말 경계를 교정문 위치로 — 경계 삽입·고친 자리 한가운데면 버림, `_editorial`이면 버림) · `collect_project`(문서 폴더 `manifest.json`, 새 조각 있는 쪽만 렌더링, 원본 바뀌면 경고) · `export`(rec_gt.txt) · 경로 `YEONE_OCR_GLYPH_SAMPLES_PATH`. 거두는 곳: `local_first._command`의 finally(중지 시 조각은 건너뜀), `ComparisonEditor.save_project` 작업 스레드(조각 포함), `_save_before_close`(장부만 — UI 스레드라 렌더링하지 않음). `tests/conftest.py`가 두 경로를 시험마다 임시 폴더로, `frozen_smoke.run`도 임시 폴더로 돌린다. 창은 `yeone_ocr/gui_confusions.py`(`App.open_confusion_ledger`, [더 보기] 메뉴).
+`yeone_ocr/antigravity_subscription.py`를 Windows · agy 1.5.9 · Google AI Pro에서 실제로 확인한 방식으로 다시 썼다: `agy -p <지시문> --output-format json --settings yeone-settings.json --disable-slash-commands --json-schema schema.json [--model]`, 표준 입력은 빈 채로 닫음, 그림은 `@image1.png`, 답은 `structured_output`(없으면 `response`의 JSON), 16,000자가 넘으면 `request.md`. `RUN_SETTINGS = {"agentMode": "", "toolPermission": "request-review"}` — agy는 저장된 모드가 없으면 Auto로 시작하고 `--mode`에는 default가 없다(경고 뒤 Auto). 상태는 `agy --version` → `agy -p /quota`(종료 코드 0 = 로그인; 로그인 문구가 한도 문구보다 먼저). `subscriptions.accepts_model`은 Gemini 계획이 agy일 때 창의 API 모델 이름(`gemini-3.1-pro-preview`)을 거절한다(1.2.14는 이것을 `--model`로 넘겨 실행이 실패하고 구독이 빠졌다). 모델이 없다는 실패면 `--model` 없이 한 번 더. `subscriptions.NAMES`는 `_Names`: Gemini 계획의 모듈이 agy면 「Antigravity」. 창의 라벨(`AI_PLAN_LABELS`·`SETUP_LABELS`·`AI_TARGET_LABELS`)도 Antigravity. 실측 기록과 남은 확인은 `docs/AI_REVIEW.md` 「Gemini 구독」 절. 시험: `tests/test_antigravity_subscription.py`(실측 출력 모양).
 
 ## 2026-11-13: 1.2.14 엔진 관리 · Gemini는 Antigravity CLI로 · 구독 연결 시험 바로잡기
 
