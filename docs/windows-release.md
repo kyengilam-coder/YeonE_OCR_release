@@ -1,3 +1,13 @@
+# Windows 1.2.15 설치판
+
+1.2.15는 1.2.14의 설치 구성을 그대로 쓰고(엔진 관리 · 새 PP-OCRv6 번들 — 아래 「다음 판 준비」 절과 1.2.14 절), Antigravity(Gemini) 구독 연결을 실제 계정에서 확인한 방식으로 바꾼 판이다. Antigravity CLI는 설치판에 넣지 않는다 — 사용자가 설정 「AI 판독기」 ①의 [설치](Google 공식 설치 명령)로 설치하고 자기 계정으로 로그인한다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.15**로 맞춘다. 빌드 절차를 사용할 때 `OutputDirectory`는 `dist/1.2.15`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.15), [AI 검토 문서](AI_REVIEW.md)의 Antigravity 확인 목록 — 「Antigravity ● 사용 가능」, [연결 시험] 「Antigravity: 응답함 · 모델 agy-auto」, `tools\check_antigravity.py`, 계정을 「Antigravity」로 골라 실제 책 한 쪽 — 그리고 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.15 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.15)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # 다음 판(미배포) 준비: 엔진 관리
 
 1.2.13 다음 판에는 [엔진 관리](release-notes.md)가 들어간다. 설치 구성에서 바뀌는 것:

@@ -105,13 +105,13 @@ class LocalFirstGuiTests(unittest.TestCase):
         row.grid.assert_called_once()
         label.configure.assert_called_with(text="Claude 구독")
         values = box.configure.call_args.kwargs["values"]
-        self.assertEqual(values, ["자동(순서대로) (다음: ChatGPT 구독)", "ChatGPT 구독", "Gemini 구독", "API 키"])
+        self.assertEqual(values, ["자동(순서대로) (다음: ChatGPT 구독)", "ChatGPT 구독", "Antigravity 구독", "API 키"])
         self.assertEqual(app.v_ai_next.get(), values[0])
         with mock.patch("yeone_ocr.subscriptions.switch", return_value="넘김") as switch, \
                 mock.patch("yeone_ocr.subscriptions.state", return_value=None):
             gui.App.switch_subscription(app)                                # 고르지 않음: 정해진 순서
             self.assertEqual(app.q.get(timeout=5), ("log", "  넘김\n"))
-            app.v_ai_next.set("Gemini 구독")
+            app.v_ai_next.set("Antigravity 구독")
             gui.App.switch_subscription(app)
             app.q.get(timeout=5); app.q.get(timeout=5)
         self.assertEqual([c.args for c in switch.call_args_list], [(None,), ("gemini",)])
@@ -288,7 +288,7 @@ class LocalFirstGuiTests(unittest.TestCase):
             gui.App.install_plan(gemini)
             self.assertIn("antigravity.google/cli/install", ask.call_args.args[1])
             self.assertEqual(gemini.q.get(timeout=5)[0], "log")
-            self.assertEqual(gemini.q.get(timeout=5), ("setup_done", "Gemini (Antigravity CLI) 설치", 0))
+            self.assertEqual(gemini.q.get(timeout=5), ("setup_done", "Antigravity (Google 계정) 설치", 0))
         self.assertEqual(len(ran), 1)
         self.assertTrue(any("antigravity.google/cli/install" in part for part in ran[0]))
         app._setup_busy = False

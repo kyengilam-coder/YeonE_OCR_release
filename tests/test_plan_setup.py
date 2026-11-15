@@ -63,3 +63,19 @@ def test_login_opens_the_program_in_a_new_window(monkeypatch, platform):
     if platform == "linux":
         assert "터미널에서 실행하세요: /bin/gemini" in plan_setup.open_login("gemini", "/bin/gemini", popen=opened.append)
         assert opened == []
+
+
+def test_a_standalone_codex_is_updated_by_openais_installer(monkeypatch):
+    """Codex 0.139.0 installed by chatgpt.com/codex/install.ps1 kept running after [설치] updated npm's copy."""
+    monkeypatch.setattr(plan_setup, "find_npm", lambda: "C:/node/npm.cmd")
+    monkeypatch.setattr(plan_setup.sys, "platform", "win32")
+    from yeone_ocr import chatgpt_subscription
+    monkeypatch.setattr(chatgpt_subscription, "candidates", lambda: ["C:/Users/me/AppData/Local/OpenAI/Codex/bin/codex.exe",
+                                                                    "C:/Users/me/AppData/Roaming/npm/codex.cmd"])
+    command = plan_setup.install_command("chatgpt")
+    assert command[0] == "powershell.exe" and "https://chatgpt.com/codex/install.ps1" in command[-1]
+    assert "CODEX_NON_INTERACTIVE=1" in command[-1]
+    monkeypatch.setattr(chatgpt_subscription, "candidates", lambda: ["C:/Users/me/AppData/Roaming/npm/codex.cmd"])
+    assert plan_setup.install_command("chatgpt") == ["C:/node/npm.cmd", "install", "-g", "@openai/codex"]
+    assert "install.ps1" in chatgpt_subscription._update_command("C:/x/OpenAI/codex.exe")
+    assert "npm install" in chatgpt_subscription._update_command("C:/Users/me/AppData/Roaming/npm/codex.cmd")

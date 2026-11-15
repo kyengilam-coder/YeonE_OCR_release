@@ -18,8 +18,14 @@ SCHEMA = {"type": "object", "additionalProperties": False, "required": ["lines"]
           "properties": {"lines": {"type": "array", "items": {"type": "string"}}}}
 
 
+DEFAULT_ORDER = subscriptions.PLANS            # the shipped automatic order (Google → ChatGPT → Claude)
+
+
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
+    # The session mechanics below (moving on, switching, resting) are written against one fixed order;
+    # the shipped order has its own test (test_the_automatic_order_is_google_then_chatgpt_then_claude).
+    monkeypatch.setattr(subscriptions, "PLANS", ("claude", "chatgpt", "gemini"))
     subscriptions.reset_status_cache(); subscriptions.reset_exhausted()
     codex.reset_model_choice(); claude._npm_prefix_cache.clear()
     for name, binary in (("CODEX", "codex"), ("GEMINI", "gemini"), ("CLAUDE", "claude")):
@@ -210,6 +216,20 @@ def _with(patches):
     for patch in patches:
         stack.enter_context(patch)
     return stack
+
+
+def test_the_automatic_order_is_google_then_chatgpt_then_claude(monkeypatch):
+    """With one plan in use (no split), the Google account (Antigravity) goes first, then ChatGPT, then Claude."""
+    monkeypatch.setattr(subscriptions, "PLANS", DEFAULT_ORDER)
+    assert DEFAULT_ORDER == ("gemini", "chatgpt", "claude") and subscriptions.order() == ["gemini", "chatgpt", "claude"]
+    with _with(_states(claude=True, chatgpt=True, gemini=True)):
+        assert subscriptions.pick()[0] == "gemini"
+        assert subscriptions.choose("subscription", "anthropic", "")[0] == "gemini"      # the fixed order
+        assert subscriptions.pick("claude")[0] == "claude"                      # a named plan still goes first
+    with _with(_states(claude=True, chatgpt=True)):
+        assert subscriptions.pick()[0] == "chatgpt"
+    with _with(_states(claude=True)):
+        assert subscriptions.pick()[0] == "claude"
 
 
 def test_auto_takes_claude_then_chatgpt_then_gemini():
@@ -889,7 +909,8 @@ def test_codex_with_no_model_left_is_an_account_problem_not_a_refused_request():
     with pytest.raises(SubscriptionError) as caught:
         client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
     assert not isinstance(caught.value, RequestRejected)                        # the session moves to the next plan
-    assert "모델을 모두 거부" in str(caught.value) and "npm install -g @openai/codex" in str(caught.value)
+    # The update command fits the Codex that ran (the fake is codex.exe on Windows: OpenAI's installer, else npm).
+    assert "모델을 모두 거부" in str(caught.value) and codex._update_command(client.cli) in str(caught.value)
     calls.clear()
     with pytest.raises(SubscriptionError):
         client.request(model_name="gpt-5.5", system="s", prompt="p", images=[], schema=SCHEMA)
@@ -993,7 +1014,8 @@ def test_codex_whose_models_need_a_newer_cli_says_so_and_is_not_offered_as_usabl
     with pytest.raises(SubscriptionError) as caught:
         client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
     text = str(caught.value)
-    assert text.startswith("설치된 Codex CLI 0.130.0가 오래되었습니다") and "[설치]" in text and "@openai/codex@latest" in text
+    assert text.startswith("설치된 Codex CLI 0.130.0가 오래되었습니다") and "[설치]" in text
+    assert codex._update_command(client.cli) in text and client.cli in text           # the command and the file that ran
     state = codex.status(runner=run)                                               # not the cached '사용 가능'
     assert state["usable"] is False and state["closed"] == "Codex CLI 업데이트 필요" and state["reason"] == text
     assert codex.status(refresh=True, runner=run)["usable"] is False               # [상태 확인] keeps it
@@ -1010,3 +1032,27 @@ def test_codex_refused_by_the_plan_points_at_the_plan_not_the_cli(tmp_path):
     assert text.startswith("이 ChatGPT 계정이 Codex에서 시도한 모델을 모두 거부했습니다") and "Plus 이상" in text
     assert "/model" in text and "YEONE_OCR_CHATGPT_MODEL" in text
     assert codex.status(refresh=True, runner=_refusing_runner([]))["closed"] == "모델 거부"
+
+
+def test_the_newest_of_several_codex_clis_runs(monkeypatch, tmp_path):
+    """An old standalone codex.exe ahead of npm's codex.cmd on PATH kept running 0.139.0 after [설치] updated
+    npm's copy; OpenAI then refused every model. The newest by --version runs, and the refusal names the paths."""
+    monkeypatch.delenv("YEONE_OCR_CODEX_CLI_PATH", raising=False)
+    old_dir, npm_dir = tmp_path / "standalone", tmp_path / "npm"
+    names = ("codex.exe",) if os.name == "nt" else ("codex",)
+    old, new = old_dir / names[0], npm_dir / names[0]
+    for path in (old, new):
+        path.parent.mkdir()
+        path.write_text("")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(old_dir), str(npm_dir)]))
+    monkeypatch.setattr(codex, "npm_global_cli", lambda name: None)
+    assert codex.candidates() == [str(old), str(new)] and codex.find_cli() == str(old)      # PATH order alone
+
+    def run(args, **kwargs):
+        if args[1:] == ["--version"]:
+            return SimpleNamespace(returncode=0, stdout="codex-cli 0.139.0" if args[0] == str(old) else "codex-cli 0.169.0", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="Logged in using ChatGPT")
+    state = codex.status(refresh=True, runner=run)
+    assert state["usable"] and state["path"] == str(new) and codex.find_cli() == str(new)
+    codex.reset_status_cache()
+    assert codex.find_cli() == str(old)                                   # forgotten with the status

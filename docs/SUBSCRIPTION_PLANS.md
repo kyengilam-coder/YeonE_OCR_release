@@ -7,25 +7,26 @@
 | --- | --- | --- | --- |
 | Claude (Pro/Max) | Claude Code `claude -p` | `irm https://claude.ai/install.ps1 \| iex` | `claude auth login` |
 | ChatGPT (Plus/Pro/Business/Edu/Enterprise) | OpenAI Codex CLI `codex exec` | `npm install -g @openai/codex` | `codex login` → **Sign in with ChatGPT** |
-| Gemini (Google 계정: 무료, Google AI Pro/Ultra, Code Assist) | Gemini CLI `gemini -p` | `npm install -g @google/gemini-cli` | `gemini` 실행 → **Login with Google** → `/quit` |
+| Antigravity (개인 Google 계정: 무료, Google AI Pro/Ultra) | Google Antigravity CLI `agy -p` | `irm https://antigravity.google/cli/install.ps1 \| iex` | `agy` 실행 → 열리는 Google 로그인 화면 |
+| Gemini (Gemini Code Assist Standard/Enterprise) | Gemini CLI `gemini -p` | `npm install -g @google/gemini-cli` | `gemini` 실행 → **Login with Google** → `/quit` |
 
-Codex CLI와 Gemini CLI는 Node.js(20 이상)가 필요하다. 로그인 상태는 `yeone-ocr plans`로 확인한다
+2026-06-18부터 Gemini CLI는 개인 Google 계정을 받지 않는다. 그래서 Google 계정 구독은 Antigravity CLI가 있으면 그것으로 연결하고, 화면에는 「Antigravity」로 보인다(자세한 방식과 실측은 [AI 검토 문서](AI_REVIEW.md)의 「Gemini 구독」 절). 창의 Gemini 모델 이름(API 키용)은 Antigravity에 넘기지 않는다 — Antigravity가 계정에 맞춰 고른다(`YEONE_OCR_AGY_MODEL`로 바꿈).
+
+Codex CLI와 Gemini CLI는 Node.js(20 이상)가 필요하다. Antigravity CLI는 Node.js 없이 실행 파일 하나(`%LOCALAPPDATA%\agy\bin\agy.exe`)다. 로그인 상태는 `yeone-ocr plans`로 확인한다
 (상태 명령만 실행하며 모델은 부르지 않는다).
 
 ## 고르기
 
-- 설정 탭 「구독 계정 판독」: 체크(기본 켬)와 계정 선택 — 자동 / Claude / ChatGPT / Gemini.
+- 설정 탭 「구독 계정 판독」: 체크(기본 켬)와 계정 선택 — 자동 / Antigravity / ChatGPT / Claude.
 - 명령줄: `--local-ai-plan auto|claude|chatgpt|gemini`, 환경 변수 `YEONE_OCR_AI_PLAN`.
-- **자동**은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고른다. Claude가 먼저인 까닭은 2026-11의 기본 설정
-  (쪽 판독 prefer, 4구간씩 1024화소 조각, 확신한 제안 반영)을 Claude로 쟀기 때문이다. ChatGPT·Gemini에서도 같은
-  설정을 쓰지만 정확도는 아직 재지 않았다.
+- **자동**은 로그인된 것 중 Antigravity(Google) → ChatGPT → Claude 순으로 고른다. Google 계정이 먼저다(2026-11 사용자 결정 — 구독 하나로 돌리면 Google 계정부터). 기본 설정(쪽 판독 prefer, 4구간씩 1024화소 조각, 확신한 제안 반영)은 Claude로 쟀고, 다른 구독의 정확도는 아직 재지 않았다.
 - 계정을 고르면 그 계정부터 쓰고, 쓸 수 없으면 나머지를 위 순서대로 쓴다.
 - 끄기: 체크 해제, 또는 `--local-ai-page off --local-ai-auth api`.
 
 ## 사용량 한도에 닿으면: 다른 구독 → API 키, 한도가 풀리면 다시
 
 실행 중에 쓰던 구독 계정이 사용량 한도(5시간·주간·일일)에 닿거나 로그인이 풀리거나 프로그램을 실행할 수 없으면,
-**같은 요청을 로그인된 다음 구독 계정으로 다시 보낸다**(Claude → ChatGPT → Gemini 순, 지금 쉬는 계정은 건너뜀).
+**같은 요청을 로그인된 다음 구독 계정으로 다시 보낸다**(Antigravity(Google) → ChatGPT → Claude 순, 지금 쉬는 계정은 건너뜀).
 쪽 판독과 의심 구간 검증이 한 연결을 같이 쓰므로, 한쪽에서 넘어가면 다른 쪽도 넘어간 계정을 쓴다.
 
 계정이 빠지는 기간은 까닭에 따라 다르다.
@@ -53,7 +54,7 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`.
 
 - **넘길 곳을 고르고 누르면**: 지금 쓰는 구독을 멈추고 고른 계정에 연결한다. 답을 기다리던 요청이 있으면 그 프로그램을
   끄고(자식 프로그램까지) 같은 요청을 새 계정으로 다시 보낸다. 고른 계정이 로그인되어 있지 않으면 정해진 순서로 고른다.
-- **고르지 않고(자동) 누르면**: 정해진 순서(Claude → ChatGPT → Gemini, 이번 실행에서 넘긴·실패한 계정은 건너뜀)의
+- **고르지 않고(자동) 누르면**: 정해진 순서(Antigravity(Google) → ChatGPT → Claude, 이번 실행에서 넘긴·실패한 계정은 건너뜀)의
   다음 계정에 연결하고, 남은 구독이 없으면 API 키로 간다. 줄의 '자동(다음: …)'이 갈 곳을 미리 보여 준다.
 - 직접 넘긴 계정은 이번 실행에서 저절로 돌아오지 않는다. 넘길 곳에서 직접 고르면 다시 쓴다. 쪽 나눠 보내기에서 같은 계정을 쓰던 다른 연결도 함께 넘어간다.
 - 넘길 곳이 하나도 없으면 지금 연결을 그대로 쓴다. 넘길 때마다 진행 기록에 적는다.
@@ -112,6 +113,6 @@ API 요금을 쓰지 않으려면 `--no-local-ai-api-fallback`.
 
 설정 「AI 판독기」 ①의 「로그인 상태」에 마우스를 올리면 계정마다 찾은 프로그램 경로와 이유가 나온다(명령줄 `yeone-ocr plans`도 같음).
 
-- **설치 안 됨**: 그 회사의 공식 프로그램(Codex CLI · Gemini CLI)을 찾지 못함. Gemini 구독(Google AI Pro 등)이 있어도 연어OCR은 **Gemini CLI**를 통해서만 쓴다 — PowerShell에서 `npm install -g @google/gemini-cli` 뒤 `gemini`를 한 번 실행해 'Login with Google'. PATH에 없어도 npm 전역 폴더(`%APPDATA%\npm`)·Node 설치 폴더·nvm·Volta에서 찾는다. 다른 곳에 있으면 환경 변수 `YEONE_OCR_GEMINI_CLI_PATH`로 지정.
+- **설치 안 됨**: 그 회사의 공식 프로그램(Codex CLI · Gemini CLI)을 찾지 못함. 개인 Google 계정(무료 · Google AI Pro/Ultra)은 **Antigravity CLI**가 필요하다 — PowerShell에서 `irm https://antigravity.google/cli/install.ps1 | iex` 뒤 `agy`를 한 번 실행해 로그인(다른 곳에 있으면 `YEONE_OCR_AGY_CLI_PATH`). Gemini CLI(Code Assist Standard/Enterprise)는 `npm install -g @google/gemini-cli` 뒤 `gemini`를 한 번 실행해 'Login with Google'. PATH에 없어도 npm 전역 폴더(`%APPDATA%\npm`)·Node 설치 폴더·nvm·Volta에서 찾는다. 다른 곳에 있으면 환경 변수 `YEONE_OCR_GEMINI_CLI_PATH`로 지정.
 - **실행 실패**: 찾았지만 `gemini --version`이 실패함 — 이유(종료 코드·오류 문구)가 함께 나온다. 흔한 원인은 Node.js가 20보다 낮음.
 - **로그인 필요**: 설치됐지만 Google 계정 로그인이 아님 — `gemini`에서 /auth로 'Login with Google'.
