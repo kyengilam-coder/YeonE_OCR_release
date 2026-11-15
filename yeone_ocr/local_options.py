@@ -98,7 +98,7 @@ def apply_votes(project, number) -> int:
             continue                                            # strict majority of the eligible engines
         engine = next(e for e in eligible if suggestion["candidates"][e] == value)
         try:
-            project.accept_candidate(number, suggestion["id"], engine)
+            project.accept_candidate(number, suggestion["id"], engine, actor="auto")
         except ComparisonError:
             continue
         accepted += 1

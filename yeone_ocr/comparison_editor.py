@@ -709,6 +709,8 @@ class ComparisonEditor(tk.Toplevel):
         project = self.project
         def worker(_stop, _generation, _job):
             project.save(path)
+            from .confusion_memory import harvest_quietly
+            harvest_quietly(project)
             return "saved", str(path)
         self._start_job("원시 결과와 교정 이력을 함께 저장하는 중…", worker)
 
@@ -1080,6 +1082,7 @@ class ComparisonEditor(tk.Toplevel):
         project = self.project
         def worker(stop, _generation, _job):
             from .comparison_ai import AISettings, ReviewPolicy, prepare_plan
+            from .confusion_memory import load_for_review
             settings = AISettings(provider=provider, model=model)
             settings = replace(settings, max_calls=max_calls,
                                max_total_output_tokens=max_calls * settings.max_output_tokens)
@@ -1087,7 +1090,8 @@ class ComparisonEditor(tk.Toplevel):
                                            preserve_variants=True, visual_scope=policy.get("visual_scope", "auto"),
                                            selective=policy.get("visual_scope", "auto") != "page")
             plan = prepare_plan(project, pages, selected_policy, settings=settings,
-                                suggestion_ids=identifiers, force=force, should_stop=stop.is_set)
+                                suggestion_ids=identifiers, force=force, should_stop=stop.is_set,
+                                confusions=load_for_review())
             return "ai-plan", (plan, api_key, project, bool(identifiers), key_count)
         self._start_job("AI에 보낼 이미지와 문장 범위를 준비합니다. 아직 외부로 전송하지 않습니다.", worker)
 
@@ -1266,7 +1270,7 @@ class ComparisonEditor(tk.Toplevel):
             return
         self._commit_text()
         try:
-            self.project.accept_ai_proposal(self.page_number, item["review_id"], item["id"])
+            self.project.accept_ai_proposal(self.page_number, item["review_id"], item["id"], actor="human")
             self._populate_page()
             self._update_page(self.page_number)
             self._schedule_recovery()
@@ -1359,7 +1363,7 @@ class ComparisonEditor(tk.Toplevel):
             return
         self._commit_text()
         try:
-            self.project.accept_candidate(self.page_number, self._selected_suggestion["id"], self.candidate.get())
+            self.project.accept_candidate(self.page_number, self._selected_suggestion["id"], self.candidate.get(), actor="human")
             self._populate_page()
             self._update_page(self.page_number)
             self._schedule_recovery()
@@ -1833,6 +1837,8 @@ class ComparisonEditor(tk.Toplevel):
                 self.status.set(f"프로젝트 저장 실패: {exc} · 복구 사본은 보존했습니다. 다른 이름으로 저장하십시오.")
                 self.recovery_close_button.pack(side="right", padx=(8, 0))
                 return False
+            from .confusion_memory import harvest_quietly
+            harvest_quietly(self.project)
         return True
 
     def _close_from_recovery(self):

@@ -2732,6 +2732,15 @@ def build_parser():
     p.add_argument("--test", action="store_true",
                    help="연결 시험: 쓸 수 있는 계정마다 작은 요청 하나를 실제로 보내 답하는지, 어느 모델인지, 실패하면 그 이유를 보임")
     p.set_defaults(fn=cmd_plans)
+    p = sub.add_parser("confusions", help="엔진 혼동 장부: 로컬 엔진이 자주 틀린 글자 보기·제외·초기화(모델 호출 없음)")
+    p.add_argument("--top", type=int, default=30, metavar="N", help="보일 줄 수(기본 30)")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--reset", action="store_true", help="장부를 비움(교정본·비교 프로젝트는 그대로)")
+    action.add_argument("--enable", action="store_true", help="검증 경로에 장부를 씀")
+    action.add_argument("--disable", action="store_true", help="장부를 모으기만 하고 검증 경로에는 쓰지 않음")
+    action.add_argument("--exclude", nargs=3, metavar=("엔진", "읽은글자", "확정글자"), help="잘못 쌓인 쌍을 제외")
+    action.add_argument("--include", nargs=3, metavar=("엔진", "읽은글자", "확정글자"), help="제외한 쌍을 되살림")
+    p.set_defaults(fn=cmd_confusions)
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
     p = sub.add_parser("read"); common(p); read_opts(p); p.set_defaults(fn=cmd_read)
     p = sub.add_parser("estimate", help="판독 전 호출·토큰·비용 어림"); common(p); read_opts(p)
@@ -2833,6 +2842,9 @@ def build_parser():
                         "AI는 큰 이미지를 줄여서 보기 때문에 쪽 크기의 글 덩어리에서 작은 한글이 흐려짐. 예: 1024")
     p.add_argument("--local-ai-accept", action=argparse.BooleanOptionalAction, default=None,
                    help="AI 검증이 확신하고 안전 검사를 통과한 수정 제안을 본문에 바로 반영(초록, 되돌릴 수 있음). 기본: 구독 계정이면 켬, 아니면 끔")
+    p.add_argument("--local-learned-confusions", action=argparse.BooleanOptionalAction, default=True,
+                   help="엔진 혼동 장부(로컬 엔진별로 자주 틀린 글자)를 써서, 신뢰도가 높아도 그런 글자가 든 자리를 AI 검증에 보탬. "
+                        "글자를 바꾸지는 않음(기본: 켬). 끄려면 --no-local-learned-confusions")
     p.add_argument("--local-ai-batch", type=int, choices=range(1, 5), metavar="1-4", default=None,
                    help="의심 구간 AI 검증 한 호출에 넣을 구간 수(기본: 구독 계정이면 4, 아니면 1)")
     p.add_argument("--local-ai-subscription-calls", type=int, default=1000, metavar="N",
@@ -2891,6 +2903,28 @@ def build_parser():
     return ap
 
 
+def cmd_confusions(args):
+    """Show or manage the per-engine confusion ledger; touches no document or project."""
+    from . import confusion_memory as memory
+    try:
+        if args.reset:
+            memory.reset(); log("엔진 혼동 장부를 비웠습니다.")
+        elif args.enable or args.disable:
+            memory.set_enabled(bool(args.enable)); log("검증 경로에 엔진 혼동 장부를 " + ("씁니다." if args.enable else "쓰지 않습니다."))
+        elif args.exclude:
+            memory.suppress(*args.exclude); log("제외했습니다: " + " ".join(args.exclude))
+        elif args.include:
+            memory.unsuppress(*args.include); log("되살렸습니다: " + " ".join(args.include))
+    except (OSError, ValueError) as exc:
+        log(f"엔진 혼동 장부를 바꾸지 못했습니다: {exc}"); return 2
+    learned = memory.LearnedConfusions.load()
+    if learned.warning:
+        log(learned.warning)
+    for line in memory.summary_lines(learned, top=max(1, args.top)):
+        log(line)
+    return 0
+
+
 def cmd_plans(args):
     """Which signed-in plans this PC can use; runs only the CLIs' status commands."""
     from . import subscriptions
@@ -2936,7 +2970,7 @@ def main(argv=None):
     global LOCAL_API_CALLS
     LOCAL_API_CALLS = 0
     args = build_parser().parse_args(argv)
-    if args.cmd in ("compare-engines", "plans"):
+    if args.cmd in ("compare-engines", "plans", "confusions"):
         return args.fn(args)
     from .reader_gemini import set_call_cap, set_cancel_event
     set_call_cap(getattr(args, "max_calls", 0) or 0)        # 호출 상한은 명령마다 새로 센다(창 프로그램은 한 프로세스에서 명령을 여럿 돌린다)
