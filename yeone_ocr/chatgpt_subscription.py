@@ -112,6 +112,14 @@ def candidates() -> list:
     return found
 
 
+def _update_command(cli: str) -> str:
+    """How to update the Codex CLI that runs: npm's copy through npm, OpenAI's standalone one through its installer."""
+    low = (cli or "").replace("/", "\\").lower()
+    if low.endswith(".exe") and "\\npm\\" not in low and "node_modules" not in low:
+        return "irm https://chatgpt.com/codex/install.ps1 | iex"
+    return "npm install -g @openai/codex@latest"
+
+
 def _version_of(cli: str, runner) -> tuple:
     try:
         proc = runner([cli, "--version"], env=cli_env(), cwd=_empty_dir(), capture_output=True, text=True,
@@ -398,13 +406,13 @@ class SubscriptionClient:
             head = (f"설치된 {cli}가 오래되었습니다 — OpenAI가 {', '.join(newer[:3])}{' 등' if len(newer) > 3 else ''}은 "
                     f"새 Codex가 필요하다고 답했고, 이 CLI의 기본 모델({refused.model or '기본값'})은 ChatGPT 계정에서 더 이상 쓰지 않습니다({where}). ")
             return (head + "설정 「AI 판독기」 ①에서 'ChatGPT (Codex CLI)'를 고르고 [설치]를 눌러 최신으로 올린 뒤 "
-                    "[상태 확인] → [연결 시험]을 다시 하십시오(PowerShell: npm install -g @openai/codex@latest). "
+                    f"[상태 확인] → [연결 시험]을 다시 하십시오(PowerShell: {_update_command(self.cli)}). "
                     f"(시도한 모델: {listed} · 원문: {refused.detail[:200]})")
         return (f"이 ChatGPT 계정이 Codex에서 시도한 모델을 모두 거부했습니다({cli} · 시도: {listed}). "
                 "ChatGPT 요금제가 Plus 이상이고 만료되지 않았는지 확인하고(Free·Go는 쓸 수 없는 모델이 많고, "
                 "Business·Enterprise·Edu는 관리자가 Codex를 켜야 함), PowerShell에서 `codex`를 실행해 /model 로 "
                 "쓸 수 있는 모델을 본 뒤 그 이름을 환경 변수 YEONE_OCR_CHATGPT_MODEL에 넣으십시오. Codex CLI가 오래되었다면 "
-                f"[설치]로 최신으로 올리십시오(PowerShell: npm install -g @openai/codex@latest). (원문: {refused.detail[:200]})")
+                f"[설치]로 최신으로 올리십시오(PowerShell: {_update_command(self.cli)}). (원문: {refused.detail[:200]})")
 
     def _catalog(self) -> list:
         """The account's image-capable models in Codex's own order (`codex debug models`), then a short

@@ -18,6 +18,10 @@ NPM_PACKAGES = {"chatgpt": "@openai/codex"}
 ANTIGRAVITY_INSTALL = {"win32": ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                                  "irm https://antigravity.google/cli/install.ps1 | iex"],
                        "posix": ["bash", "-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"]}
+# OpenAI's own Codex installer (the one `codex` itself names in its "Update available" notice). A Codex installed
+# by it is a standalone codex.exe that npm does not update: [설치] runs this when such a Codex is on the PC.
+CODEX_INSTALL_WINDOWS = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                         "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex"]
 PROGRAMS = {"claude": "claude", "chatgpt": "codex", "gemini": "agy"}
 LOGIN_ARGS = {"claude": ["auth", "login"], "chatgpt": ["login"], "gemini": []}
 LOGIN_NOTES = {"claude": "Claude 계정(Pro/Max)으로 로그인하세요.",
@@ -59,11 +63,23 @@ def install_command(plan: str) -> list | None:
     """The install command for a plan's program, or None (Claude: its own installer; no npm)."""
     if plan == "gemini":
         return list(ANTIGRAVITY_INSTALL["win32" if sys.platform == "win32" else "posix"])
+    if plan == "chatgpt" and sys.platform == "win32" and standalone_codex():
+        return list(CODEX_INSTALL_WINDOWS)
     package = NPM_PACKAGES.get(plan)
     npm = find_npm()
     if package is None or npm is None:
         return None
     return [npm, "install", "-g", package]
+
+
+def standalone_codex() -> str | None:
+    """A Codex CLI on this PC that npm did not install (OpenAI's own installer: a codex.exe outside npm's folders)."""
+    from .chatgpt_subscription import candidates
+    for path in candidates():
+        low = path.replace("/", "\\").lower()
+        if low.endswith(".exe") and "\\npm\\" not in low and "node_modules" not in low:
+            return path
+    return None
 
 
 def node_install_command() -> list | None:
