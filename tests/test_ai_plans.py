@@ -691,6 +691,29 @@ def test_a_plan_back_from_rest_does_not_skip_a_plan_not_yet_tried():
     assert flaky["claude"].calls == 1 and api.request.call_count == 0
 
 
+@pytest.mark.parametrize("with_api", [False, True])
+def test_timeouts_in_the_shipped_order_never_loop(monkeypatch, with_api):
+    """Codex: Google → ChatGPT timed out, Google's rest ended, and the session swung Google ↔ Claude for ever."""
+    import threading
+    monkeypatch.setattr(subscriptions, "PLANS", DEFAULT_ORDER)
+    now = [0.0]
+    flaky = {"gemini": _Flaky("gemini", [TimeoutError("gemini")] * 50),
+             "chatgpt": _Flaky("chatgpt", [TimeoutError("chatgpt")] * 50), "claude": _Flaky("claude")}
+    def factory(plan):
+        now[0] += 700
+        return flaky[plan]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key") if with_api else None
+    outcome = {}
+    def run():
+        with _with(_states(claude=True, chatgpt=True, gemini=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+            session = subscriptions.Session("gemini", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
+            outcome["answer"] = _ask(session)[-1]
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start(); worker.join(10)
+    assert not worker.is_alive(), "the request kept switching plans"
+    assert outcome == {"answer": "claude"} and {k: v.calls for k, v in flaky.items()} == {"gemini": 1, "chatgpt": 1, "claude": 1}
+
+
 def test_a_timeout_after_stop_sends_nothing_else():
     """Codex final check: a timeout after [중지] went on to the next plan and the paid API."""
     stop = [False]

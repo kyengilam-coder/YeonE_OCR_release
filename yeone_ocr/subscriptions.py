@@ -234,6 +234,9 @@ def client(plan: str):
     return module(plan).SubscriptionClient()
 
 
+MAX_REQUEST_ROUNDS = 100                   # switches + retries one request may go through
+
+
 def _kind(exc):
     """A CLI that did not answer in time (TimeoutError from the adapters) is a temporary failure:
     retried, then the next plan or the API key, like any other temporary error."""
@@ -332,8 +335,12 @@ class Session:
         from .claude_subscription import RequestRejected, SubscriptionError
         attempts, rested = 0, []                 # this request: tries on the plan in use, plans it sent to rest
         timed_out, last_timeout = set(), None    # plans that did not answer this request in time
+        rounds = 0
         while True:
-            self._come_back()
+            rounds += 1
+            if rounds > MAX_REQUEST_ROUNDS:            # a safety stop: never spin on switches without sending
+                raise SubscriptionError("구독 계정 전환이 반복되어 이 요청을 멈춥니다. 구독 상태를 확인하세요.")
+            self._come_back(avoid=timed_out)
             with self._lock:
                 plan, current = self.plan, self._client
                 if plan is not None and plan in timed_out:
@@ -416,7 +423,7 @@ class Session:
                 break
             self._sleep(min(0.5, left))
 
-    def _come_back(self):
+    def _come_back(self, avoid=()):
         """Back to the plan this connection started with once its rest is over (a limit that reset, a
         temporary failure), or from the API key to any plan that can be used again."""
         with self._lock:
@@ -424,12 +431,13 @@ class Session:
                 return
             failed = exhausted()
             target = None
-            if self.first not in failed and status(self.first)["usable"]:
+            if self.first not in failed and self.first not in avoid and status(self.first)["usable"]:
                 target = self.first
             elif self.plan is None:
-                target = next((plan for plan in order(self.requested) if plan not in failed and status(plan)["usable"]), None)
-            if target is None or target == self.plan:
-                return
+                target = next((plan for plan in order(self.requested)
+                               if plan not in failed and plan not in avoid and status(plan)["usable"]), None)
+            if target is None or target == self.plan or target in avoid:
+                return                                # not to a plan that already timed out on this request
             before = self.describe()
             self.plan, self._client, self.reason = target, None, ""
             self.switches.append({"from": before, "to": target, "reason": "쉬는 시간이 지남", "by": "rest"})
