@@ -338,9 +338,14 @@ class Session:
                 plan, current = self.plan, self._client
                 if plan is not None and plan in timed_out:
                     # Back on a plan that already timed out on this very request (its rest ended meanwhile):
-                    # this request goes to the API key instead of waiting through every plan again.
-                    if self.api is None:
+                    # the connection moves to the API key instead of waiting through every plan again. It is a
+                    # real switch, so the record names the API transport; the plan comes back after its rest.
+                    if self.api is None or self.should_stop():
                         raise last_timeout
+                    self.switches.append({"from": plan, "to": "api", "reason": str(last_timeout), "by": "temporary"})
+                    self.log(f"  {NAMES[plan]} 구독이 이 요청에 이미 응답하지 못했습니다 — API 키({self.api.provider} · "
+                             f"모델 {self.api.model})로 보냅니다.")
+                    self.plan, self._client = None, None
                     plan = current = None
                 if plan is not None and current is None:
                     try:
@@ -368,6 +373,8 @@ class Session:
                     if not isinstance(exc, (SubscriptionError, TimeoutError)) or isinstance(exc, RequestRejected):
                         raise                         # this request's own problem: another plan would refuse it too
                     if isinstance(exc, TimeoutError):
+                        if self.should_stop():
+                            raise                     # stopped while it waited: no other plan, no paid call
                         # The whole timeout was already waited: no second try on the same plan, on to the next.
                         timed_out.add(plan)
                         last_timeout = exc

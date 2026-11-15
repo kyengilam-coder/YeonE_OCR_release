@@ -672,7 +672,25 @@ def test_a_plan_back_from_rest_is_not_tried_again_by_the_request_it_timed_out_on
     with _with(_states(claude=True, chatgpt=True, gemini=False)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
         session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
         assert _ask(session)[-1] == "gpt-x"
+        assert session.plan is None                                   # really on the API key: the record names it
     assert slow["claude"].calls + slow["chatgpt"].calls <= 3 and api.request.call_count == 1
+
+
+def test_a_timeout_after_stop_sends_nothing_else():
+    """Codex final check: a timeout after [중지] went on to the next plan and the paid API."""
+    stop = [False]
+    class Slow(_Flaky):
+        def request(self, **kwargs):
+            stop[0] = True                                         # the person pressed stop while the CLI waited
+            return super().request(**kwargs)
+    plans = {"claude": Slow("claude", [TimeoutError("claude")]), "chatgpt": _Flaky("chatgpt")}
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=plans.__getitem__,
+                                        sleep=lambda _s: None, should_stop=lambda: stop[0])
+        with pytest.raises(TimeoutError):
+            _ask(session)
+    assert plans["chatgpt"].calls == 0 and api.request.call_count == 0
 
 
 def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():
