@@ -4,4 +4,12 @@
 사람의 제안 채택·교정 → HWPX/DOCX·검색 PDF와 검수 보고를 연결한다.
 기존 전체 쪽 AI 판독은 명시적으로 선택할 수 있으며 원시 판독·AI 제안·사람 교정을 구분한다.
 """
-__version__ = "1.2.16"
+__version__ = "1.2.17"
+
+import os as _os
+
+if _os.name == "nt":
+    # Windows looks for a bare program name (and shutil.which for a CLI) in the current folder
+    # too. The portable exe is often run from Downloads, where a planted claude.exe or npm.cmd
+    # would otherwise be found before the real one. Child processes inherit the setting.
+    _os.environ.setdefault("NoDefaultCurrentDirectoryInExePath", "1")

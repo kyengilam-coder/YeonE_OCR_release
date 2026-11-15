@@ -322,10 +322,6 @@ def fmt_tokens(n: float) -> str:
     return f"{n:,.0f}"
 
 
-def fmt_range(lo, hi, f) -> str:
-    return f"{f(lo)}~{f(hi)}"
-
-
 def fmt_krw(v: float) -> str:
     """원화는 100원 단위로 끊어 보여 준다(추정치라는 뜻)."""
     return f"{round(v / 100) * 100:,.0f}원"

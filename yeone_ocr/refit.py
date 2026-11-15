@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 from PIL import Image
-from .schema import PageReading, Region, TEXT_KINDS, IMAGE_KINDS, bbox_frac, frac_bbox
+from .schema import PageReading, Region, IMAGE_KINDS, bbox_frac, frac_bbox
 from .merge import columns_in_reading_order
 
 _STRIP = re.compile(r"[\s　·ㆍ・•。,，、:：;；!！?？()（）\[\]【】『』「」《》〈〉“”\"'‘’—─―－\-_/／\\|*＊~～…‥\.]")

@@ -64,10 +64,6 @@ def image_sources(path: str | os.PathLike) -> list[Path]:
     return [p] if is_image(p) else []
 
 
-def is_image_source(path: str | os.PathLike) -> bool:
-    return bool(image_sources(path)) or (Path(path).is_dir())
-
-
 def _first_jpeg(im: Image.Image, raw: bytes) -> bytes:
     """넣을 JPEG 바이트. MPO(미리보기·HDR 이득 지도가 뒤에 붙은 사진)는 첫 그림의 바이트만(뒤에 붙은 것은 쪽에 쓰이지 않고 PDF 만 키운다)."""
     if im.format == "MPO":
@@ -205,6 +201,9 @@ def _embedded(page: pymupdf.Page, prefer_embedded: bool = True) -> tuple[int, py
     return None
 
 
+MAX_RENDER_PIXELS = 100_000_000      # 1억 화소: A2 판면 300 dpi(약 4,900 × 7,000)의 세 배
+
+
 def page_image(doc: pymupdf.Document, pdf_page: int, dpi: int = 300, prefer_embedded: bool = True) -> tuple[Image.Image, str]:
     """쪽 이미지. 쪽이 스캔 이미지 한 장으로 되어 있으면 그 원본 비트맵을 그대로 꺼내고(재압축·재샘플 없음, 쪽 위에서
     돌려 놓였으면 놓인 방향대로 바로 세워서), 아니면 dpi로 렌더한다. 돌려주는 설명 문자열은 기록용."""
@@ -225,6 +224,22 @@ def page_image(doc: pymupdf.Document, pdf_page: int, dpi: int = 300, prefer_embe
         if im.mode not in ("L", "RGB"):
             im = im.convert("RGB")
         return im, f"내장 스캔 {im.width}x{im.height} {info['ext']}" + (f" ({emb[2]}도 돌려 놓임)" if emb[2] else "")
+    area = page.rect.width * page.rect.height               # pt², UserUnit included
+    scale = dpi / 72
+    full = (page.rect * pymupdf.Matrix(scale, scale)).irect     # the pixmap's real, whole-pixel size
+    if area > 0 and full.width * full.height > MAX_RENDER_PIXELS:
+        # An oversized page (a crafted PDF can declare 200 × 200 inches, or multiply it by UserUnit)
+        # would need gigabytes: render at the scale that fits. No lower bound — a floor would let
+        # a large enough page through again (Codex review, 1.2.17).
+        zoom = (MAX_RENDER_PIXELS / area) ** 0.5 * 0.999
+        while True:                                          # rounding a very thin page up to whole pixels can still cross it
+            box = (page.rect * pymupdf.Matrix(zoom, zoom)).irect
+            if box.width * box.height <= MAX_RENDER_PIXELS:
+                break
+            zoom *= 0.99
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        return im, f"렌더 {zoom * 72:.1f}dpi(큰 쪽 축소) {im.width}x{im.height}"
     pix = page.get_pixmap(dpi=dpi)
     im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     return im, f"렌더 {dpi}dpi {im.width}x{im.height}"

@@ -112,7 +112,8 @@ def find_cli() -> str | None:
 
 
 def cli_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}   # an API key would replace the sign-in
+    from ab_ocr.runtime import without_api_keys
+    env = {k: v for k, v in without_api_keys(os.environ).items() if k not in _STRIP_ENV}   # an API key would replace the sign-in; no other company's key either
     env["NO_COLOR"] = "1"
     env.setdefault("PYTHONUTF8", "1")
     return env

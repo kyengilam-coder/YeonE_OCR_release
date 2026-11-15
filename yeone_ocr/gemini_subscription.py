@@ -89,7 +89,8 @@ def _home() -> Path:
 
 
 def cli_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+    from ab_ocr.runtime import without_api_keys
+    env = {k: v for k, v in without_api_keys(os.environ).items() if k not in _STRIP_ENV}   # no other company's key either
     configured = os.environ.get("YEONE_OCR_GEMINI_CLI_HOME", "").strip()
     if configured:
         env["GEMINI_CLI_HOME"] = str(Path(configured).expanduser())

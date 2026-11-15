@@ -273,7 +273,8 @@ def _is_cmd_shim(path: str) -> bool:
 
 
 def cli_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+    from ab_ocr.runtime import without_api_keys
+    env = {k: v for k, v in without_api_keys(os.environ).items() if k not in _STRIP_ENV}   # no other company's key either
     config = os.environ.get("YEONE_OCR_CLAUDE_CONFIG_DIR", "").strip()
     if config:
         env["CLAUDE_CONFIG_DIR"] = str(Path(config).expanduser())

@@ -1893,32 +1893,6 @@ class App(tk.Tk):
                          for k in ("done", "now", "wait", "skip", "fail", "stop")}
 
     # ---------- 화면 부품 ----------
-    def _card(self, parent, title: str | None = None, pad=None) -> ttk.Frame:
-        """둥근 모서리 카드. 제목이 있으면 위에 굵게 적고, 내용은 card.body 에 넣는다."""
-        P = self.px
-        outer = ttk.Frame(parent, style="Card.TFrame", padding=pad or (P(18), P(12) if title else P(14), P(18), P(14)))
-        if title:
-            ttk.Label(outer, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, P(8)))
-        body = ttk.Frame(outer, style="Panel.TFrame"); body.pack(fill="both", expand=True)
-        outer.body = body                                   # type: ignore[attr-defined]
-        return outer
-
-    def _hint(self, parent, text: str = "", page: bool = False, **kw) -> ttk.Label:
-        """흐린 안내 글. 차지한 너비에 맞춰 줄을 바꾼다(창이 좁아도 잘리지 않게)."""
-        # width=1: 안내 글이 칸 너비를 정하지 않게 한다(줄바꿈 너비 ↔ 칸 너비가 서로를 바꾸며 끝없이 되먹임되는 것을 막음).
-        # 실제 너비는 칸이 주는 만큼이고, 그 너비에 맞춰 줄을 바꾼다.
-        lab = ttk.Label(parent, text=text, style="PageHint.TLabel" if page else "Hint.TLabel", justify="left", width=1, **kw)
-
-        def wrap(e):
-            w = max(self.px(40), e.width - 2)
-            if abs(int(str(lab.cget("wraplength") or 0)) - w) > 3:
-                lab.configure(wraplength=w)
-        lab.bind("<Configure>", wrap)
-        return lab
-
-    def _field_label(self, parent, text: str, row: int, top: int = 3):
-        ttk.Label(parent, text=text, style="Field.TLabel").grid(row=row, column=0, sticky="w", padx=(0, self.px(12)), pady=(self.px(top), self.px(3)))
-
     def _tabs(self, parent, items: list[tuple[str, int]], var: tk.IntVar, command, images: dict | None = None) -> tk.Frame:
         """명령 띠의 알약 탭(라디오 단추: 고른 탭은 강조색 알약 + 흰 굵은 글). 굵게 바뀌어도 너비가 흔들리지 않게 굵은 글 너비로 잡고,
         탭 소개(TAB_HINTS)는 풍선 도움말로 보인다. images 는 탭 값 → 글 앞 그림(상태별 그림 묶음)."""
@@ -6047,10 +6021,6 @@ class App(tk.Tk):
         self._collate_run_selection = None
         self.start(argv, "HWPX 전체 교정", open_after=self.work2() / "collate" / "_전체_요약.html")
 
-    def _latest(self, folder: Path, pattern: str) -> Path | None:
-        files = sorted(folder.glob(pattern), key=lambda p: p.stat().st_mtime) if folder.exists() else []
-        return files[-1] if files else None
-
     def _collate_report_path(self, row):
         from .collate.results import locate_section_report
         return locate_section_report(self.work2(), self.pdf2(), self.v_hwpx.get().strip(), row["name"], row["para"], row.get("end"))
@@ -6164,43 +6134,6 @@ class App(tk.Tk):
         except (OSError, ValueError) as exc:
             messagebox.showerror(APP_NAME, f"대조 편집을 열지 못했습니다.\n{exc}", parent=self)
 
-    def preview_collate_section(self):
-        if not App._collate_index_current(self):
-            return
-        row = App._collate_selected_row(self)
-        if row is None:
-            return
-        from .gui_preview import preview_image
-        from PIL import ImageTk
-        window = tk.Toplevel(self)
-        window.title(f"구획 미리 보기 — {row['name']}")
-        window.geometry("1000x760")
-        window.configure(bg=self.colors["PANEL"])
-        window.columnconfigure(0, weight=1); window.columnconfigure(1, weight=1); window.rowconfigure(1, weight=1)
-        pages = row.get("pages")
-        scope = f"PDF {pages[0]}–{pages[1]}쪽" if pages else "PDF 범위 확인 필요"
-        ttk.Label(window, text=f"{row['name']} · {scope} · HWPX 문단 {row['para'] + 1}–{row.get('end', row['para'] + 1)}",
-                  font=self.fonts["BODY_B"]).grid(row=0, column=0, columnspan=2, sticky="w", padx=16, pady=12)
-        image_label = tk.Label(window, bg=self.colors["FIELD"], text="연결된 PDF 쪽이 없습니다.", wraplength=460)
-        image_label.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=(0, 12))
-        page = int(row.get("page") or 0)
-        if page:
-            try:
-                picture = preview_image(self.pdf2(), (470, 640), page - 1)
-                photo = ImageTk.PhotoImage(picture, master=window)
-                image_label.configure(image=photo, text="")
-                window._section_photo = photo
-            except Exception as exc:
-                image_label.configure(text=f"PDF 미리 보기를 읽지 못했습니다.\n{exc}")
-        text = tk.Text(window, wrap="word", font=self.fonts["BODY"], bg=self.colors["FIELD"], relief="flat",
-                       width=42, padx=12, pady=12)
-        text.grid(row=1, column=1, sticky="nsew", padx=(8, 16), pady=(0, 12))
-        text.insert("1.0", f"HWPX 시작\n{row.get('snippet_start', row['name'])}\n\nHWPX 끝\n{row.get('snippet_end', '')}\n\n"
-                    "선택 범위의 원본 미리 보기입니다. OCR이나 교정을 실행하지 않습니다.\n"
-                    "교정 후 변경 전후 내용은 [이 구획 결과 보기]에서 확인할 수 있습니다.")
-        text.configure(state="disabled")
-        ttk.Button(window, text="닫기", command=window.destroy).grid(row=2, column=1, sticky="e", padx=16, pady=(0, 12))
-
     def open_collate_hwpx_section(self):
         if not App._collate_index_current(self):
             return
@@ -6293,7 +6226,6 @@ class App(tk.Tk):
         if self.running or getattr(self, "_closing", False):
             return
         from .comparison_editor import ComparisonEditor
-        from ab_ocr.runtime import default_engine_root
         source = self.pdf2() if getattr(self, "_selected_tab", 0) == 1 else self.pdf()
         mode = self.mode_key(0 if getattr(self, "_selected_tab", 0) == 1 else None)
         windows = vars(self).setdefault("_comparison_windows", [])

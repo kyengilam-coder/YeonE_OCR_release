@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 import re, unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -110,7 +110,9 @@ class HwpxBook:
 
     def __init__(self, path: str):
         from hwpx.document import HwpxDocument
+        from ..ziplimits import check_archive
         self.path = path
+        check_archive(path)                         # before python-hwpx reads every part into memory
         self.doc = HwpxDocument.open(path)
         self.paragraphs = self.doc.paragraphs
         self.style_names = self._style_names()
@@ -129,17 +131,12 @@ class HwpxBook:
         if not out:
             # 헤더 XML 을 직접 읽는 우회
             try:
-                import xml.etree.ElementTree as ET
                 for el in self.doc.headers[0].element.iter():
                     if el.tag.endswith("}style"):
                         out.append((el.get("id", ""), el.get("name", "")))
             except Exception:
                 pass
         return out
-
-    def style_of(self, i: int) -> str:
-        sid = self.paragraphs[i].element.get("styleIDRef", "0")
-        return dict(self.style_names).get(sid, sid)
 
     def texts(self) -> list[str]:
         if self._texts is None:

@@ -122,7 +122,7 @@ class RecordedReader:
 
 def baseline(inputs, out_dir, *, provider, model, api_key=None, max_calls=32,
              baseline_cap=12, second_pass=True):
-    from yeone_ocr import cli, prompts
+    from yeone_ocr import cli
     from yeone_ocr.pdfio import open_pdf
     from yeone_ocr.reader_gemini import CALL_CAP, set_call_cap
     from yeone_ocr.readers import create_reader

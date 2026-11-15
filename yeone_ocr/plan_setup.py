@@ -12,15 +12,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .runtime import system_program
+
 # Gemini: Google moved personal accounts from Gemini CLI to Antigravity CLI (agy) on 2026-06-18;
 # agy ships as a native program with Google's own install script, not through npm.
 NPM_PACKAGES = {"chatgpt": "@openai/codex"}
-ANTIGRAVITY_INSTALL = {"win32": ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+ANTIGRAVITY_INSTALL = {"win32": [system_program("powershell.exe"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                                  "irm https://antigravity.google/cli/install.ps1 | iex"],
                        "posix": ["bash", "-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"]}
 # OpenAI's own Codex installer (the one `codex` itself names in its "Update available" notice). A Codex installed
 # by it is a standalone codex.exe that npm does not update: [설치] runs this when such a Codex is on the PC.
-CODEX_INSTALL_WINDOWS = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+CODEX_INSTALL_WINDOWS = [system_program("powershell.exe"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                          "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex"]
 PROGRAMS = {"claude": "claude", "chatgpt": "codex", "gemini": "agy"}
 LOGIN_ARGS = {"claude": ["auth", "login"], "chatgpt": ["login"], "gemini": []}
@@ -92,7 +94,8 @@ def node_install_command() -> list | None:
 
 def run(command: list, log, runner=subprocess.Popen) -> int:
     """Run an install command, passing its output to log line by line. Returns the exit code."""
-    env = dict(os.environ)
+    from ab_ocr.runtime import without_api_keys
+    env = without_api_keys(os.environ)                  # npm, winget and install scripts never need the reader keys
     env.setdefault("PYTHONUTF8", "1")
     try:
         proc = runner(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -116,7 +119,7 @@ def open_login(plan: str, cli: str, popen=subprocess.Popen) -> str | None:
     opened here (the person runs the command themselves)."""
     command = login_command(plan, cli)
     if sys.platform == "win32":
-        popen(["cmd.exe", "/k", *command], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10))
+        popen([system_program("cmd.exe"), "/k", *command], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0x10))
         return None
     if sys.platform == "darwin":
         script = " ".join(_quote(part) for part in command)

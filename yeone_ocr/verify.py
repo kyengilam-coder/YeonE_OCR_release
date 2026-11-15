@@ -81,8 +81,12 @@ def check_hwpx_file(path: str) -> list[dict]:
     """HWPX 파일 구조 검사: 확장자만 바꾼 파일이 아닌지(지침 23)."""
     import zipfile
     issues = []
+    from .ziplimits import ArchiveTooLarge, check_archive, read_member
     try:
         z = zipfile.ZipFile(path)
+        check_archive(z)
+    except ArchiveTooLarge as e:
+        return [{"level": "error", "rule": "zip 크기", "where": path, "msg": str(e)}]
     except Exception as e:
         return [{"level": "error", "rule": "zip", "where": path, "msg": f"zip 으로 열리지 않음: {e}"}]
     names = z.namelist()
@@ -105,16 +109,20 @@ def check_hwpx_file(path: str) -> list[dict]:
     HH = "{http://www.hancom.co.kr/hwpml/2011/head}"; HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
     numbered = set()
     try:
-        for ppr in ET.fromstring(z.read("Contents/header.xml")).iter(f"{HH}paraPr"):
+        for ppr in ET.fromstring(read_member(z, "Contents/header.xml")).iter(f"{HH}paraPr"):
             hd = ppr.find(f".//{HH}heading")
             if hd is not None and (hd.get("type") or "NONE").upper() in ("OUTLINE", "NUMBER", "BULLET"):
                 numbered.add(ppr.get("id"))
     except (KeyError, ET.ParseError):
         pass
+    except ArchiveTooLarge as e:
+        issues.append({"level": "error", "rule": "zip 크기", "where": "Contents/header.xml", "msg": str(e)})
     for n in names:
         if n.startswith("Contents/section") and n.endswith(".xml"):
             try:
-                root = ET.fromstring(z.read(n))
+                root = ET.fromstring(read_member(z, n))
+            except ArchiveTooLarge as e:
+                issues.append({"level": "error", "rule": "zip 크기", "where": n, "msg": str(e)}); continue
             except ET.ParseError as e:
                 issues.append({"level": "error", "rule": "XML 해석", "where": n, "msg": f"XML 로 읽을 수 없음: {e}"}); continue
             bad = [p for p in root.iter(f"{HP}p") if p.get("paraPrIDRef") in numbered]

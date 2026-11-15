@@ -57,7 +57,8 @@ def test_login_opens_the_program_in_a_new_window(monkeypatch, platform):
     assert message is None
     assert opened[0][-2:] == ["/bin/codex", "login"] or "codex login" in opened[0][-1]
     if platform == "win32":
-        assert opened[0][:2] == ["cmd.exe", "/k"]
+        # System32's cmd.exe by full path: never a cmd.exe planted in the app or current folder.
+        assert opened[0][0].replace("\\", "/").lower().endswith("/system32/cmd.exe") and opened[0][1] == "/k"
     opened.clear()
     monkeypatch.setattr(plan_setup.shutil, "which", lambda name: None)
     if platform == "linux":
@@ -73,7 +74,7 @@ def test_a_standalone_codex_is_updated_by_openais_installer(monkeypatch):
     monkeypatch.setattr(chatgpt_subscription, "candidates", lambda: ["C:/Users/me/AppData/Local/OpenAI/Codex/bin/codex.exe",
                                                                     "C:/Users/me/AppData/Roaming/npm/codex.cmd"])
     command = plan_setup.install_command("chatgpt")
-    assert command[0] == "powershell.exe" and "https://chatgpt.com/codex/install.ps1" in command[-1]
+    assert command[0].lower().endswith("powershell.exe") and "https://chatgpt.com/codex/install.ps1" in command[-1]
     assert "CODEX_NON_INTERACTIVE=1" in command[-1]
     monkeypatch.setattr(chatgpt_subscription, "candidates", lambda: ["C:/Users/me/AppData/Roaming/npm/codex.cmd"])
     assert plan_setup.install_command("chatgpt") == ["C:/node/npm.cmd", "install", "-g", "@openai/codex"]

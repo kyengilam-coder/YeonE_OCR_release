@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import difflib
+import gzip
 import hashlib
 import json
 import math
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zlib
 
 from ab_ocr import ocr
 from ab_ocr.fileid import same_file
@@ -27,7 +29,14 @@ from ab_ocr.engine_registry import ENGINES, LEGACY_ENGINES, language_for
 
 FORMAT = "yeone-ocr-comparison"
 VERSION = 1
-MAX_BYTES = 256_000_000
+MAX_BYTES = 256_000_000          # project file on disk
+# The JSON itself. A whole book keeps every engine reading and every AI request it
+# sent (each batch carries its page's evidence), about 0.9 MB a page: a 462-page
+# book crossed 256 MB at page 300. Large projects are therefore stored gzip-compressed
+# (about a tenth of the size); this bounds what a file may expand to in memory.
+MAX_JSON_BYTES = 1_000_000_000
+COMPRESS_ABOVE = 32_000_000      # smaller projects stay plain JSON (readable by earlier versions)
+_GZIP_MAGIC = b"\x1f\x8b"
 MAX_TEXT = 2_000_000
 DEFAULT_ENGINES = LEGACY_ENGINES
 PROFILES = ("traditional", "simplified", "mixed")
@@ -220,6 +229,38 @@ def _same_file(a, b):
     return same_file(a, b)
 
 
+def _pack(content):
+    """Bytes to write for an encoded project: plain JSON, or gzip for a large one.
+
+    Level 1 keeps a save of a 200 MB project near one second; mtime 0 keeps the
+    same project content to the same bytes (saves are compared by file digest)."""
+    if len(content) > MAX_JSON_BYTES:
+        raise ComparisonError("프로젝트가 허용 크기(1 GB)를 넘습니다. 쪽 범위를 나누어 다른 결과 폴더에서 이어 가십시오.")
+    if len(content) <= COMPRESS_ABOVE:
+        return content
+    packed = gzip.compress(content, compresslevel=1, mtime=0)
+    if len(packed) > MAX_BYTES:
+        raise ComparisonError("프로젝트가 허용 크기를 넘습니다. 쪽 범위를 나누어 다른 결과 폴더에서 이어 가십시오.")
+    return packed
+
+
+def _unpack(data):
+    """JSON bytes of a project file; gzip is expanded with a hard bound (no zip bomb)."""
+    if bytes(data[:2]) != _GZIP_MAGIC:
+        return data
+    try:
+        inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        plain = bytearray(inflater.decompress(bytes(data), MAX_JSON_BYTES + 1))
+        if len(plain) > MAX_JSON_BYTES or inflater.unconsumed_tail:
+            raise ComparisonError("프로젝트 파일이 허용 크기를 넘습니다.")
+        plain.extend(inflater.flush())
+        if len(plain) > MAX_JSON_BYTES or not inflater.eof or inflater.unused_data:
+            raise ComparisonError("프로젝트를 읽을 수 없습니다. 정상 저장본이나 복구본을 확인하세요.")
+    except zlib.error as exc:
+        raise ComparisonError("프로젝트를 읽을 수 없습니다. 정상 저장본이나 복구본을 확인하세요.") from exc
+    return plain
+
+
 def _read(path):
     try:
         with path.open("rb") as stream:
@@ -242,7 +283,7 @@ def _read(path):
             return result
         def constant(_):
             raise ComparisonError("프로젝트에 유효하지 않은 숫자가 있습니다.")
-        value = json.loads(data.decode("utf-8-sig"), object_pairs_hook=pairs, parse_constant=constant)
+        value = json.loads(_unpack(data).decode("utf-8-sig"), object_pairs_hook=pairs, parse_constant=constant)
     except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ComparisonError("프로젝트를 읽을 수 없습니다. 정상 저장본이나 복구본을 확인하세요.") from exc
     if (not isinstance(value, dict) or value.get("format") != FORMAT
@@ -1631,9 +1672,7 @@ class ComparisonProject:
                 raise ComparisonError("원본 파일을 덮어쓸 수 없습니다.")
             self.validate_source()
             self._check_existing(target)
-            content = self._encoded()
-            if len(content) > MAX_BYTES:
-                raise ComparisonError("프로젝트가 허용 크기를 넘습니다.")
+            content = _pack(self._encoded())
             def verify():
                 self.validate_source()
                 self._check_existing(target)
@@ -1649,9 +1688,7 @@ class ComparisonProject:
             if self.project_path and _same_file(target, self.project_path):
                 raise ComparisonError("복구 파일은 정식 프로젝트와 다른 이름으로 저장하세요.")
             self._check_existing(target, check_current=False)
-            content = self._encoded({"recovery": {"source_validation": "required_before_ocr_or_export", "at": _now()}})
-            if len(content) > MAX_BYTES:
-                raise ComparisonError("복구 프로젝트가 허용 크기를 넘습니다.")
+            content = _pack(self._encoded({"recovery": {"source_validation": "required_before_ocr_or_export", "at": _now()}}))
             written = _atomic_write(target, content, protected=[self.source_path, self.project_path],
                                     before_replace=lambda: self._check_existing(target, check_current=False))
             self._recovery_sha256 = {target: hashlib.sha256(content).hexdigest()}

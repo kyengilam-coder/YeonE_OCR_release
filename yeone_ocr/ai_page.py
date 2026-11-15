@@ -120,21 +120,34 @@ def read_page(image, *, direction, profile, client, model, cache_dir: Path | Non
     path = cache_dir / f"{key}.json" if cache_dir else None
     if path and path.is_file():
         try:
-            return {**json.loads(path.read_text(encoding="utf-8")), "cached": True}
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and isinstance(cached.get("text"), str):
+                return {**cached, "cached": True}
         except (OSError, ValueError):
-            pass
+            pass                         # a damaged or foreign cache file is read again, not trusted
     text, complete, reason, tokens, actual = client.request(
         model_name=model, system=SYSTEM, prompt=_prompt(direction, profile, len(pictures)),
         images=[overview, *pictures], schema=SCHEMA)
     if not complete:
         raise ValueError(f"AI 쪽 판독이 완료되지 않았습니다({reason}).")
     data = json.loads(text)
+    # Any other shape is a failed reading (ValueError): the caller then keeps the engine reading
+    # instead of losing the whole page to an AttributeError.
+    if (not isinstance(data, dict) or not isinstance(data.get("lines", []), list)
+            or not isinstance(data.get("uncertain", []), list)):
+        raise ValueError("AI 쪽 판독 응답의 형식이 올바르지 않습니다.")
     lines = [line for line in data.get("lines", []) if isinstance(line, str)]
     result = {"text": "\n".join(lines), "uncertain": [u for u in data.get("uncertain", []) if isinstance(u, str)],
               "model": actual, "strips": [list(b) for b in boxes], "usage": tokens, "prompt_version": PROMPT_VERSION}
     if path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        # The reading is already paid for: a cache that cannot be written (read-only folder, full
+        # disk) must not throw it away, or the next run would ask again.
+        try:
+            from .state import write_atomic
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(path, json.dumps(result, ensure_ascii=False, indent=1))
+        except OSError as exc:
+            return {**result, "cached": False, "cache_warning": f"판독 저장본을 쓰지 못함: {exc}"}
     return {**result, "cached": False}
 
 

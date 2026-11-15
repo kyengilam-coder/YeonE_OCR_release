@@ -1,4 +1,4 @@
-# Product tests are scoped to tests/; historical AB sources have their own cwd.
+# Product tests are scoped to tests/.
 name: tests
 on:
   push:
@@ -23,15 +23,6 @@ jobs:
         run: python -m ruff check yeone_ocr ab_ocr tools --select E9,F63,F7,F82
       - name: Run all product tests in isolated offline processes
         run: python -B -X utf8 tools/check_regression.py --output work/ci-regression
-      - name: Check preserved AB sources independently
-        working-directory: references/AB_OCR_0.3.0
-        run: |
-          # Use one canonical spelling; hosted Windows TEMP may use RUNNER~1.
-          $testTemp = Join-Path $env:GITHUB_WORKSPACE 'work/ab-reference-tests'
-          New-Item -ItemType Directory -Force -Path $testTemp | Out-Null
-          $env:TEMP = (Resolve-Path -LiteralPath $testTemp).Path
-          $env:TMP = $env:TEMP
-          python -B -X utf8 -m unittest discover -s tests -v
       - uses: actions/upload-artifact@v4
         if: always()
         with:

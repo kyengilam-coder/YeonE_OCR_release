@@ -635,6 +635,151 @@ def test_a_temporary_failure_is_sent_again_to_the_same_plan():
         assert len(logs) == 2 and "일시 오류" in logs[0] and waits
 
 
+def test_a_cli_timeout_is_retried_then_moves_on_like_any_temporary_failure():
+    """Codex review (1.2.17): adapters raise TimeoutError, which used to skip retry, the next plan and the API key."""
+    plans = {"chatgpt": _Flaky("chatgpt", [TimeoutError("Codex CLI 응답이 300초 안에 오지 않았습니다.")] * 3),
+             "claude": _Flaky("claude")}
+    logs = []
+    with _with(_states(claude=True, chatgpt=True)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
+        session = subscriptions.Session("chatgpt", "chatgpt", log=logs.append, factory=plans.__getitem__, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "claude"                                          # answered by the next plan
+        assert plans["chatgpt"].calls == 1                                            # the timeout was already waited once
+        assert any("넘어갑니다" in line for line in logs)
+        assert "chatgpt" in subscriptions.exhausted()                                 # resting, not marked as an account problem
+
+
+def test_timeouts_on_every_plan_end_at_the_api_key():
+    """Codex re-review: after two plans timed out the request was given up, the API key never tried."""
+    slow = lambda name: _Flaky(name, [TimeoutError(name + " did not answer")] * 3)
+    plans = {"claude": slow("claude"), "chatgpt": slow("chatgpt")}
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    api.request.return_value = ('{"lines": []}', True, "done", {}, "gpt-x")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=plans.__getitem__, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "gpt-x"
+    assert api.request.call_count == 1 and plans["claude"].calls == 1 and plans["chatgpt"].calls == 1
+
+
+def test_a_plan_back_from_rest_is_not_tried_again_by_the_request_it_timed_out_on():
+    """Codex: with rests ending mid-request, three timing-out plans took 18 tries / 90 minutes to reach the key."""
+    now = [0.0]
+    slow = {name: _Flaky(name, [TimeoutError(name)] * 9) for name in ("claude", "chatgpt")}
+    def factory(plan):
+        now[0] += 700                                  # each try takes longer than a rest: claude is back when chatgpt fails
+        return slow[plan]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    api.request.return_value = ('{"lines": []}', True, "done", {}, "gpt-x")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "gpt-x"
+        assert session.plan is None                                   # really on the API key: the record names it
+    assert slow["claude"].calls + slow["chatgpt"].calls <= 3 and api.request.call_count == 1
+
+
+def test_a_plan_back_from_rest_does_not_skip_a_plan_not_yet_tried():
+    """Codex: Google and ChatGPT timed out, Google came back from rest, and Claude was skipped for the API."""
+    now = [0.0]
+    flaky = {"gemini": _Flaky("gemini", [TimeoutError("gemini")] * 5),
+             "chatgpt": _Flaky("chatgpt", [TimeoutError("chatgpt")] * 5), "claude": _Flaky("claude")}
+    def factory(plan):
+        now[0] += 700
+        return flaky[plan]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=True, gemini=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("gemini", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "claude"
+    assert flaky["claude"].calls == 1 and api.request.call_count == 0
+
+
+@pytest.mark.parametrize("with_api", [False, True])
+def test_timeouts_in_the_shipped_order_never_loop(monkeypatch, with_api):
+    """Codex: Google → ChatGPT timed out, Google's rest ended, and the session swung Google ↔ Claude for ever."""
+    import threading
+    monkeypatch.setattr(subscriptions, "PLANS", DEFAULT_ORDER)
+    now = [0.0]
+    flaky = {"gemini": _Flaky("gemini", [TimeoutError("gemini")] * 50),
+             "chatgpt": _Flaky("chatgpt", [TimeoutError("chatgpt")] * 50), "claude": _Flaky("claude")}
+    def factory(plan):
+        now[0] += 700
+        return flaky[plan]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key") if with_api else None
+    outcome = {}
+    def run():
+        with _with(_states(claude=True, chatgpt=True, gemini=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+            session = subscriptions.Session("gemini", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
+            outcome["answer"] = _ask(session)[-1]
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start(); worker.join(10)
+    assert not worker.is_alive(), "the request kept switching plans"
+    assert outcome == {"answer": "claude"} and {k: v.calls for k, v in flaky.items()} == {"gemini": 1, "chatgpt": 1, "claude": 1}
+
+
+def test_a_request_switched_away_and_stopped_while_waiting_is_not_sent_again():
+    """Codex: switched to the API key mid-request, then stopped: the failed request still went to the paid API."""
+    stop = [False]
+    session_box = {}
+    class Waiting(_Flaky):
+        def request(self, **kwargs):
+            session_box["s"].switch("api")                 # the person moves on to the API key meanwhile ...
+            stop[0] = True                                 # ... and presses stop
+            raise TimeoutError("claude")
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=False, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=lambda plan: Waiting(plan),
+                                        sleep=lambda _s: None, should_stop=lambda: stop[0])
+        session_box["s"] = session
+        with pytest.raises(TimeoutError):
+            _ask(session)
+    assert api.request.call_count == 0
+
+
+@pytest.mark.parametrize("failure", ["temporary-wait", "limit", "account", "factory"])
+def test_after_stop_a_failed_request_is_sent_nowhere_else(failure):
+    """Codex: stopping during a retry wait, after a limit/sign-in failure or a failed client start still resent."""
+    stop = [False]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    other = _Flaky("chatgpt")
+    class Failing(_Flaky):
+        def request(self, **kwargs):
+            self.calls += 1
+            if failure == "temporary-wait":
+                raise _error("high demand", "temporary")
+            stop[0] = True
+            raise _error("limit reached" if failure == "limit" else "signed out", failure)
+    first = Failing("claude")
+    def factory(plan):
+        if plan == "claude" and failure == "factory":
+            stop[0] = True
+            raise _error("cannot start", "account")
+        return first if plan == "claude" else other
+    def sleep(_seconds):
+        stop[0] = True                                     # [중지] during the wait before the retry
+    with _with(_states(claude=True, chatgpt=True, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=factory, sleep=sleep,
+                                        should_stop=lambda: stop[0])
+        with pytest.raises(SubscriptionError):
+            _ask(session)
+    assert other.calls == 0 and api.request.call_count == 0
+    assert first.calls <= 1
+
+
+def test_a_timeout_after_stop_sends_nothing_else():
+    """Codex final check: a timeout after [중지] went on to the next plan and the paid API."""
+    stop = [False]
+    class Slow(_Flaky):
+        def request(self, **kwargs):
+            stop[0] = True                                         # the person pressed stop while the CLI waited
+            return super().request(**kwargs)
+    plans = {"claude": Slow("claude", [TimeoutError("claude")]), "chatgpt": _Flaky("chatgpt")}
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=plans.__getitem__,
+                                        sleep=lambda _s: None, should_stop=lambda: stop[0])
+        with pytest.raises(TimeoutError):
+            _ask(session)
+    assert plans["chatgpt"].calls == 0 and api.request.call_count == 0
+
+
 def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():
     now = [1000.0]
     plans = {"chatgpt": _Flaky("chatgpt", [_error("stream disconnected", "temporary")] * 3), "claude": _Flaky("claude")}

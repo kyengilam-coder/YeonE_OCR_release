@@ -141,11 +141,17 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
             pg = None
         img = os.path.relpath(work.page_image_path(n), out.parent).replace(os.sep, "/")   # URL 은 '/' — 결과 폴더 맨 위에서 작업자료/pages 를 가리킨다
         sts = " ".join(f"<span>{html.escape(s)}</span>" for s in work.statuses(n))
+        img = html.escape(img, quote=True)
         parts.append(f"<section class=page id=p{n}><div class=img><div class=sheet><img src='{img}' loading=lazy alt='PDF {n}쪽'>{overlay_boxes(pr)}</div>"
                      "<div class=legend>상자: 회색 = 문자 영역 · 파랑 = 도판 · 빨강 = 제목 · 붉은 점선 = 영역 밖 글줄 흔적(모델이 어느 영역에도 넣지 않음, 확인 필요)</div>")
         crops = rec.get("crops") or {}
         if crops:
-            parts.append("<div class=crops>" + "".join(f"<figure><img src='{os.path.relpath(c['path'], out.parent).replace(os.sep, '/')}' alt='{k}'><figcaption style='font-size:11px'>{k} {'⚠ 외곽 '+','.join(c['touching']) if c.get('touching') else '외곽 OK'}</figcaption></figure>" for k, c in crops.items()) + "</div>")
+            def figure(k, c):
+                src = os.path.relpath(c["path"], out.parent).replace(os.sep, "/")
+                edge = "⚠ 외곽 " + ",".join(map(str, c["touching"])) if c.get("touching") else "외곽 OK"
+                return (f"<figure><img src='{html.escape(src, quote=True)}' alt='{html.escape(str(k), quote=True)}'>"
+                        f"<figcaption style='font-size:11px'>{html.escape(str(k))} {html.escape(edge)}</figcaption></figure>")
+            parts.append("<div class=crops>" + "".join(figure(k, c) for k, c in crops.items()) + "</div>")
         parts.append("</div><div class=txt>")
         parts.append(f"<div class=meta><b>PDF {n}쪽</b> · 인쇄 {html.escape(pr.print_page) or '확인 안 됨'} · 쪽번호 표기 「{html.escape(pr.page_label)}」 · 머리말 「{html.escape(pr.running_header)}」 · 판독기 {html.escape(str(rec.get('reader')))} {html.escape(str(rec.get('model') or ''))} · 이미지 {html.escape(str(rec.get('image_source') or ''))}</div>")
         parts.append(f"<div class=status>{sts}</div>")
@@ -166,7 +172,7 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
             parts.append("<p>수정 제안의 채택·기각은 로컬 비교·교정 창에서 합니다. 원문에는 자동 반영하지 않습니다.</p>")
         for reg in pr.regions:
             cls = "img-kind" if reg.kind in IMAGE_KINDS else ("title" if reg.kind in TITLE_KINDS else "")
-            parts.append(f"<div class='reg {cls}'><span class=k>{html.escape(reg.kind)}</span><small>{reg.id} bbox {reg.bbox} {html.escape(reg.reading_direction)}</small>")
+            parts.append(f"<div class='reg {cls}'><span class=k>{html.escape(reg.kind)}</span><small>{html.escape(reg.id)} bbox {html.escape(str(reg.bbox))} {html.escape(reg.reading_direction)}</small>")
             if reg.kind in TITLE_KINDS:
                 parts.append(f"<p><b>{_mark(reg.title_text)}</b></p>")
             elif reg.kind in TEXT_KINDS or reg.kind == "기타":
@@ -176,7 +182,7 @@ def make_review(work: Work, records: list[dict], out_path: str | None = None, co
                     parts.append(f"<p>{_graded(paragraph_text(p), sp)}</p><details><summary>열별 보기</summary><ol>{cols}</ol></details>")
                 p2 = (rec.get("pass2") or {}).get(reg.id)
                 if p2 and p2.get("columns"):
-                    cols2 = "".join(f"<li><small>{c.get('col_from_right')}열</small> {html.escape(c.get('text', ''))}</li>" for c in sorted(p2["columns"], key=lambda c: c.get("col_from_right", 0)))
+                    cols2 = "".join(f"<li><small>{html.escape(str(c.get('col_from_right')))}열</small> {html.escape(str(c.get('text', '')))}</li>" for c in sorted(p2["columns"], key=lambda c: c.get("col_from_right", 0)))
                     parts.append(f"<details><summary>2차 판독(확대 조각) 열 {len(p2['columns'])}개 — 비교 원본</summary><ol>{cols2}</ol></details>")
             elif reg.kind == "단순표":
                 parts.append("<table border=1 cellpadding=3>" + "".join("<tr>" + "".join(f"<td>{_mark(c)}</td>" for c in r.cells) + "</tr>" for r in reg.table_rows) + "</table>")
