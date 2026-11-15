@@ -5,7 +5,7 @@
   낱말 가운데 글자도 두음법칙을 적용한 꼴(릉/능, 량/양)로 찾을 수 있다.
 """
 from __future__ import annotations
-import functools, re, unicodedata
+import functools, unicodedata
 
 # 본초·역학 문헌에서 흔한 여러 음 글자(기본 독음 외의 음). 표시에는 첫 음을 쓰고, 찾기에는 모두 허용한다.
 MULTI = {

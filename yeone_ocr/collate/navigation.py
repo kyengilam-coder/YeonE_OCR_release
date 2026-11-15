@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from .sections import normalize_name
+from ..ziplimits import check_archive, read_member
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HA = "{http://www.hancom.co.kr/hwpml/2011/app}"
@@ -39,10 +40,11 @@ def create_section_view_copy(hwpx: str | Path, para: int, name: str, *,
     """
     source = Path(hwpx)
     with zipfile.ZipFile(source) as archive:
+        check_archive(archive)
         sections = [n for n in archive.namelist() if re.fullmatch(r"Contents/section\d+\.xml", n)]
         if sections != ["Contents/section0.xml"]:
             raise ValueError("이 문서는 본문 섹션이 여러 개여서 한글의 이동 위치를 확인할 수 없습니다. 앱의 구획 미리 보기를 이용하십시오.")
-        root = ET.fromstring(archive.read(sections[0]))
+        root = ET.fromstring(read_member(archive, sections[0]))
         paragraphs = root.findall(HP + "p")
         if not 0 <= para < len(paragraphs):
             raise ValueError("선택한 문단이 교정본에 없습니다. 구획을 다시 색인하십시오.")

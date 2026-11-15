@@ -35,7 +35,7 @@ from .state import Work, HUMAN_ONLY, STATUSES, legacy_work_dir, write_atomic, wr
 from .pdfio import open_pdf, parse_pages, page_image, text_layer
 from .reader_gemini import ReaderError
 from .readers import PROVIDERS, create_reader
-from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac
+from .schema import PageReading, RegionReread, Uncertain, TEXT_KINDS, IMAGE_KINDS, bbox_frac, region_file_part
 from .layout import upscale, crop_frac, fit_figure_bbox, grow_to_components, expand_until_clean, detect_figures, overlap_ratio, uncovered_ink_boxes, attach_uncovered, snap_to_gaps, split_bands
 from .merge import merge_passes, compare_textlayer
 from .verify import verify_page, check_hwpx_file
@@ -1498,7 +1498,7 @@ def make_crops(work: Work, rec: dict, img: Image.Image) -> dict:
         grown = grow_to_components(img, bbox_frac(reg.bbox))           # 모델 좌표가 도판을 크게 자른 경우(원형 도판 반쪽 등) 도판 전체로
         fit = fit_figure_bbox(img, grown, pad=0.01)
         crop = crop_frac(img, fit["bbox"], pad=0.01)
-        path = work.crops_dir / f"p{pr.pdf_page:03d}_{reg.id}.jpg"     # 스캔 도판은 JPEG 가 PNG 의 1/4~1/5 크기. 수백 장이 들어가도 문서가 가볍다
+        path = work.crops_dir / f"p{pr.pdf_page:03d}_{region_file_part(reg.id)}.jpg"     # 스캔 도판은 JPEG 가 PNG 의 1/4~1/5 크기. 수백 장이 들어가도 문서가 가볍다
         (crop.convert("L") if crop.mode not in ("L", "RGB") else crop).save(path, "JPEG", quality=90)
         out[reg.id] = {"path": str(path), "kind": reg.kind, "bbox_model": list(bbox_frac(reg.bbox)), "bbox_used": list(fit["bbox"]),
                        "steps": fit["steps"], "touching": fit["touching"], "frac_w": round(fit["bbox"][2] - fit["bbox"][0] + 0.02, 4),
@@ -1870,7 +1870,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     if template:                                                        # 비싼 획 굵기 재기 전에 양식이 HWPX 꾸러미인지 싸게 본다
         import zipfile
         try:
+            from .ziplimits import check_archive
             with zipfile.ZipFile(template) as z:
+                check_archive(z)
                 missing = [n for n in ("Contents/header.xml", "Contents/section0.xml") if n not in z.namelist()]
         except Exception as e:
             missing = [f"zip 으로 열리지 않음({type(e).__name__})"]

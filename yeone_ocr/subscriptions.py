@@ -81,10 +81,6 @@ def plan_for_key(key) -> str | None:
     return next((plan for plan, value in KEYS.items() if value == key), None)
 
 
-def is_key(key) -> bool:
-    return plan_for_key(key) is not None
-
-
 def status(plan: str, refresh: bool = False, runner=subprocess.run) -> dict:
     return module(plan).status(refresh=refresh, runner=runner)
 
@@ -238,6 +234,15 @@ def client(plan: str):
     return module(plan).SubscriptionClient()
 
 
+MAX_REQUEST_ROUNDS = 100                   # switches + retries one request may go through
+
+
+def _kind(exc):
+    """A CLI that did not answer in time (TimeoutError from the adapters) is a temporary failure:
+    retried, then the next plan or the API key, like any other temporary error."""
+    return getattr(exc, "kind", "temporary" if isinstance(exc, TimeoutError) else "account")
+
+
 class Session:
     """One run's AI connection, shared by page reading and review; the client both of them call.
 
@@ -329,16 +334,50 @@ class Session:
     def request(self, *, model_name, system, prompt, images, schema):
         from .claude_subscription import RequestRejected, SubscriptionError
         attempts, rested = 0, []                 # this request: tries on the plan in use, plans it sent to rest
+        timed_out, last_timeout = set(), None    # plans that did not answer this request in time
+        rounds, last_error = 0, None
+        def stopped_after_a_failure():
+            # Once this request has failed somewhere, [중지] ends it: no retry, no other plan, no paid API call.
+            return last_error is not None and self.should_stop()
         while True:
-            self._come_back()
+            rounds += 1
+            if rounds > MAX_REQUEST_ROUNDS:            # a safety stop: never spin on switches without sending
+                raise SubscriptionError("구독 계정 전환이 반복되어 이 요청을 멈춥니다. 구독 상태를 확인하세요.")
+            if stopped_after_a_failure():
+                raise last_error
+            self._come_back(avoid=timed_out)
             with self._lock:
                 plan, current = self.plan, self._client
+                if plan is not None and plan in timed_out:
+                    # Back on a plan that already timed out on this very request (its rest ended meanwhile):
+                    # the connection moves to the API key instead of waiting through every plan again. It is a
+                    # real switch, so the record names the API transport; the plan comes back after its rest.
+                    if self.should_stop():
+                        raise last_timeout
+                    failed = exhausted()
+                    untried = next((other for other in order(self.requested) if other not in timed_out
+                                    and other not in failed and status(other)["usable"]), None)
+                    if untried is not None:            # a plan this request has not tried yet comes first
+                        self.switches.append({"from": plan, "to": untried, "reason": str(last_timeout), "by": "temporary"})
+                        self.log(f"  {NAMES[plan]} 구독이 이 요청에 이미 응답하지 못했습니다 — {NAMES[untried]} 구독으로 보냅니다.")
+                        self.plan, self._client = untried, None
+                        continue
+                    if self.api is None:
+                        raise last_timeout
+                    self.switches.append({"from": plan, "to": "api", "reason": str(last_timeout), "by": "temporary"})
+                    self.log(f"  {NAMES[plan]} 구독이 이 요청에 이미 응답하지 못했습니다 — API 키({self.api.provider} · "
+                             f"모델 {self.api.model})로 보냅니다.")
+                    self.plan, self._client = None, None
+                    plan = current = None
                 if plan is not None and current is None:
                     try:
                         current = self._client = self._factory(plan)
                     except SubscriptionError as exc:
+                        last_error = exc
                         self._fail(plan, exc)
                         continue
+            if stopped_after_a_failure():                # stopped while the client was being made
+                raise last_error
             if plan is None:
                 if self.api is None:
                     raise SubscriptionError(self.reason or "쓸 수 있는 구독 계정도 API 키도 없습니다.")
@@ -352,13 +391,22 @@ class Session:
                 return self._as_first(current.request(model_name=name, system=system, prompt=prompt,
                                                       images=images, schema=schema), plan)
             except Exception as exc:
+                last_error = exc
                 wait = None
                 with self._lock:
                     if self.plan != plan or self._client is not current:
+                        if self.should_stop():
+                            raise                     # stopped meanwhile: do not send it again anywhere
                         continue                      # switched while it ran (by the user or another caller): send again
-                    if not isinstance(exc, SubscriptionError) or isinstance(exc, RequestRejected):
+                    if not isinstance(exc, (SubscriptionError, TimeoutError)) or isinstance(exc, RequestRejected):
                         raise                         # this request's own problem: another plan would refuse it too
-                    if getattr(exc, "kind", "account") == "temporary":
+                    if isinstance(exc, TimeoutError):
+                        if self.should_stop():
+                            raise                     # stopped while it waited: no other plan, no paid call
+                        # The whole timeout was already waited: no second try on the same plan, on to the next.
+                        timed_out.add(plan)
+                        last_timeout = exc
+                    elif _kind(exc) == "temporary":
                         if self.should_stop():
                             raise
                         if attempts < len(RETRY_WAITS):
@@ -386,7 +434,7 @@ class Session:
                 break
             self._sleep(min(0.5, left))
 
-    def _come_back(self):
+    def _come_back(self, avoid=()):
         """Back to the plan this connection started with once its rest is over (a limit that reset, a
         temporary failure), or from the API key to any plan that can be used again."""
         with self._lock:
@@ -394,12 +442,13 @@ class Session:
                 return
             failed = exhausted()
             target = None
-            if self.first not in failed and status(self.first)["usable"]:
+            if self.first not in failed and self.first not in avoid and status(self.first)["usable"]:
                 target = self.first
             elif self.plan is None:
-                target = next((plan for plan in order(self.requested) if plan not in failed and status(plan)["usable"]), None)
-            if target is None or target == self.plan:
-                return
+                target = next((plan for plan in order(self.requested)
+                               if plan not in failed and plan not in avoid and status(plan)["usable"]), None)
+            if target is None or target == self.plan or target in avoid:
+                return                                # not to a plan that already timed out on this request
             before = self.describe()
             self.plan, self._client, self.reason = target, None, ""
             self.switches.append({"from": before, "to": target, "reason": "쉬는 시간이 지남", "by": "rest"})
@@ -418,7 +467,7 @@ class Session:
         return text, complete, finish, tokens, actual
 
     def _fail(self, plan, exc):
-        kind = getattr(exc, "kind", "account")
+        kind = _kind(exc)
         seconds = _rest_seconds(plan, kind, getattr(exc, "retry_after", None))
         mark_exhausted(plan, str(exc), seconds)
         again = (f" {NAMES[plan]} 구독은 약 {_minutes(seconds)} 뒤 다시 씁니다." if seconds is not None
@@ -511,7 +560,8 @@ def _kill_tree(proc):
         return
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15, check=False,
+            from .runtime import system_program
+            subprocess.run([system_program("taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15, check=False,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         else:
             os.killpg(proc.pid, signal.SIGKILL)

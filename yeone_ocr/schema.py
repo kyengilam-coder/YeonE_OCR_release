@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 from collections import Counter
+import re
 from dataclasses import dataclass
 from typing import Annotated, Literal
 from pydantic import BaseModel, Field, ConfigDict, field_validator
@@ -94,6 +95,11 @@ def duplicate_region_ids(page: PageReading) -> set[str]:
     return {rid for rid, n in Counter(r.id for r in page.regions).items() if n > 1}
 
 
+# A region id names crop files and appears in the review page. The model writes it, and a
+# scanned page can carry instructions, so a new answer may not put path or markup syntax in it.
+_UNSAFE_ID = re.compile(r'[\\/:*?"<>|&\x00-\x1f\x7f]|\.\.')
+
+
 class PageResponse(PageReading):
     """새 모델 응답은 영역 id 가 유일해야 한다. PageReading 은 과거 중복 id 기록의 검수·본문 보존을 허용한다."""
 
@@ -103,7 +109,20 @@ class PageResponse(PageReading):
         duplicate = [rid for rid, n in Counter(r.id for r in regions).items() if n > 1]
         if duplicate:
             raise ValueError("영역 id 겹침: " + ", ".join(duplicate))
+        unsafe = [r.id for r in regions if len(r.id) > 64 or _UNSAFE_ID.search(r.id)]
+        if unsafe:
+            raise ValueError("영역 id 에 쓸 수 없는 글자: " + ", ".join(repr(rid[:40]) for rid in unsafe))
         return regions
+
+
+def region_file_part(region_id: str) -> str:
+    """Part of a file name for a region id: the id itself when it is plain, otherwise a cleaned
+    form with a short hash (records written before ids were checked may hold anything)."""
+    import hashlib
+    if re.fullmatch(r"[0-9A-Za-z가-힣_-]{1,40}", region_id):
+        return region_id
+    cleaned = re.sub(r"[^0-9A-Za-z가-힣_-]", "_", region_id)[:24]
+    return cleaned + "-" + hashlib.sha256(region_id.encode("utf-8")).hexdigest()[:8]
 
 
 class RegionReread(_M):

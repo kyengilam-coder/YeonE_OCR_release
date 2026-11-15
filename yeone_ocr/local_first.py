@@ -456,7 +456,8 @@ def _ai_page_reader(args, project, work, cli, session=None, api=None):
             cli.log(f"  {number}쪽: AI 쪽 판독 실패 — {exc} (엔진 판독만 씀)")
             return None
         cli.log(f"  {number}쪽: AI 쪽 판독 {len(result['text'])}자"
-                + (" (저장된 판독)" if result.get("cached") else f"({session.short()})"))
+                + (" (저장된 판독)" if result.get("cached") else f"({session.short()})")
+                + (f" · {result['cache_warning']}" if result.get("cache_warning") else ""))
         return {**result, "mode": mode}
     return read
 
@@ -814,9 +815,14 @@ def _command(args, *, work=None, doc=None, pool=None):
                 write_atomic(plan_path, json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
                 review["plan_path"] = str(plan_path)
                 unresolved = bool(plan.summary.get("unlocalized_targets"))
+                # Engines that failed on this page leave fewer readings to compare: a page that then has
+                # nothing to send is not "checked", it is unchecked evidence (Codex review, 1.2.17).
+                weakened = bool(review.get("engine_errors")) and review.get("single_reading")
                 if plan.summary["calls"] == 0:
-                    review["status"] = "needs-local-review" if unresolved else "no-api-needed"
-                    if unresolved and review_enabled:
+                    review["status"] = "needs-local-review" if unresolved or weakened else "no-api-needed"
+                    if weakened:
+                        review["reason"] = "엔진 실패로 남은 판독이 하나뿐이고 의심 구간도 찾지 못함"
+                    if (unresolved or weakened) and review_enabled:
                         incomplete.append(number)
                 elif not review_enabled or not key or plan.summary["calls"] > cap - tally["calls"] or (
                         stage_session is not None and not stage_session.available):
@@ -952,6 +958,14 @@ def _command(args, *, work=None, doc=None, pool=None):
                 saver.save()
                 if outcome.get("cancelled"):
                     return 130
+                errors = {engine: str(message) for engine, message in (outcome.get("errors") or {}).items()}
+                if errors:
+                    # Reported, not hidden: the page goes on with the engines that did read it.
+                    review["engine_errors"] = errors
+                    review["single_reading"] = len([r for r in (outcome.get("selection") or {}).get("scores", [])
+                                                    if r.get("characters") and r.get("score", 0) > 0]) <= 1
+                    cli.log(f"  {number}쪽: 엔진 실패 — " + " · ".join(f"{engine}: {message[:120]}" for engine, message in errors.items())
+                            + " (남은 엔진의 판독으로 계속)")
                 from .comparison import _run_complete, _run_profile
                 selected = _selected(project, number)
                 successful = set(outcome.get("completed", [])) | set(outcome.get("skipped", []))
@@ -980,6 +994,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                 # A page finished under the same conditions (no engine ran again, same key, review done):
                 # nothing to crop, plan, read or write again.
                 if (resume == "unfinished" and old and not getattr(args, "force", False) and not outcome.get("completed")
+                        and not review.get("engine_errors")      # a failure this time is judged again, not copied
                         and _resume_done(old, args, _resume_key(args, selected["id"], project.text(number), options),
                                          review_enabled)):
                     done = old["local_first"]["review"]

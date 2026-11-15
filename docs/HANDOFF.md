@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-15: 1.2.17 큰 비교 프로젝트는 gzip으로
+
+`comparison.py`: `_pack`(인코딩한 JSON이 `COMPRESS_ABOVE` 32 MB를 넘으면 `gzip.compress(level=1, mtime=0)` — mtime 0이라 같은 내용은 같은 바이트, `_disk_sha256` 비교가 그대로 맞음 · JSON 상한 `MAX_JSON_BYTES` 1 GB, 파일 상한 `MAX_BYTES` 256 MB) · `_unpack`(`_read`에서 gzip 머리 `1f 8b`면 `zlib.decompressobj(16+MAX_WBITS)`로 상한까지만 풀고, 덜 끝났거나 뒤에 군더더기가 있으면 거부). 저장·복구 저장 모두 `_pack`. 원인 측정: 엔진 4개·30줄 쪽에서 AI 검증 묶음 8개가 각자 `source_fidelity_evidence`(12 KB)와 쪽 전문을 복사해 쪽당 445 KB, 실제 책은 약 0.85 MB. 중복을 저장 때만 묶는 방법도 재 봤으나 47%만 줄었고(gzip은 13분의 1), 해시로 보존하는 AI 요청 형식을 건드려야 해서 택하지 않았다. 메모리에 드는 크기 자체는 그대로다 — 1,000쪽을 넘는 책은 따로 줄일 방법이 필요하다(`tests/test_comparison_storage.py`).
+
 ## 2026-11-15: 1.2.16 엔진 혼동 장부 · 글자 이미지 조각
 
 `yeone_ocr/confusion_memory.py`: `aligned_page(page)`(기준 판독 ↔ 현재 교정문, 교정 이력을 되돌려 글자마다 넣은 주체 'engine'/human/ai_confirmed/ai_auto — 고친 뒤 들어온 기준 판독, 다른 기준에서 나온 AI 채택, 30% 넘게 바뀐 쪽은 None) · `page_observations` · `harvest_project`(문서 `_id` 단위로 바꿔 넣음) · `LearnedConfusions`(집계, `risky(engine)`, `hints`) · `load_for_review`(비었거나 꺼졌으면 None → 계획 불변). 장부 경로 `YEONE_OCR_CONFUSIONS_PATH`. `comparison_ai.prepare_plan(confusions=)` → `_selective_targets(learned)` → `_learned_targets`(신뢰도 통과한 낱말, `quiet=True`라 unlocalized로 세지 않음), 시각 단계 대상에 `learned_confusions`, 프롬프트에 LEARNED CONFUSIONS 문단(힌트가 있을 때만). `ReviewPolicy`에 넣지 않은 까닭: `asdict(policy)`가 지문에 들어가 기존 프로젝트의 이어하기가 모두 다시 호출된다. `accept_candidate`/`accept_ai_proposal(actor=)`: 비교 창 human, `local_first._accept_ai`·`local_options.apply_votes` auto.
@@ -380,7 +384,7 @@ AI 완료 99범위·미완료 21범위와 원래 AI 제안 1,512개를 고정한
 
 AB 코드의 원본 파일 해시는 `docs/AB_OCR_PROVENANCE.json`에 기록했다. 원래 AB_OCR 프로젝트는 수정하지 않는다. 연어OCR 코드는 다른 프로젝트의 Python 소스를 가져오지 않는다. 현재 개발 PC에서는 기존 AB 설치의 공개 모델·별도 실행 환경만 재사용한다. 설치판은 개발용 형제 프로젝트 탐색을 하지 않는다.
 
-통합 전 AB_OCR 0.3.0의 공개 소스 52개와 파일 해시 목록은 `references/AB_OCR_0.3.0`에 보존한다. [보존 안내](../references/README.md)를 확인한다. `references`는 기록과 비교를 위한 비활성 소스 사본이며 런타임 import 경로가 아니다. 앱이 사용하는 통합 코드는 루트의 `ab_ocr`와 `yeone_ocr/comparison*.py`다. 보존 사본은 소스 ZIP에 포함하고 개인 문서·판독 기록·엔진 실행 환경·모델 가중치는 제외한다.
+통합 전 AB_OCR 0.3.0의 보존 사본(`references/AB_OCR_0.3.0`, 52개 파일과 해시 목록)은 1.2.17에서 지웠다 — 실행에 쓰이지 않았고, 그 안의 옛 GUI 시험이 Windows CI에서 임시 파일 잠금으로 실패했다. Git 이력과 1.2.16 이하 소스 ZIP에 남아 있다. 앱이 사용하는 통합 코드는 루트의 `ab_ocr`와 `yeone_ocr/comparison*.py`다.
 
 ## 지켜야 할 데이터 정책
 

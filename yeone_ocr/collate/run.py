@@ -4,17 +4,16 @@
          yeone-ocr collate <pdf> --hwpx <hwpx> --section "大薊" [--apply] [--policy all|sure|memo] [--out 파일]
 """
 from __future__ import annotations
-import hashlib, html, json, os, re, time, unicodedata
+import hashlib, html, json, os, time
 from argparse import Namespace
-from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from . import zh
-from .sections import HwpxBook, Anchor, Section, find_anchor, normalize_name, resolve_anchor_index
-from .pdf_outline import pdf_bookmarks, match_anchors, page_range, PdfAnchor, find_title_pages, fallback_page_bounds, section_page_range
+from .sections import HwpxBook, Section, find_anchor, normalize_name, resolve_anchor_index
+from .pdf_outline import pdf_bookmarks, match_anchors, PdfAnchor, find_title_pages, fallback_page_bounds, section_page_range
 from .collate import hwpx_cells, ocr_cells, collate, summary, Item, witness_filter, book_titles, promote_repeated, REPEAT_MIN
 from .hwpx_edit import Editor
-from .labels import POLICIES, ANCHOR_SOURCES
+from .labels import POLICIES
 from ..grades import COLLATE_LEGEND
 
 
@@ -221,7 +220,6 @@ def ensure_pages_read(args, work, doc, pages: tuple[int, int]) -> bool:
     준비·판독한다. 일부 쪽 판독이 실패했으면(cmd_read 3) True — 기록이 없는 쪽이 있으면 PartialRead. 2차가 여전히 덜 된 영역은
     run_section 이 표시만 하고(1차만 읽은 글), 다시 판독만 실패한 쪽은 있던 기록으로 대조한다."""
     from ..cli import cmd_prepare, cmd_read
-    from ..pdfio import parse_pages
     rng = range(pages[0], pages[1] + 1); force = getattr(args, "force", False); redo2 = not getattr(args, "no_second_pass", False)
     before = {n: work.load_record(n) for n in rng}
     need = [n for n in rng if before[n] is None or force or (redo2 and before[n].get("pass2_failed"))]

@@ -236,8 +236,10 @@ def template_suggests(template, ref: str | None) -> list[str]:
         k, r = _builtin("kaibao"), _builtin("regions")
         common = {n for v in r.para_styles.values() for n in v}
         want = {n for role in ("entry", "bonjing", "bielu") for n in k.para_styles.get(role, ()) if n not in common}
+        from .ziplimits import check_archive, read_member
         with zipfile.ZipFile(template) as z:
-            root = ET.fromstring(z.read("Contents/header.xml"))
+            check_archive(z)
+            root = ET.fromstring(read_member(z, "Contents/header.xml"))
         names = {e.get("name") for e in root.iter() if e.tag.endswith("}style")}
     except Exception:
         return []

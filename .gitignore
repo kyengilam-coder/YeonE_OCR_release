@@ -18,3 +18,4 @@ dist/
 /tools/glmocr/
 /tools/surya/
 /downloads/
+.coverage

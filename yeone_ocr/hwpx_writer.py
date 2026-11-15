@@ -337,6 +337,8 @@ class TemplateLook:
 
     def open(self, highlight: bool):
         from hwpx import HwpxDocument
+        from .ziplimits import check_archive
+        check_archive(self.template)                # the template is a file the person picked
         doc = HwpxDocument.open(self.template)
         sec0 = doc.sections[0]
         dropped = {"sections": 0, "headers": 0, "footers": 0, "controls": 0, "paragraphs": 0}   # 양식에서 뺀 것(cli 가 알린다)

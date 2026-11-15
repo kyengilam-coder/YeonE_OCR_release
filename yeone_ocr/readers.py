@@ -10,14 +10,14 @@ import json
 import os
 import re
 import threading
-import time
+import time  # noqa: F401 — tests patch readers.time.sleep
 
 from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
 
 from . import prompts, reader_gemini as gemini
 from .layout import to_png_bytes
-from .providers import PROVIDERS, PROVIDER_LABELS, DEFAULT_MODELS, ENV_KEYS, MODEL_ENV_KEYS, KEY_URLS, provider_name, default_model
+from .providers import PROVIDERS, PROVIDER_LABELS, ENV_KEYS, KEY_URLS, provider_name, default_model  # noqa: F401 — PROVIDERS is re-exported (cli.py imports it from here)
 
 ReaderError = gemini.ReaderError
 

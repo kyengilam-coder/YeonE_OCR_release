@@ -1910,6 +1910,3 @@ class ComparisonEditor(tk.Toplevel):
                 self._preview.close()
                 self._preview = None
 
-
-def open_comparison_editor(master, source_path=None, project_path=None, **kwargs):
-    return ComparisonEditor(master, source_path, project_path, **kwargs)
