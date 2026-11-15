@@ -1,3 +1,13 @@
+# Windows 1.2.17 설치판
+
+1.2.17은 1.2.16의 설치 구성을 그대로 쓰고, 32 MB를 넘는 비교 프로젝트를 gzip으로 압축해 저장하는 수정만 더한 판이다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.17**로 맞춘다. 빌드 절차를 사용할 때 `OutputDirectory`는 `dist/1.2.17`로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일에서 올린다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.17), 1.2.16에서 300쪽 무렵 멈춘 책을 「끝나지 않은 쪽만 점검」으로 이어 가면 실패한 쪽이 처리되고 `작업자료\comparison\local-first-*.yeone-compare.json`이 압축 파일(머리 1F 8B)로 바뀌는지, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.17 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.17)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.16 설치판
 
 1.2.16은 1.2.15의 설치 구성을 그대로 쓰고, 엔진 혼동 장부·글자 이미지 조각과 그 관리 창을 더한 판이다. 새 파일은 사용자 자료 폴더(`%LOCALAPPDATA%\YeonE_OCR\confusions.json`, `glyph_samples\`)에만 쓰며 설치 구성은 바뀌지 않는다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
