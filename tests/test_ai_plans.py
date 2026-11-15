@@ -635,6 +635,18 @@ def test_a_temporary_failure_is_sent_again_to_the_same_plan():
         assert len(logs) == 2 and "일시 오류" in logs[0] and waits
 
 
+def test_a_cli_timeout_is_retried_then_moves_on_like_any_temporary_failure():
+    """Codex review (1.2.17): adapters raise TimeoutError, which used to skip retry, the next plan and the API key."""
+    plans = {"chatgpt": _Flaky("chatgpt", [TimeoutError("Codex CLI 응답이 300초 안에 오지 않았습니다.")] * 3),
+             "claude": _Flaky("claude")}
+    logs = []
+    with _with(_states(claude=True, chatgpt=True)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
+        session = subscriptions.Session("chatgpt", "chatgpt", log=logs.append, factory=plans.__getitem__, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "claude"                                          # answered by the next plan
+        assert plans["chatgpt"].calls == 3 and any("일시 오류" in line for line in logs)
+        assert "chatgpt" in subscriptions.exhausted()                                 # resting, not marked as an account problem
+
+
 def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():
     now = [1000.0]
     plans = {"chatgpt": _Flaky("chatgpt", [_error("stream disconnected", "temporary")] * 3), "claude": _Flaky("claude")}

@@ -224,11 +224,15 @@ def page_image(doc: pymupdf.Document, pdf_page: int, dpi: int = 300, prefer_embe
         if im.mode not in ("L", "RGB"):
             im = im.convert("RGB")
         return im, f"내장 스캔 {im.width}x{im.height} {info['ext']}" + (f" ({emb[2]}도 돌려 놓임)" if emb[2] else "")
-    area = page.rect.width * page.rect.height               # pt²
+    area = page.rect.width * page.rect.height               # pt², UserUnit included
     if area > 0 and area * (dpi / 72) ** 2 > MAX_RENDER_PIXELS:
-        # An oversized page (a crafted PDF can declare 200 × 200 inches) would need gigabytes at 300 dpi:
-        # render it at the resolution that fits instead of running out of memory.
-        dpi = max(36, int(72 * (MAX_RENDER_PIXELS / area) ** 0.5))
+        # An oversized page (a crafted PDF can declare 200 × 200 inches, or multiply it by UserUnit)
+        # would need gigabytes: render at the scale that fits. No lower bound — a floor would let
+        # a large enough page through again (Codex review, 1.2.17).
+        zoom = (MAX_RENDER_PIXELS / area) ** 0.5 * 0.999
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        return im, f"렌더 {zoom * 72:.1f}dpi(큰 쪽 축소) {im.width}x{im.height}"
     pix = page.get_pixmap(dpi=dpi)
     im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     return im, f"렌더 {dpi}dpi {im.width}x{im.height}"

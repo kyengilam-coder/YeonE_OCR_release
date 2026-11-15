@@ -110,7 +110,9 @@ class HwpxBook:
 
     def __init__(self, path: str):
         from hwpx.document import HwpxDocument
+        from ..ziplimits import check_archive
         self.path = path
+        check_archive(path)                         # before python-hwpx reads every part into memory
         self.doc = HwpxDocument.open(path)
         self.paragraphs = self.doc.paragraphs
         self.style_names = self._style_names()

@@ -148,6 +148,36 @@ class LocalFirstTests(unittest.TestCase):
         project = collect.call_args.args[0]
         self.assertEqual(project.project_path, Path(self.record()["local_first"]["project_path"]))
 
+    def test_an_engine_failure_is_reported_and_the_page_is_not_called_checked(self):
+        """Codex review (1.2.17): a failed engine left one reading and the page still ended "no API needed"."""
+        original = self.recognize
+        def recognize(project, number, **kwargs):
+            outcome = original(project, number, **kwargs)
+            outcome["errors"] = {"glmocr": "GPU 메모리 부족"}
+            outcome["selection"] = {"selected_engine": "ppocrv6",
+                                    "scores": [{"engine": "ppocrv6", "characters": 4, "score": 0.9}]}
+            return outcome
+        logs = []
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=recognize), \
+                patch.object(cli, "log", side_effect=logs.append):
+            self.assertEqual(command(self.args()), 4)                                     # 4: pages left to check
+        review = self.record()["local_first"]["review"]
+        self.assertEqual(review["status"], "needs-local-review")
+        self.assertEqual(review["engine_errors"], {"glmocr": "GPU 메모리 부족"})
+        self.assertTrue(any("엔진 실패" in line and "glmocr" in line for line in logs))
+
+    def test_an_engine_failure_with_other_readings_left_still_needs_no_extra_check(self):
+        original = self.recognize
+        def recognize(project, number, **kwargs):
+            outcome = original(project, number, **kwargs)
+            outcome["errors"] = {"glmocr": "시간 초과"}
+            outcome["selection"] = {"selected_engine": "ppocrv6", "scores": [
+                {"engine": "ppocrv6", "characters": 4, "score": 0.9}, {"engine": "surya", "characters": 4, "score": 0.8}]}
+            return outcome
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=recognize):
+            self.assertEqual(command(self.args()), 0)
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "no-api-needed")
+
     def test_record_carries_per_glyph_grades_for_document_colours(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

@@ -155,3 +155,52 @@ def test_startup_log_hides_keys_set_after_start(tmp_path, monkeypatch):
     log.write("using plain-secret-value-123 now\n")
     log.finish()
     assert "plain-secret-value-123" not in (tmp_path / "startup.log").read_text(encoding="utf-8")
+
+
+def test_a_user_unit_page_cannot_get_past_the_render_cap():
+    """Codex review (1.2.17): a 36 dpi floor let a UserUnit=10 page ask for 5.2 Gpx."""
+    from yeone_ocr.pdfio import MAX_RENDER_PIXELS, page_image
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=14400, height=14400)
+        doc.xref_set_key(page.xref, "UserUnit", "10")
+        data = doc.tobytes()
+    with pymupdf.open("pdf", data) as doc:
+        assert doc[0].rect.width == 144000
+        image, note = page_image(doc, 1, 300, prefer_embedded=False)
+        assert image.width * image.height <= MAX_RENDER_PIXELS and "축소" in note
+
+
+def test_every_way_into_a_users_hwpx_checks_its_expanded_size(tmp_path, monkeypatch):
+    """Codex review (1.2.17): choosing a template read Contents/header.xml with no size check."""
+    from yeone_ocr import cli, presets, ziplimits
+    from yeone_ocr.collate import navigation
+    from yeone_ocr.collate.sections import HwpxBook
+    bomb = tmp_path / "template.hwpx"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("Contents/header.xml", b"<a>" + b" " * 3_000_000 + b"</a>")
+        archive.writestr("Contents/section0.xml", b"<s/>")
+    monkeypatch.setattr(ziplimits, "MAX_ARCHIVE_BYTES", 1_000_000)
+    monkeypatch.setattr(ziplimits, "MAX_MEMBER_BYTES", 1_000_000)
+    read = []
+    original = zipfile.ZipFile.read
+    monkeypatch.setattr(zipfile.ZipFile, "read", lambda self, name, *a: read.append(name) or original(self, name, *a))
+    assert presets.template_suggests(str(bomb), None) == []
+    with pytest.raises(ziplimits.ArchiveTooLarge):
+        HwpxBook(str(bomb))
+    with pytest.raises(ziplimits.ArchiveTooLarge):
+        navigation.create_section_view_copy(str(bomb), 0, "x")
+    assert "Contents/header.xml" not in read                                              # never expanded
+
+
+def test_an_ai_page_reading_survives_a_cache_that_cannot_be_written(tmp_path, monkeypatch):
+    """Codex review (1.2.17): a failed cache write threw away a reading that was already paid for."""
+    from PIL import Image
+    from yeone_ocr import ai_page, state
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("read-only folder")
+    monkeypatch.setattr(state, "write_atomic", refuse)
+    client = SimpleNamespace(request=lambda **_: (json.dumps({"lines": ["甲乙"], "uncertain": []}), True, "", {}, "m"))
+    with Image.new("RGB", (200, 300), "white") as image:
+        result = ai_page.read_page(image, direction="vertical", profile="traditional", client=client, model="m",
+                                   cache_dir=tmp_path / "cache")
+    assert result["text"] == "甲乙" and "cache_warning" in result

@@ -140,8 +140,14 @@ def read_page(image, *, direction, profile, client, model, cache_dir: Path | Non
     result = {"text": "\n".join(lines), "uncertain": [u for u in data.get("uncertain", []) if isinstance(u, str)],
               "model": actual, "strips": [list(b) for b in boxes], "usage": tokens, "prompt_version": PROMPT_VERSION}
     if path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        # The reading is already paid for: a cache that cannot be written (read-only folder, full
+        # disk) must not throw it away, or the next run would ask again.
+        try:
+            from .state import write_atomic
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(path, json.dumps(result, ensure_ascii=False, indent=1))
+        except OSError as exc:
+            return {**result, "cached": False, "cache_warning": f"판독 저장본을 쓰지 못함: {exc}"}
     return {**result, "cached": False}
 
 

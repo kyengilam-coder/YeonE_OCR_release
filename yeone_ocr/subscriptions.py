@@ -234,6 +234,12 @@ def client(plan: str):
     return module(plan).SubscriptionClient()
 
 
+def _kind(exc):
+    """A CLI that did not answer in time (TimeoutError from the adapters) is a temporary failure:
+    retried, then the next plan or the API key, like any other temporary error."""
+    return getattr(exc, "kind", "temporary" if isinstance(exc, TimeoutError) else "account")
+
+
 class Session:
     """One run's AI connection, shared by page reading and review; the client both of them call.
 
@@ -352,9 +358,9 @@ class Session:
                 with self._lock:
                     if self.plan != plan or self._client is not current:
                         continue                      # switched while it ran (by the user or another caller): send again
-                    if not isinstance(exc, SubscriptionError) or isinstance(exc, RequestRejected):
+                    if not isinstance(exc, (SubscriptionError, TimeoutError)) or isinstance(exc, RequestRejected):
                         raise                         # this request's own problem: another plan would refuse it too
-                    if getattr(exc, "kind", "account") == "temporary":
+                    if _kind(exc) == "temporary":
                         if self.should_stop():
                             raise
                         if attempts < len(RETRY_WAITS):
@@ -414,7 +420,7 @@ class Session:
         return text, complete, finish, tokens, actual
 
     def _fail(self, plan, exc):
-        kind = getattr(exc, "kind", "account")
+        kind = _kind(exc)
         seconds = _rest_seconds(plan, kind, getattr(exc, "retry_after", None))
         mark_exhausted(plan, str(exc), seconds)
         again = (f" {NAMES[plan]} 구독은 약 {_minutes(seconds)} 뒤 다시 씁니다." if seconds is not None

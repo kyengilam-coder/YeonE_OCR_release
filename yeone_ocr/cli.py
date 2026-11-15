@@ -1870,7 +1870,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     if template:                                                        # 비싼 획 굵기 재기 전에 양식이 HWPX 꾸러미인지 싸게 본다
         import zipfile
         try:
+            from .ziplimits import check_archive
             with zipfile.ZipFile(template) as z:
+                check_archive(z)
                 missing = [n for n in ("Contents/header.xml", "Contents/section0.xml") if n not in z.namelist()]
         except Exception as e:
             missing = [f"zip 으로 열리지 않음({type(e).__name__})"]
