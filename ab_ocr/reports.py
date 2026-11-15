@@ -46,10 +46,6 @@ def write_text(text: str, path: str | Path, *, protected_paths=()) -> Path:
     return atomic_write(path, text, protected_paths=protected_paths)
 
 
-def read_utf8(path: str | Path, *, max_bytes=8_000_000) -> str:
-    return read_utf8_snapshot(path, max_bytes=max_bytes)[0]
-
-
 def read_utf8_snapshot(path: str | Path, *, max_bytes=8_000_000) -> tuple[str, str]:
     with Path(path).open("rb") as stream:
         data = stream.read(max_bytes + 1)
@@ -191,41 +187,3 @@ def _publish_new(temporary: Path, destination: Path) -> None:
     else:
         os.link(temporary, destination)
 
-
-def write_recognition(result: dict, text_path: str | Path) -> tuple[Path, Path]:
-    """Publish a new transcript + provenance pair; never overwrite an old pair."""
-    text_path = Path(text_path).resolve()
-    record_path = text_path.with_suffix(".ocr.json")
-    if text_path.exists() or record_path.exists():
-        raise ValueError("인식문 또는 인식 기록이 이미 있습니다. 새 출력 이름을 고르십시오.")
-    if text_path.suffix.lower() != ".txt" or not text_path.parent.is_dir():
-        raise ValueError("기존 폴더 안의 새 .txt 경로를 고르십시오.")
-    source = Path(result["source_path"]).resolve()
-    if source in (text_path, record_path):
-        raise ValueError("원본 파일에 인식 결과를 저장할 수 없습니다.")
-    contents = [result["text"].encode("utf-8"),
-                (json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")]
-    staged = []
-    published = []
-    try:
-        for data in contents:
-            with tempfile.NamedTemporaryFile(dir=text_path.parent, prefix=".abocr-", delete=False) as stream:
-                staged.append(Path(stream.name))
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-        for temp_path, destination, data in zip(staged, (text_path, record_path), contents):
-            _publish_new(temp_path, destination)
-            stat = destination.stat()
-            published.append((destination, (stat.st_dev, stat.st_ino), hashlib.sha256(data).digest()))
-        return text_path, record_path
-    except OSError:
-        for destination, identity, digest in reversed(published):
-            if destination.is_file():
-                stat = destination.stat()
-                if (stat.st_dev, stat.st_ino) == identity and hashlib.sha256(destination.read_bytes()).digest() == digest:
-                    destination.unlink()
-        raise
-    finally:
-        for temp_path in staged:
-            temp_path.unlink(missing_ok=True)

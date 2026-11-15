@@ -58,16 +58,6 @@ def serve_requests(worker, root, languages, write_result, *, failure_evidence=No
     return 0
 
 
-def load_session_protocol(script_path):
-    """Isolated -I workers load only their allowlisted adjacent helper."""
-    import importlib.util
-    path = Path(script_path).with_name("worker_sessions.py")
-    spec = importlib.util.spec_from_file_location("yeone_private_worker_protocol", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 class WorkerProcess:
     """One application-owned worker tree; never discovers another server."""
     def __init__(self, argv, root, *, should_stop=None, timeout=300):

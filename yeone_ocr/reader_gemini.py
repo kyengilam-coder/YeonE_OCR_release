@@ -3,7 +3,7 @@
 환경 변수: GEMINI_API_KEY (또는 GOOGLE_API_KEY), GEMINI_MODEL (선택).
 """
 from __future__ import annotations
-import os, re, time, json, logging, threading
+import os, re, time, logging, threading
 from PIL import Image
 from .schema import PageReading, PageResponse, RegionReread, MultiRegionReread, GlyphChoice, MultiGlyphChoice, GlyphAsk
 from .layout import to_png_bytes
@@ -74,10 +74,6 @@ def split_keys(raw: str | None) -> list[str]:
         if part and part not in out:
             out.append(part)
     return out
-
-
-def join_keys(keys: list[str]) -> str:
-    return ", ".join(keys)
 
 
 def key_shape_warning(key: str) -> str:

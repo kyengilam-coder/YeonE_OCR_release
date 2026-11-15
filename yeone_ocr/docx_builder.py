@@ -1,7 +1,6 @@
 """python-docx 로 DOCX 도 함께 만들 수 있다(선택). HWPX 와 같은 꾸밈: 쪽 나누기, 확인 등급 색(초록·파랑·빨강)과 밑줄,
 고지 사항은 Word 주석, 작업 표시 회색."""
 from __future__ import annotations
-from pathlib import Path
 from .blocks import Block
 from .hwpx_builder import figure_width_mm, split_marks, FONT_BODY, FONT_HEAD, MEMO_AUTHOR
 from .grades import styled_runs, GRADE_STYLE, STYLE_ALIAS

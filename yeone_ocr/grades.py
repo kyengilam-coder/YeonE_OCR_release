@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from .merge import columns_in_reading_order
 from .marks import MARK_RE, NOTE_PREFIXES, split_marks, fold_map   # NOTE_PREFIXES·split_marks 는 예전 이름(grades.*)으로도 쓰인다(hwpx_builder·collate·시험)
 from .schema import PageReading, TEXT_KINDS
 from .adjudicate import SUSPECT_NOTE, suspect_uncertain
@@ -212,12 +211,6 @@ def suspect_positions(merged: PageReading, suspects: list[dict] | None) -> tuple
             missing.append(e); continue
         found.append(Located(reg.id, pi, off + at, off + at + len(e["consensus"]), e))
     return found, missing
-
-
-def _check_columns_order(reg) -> bool:
-    """columns_in_reading_order 와 decided_positions 의 열 차례가 같은지(시험용)."""
-    flat = [c for p in reg.paragraphs for c in sorted(p.columns, key=lambda c: c.col_from_right)]
-    return [id(c) for c in flat] == [id(c) for c in columns_in_reading_order(reg)]
 
 
 # ---------- 쪽마다 등급·고지 계산 ----------

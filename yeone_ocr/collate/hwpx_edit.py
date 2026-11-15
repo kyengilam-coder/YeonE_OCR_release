@@ -17,7 +17,7 @@
 - 원본 파일은 덮어쓰지 않고 사본으로 저장한다.
 """
 from __future__ import annotations
-import os, random, shutil, time
+import os, shutil
 from copy import deepcopy
 from dataclasses import dataclass
 from lxml import etree
@@ -69,12 +69,6 @@ def item_grade(it: Item) -> str:
     """항목의 확인 등급(grades.collate_grade): green | blue | red."""
     from ..grades import collate_grade
     return collate_grade(it) or "red"
-
-
-def is_notice(it: Item) -> bool:
-    """색만으로는 전할 수 없는 고지 사항인지(notice 메모 대상, grades.needs_memo)."""
-    from ..grades import needs_memo
-    return needs_memo(it, "notice")
 
 
 # python-hwpx 와 같은 셈법: hp:t 안의 이 요소들은 글자 하나로 센다
@@ -208,10 +202,6 @@ def remove_collate_memos(book, *, author: str = "YeonE_OCR") -> MemoCleanup:
     if removed and hasattr(book, "_texts"):
         book._texts = None
     return MemoCleanup(removed, skipped)
-
-
-def _rid() -> str:
-    return str(random.randint(10 ** 9, 2 ** 31 - 1))
 
 
 def paragraph_text(pel: etree._Element) -> str:

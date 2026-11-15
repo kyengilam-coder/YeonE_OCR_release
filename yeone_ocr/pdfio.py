@@ -64,10 +64,6 @@ def image_sources(path: str | os.PathLike) -> list[Path]:
     return [p] if is_image(p) else []
 
 
-def is_image_source(path: str | os.PathLike) -> bool:
-    return bool(image_sources(path)) or (Path(path).is_dir())
-
-
 def _first_jpeg(im: Image.Image, raw: bytes) -> bytes:
     """넣을 JPEG 바이트. MPO(미리보기·HDR 이득 지도가 뒤에 붙은 사진)는 첫 그림의 바이트만(뒤에 붙은 것은 쪽에 쓰이지 않고 PDF 만 키운다)."""
     if im.format == "MPO":

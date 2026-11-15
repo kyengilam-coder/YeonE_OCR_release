@@ -184,9 +184,6 @@ class DocumentProject:
     def text(self, number: int) -> str:
         return self.page(number).text
 
-    def has_corrections(self, number: int) -> bool:
-        return self.page(number).corrected_text is not None
-
     def _replace(self, page: PageState) -> None:
         if self._pages.get(page.number, PageState(page.number)) != page:
             self._pages[page.number] = page
@@ -201,15 +198,6 @@ class DocumentProject:
                 return
             data = asdict(page)
             data.update(corrected_text=None if page.raw is not None and text == page.raw_text else text, reviewed=False)
-            self._replace(PageState(**data))
-
-    def restore_raw(self, number: int) -> None:
-        with self._lock:
-            page = self.page(number)
-            if page.raw is None:
-                raise ProjectError("이 쪽에는 복원할 원시 인식 결과가 없습니다.")
-            data = asdict(page)
-            data.update(corrected_text=None, reviewed=False)
             self._replace(PageState(**data))
 
     def set_reviewed(self, number: int, reviewed: bool) -> None:

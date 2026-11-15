@@ -22,7 +22,7 @@ def parse_pages(value, count):
 def command(args):
     from ab_ocr.ocr import document_info, OCRError
     from ab_ocr.engine_registry import engine_set, primary_engine
-    from .comparison import ComparisonProject, run_page, run_pages
+    from .comparison import ComparisonProject, run_pages
     from .automatic_ocr import run_automatic_page
     from .comparison_bridge import default_project_path, open_project
     stop = threading.Event()

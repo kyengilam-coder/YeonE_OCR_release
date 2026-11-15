@@ -19,7 +19,6 @@ import threading
 import time
 import unicodedata
 
-from PIL import Image
 
 from . import prompts
 from .comparison import _atomic_write

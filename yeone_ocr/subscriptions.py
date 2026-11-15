@@ -81,10 +81,6 @@ def plan_for_key(key) -> str | None:
     return next((plan for plan, value in KEYS.items() if value == key), None)
 
 
-def is_key(key) -> bool:
-    return plan_for_key(key) is not None
-
-
 def status(plan: str, refresh: bool = False, runner=subprocess.run) -> dict:
     return module(plan).status(refresh=refresh, runner=runner)
 
