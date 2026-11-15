@@ -386,6 +386,8 @@ class Session:
                 wait = None
                 with self._lock:
                     if self.plan != plan or self._client is not current:
+                        if self.should_stop():
+                            raise                     # stopped meanwhile: do not send it again anywhere
                         continue                      # switched while it ran (by the user or another caller): send again
                     if not isinstance(exc, (SubscriptionError, TimeoutError)) or isinstance(exc, RequestRejected):
                         raise                         # this request's own problem: another plan would refuse it too

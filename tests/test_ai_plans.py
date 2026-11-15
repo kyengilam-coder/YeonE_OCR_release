@@ -714,6 +714,25 @@ def test_timeouts_in_the_shipped_order_never_loop(monkeypatch, with_api):
     assert outcome == {"answer": "claude"} and {k: v.calls for k, v in flaky.items()} == {"gemini": 1, "chatgpt": 1, "claude": 1}
 
 
+def test_a_request_switched_away_and_stopped_while_waiting_is_not_sent_again():
+    """Codex: switched to the API key mid-request, then stopped: the failed request still went to the paid API."""
+    stop = [False]
+    session_box = {}
+    class Waiting(_Flaky):
+        def request(self, **kwargs):
+            session_box["s"].switch("api")                 # the person moves on to the API key meanwhile ...
+            stop[0] = True                                 # ... and presses stop
+            raise TimeoutError("claude")
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=False, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=lambda plan: Waiting(plan),
+                                        sleep=lambda _s: None, should_stop=lambda: stop[0])
+        session_box["s"] = session
+        with pytest.raises(TimeoutError):
+            _ask(session)
+    assert api.request.call_count == 0
+
+
 def test_a_timeout_after_stop_sends_nothing_else():
     """Codex final check: a timeout after [중지] went on to the next plan and the paid API."""
     stop = [False]
