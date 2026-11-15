@@ -1,5 +1,9 @@
 # 연어OCR 개발 인수인계
 
+## 2026-11-15: 다음 판(미배포) — 큰 비교 프로젝트는 gzip으로
+
+`comparison.py`: `_pack`(인코딩한 JSON이 `COMPRESS_ABOVE` 32 MB를 넘으면 `gzip.compress(level=1, mtime=0)` — mtime 0이라 같은 내용은 같은 바이트, `_disk_sha256` 비교가 그대로 맞음 · JSON 상한 `MAX_JSON_BYTES` 1 GB, 파일 상한 `MAX_BYTES` 256 MB) · `_unpack`(`_read`에서 gzip 머리 `1f 8b`면 `zlib.decompressobj(16+MAX_WBITS)`로 상한까지만 풀고, 덜 끝났거나 뒤에 군더더기가 있으면 거부). 저장·복구 저장 모두 `_pack`. 원인 측정: 엔진 4개·30줄 쪽에서 AI 검증 묶음 8개가 각자 `source_fidelity_evidence`(12 KB)와 쪽 전문을 복사해 쪽당 445 KB, 실제 책은 약 0.85 MB. 중복을 저장 때만 묶는 방법도 재 봤으나 47%만 줄었고(gzip은 13분의 1), 해시로 보존하는 AI 요청 형식을 건드려야 해서 택하지 않았다. 메모리에 드는 크기 자체는 그대로다 — 1,000쪽을 넘는 책은 따로 줄일 방법이 필요하다(`tests/test_comparison_storage.py`).
+
 ## 2026-11-15: 1.2.16 엔진 혼동 장부 · 글자 이미지 조각
 
 `yeone_ocr/confusion_memory.py`: `aligned_page(page)`(기준 판독 ↔ 현재 교정문, 교정 이력을 되돌려 글자마다 넣은 주체 'engine'/human/ai_confirmed/ai_auto — 고친 뒤 들어온 기준 판독, 다른 기준에서 나온 AI 채택, 30% 넘게 바뀐 쪽은 None) · `page_observations` · `harvest_project`(문서 `_id` 단위로 바꿔 넣음) · `LearnedConfusions`(집계, `risky(engine)`, `hints`) · `load_for_review`(비었거나 꺼졌으면 None → 계획 불변). 장부 경로 `YEONE_OCR_CONFUSIONS_PATH`. `comparison_ai.prepare_plan(confusions=)` → `_selective_targets(learned)` → `_learned_targets`(신뢰도 통과한 낱말, `quiet=True`라 unlocalized로 세지 않음), 시각 단계 대상에 `learned_confusions`, 프롬프트에 LEARNED CONFUSIONS 문단(힌트가 있을 때만). `ReviewPolicy`에 넣지 않은 까닭: `asdict(policy)`가 지문에 들어가 기존 프로젝트의 이어하기가 모두 다시 호출된다. `accept_candidate`/`accept_ai_proposal(actor=)`: 비교 창 human, `local_first._accept_ai`·`local_options.apply_votes` auto.
