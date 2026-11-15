@@ -288,7 +288,7 @@ class LocalFirstGuiTests(unittest.TestCase):
             gui.App.install_plan(gemini)
             self.assertIn("antigravity.google/cli/install", ask.call_args.args[1])
             self.assertEqual(gemini.q.get(timeout=5)[0], "log")
-            self.assertEqual(gemini.q.get(timeout=5), ("setup_done", "Antigravity (Google 계정 · Gemini) 설치", 0))
+            self.assertEqual(gemini.q.get(timeout=5), ("setup_done", "Antigravity (Google 계정) 설치", 0))
         self.assertEqual(len(ran), 1)
         self.assertTrue(any("antigravity.google/cli/install" in part for part in ran[0]))
         app._setup_busy = False

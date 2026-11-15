@@ -37,15 +37,15 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
-AI_PLAN_LABELS = {"auto": "자동 (로그인된 것: Claude → ChatGPT → Antigravity)", "claude": "Claude (Claude Code)",
-                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Antigravity (Google 계정 · Gemini)"}
+AI_PLAN_LABELS = {"auto": "자동 (Claude → ChatGPT → Antigravity)", "claude": "Claude (Claude Code)",
+                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Antigravity (Google 계정)"}
 RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
                  "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
               "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
               "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
               "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
-SETUP_LABELS = {"gemini": "Antigravity (Google 계정 · Gemini)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
+SETUP_LABELS = {"gemini": "Antigravity (Google 계정)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Antigravity 구독", "api": "API 키"}
 
@@ -1735,7 +1735,7 @@ class App(tk.Tk):
             st.map(sname, foreground=[("disabled", C["EDGE"])], background=[("active", C["QUIET"])], font=[("disabled", F["BODY_B"])])
         for sname, bg, font in (("Link.TButton", C["PANEL"], under), ("PageLink.TButton", C["BG"], under),
                                 ("Toggle.TButton", C["PANEL"], F["BODY_B"]), ("PageToggle.TButton", C["BG"], F["BODY_B"]),
-                                ("SecToggle.TButton", C["PANEL"], F["SECTION"]), ("SetToggle.TButton", C["PANEL"], F["BODY_B"])):   # 설정 탭의 접힌 섹션 제목·[고급 ▸]
+                                ("SecToggle.TButton", C["PANEL"], F["DLG"]), ("SetToggle.TButton", C["PANEL"], F["BODY_B"])):   # 설정 탭의 접힌 섹션 제목·[고급 ▸]
             st.layout(sname, [("Link.border", {"sticky": "nsew", "children": [("Button.padding", {"sticky": "nsew", "children": [
                 ("Button.focus", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})]})])
             st.configure(sname, background=bg, foreground=C["INK"], font=font, padding=(P(4), P(2)), width=0, focuscolor=C["INK"], focusthickness=max(1, P(1)))
@@ -2429,15 +2429,23 @@ class App(tk.Tk):
             return lambda p: ttk.Checkbutton(p, variable=var, style="Bare.TCheckbutton")
 
         def subhead(parent, title, note="", tag=None):
-            """섹션 안의 묶음 머리(굵은 글 · 꼬리표 · 회색 설명) — 한 섹션 안에서 기능별로 나눈다."""
-            f = boxed(parent); f.pack(fill="x", pady=(P(12), P(2)))
-            L(f, title, "BODY_B").pack(side="left")
+            """섹션 안의 묶음 머리 — 한 섹션 안에서 기능별로 나눈다. 세 단계가 한눈에 갈리게: 섹션 제목(큰 글) > 묶음 머리(옅은 남색 띠 ·
+            왼쪽 굵은 색 막대 · 굵은 남색 제목, 설명은 아래 줄) > 설정 줄(묶음 머리보다 들여 씀 — _setting_row 가 parent._indent 를 따름).
+            묶음의 첫 줄 위에는 가는 줄을 긋지 않는다(띠가 이미 나눔)."""
+            BAND = C["SEAL_SOFT"]
+            f = tk.Frame(parent, bg=BAND)
+            f.pack(fill="x", pady=(P(16) if parent.winfo_children()[:-1] else P(4), P(2)))
+            tk.Frame(f, bg=C["SEAL"], width=P(4)).pack(side="left", fill="y")
+            inner = tk.Frame(f, bg=BAND); inner.pack(side="left", fill="x", expand=True, padx=(P(10), P(10)), pady=(P(6), P(6)))
+            top = tk.Frame(inner, bg=BAND); top.pack(fill="x")
+            L(top, title, "BODY_B", "SEAL_HI", bg="SEAL_SOFT").pack(side="left")
             f.tag = None
             if tag:
-                f.tag = ttk.Label(f, text=tag, style="Tag.TLabel"); f.tag.pack(side="left", padx=(P(8), 0))
+                f.tag = ttk.Label(top, text=tag, style="Tag.TLabel"); f.tag.pack(side="left", padx=(P(8), 0))
                 Tip(f.tag, TAG_TIP, self)
             if note:
-                L(f, note, "CAP", "MUTED").pack(side="left", padx=(P(8), 0), pady=(P(2), 0))
+                L(inner, note, "CAP", "MUTED", bg="SEAL_SOFT", wrap=True).pack(fill="x", pady=(P(2), 0))
+            parent._indent, parent._group_start = P(14), True
             return f
 
         # ---- 판독(모든 책 공통) ----
@@ -2448,11 +2456,13 @@ class App(tk.Tk):
         s = S["read"] = self._settings_section(common, "인식", "인식 방식과 이 PC의 OCR 엔진 · 모든 책 공통 · 세 OCR 탭이 함께 씀")
         b = s["body"]
 
+        subhead(b, "방식", "어떻게 읽을지 · 어떤 글의 책인지")
         R["ocr_strategy"] = row(b, "인식 방식", "일반·이미지 OCR의 한 번에 인식에 적용",
             lambda p: ttk.Combobox(p, textvariable=self.v_ocr_strategy, values=list(OCR_STRATEGY_LABELS.values()), state="readonly", width=chars(280)))
         R["local_profile"] = row(b, "로컬 문서 종류", "설치된 엔진 중 해당 언어를 지원하는 엔진을 비교",
             lambda p: ttk.Combobox(p, textvariable=self.v_local_profile, values=list(LOCAL_PROFILE_LABELS.values()), state="readonly", width=chars(220)))
 
+        subhead(b, "엔진", "이 PC의 OCR 엔진과 함께 읽을 것")
         def local_columns(parent):
             cb = ttk.Checkbutton(parent, text="두 단 본문은 왼쪽 단 먼저", variable=self.v_local_columns)
             Tip(cb, "가로쓰기 두 단 조판에서 엔진이 왼쪽·오른쪽 줄을 번갈아 내놓아 글이 섞이는 것을 바로잡습니다. 각 단이 단 폭을 채우는 "
@@ -2491,6 +2501,7 @@ class App(tk.Tk):
                                  "설치할 때만 공개 파일을 내려받으며 문서와 API 키는 읽지 않습니다.")
         R["engines"] = row(b, "OCR 엔진", "GPU 점검 · 추가 엔진과 GPU 가속 내려받아 설치", engines)
 
+        subhead(b, "판독 기록이 있을 때", "중간에 멈춘 실행 · 다시 판독")
         R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
 
         def resume(parent):
@@ -2525,13 +2536,8 @@ class App(tk.Tk):
 
         def plans_status(parent):
             f = boxed(parent)
-            self.l_plans = L(f, "설정 탭을 열면 확인합니다", "CAP", "MUTED")
-            self.l_plans.pack(side="left")
-            self._plans_tip = Tip(self.l_plans, "", self)                    # 계정마다 이유·찾은 경로·설치·로그인 방법
-            self.l_plans.configure(cursor="hand2")
-            self.l_plans.bind("<Button-1>", lambda _e: App.show_plan_details(self), add="+")
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
-                      tip="Claude Code · Codex CLI · Gemini CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left", padx=(P(8), 0))
+                      tip="Claude Code · Codex CLI · Antigravity CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left")
             self.b_plan_test = self._btn(f, "연결 시험", lambda: App.test_plans(self), lock=False,
                                          tip="쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 봅니다(실행 때와 같은 방식 · 구독 사용량에서 조금 차감). "
                                              "답하는지, 어느 모델인지, 실패하면 그 프로그램이 말한 이유를 보여 줍니다. 긴 작업 전에 눌러 보세요.")
@@ -2556,7 +2562,14 @@ class App(tk.Tk):
                     "빨리 찹니다. 한 쪽 안에서는 쪽 판독과 검증 요청(「동시 AI 요청」)을 함께 보냅니다. 1 = 계정마다 한 쪽씩.", self)
             return f
         R["ai_pages"] = row(b, "계정이 함께 맡는 쪽", "구독 계정 하나가 AI 판독·검증을 함께 진행하는 쪽 수(1~4, 기본 2) · 빠르지만 한도가 빨리 참", ai_pages)
-        R["plans"] = row(b, "로그인 상태", "구독마다 공식 프로그램의 설치·로그인 · 글자를 누르면 이유·찾아본 곳 · [연결 시험]은 실제로 작은 요청을 보내 봄", plans_status)
+        # 상태 글(계정마다 ● 사용 가능 …)은 설명 줄 자리에 — 칸 너비에 맞춰 줄바꿈되고, 단추 둘만 오른쪽(좁은 두 열에서 [연결 시험]이 잘리던 것)
+        R["plans"] = row(b, "로그인 상태", "설정 탭을 열면 확인합니다", plans_status)
+        self.l_plans = R["plans"]["desc"]
+        self.l_plans.configure(cursor="hand2")
+        self.l_plans.bind("<Button-1>", lambda _e: App.show_plan_details(self), add="+")
+        self._plans_tip = Tip(self.l_plans, "", self)                        # 계정마다 이유·찾은 경로·설치·로그인 방법
+        Tip(R["plans"]["name"], "구독마다 공식 프로그램의 설치·로그인 상태입니다. 상태 글을 누르면 계정마다 이유·찾아본 곳·해결 방법을 봅니다. "
+                                "[연결 시험]은 실제로 작은 요청을 보내 봅니다.", self)
 
         def plan_setup(parent):
             f = boxed(parent)
@@ -2617,10 +2630,8 @@ class App(tk.Tk):
                                 check(self.v_local_ai_api_fallback))
         # 세부 설정(펼치면 판독 섹션 아래에 — 보통은 기본값). 3차 판별 세 줄은 '모델 단계' 섹션으로 옮겼다
         d = self.details = boxed(b)
-        dh = boxed(d); dh.pack(fill="x")
-        tk.Frame(dh, bg=C["LINE"], height=max(1, P(1))).pack(fill="x")
-        L(dh, "세부 설정", "CAP_B", "MUTED").pack(side="left", pady=(P(7), P(3)))
-        L(dh, " · 보통은 기본값 그대로 두십시오", "CAP", "MUTED").pack(side="left", pady=(P(7), P(3)))
+        tk.Frame(d, bg=C["PANEL"], height=1).pack(fill="x")             # 머리 띠 위에 묶음 사이 간격(P(16))을 두게 하는 자리
+        subhead(d, "세부 설정", "보통은 기본값 그대로 두십시오 · 2차 판독 모델 · 속도 · 2차 조각 · 판독 단계 · 1차 판독 · 호출 상한")
         R["model2"] = row(d, "2차 판독 모델", "비우면 1차와 같은 모델 · auto = Gemini는 flash, 그 밖은 1차와 같음",
                           lambda p: got.setdefault("e_model2", ttk.Entry(p, textvariable=self.v_model2, width=chars(200))))
         self.e_model2 = got["e_model2"]
@@ -2687,10 +2698,10 @@ class App(tk.Tk):
 
         # ---- AI 판독기 끝: 판독 뒤 모델 단계 [아니요]면 뺌(판독 뒤 모델을 더 부르는 단계 — 켜거나 끄면 호출 수가 바뀜) ----
         b = ai_body
-        head = self._model_stage_head = subhead(b, "판독 뒤 모델 단계", tag="[아니요]면 뺌")
+        head = self._model_stage_head = subhead(
+            b, "판독 뒤 모델 단계", "판독 뒤 모델을 더 부르는 단계 · 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 뺌 · 영수증 표 = 켜거나 끄면 "
+               "호출 수가 바뀜 · 문맥 교정의 모델 사용은 [자동 교정]에", tag="[아니요]면 뺌")
         self._model_stage_tag = head.tag
-        L(b, "판독 뒤 모델을 더 부르는 단계입니다. 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 뺍니다. 켜거나 끄면 호출 수가 바뀌는 설정에는 영수증 표를 "
-             "붙였습니다. 문맥 교정의 모델 사용은 [자동 교정]에 있습니다.", "CAP", "MUTED", wrap=True).pack(fill="x", pady=(P(3), P(6)))
         R["suspects"] = row(b, "합의 판독도 글자층과 다르면 자형으로 확인(표시만)", "합의 판독 의심 · 쪽당 최대 8곳 · 본문은 그대로", check(self.v_suspects), receipt=True)
         Tip(R["suspects"]["ctrl"], "1차·2차가 같게 읽어 〔a/b〕 가 없는 글자도, PDF 글자층(기존 OCR)과 한 글자만 다르고 그 두 글자가 入/人·曰/日·問/間 처럼 자형이 헷갈리는 쌍이면 "
                                    "3차 판별과 같은 방식으로 글자 조각을 묻습니다. 자형이 글자층 쪽이면 본문은 판독대로 두고 확인 항목 「합의 판독 의심」과 문서 메모만 답니다"
@@ -2711,8 +2722,8 @@ class App(tk.Tk):
         head = boxed(card); head.pack(fill="x", pady=(0, P(6)))
         bk["seal"] = boxed(head); bk["seal"].pack(side="left", padx=(0, P(10)))
         tf = boxed(head); tf.pack(side="left", fill="x", expand=True)
-        bk["title"] = L(tf, "이 책", "SECTION", wrap=True); bk["title"].pack(fill="x")
-        bk["sub"] = L(tf, "", "CAP", "MUTED", wrap=True); bk["sub"].pack(fill="x")
+        bk["title"] = L(tf, "이 책", "DLG", wrap=True); bk["title"].pack(fill="x")          # 다른 섹션 제목(_settings_section)과 같은 크기
+        bk["sub"] = L(tf, "", "CAP", "MUTED", wrap=True); bk["sub"].pack(fill="x", pady=(P(3), 0))
         bk["title_tip"] = Tip(bk["title"], "", self)
         b = boxed(card); b.pack(fill="x")
         S["book"] = {"card": card, "head": head, "body": b}
@@ -2900,10 +2911,12 @@ class App(tk.Tk):
         card = ttk.Frame(parent, style="Card.TFrame", padding=(P(20), P(12), P(20), P(6)))
         head = tk.Frame(card, bg=C["PANEL"]); head.pack(fill="x", pady=(0, P(6)))
         head.columnconfigure(1, weight=1)
-        t = self._lab(head, title, "SECTION"); t.grid(row=0, column=0, sticky="nw")
-        s = self._lab(head, sub, "CAP", "MUTED", wrap=True); s.grid(row=0, column=1, sticky="new", padx=(P(10), 0), pady=(P(2), 0))   # 부제가 접혀도 제목은 첫 줄에
+        t = self._lab(head, title, "DLG"); t.grid(row=0, column=0, columnspan=2, sticky="nw")
+        s = self._lab(head, sub, "CAP", "MUTED", wrap=True)                # 부제는 제목 아래 줄(제목이 섹션의 가장 큰 글로 홀로 보이게)
+        if sub:
+            s.grid(row=1, column=0, columnspan=2, sticky="new", pady=(P(3), 0))
         if right is not None:
-            right(head).grid(row=0, column=2, sticky="ne", padx=(P(10), 0))
+            right(head).grid(row=0, column=2, rowspan=2, sticky="ne", padx=(P(10), 0))
         body = tk.Frame(card, bg=C["PANEL"]); body.pack(fill="x")
         return {"card": card, "head": head, "title": t, "sub": s, "body": body}
 
@@ -2922,9 +2935,11 @@ class App(tk.Tk):
         너비, 모델 칸). desc 가 [(글, 꼬리)] 목록이면 색 글을 섞은 글줄. 체크 상자 줄은 이름·설명을 눌러도 켜고 끈다(HTML 의 label for 처럼)."""
         C, P, F = self.colors, self.px, self.fonts
         PANEL = C["PANEL"]
-        f = tk.Frame(parent, bg=PANEL); f.pack(fill="x")
+        f = tk.Frame(parent, bg=PANEL); f.pack(fill="x", padx=(getattr(parent, "_indent", 0), 0))   # 묶음 머리(subhead) 아래면 들여 씀
         f.columnconfigure(0, weight=1)
-        tk.Frame(f, bg=C[line], height=max(1, P(1))).grid(row=0, column=0, columnspan=2, sticky="ew")
+        first = getattr(parent, "_group_start", False)                       # 묶음의 첫 줄: 위 줄 대신 띠와의 여백만
+        parent._group_start = False
+        tk.Frame(f, bg=PANEL if first else C[line], height=max(1, P(1))).grid(row=0, column=0, columnspan=2, sticky="ew")
         left = tk.Frame(f, bg=PANEL); left.grid(row=1, column=0, sticky="ew", pady=P(5))
         nl = tk.Frame(left, bg=PANEL); nl.pack(fill="x")
         name = tk.Label(left, text=title, font=F["BODY"], fg=C["INK"], bg=PANEL, bd=0, padx=0, pady=0, justify="left", anchor="w", wraplength=P(260))
@@ -5692,8 +5707,8 @@ class App(tk.Tk):
         head = tk.Frame(card, bg=C["PANEL"]); head.pack(fill="x")
         self.v_collate_set = tk.BooleanVar(value=False)
         self.b_collate_set = ttk.Button(head, text="책갈피 OCR 교정 ▸", style="SecToggle.TButton", cursor="hand2", command=self.toggle_collate_settings)
-        self.b_collate_set.pack(side="left")
-        self._lab(head, "교정 정책 · 표시 방식 · 책갈피 OCR: 기록 있는 쪽도 다시 판독", "CAP", "MUTED", wrap=True).pack(side="left", fill="x", expand=True, padx=(P(8), 0))
+        self.b_collate_set.pack(anchor="w")                               # 제목 · 아래 줄에 부제(다른 섹션 머리와 같은 짜임)
+        self._lab(head, "교정 정책 · 표시 방식 · 책갈피 OCR: 기록 있는 쪽도 다시 판독", "CAP", "MUTED", wrap=True).pack(fill="x", pady=(P(1), P(4)))
         body = tk.Frame(card, bg=C["PANEL"])
         self._set_sections["collate"] = {"card": card, "head": head, "body": body}
         R, row = self._set_rows, self._setting_row
