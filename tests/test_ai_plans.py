@@ -909,7 +909,8 @@ def test_codex_with_no_model_left_is_an_account_problem_not_a_refused_request():
     with pytest.raises(SubscriptionError) as caught:
         client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
     assert not isinstance(caught.value, RequestRejected)                        # the session moves to the next plan
-    assert "모델을 모두 거부" in str(caught.value) and "npm install -g @openai/codex" in str(caught.value)
+    # The update command fits the Codex that ran (the fake is codex.exe on Windows: OpenAI's installer, else npm).
+    assert "모델을 모두 거부" in str(caught.value) and codex._update_command(client.cli) in str(caught.value)
     calls.clear()
     with pytest.raises(SubscriptionError):
         client.request(model_name="gpt-5.5", system="s", prompt="p", images=[], schema=SCHEMA)
@@ -1013,7 +1014,8 @@ def test_codex_whose_models_need_a_newer_cli_says_so_and_is_not_offered_as_usabl
     with pytest.raises(SubscriptionError) as caught:
         client.request(model_name="codex-default", system="s", prompt="p", images=[], schema=SCHEMA)
     text = str(caught.value)
-    assert text.startswith("설치된 Codex CLI 0.130.0가 오래되었습니다") and "[설치]" in text and "@openai/codex@latest" in text
+    assert text.startswith("설치된 Codex CLI 0.130.0가 오래되었습니다") and "[설치]" in text
+    assert codex._update_command(client.cli) in text and client.cli in text           # the command and the file that ran
     state = codex.status(runner=run)                                               # not the cached '사용 가능'
     assert state["usable"] is False and state["closed"] == "Codex CLI 업데이트 필요" and state["reason"] == text
     assert codex.status(refresh=True, runner=run)["usable"] is False               # [상태 확인] keeps it
