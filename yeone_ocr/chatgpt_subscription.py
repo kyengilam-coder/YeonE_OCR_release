@@ -75,16 +75,65 @@ def timeout() -> float:
     return min(max(value, 30.0), 1800.0)
 
 
+_newest: str | None = None             # the newest of several installed Codex CLIs, as the last status found it
+
+
 def find_cli() -> str | None:
+    """The Codex CLI to run: the one status() found newest when several are installed, else the first on PATH,
+    else npm's global folder."""
     configured = os.environ.get("YEONE_OCR_CODEX_CLI_PATH", "").strip()
     if configured:
         path = Path(configured).expanduser()
         return str(path) if path.exists() else None
-    if sys.platform == "win32":
-        found = shutil.which("codex.exe") or shutil.which("codex.cmd") or shutil.which("codex")
-    else:
-        found = shutil.which("codex")
-    return found or npm_global_cli("codex")
+    if _newest and Path(_newest).is_file():
+        return _newest
+    found = candidates()
+    return found[0] if found else None
+
+
+def candidates() -> list:
+    """Every Codex CLI on this PC that the app could run: each PATH folder's codex.exe / codex.cmd (Windows) or
+    codex, then npm's global folder. A PC can hold an old standalone codex.exe ahead of npm's codex.cmd on PATH:
+    [설치] (npm) then updates the one the app does not run (seen: 0.139.0 kept running after an update)."""
+    names = ("codex.exe", "codex.cmd") if sys.platform == "win32" else ("codex",)
+    found, seen = [], set()
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if not folder.strip():
+            continue
+        for name in names:
+            path = Path(folder.strip().strip('"')) / name
+            key = os.path.normcase(str(path))
+            if key not in seen and path.is_file():
+                seen.add(key)
+                found.append(str(path))
+    npm = npm_global_cli("codex")
+    if npm and os.path.normcase(npm) not in seen:
+        found.append(npm)
+    return found
+
+
+def _version_of(cli: str, runner) -> tuple:
+    try:
+        proc = runner([cli, "--version"], env=cli_env(), cwd=_empty_dir(), capture_output=True, text=True,
+                      encoding="utf-8", errors="replace", timeout=60, **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    found = re.search(r"(\d+)\.(\d+)\.(\d+)", proc.stdout or "")
+    return tuple(int(n) for n in found.groups()) if found and proc.returncode == 0 else ()
+
+
+def _pick_newest(runner) -> None:
+    """With several Codex CLIs installed, run the newest (by `--version`); an explicit path is kept."""
+    global _newest
+    if os.environ.get("YEONE_OCR_CODEX_CLI_PATH", "").strip():
+        return
+    found = candidates()
+    if len(found) < 2:
+        _newest = None
+        return
+    versions = [(_version_of(cli, runner), -index, cli) for index, cli in enumerate(found)]
+    best = max(versions)
+    _newest = best[2] if best[0] else None
 
 
 def codex_home() -> Path:
@@ -120,14 +169,15 @@ def status(refresh: bool = False, runner=subprocess.run) -> dict:
 
 
 def reset_status_cache() -> None:
-    global _status_cache
+    global _status_cache, _newest
     with _lock:
-        _status_cache = None
+        _status_cache, _newest = None, None
 
 
 def _query_status(runner) -> dict:
     result = {"installed": False, "logged_in": False, "billing": None, "plan": None, "usable": False,
               "reason": INSTALL_HINT, "limits": None}
+    _pick_newest(runner)
     cli = find_cli()
     if not cli:
         result["reason"] = not_found_reason("Codex CLI", "codex", INSTALL_HINT)
@@ -339,10 +389,14 @@ class SubscriptionClient:
         """Why no model answered, in the order of what to do: an old CLI (OpenAI said so) first, then the plan."""
         version = self._version()
         cli = f"Codex CLI{f' {version}' if version else ''}"
+        others = [path for path in candidates() if os.path.normcase(path) != os.path.normcase(self.cli)]
+        where = f"실행한 파일: {self.cli}"
+        if others:                     # [설치] (npm) updates npm's copy; another one may be the one that runs
+            where += f" · 이 PC의 다른 Codex CLI: {', '.join(others[:3])} — 오래된 것을 지우면 새것을 씁니다"
         listed = ", ".join(tried) or "없음"
         if newer:
             head = (f"설치된 {cli}가 오래되었습니다 — OpenAI가 {', '.join(newer[:3])}{' 등' if len(newer) > 3 else ''}은 "
-                    f"새 Codex가 필요하다고 답했고, 이 CLI의 기본 모델({refused.model or '기본값'})은 ChatGPT 계정에서 더 이상 쓰지 않습니다. ")
+                    f"새 Codex가 필요하다고 답했고, 이 CLI의 기본 모델({refused.model or '기본값'})은 ChatGPT 계정에서 더 이상 쓰지 않습니다({where}). ")
             return (head + "설정 「AI 판독기」 ①에서 'ChatGPT (Codex CLI)'를 고르고 [설치]를 눌러 최신으로 올린 뒤 "
                     "[상태 확인] → [연결 시험]을 다시 하십시오(PowerShell: npm install -g @openai/codex@latest). "
                     f"(시도한 모델: {listed} · 원문: {refused.detail[:200]})")

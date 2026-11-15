@@ -320,7 +320,9 @@ class LocalFirstTests(unittest.TestCase):
                 return json.dumps({"items": [{"target_id": t["id"], "uncertain": False, "note": "ok", "proposals": []}
                                              for t in data["targets"]]}), True, "completed", {}, model_name
         signed_in = {"usable": True, "plan": "p", "reason": None, "installed": True}
-        with patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
+        from yeone_ocr import subscriptions
+        with patch.object(subscriptions, "PLANS", ("claude", "chatgpt", "gemini")), \
+                patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
                 patch.object(chatgpt_subscription, "SubscriptionClient", return_value=Codex()), \
                 patch.object(claude_subscription, "status", return_value=signed_in), \
                 patch.object(chatgpt_subscription, "status", return_value=signed_in), \
@@ -512,7 +514,9 @@ class LocalFirstTests(unittest.TestCase):
                                                  for t in data["targets"]]}), True, {"claude": "end_turn", "chatgpt": "completed"}[name], {}, model_name
             return FakeCLI()
         signed_in = {"usable": True, "plan": "p", "reason": None, "installed": True}
-        with patch.object(claude_subscription, "SubscriptionClient", side_effect=lambda **_k: fake("claude")), \
+        from yeone_ocr import subscriptions
+        with patch.object(subscriptions, "PLANS", ("claude", "chatgpt", "gemini")), \
+                patch.object(claude_subscription, "SubscriptionClient", side_effect=lambda **_k: fake("claude")), \
                 patch.object(chatgpt_subscription, "SubscriptionClient", side_effect=lambda **_k: fake("chatgpt")), \
                 patch.object(claude_subscription, "status", return_value=signed_in), \
                 patch.object(chatgpt_subscription, "status", return_value=signed_in), \

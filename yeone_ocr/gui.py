@@ -37,8 +37,8 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
-AI_PLAN_LABELS = {"auto": "자동 (Claude → ChatGPT → Antigravity)", "claude": "Claude (Claude Code)",
-                  "chatgpt": "ChatGPT (Codex CLI)", "gemini": "Antigravity (Google 계정)"}
+AI_PLAN_LABELS = {"auto": "자동 (Antigravity → ChatGPT → Claude)", "gemini": "Antigravity (Google 계정)",
+                  "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}
 RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
                  "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
@@ -2527,7 +2527,7 @@ class App(tk.Tk):
             plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
                                 width=chars(300))
             plan.pack(side="left", padx=(P(8), 0))
-            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Claude → ChatGPT → Gemini 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
+            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Antigravity(Google) → ChatGPT → Claude 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
                       "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 API 키로 넘어갑니다"
                       "(API 호출은 「로컬 뒤 AI 검증」의 횟수까지). 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
             return f
@@ -3850,7 +3850,7 @@ class App(tk.Tk):
                   tip="판독기·모델·자동 교정·문서 옵션(모든 책 공통)과 이 책의 설정을 설정 탭에서 고칩니다.").pack(side="right")
         top = tk.Frame(b, bg=C["PANEL"]); top.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
         self.l_run_summary = L(top, "", "BODY_B", wrap=True); self.l_run_summary.pack(fill="x")
-        Tip(self.l_run_summary, "AI 판독·검증에 연결하는 차례입니다. 구독 계정(자동)은 이 PC에 로그인된 구독을 Claude → ChatGPT → Gemini 순으로 "
+        Tip(self.l_run_summary, "AI 판독·검증에 연결하는 차례입니다. 구독 계정(자동)은 이 PC에 로그인된 구독을 Antigravity(Google) → ChatGPT → Claude 순으로 "
                                 "쓰고(API 요금 없음), 구독을 쓸 수 없으면(한도·로그인 풀림) 설정 「AI 판독기」 ② 의 API 키와 모델로 넘어갑니다"
                                 "(한 실행 「로컬 뒤 AI 검증」 횟수까지). 지금 실제로 쓰는 연결은 진행 카드 아래의 'AI 연결' 줄에 나옵니다.", self)
         # 이어서 할 때: 이 책에 판독 기록이 있을 때만(중간에 멈춘 실행) — 설정 「인식」의 같은 칸
@@ -4600,7 +4600,7 @@ class App(tk.Tk):
         self._ai_link_tip = Tip(self.l_ai_link, "", self)
         self.b_ai_switch = self._btn(link, "다음 구독으로 넘기기", lambda: App.switch_subscription(self), lock=False,
                                      tip="지금 쓰는 구독 계정을 멈추고(답을 기다리던 요청은 다시 보냄) 옆에서 고른 계정에 연결합니다. "
-                                         "고르지 않으면(자동) 정해진 순서(Claude → ChatGPT → Gemini, 남은 구독이 없으면 API 키)로 다음 계정에 연결합니다. "
+                                         "고르지 않으면(자동) 정해진 순서(Antigravity(Google) → ChatGPT → Claude, 남은 구독이 없으면 API 키)로 다음 계정에 연결합니다. "
                                          "넘긴 계정은 이번 실행에서 다시 쓰지 않습니다(직접 고르면 다시 씀).")
         self.b_ai_switch.pack(side="right")
         self.v_ai_next = tk.StringVar(value=AI_NEXT_AUTO)
