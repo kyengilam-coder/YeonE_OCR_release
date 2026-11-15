@@ -335,11 +335,16 @@ class Session:
         from .claude_subscription import RequestRejected, SubscriptionError
         attempts, rested = 0, []                 # this request: tries on the plan in use, plans it sent to rest
         timed_out, last_timeout = set(), None    # plans that did not answer this request in time
-        rounds = 0
+        rounds, last_error = 0, None
+        def stopped_after_a_failure():
+            # Once this request has failed somewhere, [중지] ends it: no retry, no other plan, no paid API call.
+            return last_error is not None and self.should_stop()
         while True:
             rounds += 1
             if rounds > MAX_REQUEST_ROUNDS:            # a safety stop: never spin on switches without sending
                 raise SubscriptionError("구독 계정 전환이 반복되어 이 요청을 멈춥니다. 구독 상태를 확인하세요.")
+            if stopped_after_a_failure():
+                raise last_error
             self._come_back(avoid=timed_out)
             with self._lock:
                 plan, current = self.plan, self._client
@@ -368,8 +373,11 @@ class Session:
                     try:
                         current = self._client = self._factory(plan)
                     except SubscriptionError as exc:
+                        last_error = exc
                         self._fail(plan, exc)
                         continue
+            if stopped_after_a_failure():                # stopped while the client was being made
+                raise last_error
             if plan is None:
                 if self.api is None:
                     raise SubscriptionError(self.reason or "쓸 수 있는 구독 계정도 API 키도 없습니다.")
@@ -383,6 +391,7 @@ class Session:
                 return self._as_first(current.request(model_name=name, system=system, prompt=prompt,
                                                       images=images, schema=schema), plan)
             except Exception as exc:
+                last_error = exc
                 wait = None
                 with self._lock:
                     if self.plan != plan or self._client is not current:

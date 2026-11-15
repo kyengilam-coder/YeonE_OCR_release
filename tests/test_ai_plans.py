@@ -733,6 +733,36 @@ def test_a_request_switched_away_and_stopped_while_waiting_is_not_sent_again():
     assert api.request.call_count == 0
 
 
+@pytest.mark.parametrize("failure", ["temporary-wait", "limit", "account", "factory"])
+def test_after_stop_a_failed_request_is_sent_nowhere_else(failure):
+    """Codex: stopping during a retry wait, after a limit/sign-in failure or a failed client start still resent."""
+    stop = [False]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    other = _Flaky("chatgpt")
+    class Failing(_Flaky):
+        def request(self, **kwargs):
+            self.calls += 1
+            if failure == "temporary-wait":
+                raise _error("high demand", "temporary")
+            stop[0] = True
+            raise _error("limit reached" if failure == "limit" else "signed out", failure)
+    first = Failing("claude")
+    def factory(plan):
+        if plan == "claude" and failure == "factory":
+            stop[0] = True
+            raise _error("cannot start", "account")
+        return first if plan == "claude" else other
+    def sleep(_seconds):
+        stop[0] = True                                     # [중지] during the wait before the retry
+    with _with(_states(claude=True, chatgpt=True, gemini=False)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=factory, sleep=sleep,
+                                        should_stop=lambda: stop[0])
+        with pytest.raises(SubscriptionError):
+            _ask(session)
+    assert other.calls == 0 and api.request.call_count == 0
+    assert first.calls <= 1
+
+
 def test_a_timeout_after_stop_sends_nothing_else():
     """Codex final check: a timeout after [중지] went on to the next plan and the paid API."""
     stop = [False]
