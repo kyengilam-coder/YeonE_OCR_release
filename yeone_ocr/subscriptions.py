@@ -366,8 +366,9 @@ class Session:
                         if attempts < len(RETRY_WAITS):
                             wait = RETRY_WAITS[attempts]
                             attempts += 1
-                        elif rested:
+                        elif rested and not isinstance(exc, TimeoutError):
                             # The same request failed on a second plan as well: the request, not the plans.
+                            # (A timeout says nothing about the request: it goes on to the next plan and the key.)
                             for other in rested:
                                 release(other)
                             raise

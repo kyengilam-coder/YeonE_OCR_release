@@ -81,8 +81,12 @@ def check_hwpx_file(path: str) -> list[dict]:
     """HWPX 파일 구조 검사: 확장자만 바꾼 파일이 아닌지(지침 23)."""
     import zipfile
     issues = []
+    from .ziplimits import ArchiveTooLarge, check_archive
     try:
         z = zipfile.ZipFile(path)
+        check_archive(z)
+    except ArchiveTooLarge as e:
+        return [{"level": "error", "rule": "zip 크기", "where": path, "msg": str(e)}]
     except Exception as e:
         return [{"level": "error", "rule": "zip", "where": path, "msg": f"zip 으로 열리지 않음: {e}"}]
     names = z.namelist()

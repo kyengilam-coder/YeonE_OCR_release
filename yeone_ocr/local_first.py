@@ -994,6 +994,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                 # A page finished under the same conditions (no engine ran again, same key, review done):
                 # nothing to crop, plan, read or write again.
                 if (resume == "unfinished" and old and not getattr(args, "force", False) and not outcome.get("completed")
+                        and not review.get("engine_errors")      # a failure this time is judged again, not copied
                         and _resume_done(old, args, _resume_key(args, selected["id"], project.text(number), options),
                                          review_enabled)):
                     done = old["local_first"]["review"]

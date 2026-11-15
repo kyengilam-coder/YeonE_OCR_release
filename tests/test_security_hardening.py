@@ -204,3 +204,15 @@ def test_an_ai_page_reading_survives_a_cache_that_cannot_be_written(tmp_path, mo
         result = ai_page.read_page(image, direction="vertical", profile="traditional", client=client, model="m",
                                    cache_dir=tmp_path / "cache")
     assert result["text"] == "甲乙" and "cache_warning" in result
+
+
+def test_a_thin_page_cannot_round_past_the_render_cap():
+    """Codex re-review: 14400 × 1 pt with UserUnit 75000 rounded up to 100.7 Mpx."""
+    from yeone_ocr.pdfio import MAX_RENDER_PIXELS, page_image
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=14400, height=1)
+        doc.xref_set_key(page.xref, "UserUnit", "75000")
+        data = doc.tobytes()
+    with pymupdf.open("pdf", data) as doc:
+        image, _note = page_image(doc, 1, 300, prefer_embedded=False)
+        assert image.width * image.height <= MAX_RENDER_PIXELS

@@ -647,6 +647,18 @@ def test_a_cli_timeout_is_retried_then_moves_on_like_any_temporary_failure():
         assert "chatgpt" in subscriptions.exhausted()                                 # resting, not marked as an account problem
 
 
+def test_timeouts_on_every_plan_end_at_the_api_key():
+    """Codex re-review: after two plans timed out the request was given up, the API key never tried."""
+    slow = lambda name: _Flaky(name, [TimeoutError(name + " did not answer")] * 3)
+    plans = {"claude": slow("claude"), "chatgpt": slow("chatgpt")}
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    api.request.return_value = ('{"lines": []}', True, "done", {}, "gpt-x")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=plans.__getitem__, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "gpt-x"
+    assert api.request.call_count == 1 and plans["claude"].calls == 3 and plans["chatgpt"].calls == 3
+
+
 def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():
     now = [1000.0]
     plans = {"chatgpt": _Flaky("chatgpt", [_error("stream disconnected", "temporary")] * 3), "claude": _Flaky("claude")}

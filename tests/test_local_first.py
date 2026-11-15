@@ -166,6 +166,21 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(review["engine_errors"], {"glmocr": "GPU 메모리 부족"})
         self.assertTrue(any("엔진 실패" in line and "glmocr" in line for line in logs))
 
+    def test_an_engine_failure_on_resume_is_judged_again_not_copied_from_the_last_run(self):
+        """Codex re-review: a page finished earlier was reused as "no API needed" though an engine failed now."""
+        self.assertEqual(command(self.args()), 0)
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "no-api-needed")
+        original = self.recognize
+        def recognize(project, number, **kwargs):
+            outcome = original(project, number, **kwargs)                       # nothing ran again: reading reused
+            outcome["errors"] = {"glmocr": "GPU 메모리 부족"}
+            outcome["selection"] = {"selected_engine": "ppocrv6",
+                                    "scores": [{"engine": "ppocrv6", "characters": 4, "score": 0.9}]}
+            return outcome
+        with patch("yeone_ocr.automatic_ocr.run_automatic_page", side_effect=recognize):
+            self.assertEqual(command(self.args()), 4)
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "needs-local-review")
+
     def test_an_engine_failure_with_other_readings_left_still_needs_no_extra_check(self):
         original = self.recognize
         def recognize(project, number, **kwargs):

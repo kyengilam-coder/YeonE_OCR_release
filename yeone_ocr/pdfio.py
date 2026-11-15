@@ -230,6 +230,11 @@ def page_image(doc: pymupdf.Document, pdf_page: int, dpi: int = 300, prefer_embe
         # would need gigabytes: render at the scale that fits. No lower bound — a floor would let
         # a large enough page through again (Codex review, 1.2.17).
         zoom = (MAX_RENDER_PIXELS / area) ** 0.5 * 0.999
+        while True:                                          # rounding a very thin page up to whole pixels can still cross it
+            box = (page.rect * pymupdf.Matrix(zoom, zoom)).irect
+            if box.width * box.height <= MAX_RENDER_PIXELS:
+                break
+            zoom *= 0.99
         pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
         im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         return im, f"렌더 {zoom * 72:.1f}dpi(큰 쪽 축소) {im.width}x{im.height}"
