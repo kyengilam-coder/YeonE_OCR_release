@@ -340,7 +340,17 @@ class Session:
                     # Back on a plan that already timed out on this very request (its rest ended meanwhile):
                     # the connection moves to the API key instead of waiting through every plan again. It is a
                     # real switch, so the record names the API transport; the plan comes back after its rest.
-                    if self.api is None or self.should_stop():
+                    if self.should_stop():
+                        raise last_timeout
+                    failed = exhausted()
+                    untried = next((other for other in order(self.requested) if other not in timed_out
+                                    and other not in failed and status(other)["usable"]), None)
+                    if untried is not None:            # a plan this request has not tried yet comes first
+                        self.switches.append({"from": plan, "to": untried, "reason": str(last_timeout), "by": "temporary"})
+                        self.log(f"  {NAMES[plan]} 구독이 이 요청에 이미 응답하지 못했습니다 — {NAMES[untried]} 구독으로 보냅니다.")
+                        self.plan, self._client = untried, None
+                        continue
+                    if self.api is None:
                         raise last_timeout
                     self.switches.append({"from": plan, "to": "api", "reason": str(last_timeout), "by": "temporary"})
                     self.log(f"  {NAMES[plan]} 구독이 이 요청에 이미 응답하지 못했습니다 — API 키({self.api.provider} · "

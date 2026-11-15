@@ -676,6 +676,21 @@ def test_a_plan_back_from_rest_is_not_tried_again_by_the_request_it_timed_out_on
     assert slow["claude"].calls + slow["chatgpt"].calls <= 3 and api.request.call_count == 1
 
 
+def test_a_plan_back_from_rest_does_not_skip_a_plan_not_yet_tried():
+    """Codex: Google and ChatGPT timed out, Google came back from rest, and Claude was skipped for the API."""
+    now = [0.0]
+    flaky = {"gemini": _Flaky("gemini", [TimeoutError("gemini")] * 5),
+             "chatgpt": _Flaky("chatgpt", [TimeoutError("chatgpt")] * 5), "claude": _Flaky("claude")}
+    def factory(plan):
+        now[0] += 700
+        return flaky[plan]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    with _with(_states(claude=True, chatgpt=True, gemini=True)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("gemini", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "claude"
+    assert flaky["claude"].calls == 1 and api.request.call_count == 0
+
+
 def test_a_timeout_after_stop_sends_nothing_else():
     """Codex final check: a timeout after [중지] went on to the next plan and the paid API."""
     stop = [False]
