@@ -21,6 +21,7 @@
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
   compare-engines 선택한 로컬 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
   plans    구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
+  confusions 엔진 혼동 장부: 로컬 엔진별로 자주 틀린 글자 보기·제외·끄기·비우기 — 의심 구간 검증에만 쓰고 글자는 바꾸지 않음 (모델 호출 없음)
 """
 from __future__ import annotations
 import argparse, functools, inspect, json, re, time, threading
