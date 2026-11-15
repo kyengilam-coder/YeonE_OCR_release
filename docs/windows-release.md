@@ -1,3 +1,13 @@
+# Windows 1.2.16 설치판
+
+1.2.16은 1.2.15의 설치 구성을 그대로 쓰고, 엔진 혼동 장부·글자 이미지 조각과 그 관리 창을 더한 판이다. 새 파일은 사용자 자료 폴더(`%LOCALAPPDATA%\YeonE_OCR\confusions.json`, `glyph_samples\`)에만 쓰며 설치 구성은 바뀌지 않는다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.
+
+버전은 `pyproject.toml`, `yeone_ocr/__init__.py`, `packaging/YeonE_OCR.iss`에서 **1.2.16**으로 맞춘다. 빌드 절차를 사용할 때 `OutputDirectory`는 `dist/1.2.16`으로 지정한다. 배포 CI(`windows-release.yml`)는 배포 저장소에서 수동 실행(workflow_dispatch)하며, 회귀 → 빌드·설치 검사 → 검증한 바이트만 게시 순서로 진행한다. 설치 갱신 검사는 워크플로에 적힌 이전 공개 설치 파일에서 올린다.
+
+배포 전 설치본에서 확인할 것: 판 번호(v1.2.16), [더 보기] → [엔진 혼동 장부…] 창(표·제외·끄기·비우기·조각 내보내기), 비교·교정 창에서 고치고 [저장]한 뒤 장부와 `glyph_samples`에 쌓이는지, 사용자 자료 보존.
+
+공개 게시 대상은 [v1.2.16 릴리스](https://github.com/kyengilam-coder/YeonE_OCR_release/releases/tag/v1.2.16)다. 이 안내는 빌드·게시 준비 절차이며 해당 주소의 게시 완료를 주장하지 않는다.
+
 # Windows 1.2.15 설치판
 
 1.2.15는 1.2.14의 설치 구성을 그대로 쓰고(엔진 관리 · 새 PP-OCRv6 번들 — 아래 「다음 판 준비」 절과 1.2.14 절), Antigravity(Gemini) 구독 연결을 실제 계정에서 확인한 방식으로 바꾼 판이다. Antigravity CLI는 설치판에 넣지 않는다 — 사용자가 설정 「AI 판독기」 ①의 [설치](Google 공식 설치 명령)로 설치하고 자기 계정으로 로그인한다. 바뀐 내용은 [릴리스 기록](release-notes.md) 맨 위를 따른다.

@@ -2135,6 +2135,7 @@ class App(tk.Tk):
         m.add_command(label="비용 미리 보기", command=self.do_estimate, state=busy if ocr and self.pdf() and not vars(self).get("_planning") else "disabled")
         flat = bool(ocr and self.pdf() and self.work() == App.result_dir(self) and has_flat_work(App.result_dir(self)))
         m.add_command(label="결과 폴더 정리…", command=self.tidy_result_folder, state=busy if flat else "disabled")
+        m.add_command(label="엔진 혼동 장부…", command=self.open_confusion_ledger)
         m.add_separator()
         m.add_checkbutton(label="자세히 보기", variable=self.v_detail, command=lambda: self.set_simple_view(not self.v_detail.get()))
         m.add_command(label="고급 도구 접기" if self.v_adv.get() and not App._simple(self) else "고급 도구 펼치기", command=self.open_advanced_tools,
@@ -3217,6 +3218,13 @@ class App(tk.Tk):
         except (ValueError, OSError) as exc:
             messagebox.showerror(APP_NAME, str(exc)); return
         self.v_punctuation_rules.set(str(Path(path).resolve()))
+
+    def open_confusion_ledger(self):
+        try:
+            from .gui_confusions import ConfusionLedgerDialog
+            ConfusionLedgerDialog(self)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror(APP_NAME, f"엔진 혼동 장부를 열 수 없습니다.\n{exc}")
 
     def edit_punctuation_rules(self):
         try:
