@@ -710,7 +710,9 @@ class ComparisonEditor(tk.Toplevel):
         def worker(_stop, _generation, _job):
             project.save(path)
             from .confusion_memory import harvest_quietly
+            from .glyph_samples import collect_quietly
             harvest_quietly(project)
+            collect_quietly(project, should_stop=_stop.is_set)     # renders only pages with new samples
             return "saved", str(path)
         self._start_job("원시 결과와 교정 이력을 함께 저장하는 중…", worker)
 

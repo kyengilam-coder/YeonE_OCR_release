@@ -141,6 +141,13 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(command(self.args("--no-local-learned-confusions")), 0)
         self.assertEqual(self.calls, [])
 
+    def test_run_end_collects_glyph_samples_for_the_project(self):
+        with patch("yeone_ocr.glyph_samples.collect_quietly") as collect:
+            self.assertEqual(command(self.args()), 0)
+        collect.assert_called_once()
+        project = collect.call_args.args[0]
+        self.assertEqual(project.project_path, Path(self.record()["local_first"]["project_path"]))
+
     def test_record_carries_per_glyph_grades_for_document_colours(self):
         self.confidence = 20
         with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):

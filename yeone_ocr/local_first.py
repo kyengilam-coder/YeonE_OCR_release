@@ -1044,6 +1044,10 @@ def _command(args, *, work=None, doc=None, pool=None):
             harvested = harvest_quietly(project, cli.log)
             if harvested and harvested["pairs"]:
                 cli.log(f"  엔진 혼동 장부 갱신: 확인한 {harvested['pages']}쪽 · 엔진 판독과 확정 글이 다른 자리 {harvested['pairs']}곳")
+            if not cli.CANCEL.is_set():
+                # Line images with their confirmed text, for fine-tuning a local engine later (kept on this PC).
+                from .glyph_samples import collect_quietly
+                collect_quietly(project, cli.log, should_stop=cli.CANCEL.is_set)
         from . import subscriptions
         subscriptions.deactivate()
         if owned_doc:

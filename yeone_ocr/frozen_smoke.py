@@ -1456,6 +1456,8 @@ def run(report_path: Path) -> int:
         # Editor saves add to the confusion ledger: keep the user's own ledger untouched.
         from .confusion_memory import ENV_PATH as _CONFUSIONS
         os.environ[_CONFUSIONS] = str(folder / "confusions.json")
+        from .glyph_samples import ENV_PATH as _SAMPLES
+        os.environ[_SAMPLES] = str(folder / "glyph_samples")
 
         def native_probe():
             import cv2

@@ -198,8 +198,11 @@ def _checked(page: dict) -> bool:
             or any(r.get("status") == "completed" for r in page.get("ai_reviews", [])))
 
 
-def page_observations(page: dict):
-    """한 쪽 기록에서 (엔진, 엔진 판, 읽은 글자 수, 혼동 쌍 목록)을 뽑는다. 쓸 수 없는 쪽은 None."""
+def aligned_page(page: dict):
+    """기준 판독과 현재 교정문을 맞춘 결과. 장부와 글자 조각 수집(glyph_samples)이 함께 쓴다.
+
+    돌려주는 값: {"baseline", "raw", "base", "final", "labels", "upgraded", "opcodes"} — labels[i] 는 final[i] 를
+    넣은 주체('engine' 또는 등급). 아무도 확인하지 않았거나 교정의 바탕을 믿을 수 없는 쪽은 None."""
     baseline = next((run for run in page.get("runs", []) if run.get("id") == page.get("baseline_run_id")), None)
     if baseline is None or not _checked(page):
         return None
@@ -214,43 +217,60 @@ def page_observations(page: dict):
     bases = {r.get("request", {}).get("baseline_run_id") for r in page.get("ai_reviews", []) if r.get("id") in accepted}
     if bases - {baseline["id"], None}:
         return None                          # 채택한 AI 제안이 다른 기준 판독에서 나왔다
-    pairs = []
     final = page.get("corrected_text")
-    if final is not None and final != base:
-        replay = _provenance(page, base)
-        if replay is None or replay[0] != final:
-            return None
-        _, labels = replay
-        upgraded = _reviewed_by_human(page)
-        if len(base) * len(final) > MAX_DIFF_PRODUCT:
-            return None
-        opcodes = SequenceMatcher(None, base, final, autojunk=False).get_opcodes()
-        changed = sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in opcodes if op != "equal")
-        if changed > max(8, MAX_CHANGED_SHARE * max(len(base), 1)):
-            return None
-        for op, i1, i2, j1, j2 in opcodes:
-            if op != "replace":
+    upgraded = _reviewed_by_human(page)
+    if final is None or final == base:
+        return {"baseline": baseline, "raw": raw, "base": base, "final": base, "labels": ["engine"] * len(base),
+                "upgraded": upgraded, "opcodes": [("equal", 0, len(base), 0, len(base))] if base else []}
+    replay = _provenance(page, base)
+    if replay is None or replay[0] != final or len(base) * len(final) > MAX_DIFF_PRODUCT:
+        return None
+    opcodes = SequenceMatcher(None, base, final, autojunk=False).get_opcodes()
+    changed = sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in opcodes if op != "equal")
+    if changed > max(8, MAX_CHANGED_SHARE * max(len(base), 1)):
+        return None
+    return {"baseline": baseline, "raw": raw, "base": base, "final": final, "labels": replay[1],
+            "upgraded": upgraded, "opcodes": opcodes}
+
+
+def span_grade(labels, upgraded: bool, start: int, end: int):
+    """final[start:end] 를 넣은 주체의 등급. 엔진이 읽은 그대로인 글자가 섞였으면 None."""
+    grades = set(labels[start:end])
+    if not grades or "engine" in grades:
+        return None
+    grade = next(g for g in GRADES if g in grades)
+    return "ai_confirmed" if grade == "ai_auto" and upgraded else grade
+
+
+def page_observations(page: dict):
+    """한 쪽 기록에서 (엔진, 엔진 판, 읽은 글자 수, 혼동 쌍 목록)을 뽑는다. 쓸 수 없는 쪽은 None."""
+    aligned = aligned_page(page)
+    if aligned is None:
+        return None
+    base, final, labels = aligned["base"], aligned["final"], aligned["labels"]
+    pairs = []
+    for op, i1, i2, j1, j2 in aligned["opcodes"]:
+        if op != "replace":
+            continue
+        if i2 - i1 == j2 - j1:
+            spans = [(i, i + 1, j, j + 1) for i, j in zip(range(i1, i2), range(j1, j2)) if base[i] != final[j]]
+        elif max(i2 - i1, j2 - j1) <= MAX_PAIR_CHARS:
+            spans = [(i1, i2, j1, j2)]       # 둘로 읽은 한 글자(口口→回) 등
+        else:
+            continue
+        for a, b, c, d in spans:
+            read, actual = base[a:b], final[c:d]
+            if not all(_countable(ch) for ch in read + actual) or _noise(read, actual):
                 continue
-            if i2 - i1 == j2 - j1:
-                spans = [(i, i + 1, j, j + 1) for i, j in zip(range(i1, i2), range(j1, j2)) if base[i] != final[j]]
-            elif max(i2 - i1, j2 - j1) <= MAX_PAIR_CHARS:
-                spans = [(i1, i2, j1, j2)]   # 둘로 읽은 한 글자(口口→回) 등
-            else:
+            grade = span_grade(labels, aligned["upgraded"], c, d)
+            if grade is None:
                 continue
-            for a, b, c, d in spans:
-                read, actual = base[a:b], final[c:d]
-                if not all(_countable(ch) for ch in read + actual) or _noise(read, actual):
-                    continue
-                grades = set(labels[c:d])
-                if "engine" in grades:
-                    continue
-                grade = next(g for g in GRADES if g in grades)
-                if grade == "ai_auto" and upgraded:
-                    grade = "ai_confirmed"
-                context = base[max(0, a - 6):a] + "「" + read + "」" + base[b:b + 6]
-                pairs.append((read, actual, grade, context))
+            context = base[max(0, a - 6):a] + "「" + read + "」" + base[b:b + 6]
+            pairs.append((read, actual, grade, context))
     seen = Counter(ch for ch in base if _countable(ch))
-    return {"engine": baseline["engine"], "engine_version": raw.get("engine_version", ""), "seen": seen, "pairs": pairs}
+    raw = aligned["raw"]
+    return {"engine": aligned["baseline"]["engine"], "engine_version": raw.get("engine_version", ""),
+            "seen": seen, "pairs": pairs}
 
 
 def project_contribution(project) -> dict:

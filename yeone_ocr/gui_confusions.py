@@ -3,8 +3,10 @@
 창 모양은 중문부호 규칙 창(gui_corrections)과 같다: 서재 바탕의 작은 창, 표(엔진 · 읽은 글자 · → · 확정 글자 ·
 가중 오류 · 사람/AI확인/자동 · 오류율 · 의심), 고른 줄의 보기, 바닥 [선택 쌍 제외]·[제외 모두 되살리기]·[장부 비우기…]·[닫기].
 장부는 어디를 다시 볼지만 정하며 글자를 바꾸지 않는다. 바꾼 내용은 바로 장부 파일에 저장된다."""
+from pathlib import Path
+import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 
 class ConfusionLedgerDialog(tk.Toplevel):
@@ -15,7 +17,7 @@ class ConfusionLedgerDialog(tk.Toplevel):
         self.title("엔진 혼동 장부")
         self.transient(app)
         self.configure(bg=C["PANEL"], highlightthickness=1, highlightbackground=C["RULE"])
-        self.minsize(P(720), P(520))
+        self.minsize(P(720), P(640))
         self.learned = None
         self.items = {}
         body = tk.Frame(self, bg=C["PANEL"], padx=P(22), pady=P(16)); body.pack(fill="both", expand=True)
@@ -31,7 +33,7 @@ class ConfusionLedgerDialog(tk.Toplevel):
                    ("actual", "확정 글자", 80, "center", False), ("weight", "가중 오류", 80, "e", False),
                    ("grades", "사람·AI확인·자동", 130, "center", False), ("rate", "오류율", 80, "e", False),
                    ("risky", "의심", 50, "center", False))
-        self.tree = ttk.Treeview(table, columns=[c[0] for c in columns], show="headings", selectmode="browse", height=10,
+        self.tree = ttk.Treeview(table, columns=[c[0] for c in columns], show="headings", selectmode="browse", height=7,
                                  style="Rules.Treeview")
         for col, text, width, anchor, stretch in columns:
             self.tree.heading(col, text=text, anchor=anchor)
@@ -54,6 +56,16 @@ class ConfusionLedgerDialog(tk.Toplevel):
         ttk.Button(edit, text="제외 모두 되살리기", command=self.restore, cursor="hand2").pack(side="left", padx=(P(6), 0))
         ttk.Button(edit, text="장부 비우기…", command=self.clear, cursor="hand2").pack(side="left", padx=(P(20), 0))
         tk.Frame(body, bg=C["LINE"], height=max(1, P(1))).pack(fill="x", pady=(P(14), P(10)))
+        crops = tk.Frame(body, bg=C["PANEL"]); crops.pack(fill="x")
+        self.v_samples = tk.BooleanVar(value=True)
+        ttk.Checkbutton(crops, text="글자 이미지 조각 모으기(엔진 미세조정용 · 이 PC에만 보관)", variable=self.v_samples,
+                        command=self.toggle_samples).pack(side="left")
+        ttk.Button(crops, text="조각 지우기…", command=self.clear_samples, cursor="hand2").pack(side="right")
+        ttk.Button(crops, text="조각 내보내기…", command=self.export_samples, cursor="hand2").pack(side="right", padx=(0, P(6)))
+        self.v_samples_note = tk.StringVar()
+        tk.Label(body, textvariable=self.v_samples_note, font=F["CAP"], fg=C["MUTED"], bg=C["PANEL"], bd=0, justify="left",
+                 anchor="w").pack(fill="x", pady=(P(6), 0))
+        tk.Frame(body, bg=C["LINE"], height=max(1, P(1))).pack(fill="x", pady=(P(14), P(10)))
         foot = tk.Frame(body, bg=C["PANEL"]); foot.pack(fill="x")
         self.b_close = ttk.Button(foot, text="닫기", command=self.destroy, style="DlgInkDef.TButton", cursor="hand2")
         self.b_close.pack(side="right")
@@ -64,7 +76,7 @@ class ConfusionLedgerDialog(tk.Toplevel):
         self._refresh()
         try:
             from .gui import place_over
-            self.geometry(f"{P(760)}x{P(580)}"); place_over(self, app)
+            self.geometry(f"{P(760)}x{P(700)}"); place_over(self, app)
         except Exception:
             pass
         self.b_close.focus_set()
@@ -93,6 +105,42 @@ class ConfusionLedgerDialog(tk.Toplevel):
             parts.append((" " + self.learned.warning, "warn"))
         app._set_rich(self.intro, parts)
         self._selected()
+        self._refresh_samples()
+
+    def _refresh_samples(self):
+        from .glyph_samples import stats
+        try:
+            info = stats()
+        except OSError as exc:
+            self.v_samples_note.set(f"글자 조각 목록을 읽지 못했습니다: {exc}")
+            return
+        self.v_samples.set(info["enabled"])
+        kinds = info["by_kind"]
+        self.v_samples_note.set(f"문서 {info['documents']}개 · 고친 줄 {kinds.get('corrected', 0)}개 · 검수한 그대로의 줄 "
+                                f"{kinds.get('verified', 0)}개 · {info['bytes'] / 1_000_000:.1f} MB · {info['root']}")
+
+    def toggle_samples(self):
+        from .glyph_samples import set_enabled
+        self._apply(set_enabled, bool(self.v_samples.get()))
+
+    def export_samples(self):
+        from .glyph_samples import export
+        folder = filedialog.askdirectory(parent=self, title="글자 조각을 내보낼 폴더")
+        if not folder:
+            return
+        target = Path(folder) / ("연어OCR_글자조각_" + time.strftime("%Y%m%d-%H%M%S"))
+        try:
+            done = export(target)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(self.title(), f"글자 조각을 내보내지 못했습니다.\n{exc}", parent=self)
+            return
+        messagebox.showinfo(self.title(), f"{done['exported']}개를 내보냈습니다(사람이 고쳤거나 고르거나 검수한 것).\n{target}\n"
+                            "images/ · rec_gt.txt(PaddleOCR 인식 학습 형식) · samples.jsonl", parent=self)
+
+    def clear_samples(self):
+        from .glyph_samples import reset
+        if messagebox.askyesno(self.title(), "모은 글자 조각을 모두 지울까요?\n교정본·비교 프로젝트·혼동 장부는 그대로입니다.", parent=self):
+            self._apply(reset)
 
     def _pick(self):
         selected = self.tree.selection()

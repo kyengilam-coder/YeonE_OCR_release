@@ -14,3 +14,4 @@ import pytest
 def _isolated_confusion_ledger(tmp_path, monkeypatch):
     """Each test gets an empty confusion ledger: one test's corrections must not route another's review."""
     monkeypatch.setenv("YEONE_OCR_CONFUSIONS_PATH", str(tmp_path / "confusions.json"))
+    monkeypatch.setenv("YEONE_OCR_GLYPH_SAMPLES_PATH", str(tmp_path / "glyph_samples"))

@@ -21,6 +21,7 @@
   textlayer 검색 가능한 PDF: 판독 기록의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 out/<이름>_글자층.pdf 로 (모델 호출 없음, 원본은 그대로)
   compare-engines 선택한 로컬 엔진을 같은 쪽에서 비교하고 원시 판독·교정 이력을 별도 프로젝트에 저장 (API 호출 없음)
   plans    구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태와 자동 선택 (모델 호출 없음)
+  glyph-samples 글자 이미지 조각: 확정된 줄 이미지와 글을 로컬 엔진 미세조정용으로 보기·내보내기(PaddleOCR 인식 형식)·지우기 (모델 호출 없음)
   confusions 엔진 혼동 장부: 로컬 엔진별로 자주 틀린 글자 보기·제외·끄기·비우기 — 의심 구간 검증에만 쓰고 글자는 바꾸지 않음 (모델 호출 없음)
 """
 from __future__ import annotations
@@ -2742,6 +2743,19 @@ def build_parser():
     action.add_argument("--exclude", nargs=3, metavar=("엔진", "읽은글자", "확정글자"), help="잘못 쌓인 쌍을 제외")
     action.add_argument("--include", nargs=3, metavar=("엔진", "읽은글자", "확정글자"), help="제외한 쌍을 되살림")
     p.set_defaults(fn=cmd_confusions)
+    p = sub.add_parser("glyph-samples", help="글자 이미지 조각: 로컬 엔진 미세조정용 (줄 이미지, 확정 글) 보기·내보내기·지우기(모델 호출 없음)")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--export", metavar="빈폴더", help="PaddleOCR 인식 학습 형식(images/ · rec_gt.txt · samples.jsonl)으로 내보냄")
+    action.add_argument("--enable", action="store_true", help="저장·인식이 끝날 때 조각을 모음(기본)")
+    action.add_argument("--disable", action="store_true", help="조각을 더 모으지 않음(모은 것은 그대로)")
+    action.add_argument("--reset", action="store_true", help="모은 조각을 모두 지움")
+    p.add_argument("--min-grade", choices=("ai_auto", "ai_confirmed", "human"), default="ai_confirmed",
+                   help="내보낼 최소 등급(기본 ai_confirmed: 사람이 직접 고쳤거나 사람이 고르거나 검수한 것)")
+    p.add_argument("--engine", action="append", metavar="엔진", help="이 엔진의 조각만 내보냄(여러 번 쓸 수 있음)")
+    p.add_argument("--kind", action="append", choices=("corrected", "verified"),
+                   help="내보낼 종류(기본: 둘 다 — 고친 줄과 사람이 검수한 그대로의 줄)")
+    p.add_argument("--rotate-vertical", action="store_true", help="세로쓰기 줄 조각을 90° 돌려 내보냄")
+    p.set_defaults(fn=cmd_glyph_samples)
     p = sub.add_parser("prepare"); common(p); p.add_argument("--force", action="store_true"); p.set_defaults(fn=cmd_prepare)
     p = sub.add_parser("read"); common(p); read_opts(p); p.set_defaults(fn=cmd_read)
     p = sub.add_parser("estimate", help="판독 전 호출·토큰·비용 어림"); common(p); read_opts(p)
@@ -2926,6 +2940,26 @@ def cmd_confusions(args):
     return 0
 
 
+def cmd_glyph_samples(args):
+    """Show, export or manage collected line images; touches no document or project."""
+    from . import glyph_samples as samples
+    try:
+        if args.enable or args.disable:
+            samples.set_enabled(bool(args.enable)); log("글자 조각을 " + ("모읍니다." if args.enable else "더 모으지 않습니다."))
+        elif args.reset:
+            log(f"글자 조각을 지웠습니다(문서 {samples.reset()}개).")
+        elif args.export:
+            done = samples.export(args.export, min_grade=args.min_grade, engines=args.engine,
+                                  kinds=tuple(args.kind or samples.KINDS), rotate_vertical=args.rotate_vertical)
+            log(f"내보냄: {done['exported']}개 → {done['destination']}"
+                + (f" · 파일이 없거나 바뀐 조각 {done['skipped']}개는 뺌" if done["skipped"] else ""))
+    except (OSError, ValueError) as exc:
+        log(f"글자 조각을 처리하지 못했습니다: {exc}"); return 2
+    for line in samples.summary_lines(samples.stats()):
+        log(line)
+    return 0
+
+
 def cmd_plans(args):
     """Which signed-in plans this PC can use; runs only the CLIs' status commands."""
     from . import subscriptions
@@ -2971,7 +3005,7 @@ def main(argv=None):
     global LOCAL_API_CALLS
     LOCAL_API_CALLS = 0
     args = build_parser().parse_args(argv)
-    if args.cmd in ("compare-engines", "plans", "confusions"):
+    if args.cmd in ("compare-engines", "plans", "confusions", "glyph-samples"):
         return args.fn(args)
     from .reader_gemini import set_call_cap, set_cancel_event
     set_call_cap(getattr(args, "max_calls", 0) or 0)        # 호출 상한은 명령마다 새로 센다(창 프로그램은 한 프로세스에서 명령을 여럿 돌린다)
