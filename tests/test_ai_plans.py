@@ -643,7 +643,8 @@ def test_a_cli_timeout_is_retried_then_moves_on_like_any_temporary_failure():
     with _with(_states(claude=True, chatgpt=True)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
         session = subscriptions.Session("chatgpt", "chatgpt", log=logs.append, factory=plans.__getitem__, sleep=lambda _s: None)
         assert _ask(session)[-1] == "claude"                                          # answered by the next plan
-        assert plans["chatgpt"].calls == 3 and any("일시 오류" in line for line in logs)
+        assert plans["chatgpt"].calls == 1                                            # the timeout was already waited once
+        assert any("넘어갑니다" in line for line in logs)
         assert "chatgpt" in subscriptions.exhausted()                                 # resting, not marked as an account problem
 
 
@@ -656,7 +657,22 @@ def test_timeouts_on_every_plan_end_at_the_api_key():
     with _with(_states(claude=True, chatgpt=True, gemini=False)), mock.patch.object(subscriptions, "RETRY_WAITS", (0.0, 0.0)):
         session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=plans.__getitem__, sleep=lambda _s: None)
         assert _ask(session)[-1] == "gpt-x"
-    assert api.request.call_count == 1 and plans["claude"].calls == 3 and plans["chatgpt"].calls == 3
+    assert api.request.call_count == 1 and plans["claude"].calls == 1 and plans["chatgpt"].calls == 1
+
+
+def test_a_plan_back_from_rest_is_not_tried_again_by_the_request_it_timed_out_on():
+    """Codex: with rests ending mid-request, three timing-out plans took 18 tries / 90 minutes to reach the key."""
+    now = [0.0]
+    slow = {name: _Flaky(name, [TimeoutError(name)] * 9) for name in ("claude", "chatgpt")}
+    def factory(plan):
+        now[0] += 700                                  # each try takes longer than a rest: claude is back when chatgpt fails
+        return slow[plan]
+    api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
+    api.request.return_value = ('{"lines": []}', True, "done", {}, "gpt-x")
+    with _with(_states(claude=True, chatgpt=True, gemini=False)), mock.patch.object(subscriptions, "_clock", lambda: now[0]):
+        session = subscriptions.Session("claude", api=api, log=lambda _m: None, factory=factory, sleep=lambda _s: None)
+        assert _ask(session)[-1] == "gpt-x"
+    assert slow["claude"].calls + slow["chatgpt"].calls <= 3 and api.request.call_count == 1
 
 
 def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():

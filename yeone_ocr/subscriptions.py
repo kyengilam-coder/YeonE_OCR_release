@@ -331,10 +331,17 @@ class Session:
     def request(self, *, model_name, system, prompt, images, schema):
         from .claude_subscription import RequestRejected, SubscriptionError
         attempts, rested = 0, []                 # this request: tries on the plan in use, plans it sent to rest
+        timed_out, last_timeout = set(), None    # plans that did not answer this request in time
         while True:
             self._come_back()
             with self._lock:
                 plan, current = self.plan, self._client
+                if plan is not None and plan in timed_out:
+                    # Back on a plan that already timed out on this very request (its rest ended meanwhile):
+                    # this request goes to the API key instead of waiting through every plan again.
+                    if self.api is None:
+                        raise last_timeout
+                    plan = current = None
                 if plan is not None and current is None:
                     try:
                         current = self._client = self._factory(plan)
@@ -360,15 +367,18 @@ class Session:
                         continue                      # switched while it ran (by the user or another caller): send again
                     if not isinstance(exc, (SubscriptionError, TimeoutError)) or isinstance(exc, RequestRejected):
                         raise                         # this request's own problem: another plan would refuse it too
-                    if _kind(exc) == "temporary":
+                    if isinstance(exc, TimeoutError):
+                        # The whole timeout was already waited: no second try on the same plan, on to the next.
+                        timed_out.add(plan)
+                        last_timeout = exc
+                    elif _kind(exc) == "temporary":
                         if self.should_stop():
                             raise
                         if attempts < len(RETRY_WAITS):
                             wait = RETRY_WAITS[attempts]
                             attempts += 1
-                        elif rested and not isinstance(exc, TimeoutError):
+                        elif rested:
                             # The same request failed on a second plan as well: the request, not the plans.
-                            # (A timeout says nothing about the request: it goes on to the next plan and the key.)
                             for other in rested:
                                 release(other)
                             raise

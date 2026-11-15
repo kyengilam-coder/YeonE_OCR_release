@@ -216,3 +216,24 @@ def test_a_thin_page_cannot_round_past_the_render_cap():
     with pymupdf.open("pdf", data) as doc:
         image, _note = page_image(doc, 1, 300, prefer_embedded=False)
         assert image.width * image.height <= MAX_RENDER_PIXELS
+
+
+def test_a_page_just_under_the_cap_is_checked_on_its_whole_pixel_size():
+    """Codex: 14400 x 399.99 pt at 300 dpi is 99,997,498 px by area but 60000 x 1667 whole pixels."""
+    from yeone_ocr.pdfio import MAX_RENDER_PIXELS, page_image
+    with pymupdf.open() as doc:
+        doc.new_page(width=14400, height=399.99)
+        image, _note = page_image(doc, 1, 300, prefer_embedded=False)
+        assert image.width * image.height <= MAX_RENDER_PIXELS
+
+
+def test_verify_refuses_one_oversized_part(tmp_path, monkeypatch):
+    from yeone_ocr import verify, ziplimits
+    path = tmp_path / "out.hwpx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/hwp+zip")
+        archive.writestr("Contents/content.hpf", "<a/>")
+        archive.writestr("Contents/header.xml", "<a>" + " " * 2_000 + "</a>")
+        archive.writestr("Contents/section0.xml", "<s/>")
+    monkeypatch.setattr(ziplimits, "MAX_MEMBER_BYTES", 1_000)
+    assert any(issue["rule"] == "zip 크기" for issue in verify.check_hwpx_file(str(path)))
