@@ -507,7 +507,8 @@ def _kill_tree(proc):
         return
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15, check=False,
+            from .runtime import system_program
+            subprocess.run([system_program("taskkill.exe"), "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=15, check=False,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         else:
             os.killpg(proc.pid, signal.SIGKILL)

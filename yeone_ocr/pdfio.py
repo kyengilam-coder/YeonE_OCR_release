@@ -201,6 +201,9 @@ def _embedded(page: pymupdf.Page, prefer_embedded: bool = True) -> tuple[int, py
     return None
 
 
+MAX_RENDER_PIXELS = 100_000_000      # 1억 화소: A2 판면 300 dpi(약 4,900 × 7,000)의 세 배
+
+
 def page_image(doc: pymupdf.Document, pdf_page: int, dpi: int = 300, prefer_embedded: bool = True) -> tuple[Image.Image, str]:
     """쪽 이미지. 쪽이 스캔 이미지 한 장으로 되어 있으면 그 원본 비트맵을 그대로 꺼내고(재압축·재샘플 없음, 쪽 위에서
     돌려 놓였으면 놓인 방향대로 바로 세워서), 아니면 dpi로 렌더한다. 돌려주는 설명 문자열은 기록용."""
@@ -221,6 +224,11 @@ def page_image(doc: pymupdf.Document, pdf_page: int, dpi: int = 300, prefer_embe
         if im.mode not in ("L", "RGB"):
             im = im.convert("RGB")
         return im, f"내장 스캔 {im.width}x{im.height} {info['ext']}" + (f" ({emb[2]}도 돌려 놓임)" if emb[2] else "")
+    area = page.rect.width * page.rect.height               # pt²
+    if area > 0 and area * (dpi / 72) ** 2 > MAX_RENDER_PIXELS:
+        # An oversized page (a crafted PDF can declare 200 × 200 inches) would need gigabytes at 300 dpi:
+        # render it at the resolution that fits instead of running out of memory.
+        dpi = max(36, int(72 * (MAX_RENDER_PIXELS / area) ** 0.5))
     pix = page.get_pixmap(dpi=dpi)
     im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     return im, f"렌더 {dpi}dpi {im.width}x{im.height}"

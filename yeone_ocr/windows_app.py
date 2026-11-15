@@ -27,8 +27,12 @@ def redact_log(text: str, secrets=()) -> str:
             text = text.replace(str(secret), "[REDACTED]")
     text = re.sub(r"AIza[0-9A-Za-z_-]{20,}", "[REDACTED]", text)
     text = re.sub(r"sk-[0-9A-Za-z_-]{12,}", "[REDACTED]", text)
+    text = re.sub(r"AQ\.[0-9A-Za-z_.-]{20,}", "[REDACTED]", text)         # Gemini keys issued from 2026
     text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+", r"\1[REDACTED]", text)
     return re.sub(r"(?i)((?:api[_-]?key|x-goog-api-key|[?&]key)\s*[=:]\s*)[^\s&,;]+", r"\1[REDACTED]", text)
+
+
+_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
 
 
 class SafeLog(io.TextIOBase):
@@ -38,7 +42,11 @@ class SafeLog(io.TextIOBase):
         self._file = path.open("a", encoding="utf-8", buffering=1)
         self._pending = ""
         self._lock = threading.RLock()
-        self._secrets = tuple(os.environ.get(k, "") for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"))
+        self._secrets = tuple(os.environ.get(k, "") for k in _KEY_NAMES)
+
+    def _all_secrets(self):
+        # The window sets a key it reads from its settings after start-up: look again at every write.
+        return self._secrets + tuple(os.environ.get(k, "") for k in _KEY_NAMES)
 
     @property
     def encoding(self):
@@ -53,7 +61,7 @@ class SafeLog(io.TextIOBase):
             self._pending += text
             while "\n" in self._pending:
                 line, self._pending = self._pending.split("\n", 1)
-                self._file.write(redact_log(line, self._secrets) + "\n")
+                self._file.write(redact_log(line, self._all_secrets()) + "\n")
             # Avoid unbounded output on a malformed library log. Drop an
             # unterminated oversized line instead of leaking partial keys.
             if len(self._pending) > 65536:
@@ -70,7 +78,7 @@ class SafeLog(io.TextIOBase):
             if self._file.closed:
                 return
             if self._pending:
-                self._file.write(redact_log(self._pending, self._secrets) + "\n")
+                self._file.write(redact_log(self._pending, self._all_secrets()) + "\n")
                 self._pending = ""
             self._file.flush()
 

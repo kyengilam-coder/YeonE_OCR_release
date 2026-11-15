@@ -1,6 +1,8 @@
 """Versioned text handling; absent policy always replays historical records."""
 from __future__ import annotations
 
+import re
+
 LEGACY_TEXT_POLICY = "legacy-nfc-v1"
 SOURCE_TEXT_POLICY = "source-preserving-v1"
 
@@ -32,3 +34,13 @@ def touches_selector(text: str, start: int, end: int) -> bool:
 
 def compatibility_ideograph(char: str) -> bool:
     return len(char) == 1 and (0xF900 <= ord(char) <= 0xFAFF or 0x2F800 <= ord(char) <= 0x2FA1F)
+
+
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿\ud800-\udfff]")
+
+
+def xml_text(text: str) -> str:
+    """Text an XML 1.0 document (HWPX, DOCX) can hold: drops the control characters lxml and
+    python-docx refuse. A stray U+0001 in an AI answer or a PDF text layer would otherwise stop
+    the whole document from being written."""
+    return _XML_ILLEGAL.sub("", text)

@@ -22,6 +22,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from lxml import etree
 from .collate import Item
+from ..text_policy import xml_text
 
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
@@ -466,6 +467,7 @@ class Editor:
 
     def _new_run_after(self, pel: etree._Element, run: etree._Element, char_pr: str, text: str, memo: str | None) -> etree._Element:
         nr = etree.Element(f"{HP}run", {"charPrIDRef": char_pr})
+        text, memo = xml_text(text), (xml_text(memo) if memo else memo)
         if memo and self.use_memo:
             b, e = self._memo_field(memo)
             nr.append(b)

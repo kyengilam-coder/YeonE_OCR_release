@@ -108,8 +108,9 @@ class BookmarkGui(unittest.TestCase):
     def test_report_opens_selected_identity_and_labels_legacy_history(self):
         report = self.root / "old_selected.html"; report.write_text("selected", encoding="utf-8")
         report.with_suffix(".json").write_text(json.dumps({"at": "2026-10-20 09:00:00"}), encoding="utf-8")
-        with patch("yeone_ocr.collate.results.locate_section_report", return_value=report) as lookup, \
-             patch.object(gui.App, "_latest", side_effect=AssertionError("must not select by folder mtime")):
+        # The report is located by its section identity; the old newest-file-in-folder helper is gone.
+        self.assertFalse(hasattr(gui.App, "_latest"))
+        with patch("yeone_ocr.collate.results.locate_section_report", return_value=report) as lookup:
             gui.App.open_collate_report(self.app)
         lookup.assert_called_once_with(self.root / "work", str(self.pdf), str(self.hwpx), "瀉白散", 5271, 5323)
         self.opened.assert_called_once_with(report)

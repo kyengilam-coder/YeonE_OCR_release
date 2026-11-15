@@ -21,6 +21,16 @@ def can_replace_executable() -> bool:
     return is_frozen() and sys.platform == "win32" and not is_installed_bundle()
 
 
+def system_program(name: str) -> str:
+    """A Windows system program by absolute path (System32), so a same-named file in the app or
+    current folder is never started instead. Other platforms keep the bare name."""
+    if sys.platform != "win32":
+        return name
+    root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    folder = ("System32", "WindowsPowerShell", "v1.0") if name.lower() == "powershell.exe" else ("System32",)
+    return str(root.joinpath(*folder, name))
+
+
 def user_data_dir() -> Path:
     """설치 위치와 무관하게 현재 사용자가 쓸 수 있는 작업 폴더의 루트."""
     if sys.platform == "win32":

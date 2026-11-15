@@ -290,6 +290,9 @@ def _protected_ascii_space_keys(history: dict) -> dict[int, set[str]]:
     return result
 
 
+MAX_ARCHIVE_BYTES = 1_000_000_000
+
+
 class _Archive:
     """Parse the same direct body paragraph sequence as python-hwpx."""
     def __init__(self, data: bytes):
@@ -299,6 +302,10 @@ class _Archive:
             self.infos = archive.infolist()
             if len({i.filename for i in self.infos}) != len(self.infos):
                 raise SectionEditError("문서 ZIP에 중복된 항목이 있어 편집할 수 없습니다.")
+            # Every entry is held in memory. zipfile stops each entry at its declared size, so the
+            # declared total bounds what a small crafted file (a zip bomb) can expand to.
+            if sum(i.file_size for i in self.infos) > MAX_ARCHIVE_BYTES:
+                raise SectionEditError("문서 ZIP을 풀면 너무 커서(1 GB 초과) 편집할 수 없습니다.")
             self.entries = {i.filename: archive.read(i.filename) for i in self.infos}
             self.comment = archive.comment
         doc = HwpxDocument.open(data)

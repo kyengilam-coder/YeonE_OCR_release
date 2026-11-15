@@ -7,6 +7,8 @@ from __future__ import annotations
 import random, time
 from lxml import etree
 
+from .text_policy import xml_text
+
 HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 HH = "{http://www.hancom.co.kr/hwpml/2011/head}"
 
@@ -68,7 +70,7 @@ def memo_field(text: str, number: int, author: str, shape: str) -> tuple[etree._
                                                 "linkListNextIDRef": "0", "textWidth": "0", "textHeight": "0", "hasTextRef": "0", "hasNumRef": "0"})
     p = etree.SubElement(sub, f"{HP}p", {"id": rid(), "paraPrIDRef": "0", "styleIDRef": "0", "pageBreak": "0", "columnBreak": "0", "merged": "0"})
     r = etree.SubElement(p, f"{HP}run", {"charPrIDRef": "0"})
-    etree.SubElement(r, f"{HP}t").text = text
+    etree.SubElement(r, f"{HP}t").text = xml_text(text)
     e = etree.Element(f"{HP}ctrl")
     etree.SubElement(e, f"{HP}fieldEnd", {"beginIDRef": begin_id, "fieldid": fid})
     return b, e

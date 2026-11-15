@@ -117,9 +117,15 @@ def engine_root_for(engine: str, selected_root=None) -> Path:
     return default_engine_root()
 
 
+def without_api_keys(environment) -> dict[str, str]:
+    """The environment without API keys (any *_API_KEY). No OCR worker, installer (pip and npm
+    run third-party build scripts) or other company's CLI needs the reader keys the window set."""
+    return {key: value for key, value in environment.items() if not key.upper().endswith("_API_KEY")}
+
+
 def subprocess_environment() -> dict[str, str]:
     """Keep native DLL discovery while isolating user Python/module settings."""
-    environment = os.environ.copy()
+    environment = without_api_keys(os.environ)
     for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
         environment.pop(name, None)
     environment.update(PYTHONIOENCODING="utf-8", PYTHONUTF8="1",

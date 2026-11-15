@@ -38,6 +38,9 @@ PROVIDER = "openai"
 TRANSPORT = "codex-cli-subscription"
 DEFAULT_MODEL = ""                       # the CLI picks the plan's default model
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+# Codex tools turned off for OCR review calls (checked against Codex CLI 0.169; 0.139 ignores unknown names).
+NO_TOOLS = ("shell_tool", "unified_exec", "browser_use", "browser_use_external", "in_app_browser",
+            "apps", "plugins", "image_generation", "multi_agent")
 # `codex exec` prefers an API key from the environment over the ChatGPT sign-in: drop them for the child.
 _STRIP_ENV = ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID")
 _STATUS_TTL = 60.0
@@ -150,7 +153,8 @@ def codex_home() -> Path:
 
 
 def cli_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _STRIP_ENV}
+    from ab_ocr.runtime import without_api_keys
+    env = {k: v for k, v in without_api_keys(os.environ).items() if k not in _STRIP_ENV}   # no other company's key either
     home = os.environ.get("YEONE_OCR_CODEX_HOME", "").strip()
     if home:
         env["CODEX_HOME"] = str(Path(home).expanduser())
@@ -446,6 +450,10 @@ class SubscriptionClient:
             args = [self.cli, "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules",
                     "--skip-git-repo-check", "-s", "read-only", "-C", str(root),
                     "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
+                    # Only a JSON answer is wanted. The page image may carry instructions, so the model gets
+                    # no command, browser, app or plugin tool (read-only still lets a shell read any file).
+                    # A Codex that does not know a feature name only warns and goes on.
+                    *[arg for feature in NO_TOOLS for arg in ("-c", f"features.{feature}=false")],
                     "-c", f'model_reasoning_effort="{self.effort}"',
                     "-c", "model_instructions_file=" + json.dumps(str(root / "instructions.md"))]
             if model_name and model_name != label(""):         # the label of the default is not a model name
