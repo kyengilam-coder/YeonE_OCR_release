@@ -354,7 +354,7 @@ def _accept_ai(project, number) -> dict:
             held += 1
             continue
         try:
-            project.accept_ai_proposal(number, proposal["review_id"], proposal["id"])
+            project.accept_ai_proposal(number, proposal["review_id"], proposal["id"], actor="auto")
         except ComparisonError:
             held += 1
             continue
@@ -653,6 +653,7 @@ def _command(args, *, work=None, doc=None, pool=None):
     owned_doc = doc is None
     doc = doc or open_pdf(args.pdf)
     split = None
+    project = None
     try:
         work = work or Work(args.pdf, getattr(args, "work", None))
         work.ensure_source(args.dpi)
@@ -671,6 +672,12 @@ def _command(args, *, work=None, doc=None, pool=None):
         work.save_state(state)
         cli.log(f"▶ 로컬 우선 인식: {len(pages)}쪽 · 의심 구간만 API 검증(이번 실행 최대 {cap}회)")
         review_enabled = bool(getattr(args, "local_ai_review", True))
+        # One snapshot of the confusion ledger for the whole run: every page's plan sees the same
+        # learned characters, and this run's corrections join the ledger only when it ends.
+        from .confusion_memory import load_for_review
+        learned = load_for_review(cli.log) if getattr(args, "local_learned_confusions", True) else None
+        if learned is not None:
+            cli.log(f"  엔진 혼동 장부: 이 엔진들이 자주 틀린 글자 {sum(r.risky for r in learned.rows)}개를 신뢰도와 상관없이 검증에 보탭니다")
         from . import subscriptions
         subscriptions.reset_exhausted()     # plan limits may have reset since the last run
         api = _api_fallback(args, api_cap, environment_key, split_keys)
@@ -793,7 +800,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                 plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
                                                                     detail_tile=getattr(args, "local_ai_detail_tile", 0) or 0),
                                     settings=settings,
-                                    should_stop=cli.CANCEL.is_set)
+                                    should_stop=cli.CANCEL.is_set, confusions=learned)
             except AIReviewError as exc:
                 review.update(status="pending", error=str(exc))
                 if review_enabled:
@@ -1032,6 +1039,15 @@ def _command(args, *, work=None, doc=None, pool=None):
     finally:
         if split is not None:
             split.finish()                                   # pages in flight on the plans' workers (they stop at [중지])
+        if project is not None:
+            from .confusion_memory import harvest_quietly
+            harvested = harvest_quietly(project, cli.log)
+            if harvested and harvested["pairs"]:
+                cli.log(f"  엔진 혼동 장부 갱신: 확인한 {harvested['pages']}쪽 · 엔진 판독과 확정 글이 다른 자리 {harvested['pairs']}곳")
+            if not cli.CANCEL.is_set():
+                # Line images with their confirmed text, for fine-tuning a local engine later (kept on this PC).
+                from .glyph_samples import collect_quietly
+                collect_quietly(project, cli.log, should_stop=cli.CANCEL.is_set)
         from . import subscriptions
         subscriptions.deactivate()
         if owned_doc:

@@ -1286,7 +1286,17 @@ class ComparisonProject:
                     return point, point
         raise ComparisonError("해당 위치는 이미 교정되었습니다. 현재 문장을 원본과 직접 대조하세요.")
 
-    def accept_candidate(self, number, suggestion_id, engine):
+    @staticmethod
+    def _actor(actor):
+        """Who chose a machine proposal: "human" (a click in the editor) or "auto" (a run option).
+        Recorded on the edit only when given, so older callers write the same history as before;
+        confusion_memory weighs unmarked acceptances like automatic ones."""
+        if actor not in (None, "human", "auto"):
+            raise ComparisonError("채택한 주체는 human 또는 auto여야 합니다.")
+        return {"actor": actor} if actor else {}
+
+    def accept_candidate(self, number, suggestion_id, engine, *, actor=None):
+        marker = self._actor(actor)
         with self._lock:
             page = self._page(number)
             suggestion = next((s for s in page["suggestions"] if s["id"] == suggestion_id), None)
@@ -1303,7 +1313,8 @@ class ComparisonProject:
             value = suggestion["candidates"][engine]
             replacement = current[:start] + value + current[end:]
             self._set_text(number, replacement, "candidate:" + suggestion_id + ":" + engine, kind="candidate",
-                           extra={"suggestion_id": suggestion_id, "engine": engine, "applied_start": start, "applied_end": end})
+                           extra={"suggestion_id": suggestion_id, "engine": engine, "applied_start": start, "applied_end": end,
+                                  **marker})
             suggestion.update(decision="accepted", selected_engine=engine, decided_at=_now())
             page["decisions"].append({"suggestion_id": suggestion_id, "at": _now(), "decision": "accepted", "engine": engine})
             self._revision += 1
@@ -1523,7 +1534,8 @@ class ComparisonProject:
                         result[-1]["image_only_check"] = image_proof
             return result
 
-    def accept_ai_proposal(self, number, review_id, proposal_id):
+    def accept_ai_proposal(self, number, review_id, proposal_id, *, actor=None):
+        marker = self._actor(actor)
         with self._lock:
             self.validate_source()
             self._check_page(number)
@@ -1546,7 +1558,7 @@ class ComparisonProject:
             changed = self._set_text(number, replacement, "ai:" + review_id + ":" + proposal_id, kind="ai_accept",
                                      extra={"ai_review_id": review_id, "ai_proposal_id": proposal_id,
                                             "applied_start": start, "applied_end": end,
-                                            "source_fidelity_acceptance_sha256": _digest(proof)})
+                                            "source_fidelity_acceptance_sha256": _digest(proof), **marker})
             if not changed:
                 raise ComparisonError("현재 교정문에 적용할 변경이 없습니다.")
             page["ai_decisions"].append({"id": uuid.uuid4().hex, "at": _now(), "review_id": review_id,

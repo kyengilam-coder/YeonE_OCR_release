@@ -302,6 +302,50 @@ class SettingsTabRealTk(unittest.TestCase):
         finally:
             app.v_pkg.set(old)
 
+    def test_13_confusion_ledger_dialog_lists_pairs_and_manages_ledger_and_samples(self):
+        app = self.app
+        from yeone_ocr import confusion_memory as memory, glyph_samples
+        from yeone_ocr.gui_confusions import ConfusionLedgerDialog
+        memory.store_path().write_text(json.dumps({"format": memory.FORMAT, "version": memory.VERSION, "enabled": True,
+            "suppressed": [], "documents": {"d" * 32: {"at": "2026-11-15T00:00:00+0000", "source": "a.pdf", "pages": 1,
+                "engines": {"ppocrv6": {"versions": [], "seen": {"己": 20},
+                                        "pairs": [["己", "已", {"human": 3}, ["甲「己」丙"]]]}}}}}), encoding="utf-8")
+        dlg = ConfusionLedgerDialog(app)
+        try:
+            dlg.update()
+            self.assertEqual([str(v) for v in dlg.tree.item("0")["values"]],
+                             ["ppocrv6", "己", "→", "已", "3", "3·0·0", "15.0%", "예"])
+            self.assertIn("의심 글자 1개", dlg.intro.get("1.0", "end"))
+            self.assertIn("고친 줄 0개", dlg.v_samples_note.get())
+            dlg.tree.selection_set("0"); dlg.update()
+            self.assertIn("甲「己」丙", dlg.v_pick.get())
+            dlg.exclude(); dlg.update()                                                         # 잘못 쌓인 쌍 빼기
+            self.assertEqual(dlg.tree.get_children(), ())
+            self.assertFalse(memory.LearnedConfusions.load().active())
+            dlg.restore(); dlg.update()
+            self.assertEqual(len(dlg.tree.get_children()), 1)
+            dlg.v_enabled.set(False); dlg.toggle()
+            self.assertFalse(memory.LearnedConfusions.load().enabled)
+            dlg.v_samples.set(False); dlg.toggle_samples()
+            self.assertFalse(glyph_samples.is_enabled())
+            with mock.patch("yeone_ocr.gui_confusions.messagebox.askyesno", return_value=True):
+                dlg.clear()
+            self.assertEqual(memory.LearnedConfusions.load().rows, ())
+            out = self.td / "samples-export"; out.mkdir()
+            with mock.patch("yeone_ocr.gui_confusions.filedialog.askdirectory", return_value=str(out)), \
+                    mock.patch("yeone_ocr.gui_confusions.messagebox.showinfo") as info:
+                dlg.export_samples()
+            info.assert_called_once()
+            self.assertTrue(any(out.glob("연어OCR_글자조각_*/rec_gt.txt")))
+            self.assertEqual(str(dlg.b_close.cget("style")), "DlgInkDef.TButton")
+            dlg.b_close.invoke()
+            self.assertFalse(bool(dlg.winfo_exists()))
+        finally:
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
     def test_11_rules_dialog_enter_never_saves_from_the_fields(self):
         app = self.app
         from yeone_ocr.gui_corrections import PunctuationRulesDialog

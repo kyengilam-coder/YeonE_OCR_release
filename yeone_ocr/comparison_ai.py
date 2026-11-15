@@ -287,8 +287,13 @@ LOW_CONFIDENCE_THRESHOLDS = {"tesseract": 70.0, "rapidocr": 85.0, "easyocr": 55.
                              "paddle_server": 85.0, "glmocr": None, "surya": None}
 
 
-def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids):
-    """Local-only risk detection; all returned targets have image coordinates."""
+def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids, learned=None):
+    """Local-only risk detection; all returned targets have image coordinates.
+
+    ``learned`` (confusion_memory.LearnedConfusions) adds confidently read words
+    that contain a character this engine has often misread before. Those extra
+    targets never count as unresolved: a word without usable geometry, or one a
+    human already edited, is simply not routed again."""
     snapshot, raw = scope["snapshot_text"], baseline["raw"]
     result, seen, skipped, known = [], set(), [], set()
     ink = None
@@ -299,11 +304,14 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
             ink = _ink_regions(image)
         return ink
 
-    def add(start, end, box, reason, candidates=None, origin=None):
+    def add(start, end, box, reason, candidates=None, origin=None, quiet=False):
         if box is None:
-            skipped.append(reason + ":missing-localized-geometry")
+            if not quiet:
+                skipped.append(reason + ":missing-localized-geometry")
             return
         if box[2] - box[0] >= image.width * .9 and box[3] - box[1] >= image.height * .9:
+            if quiet:
+                return
             regions = image_regions()
             if len(regions) != 1:
                 skipped.append(reason + ":unlocalized-large-region")
@@ -370,6 +378,8 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
     # (ab_ocr.local_engines), so the routing hints use the same unit.
     threshold = LOW_CONFIDENCE_THRESHOLDS[baseline["engine"]]
     spans = list(_word_spans(raw))
+    risky = learned.risky(baseline["engine"]) if learned is not None else {}
+    confident = []
     for start, end, word in spans:
         value, confidence = word["text"], word.get("confidence")
         unknown = ("□" in value or "〔판독불명〕" in value or
@@ -378,6 +388,8 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
                  "confidence-unavailable" if threshold is None else
                  "low-confidence-" + baseline["engine"] if confidence < threshold else None)
         if reason is None:
+            if risky:
+                confident.append((start, end, word))
             continue
         try:
             left, right = project._mapped_span(raw["text"], snapshot, start, end)
@@ -385,6 +397,8 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
             skipped.append("human-edited-difficult-span")
             continue
         add(left, right, word.get("bbox"), reason)
+    if confident:
+        _learned_targets(project, raw, snapshot, confident, risky, result, add)
     # Unknown glyphs and unrepresented text may have no word box. Match source
     # lines to independent ink bands only when their counts give an exact route.
     represented = [False] * len(raw["text"])
@@ -433,6 +447,28 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
                 skipped.append("human-edited-missing-ink-region"); continue
             add(left, right, box, "unrecognized-ink-region")
     return result, seen, skipped
+
+
+def _learned_targets(project, raw, snapshot, words, risky, result, add):
+    """Route confidently read words holding a learned confusable character.
+
+    The target is only the span from the first to the last such character; the
+    crop is the engine's own word box, so no character position is guessed."""
+    from .confusion_memory import MAX_ROUTED_PER_PAGE
+    candidates = []
+    for start, end, word in words:
+        hits = [i for i, char in enumerate(word["text"]) if char in risky]
+        if hits:
+            score = max(risky[word["text"][i]].rate for i in hits)
+            candidates.append((-score, start, start + hits[0], start + hits[-1] + 1, word))
+    for _, _, left, right, word in sorted(candidates, key=lambda c: (c[0], c[1]))[:MAX_ROUTED_PER_PAGE]:
+        try:
+            left, right = project._mapped_span(raw["text"], snapshot, left, right)
+        except ValueError:
+            continue                     # a human already changed this text
+        if any(t["start"] < right and left < t["end"] for t in result):
+            continue                     # already inside another target
+        add(left, right, word.get("bbox"), "learned-confusable", quiet=True)
 
 
 def _image_bytes(image, source_bbox, policy):
@@ -548,8 +584,11 @@ def _integrity(settings, policy, pages, fingerprint, batches, summary, scope):
 
 
 def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, force=False, should_stop=None,
-                 include_refinement=True):
-    """Render and freeze the exact offline scope before any external request."""
+                 include_refinement=True, confusions=None):
+    """Render and freeze the exact offline scope before any external request.
+
+    ``confusions`` is an optional confusion_memory.LearnedConfusions. Without it,
+    or when it has no learned confusable characters, the plan is unchanged."""
     policy = policy or ReviewPolicy()
     if (not isinstance(policy, ReviewPolicy) or not isinstance(settings, AISettings)
             or type(force) is not bool or type(include_refinement) is not bool):
@@ -562,6 +601,8 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
         raise AIReviewError("선택한 불일치 항목을 확인하세요.")
     if requested_ids is not None and policy.visual_scope == "page":
         raise AIReviewError("선택한 불일치와 전체 쪽 검증을 동시에 지정할 수 없습니다.")
+    learned = confusions if confusions is not None and confusions.active() else None
+    hinted_targets = 0
     project.validate_source()
     scope_pages, phase_targets, seen_ids, dense_pages, edited_fallback_pages = [], [], set(), [], []
     target_count = 0
@@ -577,7 +618,8 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
         if policy.selective:
             image = ocr.render_page(project.source_path, number, dpi=scope["dpi"], should_stop=should_stop)
             try:
-                visual, found_ids, skipped_reasons = _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids)
+                visual, found_ids, skipped_reasons = _selective_targets(project, page, runs, baseline, scope, policy, image,
+                                                                        requested_ids, learned)
                 seen_ids.update(found_ids)
                 if skipped_reasons:
                     selective_skips[str(number)] = skipped_reasons
@@ -649,6 +691,11 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                     if phase == "visual" and target.get("difficulty_reason"):
                         reason = target["difficulty_reason"]
                         difficulty_reasons[reason] = difficulty_reasons.get(reason, 0) + 1
+                    if phase == "visual" and learned is not None:
+                        hints = learned.hints(baseline["engine"], target["before"])
+                        if hints:
+                            target["learned_confusions"] = hints
+                            hinted_targets += 1
                     _attach_refinement_images(target, scope, image, policy)
                     if phase == "visual" and policy.detail_tile:
                         _attach_detail_tiles(target, image, policy,
@@ -740,6 +787,9 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                "refinement_image_limit": policy.refinement_image_limit,
                "codepoint_ledger_entries": sum(len(t["before"]) for b in batches for t in b["targets"]),
                "anchor_policy": ANCHOR_POLICY}
+    if learned is not None and (hinted_targets or difficulty_reasons.get("learned-confusable")):
+        summary["learned_confusions"] = {"digest": learned.digest(), "hinted_targets": hinted_targets,
+                                         "routed_targets": difficulty_reasons.get("learned-confusable", 0)}
     project.validate_source()
     for scope in scope_pages:
         if _current_scope(project, scope, policy) != scope:
@@ -773,6 +823,11 @@ def _prompt(batch, policy, visual):
                         " full resolution (overlapping tiles in reading order, source_bbox gives each tile's place). Judge"
                         " every glyph from the tiles. When the strokes in a tile clearly show the character, set"
                         " uncertain=false; set uncertain=true only when even the tile does not settle it.")
+    if any(t.get("learned_confusions") for t in batch["targets"]):
+        instruction += (" LEARNED CONFUSIONS: a target's learned_confusions lists characters the baseline engine has"
+                        " misread before, with the characters later verified in those places. It is statistics from"
+                        " other pages, NOT evidence for this page: examine those glyphs' strokes closely, keep the"
+                        " original when the image shows it, and never change a character only because it is listed.")
     data = {"phase": batch["phase"], "policy": asdict(policy), "targets": batch["targets"], "images": batch["images"],
             "snapshot_length": len(batch["snapshot_text"]), "visual_proposals_provisional": visual,
             "target_codepoints": [{"target_id": t["id"], "end_offset": t["end"],

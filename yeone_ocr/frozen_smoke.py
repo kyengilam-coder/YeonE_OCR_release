@@ -10,6 +10,7 @@ import contextlib
 import importlib
 import importlib.metadata
 import io
+import os
 import json
 from pathlib import Path
 import struct
@@ -1452,6 +1453,11 @@ def run(report_path: Path) -> int:
     with tempfile.TemporaryDirectory(prefix="yeone-smoke-", dir=report_path.parent) as temporary:
         folder = Path(temporary).resolve()
         assert folder.is_relative_to(report_path.parent)
+        # Editor saves add to the confusion ledger: keep the user's own ledger untouched.
+        from .confusion_memory import ENV_PATH as _CONFUSIONS
+        os.environ[_CONFUSIONS] = str(folder / "confusions.json")
+        from .glyph_samples import ENV_PATH as _SAMPLES
+        os.environ[_SAMPLES] = str(folder / "glyph_samples")
 
         def native_probe():
             import cv2
