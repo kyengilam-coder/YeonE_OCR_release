@@ -2,13 +2,15 @@
 
 The comparison project owns immutable local readings and AI proposals. Standard
 Work records are derived views for the existing document/PDF/review builders.
-No full-page AI reader, third-pass reader or document context model is invoked.
+Signed-in subscriptions can also read whole pages and automatically apply checked
+changes. No legacy third-pass reader or document context model is invoked.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 import time
 
@@ -225,12 +227,31 @@ def _resume_done(old, args, key, review_enabled):
     """The record of an earlier run says this page is finished under the same conditions (same key)."""
     first = (old or {}).get("local_first") or {}
     status = (first.get("review") or {}).get("status")
+    if review_enabled and (status == "needs-local-review" or
+                           (first.get("review") or {}).get("unlocalized_targets")):
+        return False  # Re-plan unresolved geometry using saved readings, without re-recognition.
     if first.get("resume_key") != key:
         return False
     if status not in RESUME_DONE and not (status == "local-complete" and not review_enabled):
         return False                                    # pending, failed, cancelled, or stopped before the review
     mode = getattr(args, "local_ai_page", "off") or "off"
-    return mode == "off" or "ai_page" in first          # the AI page reading finished too
+    return mode == "off" or ("ai_page" in first and not (first.get("ai_page") or {}).get("empty"))
+
+
+def _response_usage(tokens):
+    """Public usage of one stored response; never retain arbitrary provider fields."""
+    result = {"calls": 1, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
+    if not isinstance(tokens, dict):
+        return result
+    for key, aliases in (("prompt_tokens", ("input_tokens", "prompt_token_count", "prompt_tokens")),
+                         ("output_tokens", ("output_tokens", "candidates_token_count")),
+                         ("thinking_tokens", ("thoughts_token_count", "thinking_tokens"))):
+        for name in aliases:
+            value = tokens.get(name)
+            if type(value) in (int, float) and value >= 0 and (type(value) is int or math.isfinite(value)):
+                result[key] = value
+                break
+    return result
 
 
 def _record(project, number, args, work, started, review, extras=None):
@@ -269,18 +290,25 @@ def _record(project, number, args, work, started, review, extras=None):
     if review.get("targets") or review.get("unlocalized_targets"):
         from .schema import Uncertain
         merged.uncertain.append(Uncertain(context="로컬 인식 의심 구간의 AI 검증·수정 제안을 비교·교정 창에서 확인하세요."))
+    # Usage belongs to the stored responses, not to this execution's bill. Rebuild
+    # totals each time: a reused page cache contributes its original response once.
     usage = {"calls": 0, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0}
     for item in reviews:
-        # Only numeric public usage metadata; authentication never enters records.
         meta = item.get("metadata", {})
-        tokens = meta.get("usage", {})
-        usage["calls"] += 1
-        for key, aliases in (("prompt_tokens", ("input_tokens", "prompt_token_count")),
-                             ("output_tokens", ("output_tokens", "candidates_token_count")),
-                             ("thinking_tokens", ("thoughts_token_count",))):
-            value = next((tokens[name] for name in aliases if name in tokens), 0) if isinstance(tokens, dict) else 0
-            if type(value) in (int, float):
-                usage[key] += value
+        for key, value in _response_usage(meta.get("usage", {})).items():
+            usage[key] += value
+    if page_ai is not None:
+        # A completed response still consumed a call when empty or rejected by
+        # the merge's similarity guard. Cache hits are identified separately.
+        page_usage = _response_usage(page_ai.get("usage", {}))
+        if ai_page_summary is None:
+            # Accounting for an empty response must not change the old resume
+            # decision: an empty page transcription was not considered done.
+            ai_page_summary = {"used": False, "empty": True,
+                               **{k: page_ai[k] for k in ("mode", "model", "cached") if k in page_ai}}
+        ai_page_summary["usage"] = page_usage
+        for key, value in page_usage.items():
+            usage[key] += value
     merged_data = merged.model_dump()
     try:
         local_grades = _local_grades(project, number, run, current, witness=extras.get("witness"), marks=marks)
@@ -324,6 +352,26 @@ def _blank_record(project, number, args, work, started):
 
 
 def _save_record(project, number, args, work, started, review, *, render=True, extras=None):
+    if getattr(args, 'local_review_only', False):
+        record = work.load_record(number)
+        if not record or not record.get('local_first'):
+            raise ValueError('미완료 검증에는 저장된 로컬 OCR 기록이 필요합니다.')
+        record = copy.deepcopy(record)
+        record['local_first']['review'] = copy.deepcopy(review)
+        proposals, reviews = _review_summary(project, number)
+        record['local_first']['ai_proposals'] = proposals
+        usage = {'calls': 0, 'prompt_tokens': 0, 'output_tokens': 0, 'thinking_tokens': 0}
+        for item in reviews:
+            for key, value in _response_usage(item.get('metadata', {}).get('usage', {})).items():
+                usage[key] += value
+        for key, value in (record['local_first'].get('ai_page') or {}).get('usage', {}).items():
+            if key in usage:
+                usage[key] += value
+        record['usage'] = usage
+        record['local_first']['revalidated_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+        work.backup_record(number)
+        work.save_record(number, record)
+        return
     from ab_ocr.ocr import render_page
     from . import cli
     # The preview must use the same pixels and frame as local recognition.
@@ -344,7 +392,7 @@ def _save_record(project, number, args, work, started, review, *, render=True, e
 
 
 def _accept_ai(project, number) -> dict:
-    """(Trial, --local-ai-accept) apply every applicable, certain AI proposal to the page text.
+    """(--local-ai-accept, also a subscription default) apply applicable, certain proposals.
     Recorded like a manual acceptance (reversible); for measuring what the review changes.
     Proposals the safety checks hold (no engine or image support, uncertain) are counted, not applied."""
     from .comparison import ComparisonError
@@ -524,7 +572,7 @@ class _AiWorkers:
         for plan in plans:
             plan_session = session if plan == session.plan else subscriptions.Session(
                 plan, plan, api=api, log=cli.log, record_provider=session.record_provider, should_stop=cli.CANCEL.is_set)
-            reader = _ai_page_reader(args, project, work, cli, plan_session, api)
+            reader = None if getattr(args, 'local_review_only', False) else _ai_page_reader(args, project, work, cli, plan_session, api)
             crews.append({"plan": plan, "session": plan_session, "reader": reader, "pages": per})
         subscriptions.activate(session, [crew["session"] for crew in crews])     # the window shows every connection
         names = " · ".join(subscriptions.NAMES[p] for p in plans)
@@ -671,7 +719,9 @@ def _command(args, *, work=None, doc=None, pool=None):
         state = work.load_state()
         state["local_first_project"] = str(project.project_path)
         work.save_state(state)
-        cli.log(f"▶ 로컬 우선 인식: {len(pages)}쪽 · 의심 구간만 API 검증(이번 실행 최대 {cap}회)")
+        cli.log(f"▶ 로컬 우선 인식: {len(pages)}쪽 · 의심 구간 검증 상한 {cap}회 · "
+                f"쪽 AI 판독 {getattr(args, 'local_ai_page', 'off')} · "
+                f"검증 제안 자동 반영 {'켬' if getattr(args, 'local_ai_accept', False) else '끔'} · 유료 API 상한 {api_cap}회")
         review_enabled = bool(getattr(args, "local_ai_review", True))
         # One snapshot of the confusion ledger for the whole run: every page's plan sees the same
         # learned characters, and this run's corrections join the ledger only when it ends.
@@ -767,7 +817,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             except Exception:
                 return None
 
-        page_reader = _ai_page_reader(args, project, work, cli, session, api)
+        page_reader = None if getattr(args, 'local_review_only', False) else _ai_page_reader(args, project, work, cli, session, api)
         def ai_stage(number, started, review, extras, stage_session, stage_reader, saved=False):
             """The AI part of one page after the engines: checkpoint, AI page reading beside the review
             (review plan, review, accepted proposals), record. Inline, or on a worker of a signed-in plan
@@ -801,7 +851,9 @@ def _command(args, *, work=None, doc=None, pool=None):
                 plan = prepare_plan(project, [number], ReviewPolicy(selective=True, batch_size=getattr(args, "local_ai_batch", 1) or 1,
                                                                     detail_tile=getattr(args, "local_ai_detail_tile", 0) or 0),
                                     settings=settings,
-                                    should_stop=cli.CANCEL.is_set, confusions=learned)
+                                    should_stop=cli.CANCEL.is_set, confusions=learned,
+                                    page_context_fallback=bool(getattr(args, 'local_review_only', False)),
+                                    target_limit=2000 if getattr(args, 'local_review_only', False) else None)
             except AIReviewError as exc:
                 review.update(status="pending", error=str(exc))
                 if review_enabled:
@@ -850,11 +902,11 @@ def _command(args, *, work=None, doc=None, pool=None):
                                       parallel=(getattr(args, "local_ai_parallel", 3) or 1) if stage_session is not None else 1)
                     with tally_lock:
                         tally["calls"] += result["calls"]
-                    if getattr(args, "local_ai_accept", False):
+                    if getattr(args, "local_ai_accept", False) and not getattr(args, 'local_review_only', False):
                         review["ai_accept"] = _accept_ai(project, number)
                         cli.log(f"  {number}쪽: AI 제안 반영 {review['ai_accept']['accepted']}개 · 보류 {review['ai_accept']['held']}개")
                     cli.LOCAL_API_CALLS = tally["calls"]
-                    review.update(status="failed" if result["failed"] else "reviewed", outcome=result)
+                    review.update(status="failed" if result["failed"] else "needs-local-review" if unresolved else "reviewed", outcome=result)
                     if result["failed"] or unresolved:
                         incomplete.append(number)
                     project.save()
@@ -892,6 +944,28 @@ def _command(args, *, work=None, doc=None, pool=None):
             extras = {"columns": bool(getattr(args, "local_columns", True)), "options": options or None,
                       "witness": witness_text(number) if options.get("textlayer_witness") else None}
             old = work.load_record(number)
+            if getattr(args, 'local_review_only', False):
+                # This mode never calls recognition, page transcription or
+                # auto-accept; even derived AI-merged output remains untouched.
+                first = (old or {}).get('local_first') or {}
+                done = first.get('review') or {}
+                if not first or (done.get('status') in {'reviewed', 'no-api-needed', 'blank-page'}
+                                 and not done.get('unlocalized_targets')):
+                    if not first:
+                        incomplete.append(number)
+                    summaries[str(number)] = done
+                    if first:
+                        completed.append(number)
+                    page_finished()
+                    continue
+                if first.get('source_sha256') != project.source_sha256:
+                    raise ComparisonError('저장된 판독과 원본이 달라 재검증하지 않았습니다.')
+                review = copy.deepcopy(done)
+                review['status'] = 'pending'
+                if ai_stage(number, started, review, extras, session, None) == 130:
+                    return 130
+                page_finished()
+                continue
             if _protected_record(work, number, old) and not getattr(args, "force", False):
                 cli.log(f"  {number}쪽: 기존 판독·사람 교정 보존(다시 인식하려면 강제 재판독)")
                 cli.page_event(number, "record")
@@ -1039,6 +1113,9 @@ def _command(args, *, work=None, doc=None, pool=None):
             return 2
         if not completed:
             return 3 if failed else 2
+        if getattr(args, 'local_review_only', False):
+            cli.log(f'미완료 검증 끝: 호출 {calls}/{cap}회 · 기존 OCR·교정문·출력 문서 보존')
+            return 3 if failed else 4 if incomplete else 0
         # Local review is the only model path; document assembly must stay offline.
         build_args = copy.copy(args)
         build_args.no_context_model = True

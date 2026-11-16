@@ -36,15 +36,16 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": True, "local_resume": "unfinished",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
-OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 어려운 부분만 AI 검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
+OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 설정에 따라 AI 판독·검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (Antigravity → ChatGPT → Claude)", "gemini": "Antigravity (Google 계정)",
                   "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}
 RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
-                 "all": "모두 다시 점검한 뒤 이어가기"}             # 이어서 할 때(--local-resume) — 실행 카드와 설정 「인식」
+                 "all": "모두 다시 점검한 뒤 이어가기", "review-only": "미완료 검증만 · 기존 결과 보존"}
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
               "끝나지 않은 쪽만 점검(기본): 끝났고 조건이 같은 쪽은 바로 건너뛰고, 보류·실패한 AI 검증이나 사람이 고친 쪽·설정이 바뀐 쪽만 다시 합니다. "
               "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
-              "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음).")
+              "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음). "
+              "미완료 검증만: 기존 OCR·교정문·출력 파일을 보존하고 남은 검증만 합니다. 새 교정은 제안으로 저장하며 자동 적용하지 않습니다.")
 SETUP_LABELS = {"gemini": "Antigravity (Google 계정)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Antigravity 구독", "api": "API 키"}
@@ -71,8 +72,10 @@ STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 �
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
 한자·한글 혼용 문헌(세로쓰기 스캔 PDF, 가로쓰기 한문 책)을 지침에 따라 OCR·교정해 HWPX 로 만듭니다.
-기본은 PC의 로컬 엔진으로 먼저 읽고, 불일치·낮은 신뢰도·누락 의심 구간만 선택한 Gemini·ChatGPT(OpenAI)·Claude로 검증합니다.
-로컬 인식에는 API 키가 필요하지 않습니다. AI 검증을 켜면 선택한 제공사의 API 키가 필요하며 키·모델을 제공사별로 기억합니다.
+기본은 PC의 로컬 엔진으로 먼저 읽고, 불일치·낮은 신뢰도·누락 의심 구간을 AI로 검증합니다.
+구독 계정 판독이 켜져 있고 사용 가능한 로그인이 있으면 쪽 전체도 AI로 읽습니다. 짧은 차이는 출력문에 반영하고, 확실하며 안전 검사를 통과한 검증 제안도 자동 반영합니다. 원시 엔진 판독은 보존합니다.
+AI는 로그인된 구독이나 API 키를 사용합니다. 구독을 쓸 수 없으면 설정에 따라 다른 구독 또는 유료 API로 넘어갑니다.
+외부 전송 없이 로컬로만 읽으려면 [구독 계정 판독]과 [로컬 뒤 AI 검증]을 모두 끄세요. 의심 구간 검증만 꺼도 쪽 AI 판독은 켜져 있을 수 있습니다.
 같은 파일·결과 폴더에서 판독기를 바꿔 실행하면 완료한 쪽은 보존하고 남은 작업을 이어 갑니다.
 문서를 만들 때 [설정] → [자동 교정]에서 선택한 간체→번체, 중문부호 규칙, 云/雲 교정을 적용하고 변경 내역을 남깁니다.
 중문부호 규칙은 [규칙 추가·수정]에서 편집하여 JSON 파일로 저장하거나 [파일에서 고르기]로 불러옵니다.
@@ -2495,10 +2498,11 @@ class App(tk.Tk):
             cb = ttk.Checkbutton(f, text="구독 계정으로 쪽 판독·검증", variable=self.v_local_ai_subscription)
             cb.pack(side="left")
             Tip(cb, "이 PC에서 공식 프로그램에 자기 계정으로 로그인되어 있으면, 엔진 판독 뒤에 AI가 쪽 전체를 원래 해상도 띠로 잘라 "
-                    "한 번 더 읽고, 어려운 구간을 원래 해상도 조각으로 다시 봅니다. API 요금 없이 구독 사용량에서 차감됩니다. "
+                    "한 번 더 읽습니다. 짧은 차이는 출력문에 자동 반영하고, 의심 구간 검증을 켜면 안전 검사를 통과한 확실한 제안도 자동 반영합니다. 원시 판독은 보존합니다. "
+                    "구독 사용량을 쓰며, API 전환을 켜 두면 구독을 쓸 수 없을 때 유료 API를 사용할 수 있습니다. "
                     "Claude: Claude Code(claude auth login) · ChatGPT: Codex CLI(codex login → Sign in with ChatGPT) · "
-                    "Gemini: Gemini CLI(gemini 실행 → Login with Google). 이 프로그램은 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
-                    "세로쓰기 6쪽 측정(Claude)에서 오류율 1.53% → 0.76%, 쪽당 9초 → 37초.", self)
+                    "Google: Antigravity. 이 프로그램은 인증 토큰을 읽지 않고 공식 프로그램만 실행합니다. "
+                    "개발용 세로쓰기 6쪽(Claude)에서 오류율 1.53% → 0.76%. 시간 측정에는 쪽 판독 저장본 재사용이 포함되어 새 책의 처리시간을 보장하지 않습니다.", self)
             plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
                                 width=chars(300))
             plan.pack(side="left", padx=(P(8), 0))
@@ -2506,7 +2510,7 @@ class App(tk.Tk):
                       "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 API 키로 넘어갑니다"
                       "(API 호출은 「로컬 뒤 AI 검증」의 횟수까지). 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
             return f
-        R["local_ai_subscription"] = row(b, "구독 계정 판독", "로그인되어 있으면 자동(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
+        R["local_ai_subscription"] = row(b, "구독 계정 판독", "로그인 시 쪽 AI 판독·자동 반영(기본 켬) · 끄면 엔진과 API 키만", local_ai_subscription)
 
 
         def plans_status(parent):
@@ -2589,7 +2593,7 @@ class App(tk.Tk):
             ttk.Spinbox(f, from_=1, to=100, width=4, textvariable=self.v_local_ai_max_calls).pack(side="left", padx=(P(8), P(4)))
             L(f, "회까지").pack(side="left")
             return f
-        R["local_review"] = row(b, "로컬 뒤 AI 검증", "불일치·낮은 신뢰도·누락 의심만 검증 · 키가 없으면 로컬 결과와 검증 대상을 저장", local_review)
+        R["local_review"] = row(b, "로컬 뒤 AI 검증", "의심 구간을 구독·API로 검증 · 쪽 AI 판독과 별도 · 횟수는 유료 API 상한", local_review)
 
         def parallel(parent):
             f = boxed(parent)
@@ -6444,7 +6448,9 @@ class App(tk.Tk):
             options += ["--local-ai-pages", str(together)]
         variable = vars(self).get("v_local_resume")
         resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
-        if resume in RESUME_LABELS and resume != "unfinished":
+        if resume == "review-only":
+            options += ["--local-review-only"]
+        elif resume in RESUME_LABELS and resume != "unfinished":
             options += ["--local-resume", resume]
         variable = vars(self).get("v_local_ai_subscription")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))):
@@ -7512,10 +7518,24 @@ class App(tk.Tk):
                 return
             variable = vars(self).get("v_local_ai_review")
             review = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_review", True))
-            notice = ("로컬 엔진으로 먼저 인식합니다(API 호출 0회).\n"
-                      + (f"불일치·낮은 신뢰도·누락 의심 구간만 선택한 AI로 검증합니다.\n이번 실행 API 호출 상한: {cap}회.\n"
-                         "실제 대상 수·이미지 크기·토큰·금액은 로컬 인식 후 결정됩니다.\nAPI 키가 없으면 로컬 결과와 검증 대상을 저장합니다."
-                         if review else "AI 검증을 꺼 두어 외부 전송 없이 로컬 결과를 저장합니다."))
+            variable = vars(self).get("v_local_ai_subscription")
+            subscription = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))
+            notice = "로컬 엔진으로 먼저 인식합니다(로컬 단계는 API 호출 없음).\n"
+            if subscription:
+                notice += ("구독 계정 판독이 켜져 있습니다. 사용 가능한 로그인과 실행 환경에 따라 쪽 전체를 AI로 읽고 짧은 차이를 출력문에 자동 반영합니다.\n"
+                           "원시 엔진 판독은 보존합니다. 구독을 쓸 수 없으면 API 전환 설정에 따라 유료 API를 사용할 수 있습니다.\n")
+            if review:
+                notice += ("불일치·낮은 신뢰도·누락 의심 구간을 AI로 검증합니다.\n"
+                           + ("구독 자동 설정에서는 안전 검사를 통과한 확실한 제안도 자동 반영합니다.\n" if subscription
+                              else "검증 결과는 제안으로 저장하며 사람이 채택합니다.\n")
+                           + "AI 연결이 없으면 로컬 결과와 검증 대상을 저장합니다.\n")
+            elif subscription:
+                notice += "의심 구간 검증은 꺼져 있지만, 쪽 AI 판독은 별도로 동작할 수 있습니다.\n"
+            else:
+                notice += "구독 계정 판독과 의심 구간 검증을 모두 꺼 두어 외부 전송 없이 로컬 결과를 저장합니다.\n"
+            if review or subscription:
+                notice += (f"이번 실행 유료 API 호출 상한: {cap}회(구독 사용량 한도와 별도).\n"
+                           "실제 대상 수·이미지 크기·토큰·금액은 실행 조건에 따라 달라집니다.")
             if go is None:
                 messagebox.showinfo(APP_NAME, notice)
             else:
@@ -7677,6 +7697,8 @@ class App(tk.Tk):
             self.start(["report", self.pdf(), "--work", str(self.work())], "⑥ 보고")
 
     def do_run(self):
+        if '--local-review-only' in App._strategy_opts(self):
+            return App.do_run_pdf(self)
         if not self._need_pdf() or not App._result_editors_ready(self, self.pdf()) or not App._corrections_ok(self):
             return
         if App._local_first(self):
@@ -7695,6 +7717,9 @@ class App(tk.Tk):
         """Read the selected source and produce a searchable PDF without HWPX assembly."""
         if not self._need_pdf():
             return
+        review_only = '--local-review-only' in App._strategy_opts(self)
+        if review_only and not App._result_editors_ready(self, self.pdf()):
+            return
         if App._local_first(self):
             self._env_optional_key = True
         if self._prepare_env():
@@ -7705,7 +7730,8 @@ class App(tk.Tk):
                 out = App.result_dir(self) / "out" / f"{Path(self.pdf()).stem}_글자층.pdf"
                 argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
                 argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra + App._strategy_opts(self)
-                self.start(argv, "한 번에 인식 (문자 PDF 만들기)", open_after=out)
+                self.start(argv, "미완료 검증만 · 기존 결과 보존" if review_only else "한 번에 인식 (문자 PDF 만들기)",
+                           open_after=None if review_only else out)
             self._with_plan("run-pdf", go)
 
     def do_stop(self):

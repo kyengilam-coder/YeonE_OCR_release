@@ -375,6 +375,16 @@ def test_api_transport_counts_its_calls_and_uses_the_given_system_prompt(monkeyp
     assert len(sent) == 1
 
 
+def test_page_api_fallback_preserves_separately_reported_thinking_usage(monkeypatch):
+    monkeypatch.setattr(comparison_ai, "create_client", lambda *_: object())
+    monkeypatch.setattr(comparison_ai, "_request", lambda *a, **k: ('{"lines": ["甲"]}', True, {
+        "usage": {"prompt_token_count": 10, "candidates_token_count": 3, "thoughts_token_count": 7},
+        "actual_model": "gemini-test"}))
+    api = comparison_ai.ApiTransport("gemini", "gemini-test", "synthetic-key", 1)
+    result = api.request(model_name="ignored", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert result[3] == {"input_tokens": 10, "output_tokens": 3, "thoughts_token_count": 7}
+
+
 # ---- [다음 구독으로 넘기기] ----
 
 class _Slow:

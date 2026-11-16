@@ -220,6 +220,10 @@ class LocalFirstGuiTests(unittest.TestCase):
             self.assertEqual(flags[flags.index("--local-resume") + 1], key)
         app.v_local_resume = Var(gui.RESUME_LABELS["unfinished"])
         self.assertNotIn("--local-resume", gui.App._strategy_opts(app))
+        app.v_local_resume = Var(gui.RESUME_LABELS['review-only'])
+        flags = gui.App._strategy_opts(app)
+        self.assertIn('--local-review-only', flags)
+        self.assertNotIn('--local-resume', flags)
 
     def test_parallel_requests_add_a_flag_only_when_not_the_default(self):
         gui = self.gui
@@ -262,6 +266,9 @@ class LocalFirstGuiTests(unittest.TestCase):
 
     def test_install_button_asks_first_runs_the_official_command_and_guides_without_node(self):
         import queue
+        self.stack.enter_context(mock.patch("yeone_ocr.plan_setup.standalone_codex", return_value=None))
+        installer = self.stack.enter_context(mock.patch("yeone_ocr.plan_setup.run",
+                                                       side_effect=AssertionError("real installer forbidden")))
         gui = self.gui
         app = SimpleNamespace(v_setup_plan=Var(gui.SETUP_LABELS["chatgpt"]), q=queue.Queue(), v_status=Var(""))
         with mock.patch("yeone_ocr.plan_setup.find_npm", return_value=None), \
@@ -270,6 +277,7 @@ class LocalFirstGuiTests(unittest.TestCase):
                 mock.patch("webbrowser.open") as browser:
             gui.App.install_plan(app)
         self.assertIn("Node.js", ask.call_args.args[0]); browser.assert_called_once_with("https://nodejs.org/")
+        installer.assert_not_called()
         ran = []
         with mock.patch("yeone_ocr.plan_setup.find_npm", return_value="npm"), \
                 mock.patch("yeone_ocr.plan_setup.run", side_effect=lambda command, log: ran.append(command) or 0), \
@@ -343,10 +351,21 @@ class LocalFirstGuiTests(unittest.TestCase):
 
     def test_local_preview_states_cap_without_creating_output_or_sending(self):
         app = self.app(v_local_ai_review=False)
+        app.cfg["local_ai_subscription"] = False
         with mock.patch.object(self.gui.messagebox, "showinfo") as info:
             self.gui.App._with_plan(app, "run-pdf", None)
         self.assertIn("외부 전송 없이", info.call_args.args[1])
         self.assertFalse(any(self.root.iterdir()))
+
+    def test_local_preview_does_not_claim_offline_when_page_ai_is_enabled(self):
+        app = self.app(v_local_ai_review=False)
+        with mock.patch.object(self.gui.messagebox, "showinfo") as info:
+            self.gui.App._with_plan(app, "run-pdf", None)
+        notice = info.call_args.args[1]
+        self.assertIn("쪽 AI 판독은 별도로", notice)
+        self.assertIn("자동 반영", notice)
+        self.assertIn("유료 API", notice)
+        self.assertNotIn("외부 전송 없이", notice)
 
     def test_invalid_local_cap_blocks_execution(self):
         for cap in ("", "0", "101", "oops"):
@@ -369,10 +388,12 @@ class LocalFirstGuiTests(unittest.TestCase):
                          dict(ocr_strategy="ai-full", local_profile="simplified", local_ai_review=False, local_ai_max_calls=11))
 
     def test_document_and_pdf_launch_share_local_first_options(self):
-        for pdf_only in (False, True):
+        for pdf_only in (False, True, 'review-only'):
             with self.subTest(pdf_only=pdf_only):
                 gui = self.gui
                 app = self.app(v_local_profile=gui.LOCAL_PROFILE_LABELS["simplified"], v_local_ai_max_calls="9")
+                if pdf_only == 'review-only':
+                    app.v_local_resume = Var(gui.RESUME_LABELS['review-only'])
                 app._need_pdf = lambda: True
                 app._prepare_env = mock.Mock(return_value=True)
                 app._save_book = mock.Mock()
@@ -389,11 +410,15 @@ class LocalFirstGuiTests(unittest.TestCase):
                 app._with_plan = lambda kind, go: gui.App._with_plan(app, kind, go)
                 with mock.patch.object(gui.App, "_corrections_ok", return_value=True), \
                      mock.patch.object(gui, "template_ok", return_value=True), mock.patch.object(gui, "preset_ok", return_value=True):
-                    (gui.App.do_run_pdf if pdf_only else gui.App.do_run)(app)
+                    (gui.App.do_run_pdf if pdf_only is True else gui.App.do_run)(app)
                 argv = app.start.call_args.args[0]
                 for flag in ("--ocr-strategy", "local-first", "--local-profile", "simplified", "--local-ai-max-calls", "9"):
                     self.assertIn(flag, argv)
-                self.assertEqual("--pdf-only" in argv, pdf_only)
+                self.assertEqual("--pdf-only" in argv, bool(pdf_only))
+                if pdf_only == 'review-only':
+                    self.assertIn('--local-review-only', argv)
+                    self.assertIsNone(app.start.call_args.kwargs['open_after'])
+                    self.assertEqual(app.start.call_args.args[1], '미완료 검증만 · 기존 결과 보존')
                 self.assertTrue(app._env_optional_key)
 
     def test_main_pipeline_project_opens_for_proposal_adoption(self):

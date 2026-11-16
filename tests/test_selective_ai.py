@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 from ab_ocr.ocr import RecognitionResult
@@ -63,6 +63,108 @@ class SelectiveReviewTests(unittest.TestCase):
         outcome = run_plan(self.project, plan, api_key="", client_factory=forbidden)
         self.assertEqual(outcome["calls"], 0)
         forbidden.assert_not_called()
+
+    def geometry_fixture(self):
+        text = '天地玄黃宇宙洪荒\n日月盈昃辰宿列張'
+        self.add('rapidocr', text=text, words=[
+            {'text': text.splitlines()[0], 'bbox': [40, 20, 180, 45], 'confidence': 99},
+            {'text': text.splitlines()[1], 'bbox': [40, 60, 180, 85], 'confidence': 99}])
+        self.add('glmocr', text=text, words=[])
+        self.project.compare_page(1, baseline='glmocr')
+        return text
+
+    def test_geometry_borrowed_without_changing_raw_or_history(self):
+        self.geometry_fixture()
+        before = copy.deepcopy(self.project.to_dict())
+        plan = self.plan()
+        self.assertEqual(plan.summary['targets'], 2)
+        self.assertEqual(plan.summary['unlocalized_targets'], {})
+        self.assertEqual(plan.batches[1]['targets'][0]['bbox'], [40, 60, 180, 85])
+        self.assertEqual(self.project.to_dict(), before)
+
+    def test_borrowed_geometry_does_not_guess_offsets_in_manual_edit(self):
+        text = self.geometry_fixture()
+        self.project.set_text(1, text.replace('玄', '元'))
+        before = copy.deepcopy(self.project.to_dict())
+        plan = self.plan()
+        self.assertEqual(plan.summary['targets'], 1)
+        self.assertIn('human-edited-missing-geometry', plan.summary['unlocalized_targets']['1'])
+        self.assertEqual(self.project.to_dict(), before)
+
+    def test_new_geometry_resumes_identical_completed_batch(self):
+        self.geometry_fixture()
+        with patch('yeone_ocr.comparison_ai._aligned_geometry', return_value={(0, 8): [40, 20, 180, 45]}):
+            first = self.plan()
+            self.assertTrue(first.summary['unlocalized_targets'])
+            self.assertEqual(self.fake_run(first)[0]['completed'], 1)
+        second = self.plan()
+        self.assertNotEqual(first.fingerprint, second.fingerprint)
+        self.assertEqual((second.summary['calls'], second.summary['resumed_batches']), (1, 1))
+        self.assertEqual(second.batches[0]['targets'][0]['before'], '日月盈昃辰宿列張')
+        self.fake_run(second)
+        self.assertEqual(self.plan().summary['calls'], 0)
+        self.assertEqual(len(self.project.page(1)['ai_reviews']), 2)
+
+    def test_page_context_adds_only_missing_ranges_and_preserves_completed_batch(self):
+        self.geometry_fixture()
+        policy = ReviewPolicy(selective=True, batch_size=4)
+        with patch('yeone_ocr.comparison_ai._aligned_geometry', return_value={(0, 8): [40, 20, 180, 45]}):
+            first = self.plan(policy=policy)
+            self.fake_run(first)
+            before = copy.deepcopy(self.project.to_dict())
+            second = self.plan(policy=policy, page_context_fallback=True)
+            self.assertEqual(second.summary['resumed_batches'], 1)
+            self.assertEqual(second.summary['calls'], 1)
+            self.assertIsNone(second.batches[0]['targets'][0]['bbox'])
+            self.assertEqual(second.batches[0]['targets'][0]['origin'], 'missing-geometry-page-context')
+            self.assertEqual(self.project.to_dict(), before)
+
+    def test_pinned_baseline_can_be_reviewed_after_newer_same_engine_run(self):
+        self.add(text='甲乙丙', confidence=30)
+        self.project.compare_page(1, baseline='ppocrv6')
+        original = self.project.page(1)['baseline_run_id']
+        self.add(text='甲乙丁', confidence=30)
+        self.project._pages[1]['baseline_run_id'] = original
+        self.assertGreater(self.plan().summary['calls'], 0)
+        self.assertEqual(self.project.page(1)['baseline_run_id'], original)
+
+    def test_large_unfinished_page_is_fully_planned_without_silent_truncation(self):
+        text = ''.join(chr(0x4e00+i) for i in range(205))
+        self.add(text=text, words=[{'text':c,'bbox':[40,20,90,45],'confidence':20} for c in text])
+        self.settings = AISettings('openai','synthetic-model',max_calls=100,max_total_output_tokens=819200)
+        policy = ReviewPolicy(selective=True,batch_size=4)
+        with self.assertRaises(AIReviewError):
+            self.plan(policy=policy)
+        plan = self.plan(policy=policy,target_limit=2000)
+        self.assertEqual(plan.summary['targets'],205)
+        self.assertEqual(plan.summary['calls'],52)
+
+    def test_ambiguous_repeated_geometry_is_not_guessed(self):
+        text = '天地玄黃宇宙洪荒\n天地玄黃宇宙洪荒'
+        self.add('rapidocr', text=text, words=[
+            {'text': text.splitlines()[0], 'bbox': [40, 20, 180, 45], 'confidence': 99},
+            {'text': text.splitlines()[1], 'bbox': [40, 60, 180, 85], 'confidence': 99}])
+        self.add('glmocr', text=text, words=[])
+        self.project.compare_page(1, baseline='glmocr')
+        plan = self.plan()
+        self.assertEqual(plan.summary['calls'], 0)
+        self.assertTrue(plan.summary['unlocalized_targets'])
+
+    def test_geometry_rejects_incompatible_dpi(self):
+        self.geometry_fixture()
+        self.add('rapidocr', text='天地玄黃宇宙洪荒\n日月盈昃辰宿列張', dpi=200)
+        self.project.compare_page(1, baseline='glmocr')
+        self.assertTrue(self.plan().summary['unlocalized_targets'])
+
+    def test_completed_geometry_is_not_reused_for_changed_evidence_or_model(self):
+        self.geometry_fixture()
+        self.fake_run(self.plan())
+        with patch('yeone_ocr.comparison_ai._aligned_geometry', return_value={
+                (0, 8): [50, 20, 190, 45], (9, 17): [40, 60, 180, 85]}):
+            changed = self.plan()
+        self.assertEqual((changed.summary['calls'], changed.summary['resumed_batches']), (1, 1))
+        self.settings = AISettings('openai', 'different-model')
+        self.assertEqual(self.plan().summary['calls'], 2)
 
     def test_single_v6_low_confidence_crop_and_context(self):
         words = [{"text": "甲", "bbox": [40, 20, 55, 45], "confidence": 99},

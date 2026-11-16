@@ -12,6 +12,7 @@ import copy
 import difflib
 import hashlib
 import io
+import itertools
 import json
 import math
 import re
@@ -278,6 +279,68 @@ def _word_spans(raw):
             yield start, position, word
 
 
+def _aligned_geometry(raw, runs, baseline):
+    """Borrow only image boxes, never text, from compatible completed engines.
+
+    Whitespace-free alignment tolerates line wrapping. A unique literal anchor
+    and substantial agreement are required for each source line; unmatched or
+    repetitive lines remain unresolved. Boxes cover whole donor words, not
+    guessed per-character coordinates. Raw readings are never modified.
+    """
+    from .comparison import _slice_aligned
+    text = raw['text']
+    positions = [i for i, c in enumerate(text) if not c.isspace()]
+    compact = ''.join(text[i] for i in positions)
+    donors = []
+    for engine, run in runs.items():
+        other = run['raw']
+        if engine == baseline['engine'] or not other.get('words'):
+            continue
+        if (other['image_width'], other['image_height']) != (raw['image_width'], raw['image_height']):
+            continue
+        indexes = [i for i, c in enumerate(other['text']) if not c.isspace()]
+        value = ''.join(other['text'][i] for i in indexes)
+        matcher = difflib.SequenceMatcher(None, compact, value, autojunk=max(len(compact), len(value)) > 20_000)
+        boxed = set()
+        for a, b, word in _word_spans(other):
+            if word.get('bbox') is not None:
+                boxed.update(range(a, b))
+        donors.append((value, indexes, matcher.get_opcodes(), other, boxed))
+    result, offset, compact_offset = {}, 0, 0
+    for line in text.splitlines(keepends=True):
+        start, end = offset, offset + len(line.rstrip('\r\n'))
+        offset += len(line)
+        value = ''.join(line.split())
+        left, right = compact_offset, compact_offset + len(value)
+        compact_offset = right
+        if not value:
+            continue
+        candidates = []
+        for donor, indexes, codes, other, boxed in donors:
+            matches = [(max(left, a), min(right, b)) for tag, a, b, _, _ in codes
+                       if tag == 'equal' and a < right and b > left]
+            anchors = [compact[a:b] for a, b in matches]
+            if sum(b-a for a,b in matches) < len(value)*.7:
+                continue
+            if not any(len(a) >= min(4, len(value)) and compact.count(a) == donor.count(a) == 1 for a in anchors):
+                continue
+            _, a, b = _slice_aligned(donor, codes, left, right)
+            if b <= a or b-a > max(len(value)*1.5, len(value)+4):
+                continue
+            if any(i not in boxed for i in indexes[a:b]):
+                continue
+            box = _bbox_for(other, indexes[a], indexes[b-1]+1)
+            if box is not None:
+                candidates.append(box)
+        if candidates:
+            # Independent engines pointing to disjoint places are ambiguous.
+            if any(min(a[2], b[2]) <= max(a[0], b[0]) or min(a[3], b[3]) <= max(a[1], b[1])
+                   for a in candidates for b in candidates):
+                continue
+            result[(start, end)] = min(candidates, key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
+    return result
+
+
 # Word confidence is stored on a 0–100 scale by every local adapter: the
 # RapidOCR/PP-OCRv6 and EasyOCR workers multiply the model score (0–1) by 100,
 # Tesseract reports 0–100 natively, and comparison.py validates that range.
@@ -287,7 +350,8 @@ LOW_CONFIDENCE_THRESHOLDS = {"tesseract": 70.0, "rapidocr": 85.0, "easyocr": 55.
                              "paddle_server": 85.0, "glmocr": None, "surya": None}
 
 
-def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids, learned=None):
+def _selective_targets(project, page, runs, baseline, scope, policy, image, requested_ids, learned=None,
+                       page_context_fallback=False):
     """Local-only risk detection; all returned targets have image coordinates.
 
     ``learned`` (confusion_memory.LearnedConfusions) adds confidently read words
@@ -305,6 +369,15 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
         return ink
 
     def add(start, end, box, reason, candidates=None, origin=None, quiet=False):
+        if page_context_fallback and not quiet and (box is None or
+                (box[2]-box[0] >= image.width*.9 and box[3]-box[1] >= image.height*.9)):
+            for a, b in _chunks(snapshot[start:end], policy.chunk_chars):
+                target = _target(scope, start+a, start+b, kind='visual', bbox=None,
+                                 candidates=candidates, origin='missing-geometry-page-context')
+                target['difficulty_reason'] = 'missing-geometry-page-context'
+                if not any(t['start'] == target['start'] and t['end'] == target['end'] for t in result):
+                    result.append(target)
+            return
         if box is None:
             if not quiet:
                 skipped.append(reason + ":missing-localized-geometry")
@@ -413,14 +486,38 @@ def _selective_targets(project, page, runs, baseline, scope, policy, image, requ
                 lines.append((position, end))
             position += len(line)
         regions = image_regions()
-        if len(lines) == len(regions):
-            for (start, end), box in zip(lines, regions):
+        aligned = _aligned_geometry(raw, runs, baseline)
+        pending = []
+        for index, (start, end) in enumerate(lines):
+            if all(represented[i] or c.isspace() for i, c in enumerate(raw['text'][start:end], start)):
+                continue
+            box = aligned.get((start, end))
+            if box is None and len(lines) == len(regions):
+                box = regions[index]
+            if box is not None:
                 try:
                     left, right = project._mapped_span(raw["text"], snapshot, start, end)
                 except ValueError:
                     skipped.append("human-edited-missing-geometry"); continue
                 add(left, right, box, "missing-ocr-geometry")
-        else:
+            else:
+                pending.append((start, end))
+        if pending and page_context_fallback:
+            # No invented line coordinates: explicitly provide page context.
+            # Only unmapped ranges are added; old localized targets stay exact
+            # so their completed batches can still be reused.
+            for start, end in pending:
+                try:
+                    left, right = project._mapped_span(raw['text'], snapshot, start, end)
+                except ValueError:
+                    skipped.append('human-edited-missing-geometry')
+                    continue
+                for a, b in _chunks(snapshot[left:right], policy.chunk_chars):
+                    target = _target(scope, left+a, left+b, kind='visual', bbox=None,
+                                     origin='missing-geometry-page-context')
+                    target['difficulty_reason'] = 'missing-geometry-page-context'
+                    result.append(target)
+        elif pending:
             skipped.append("missing-ocr-geometry:ambiguous-ink-mapping")
     if not raw["text"].strip() and not snapshot.strip():
         for box in image_regions():
@@ -461,7 +558,20 @@ def _learned_targets(project, raw, snapshot, words, risky, result, add):
         if hits:
             score = max(risky[word["text"][i]].rate for i in hits)
             candidates.append((-score, start, start + hits[0], start + hits[-1] + 1, word))
-    for _, _, left, right, word in sorted(candidates, key=lambda c: (c[0], c[1]))[:MAX_ROUTED_PER_PAGE]:
+    for read, learned in risky.items():
+        if len(read) <= 1:
+            continue
+        at = raw['text'].find(read)
+        while at >= 0:
+            end = at + len(read)
+            parts = [(a, b, w) for a, b, w in words if a < end and b > at and w.get('bbox')]
+            covered = {i for a, b, _ in parts for i in range(max(a, at), min(b, end))}
+            if len(covered) == len(read):
+                boxes = [w['bbox'] for _, _, w in parts]
+                box = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
+                candidates.append((-learned.rate, at, at, end, {'bbox': box}))
+            at = raw['text'].find(read, at + 1)
+    for _, _, left, right, word in sorted(candidates, key=lambda c: (c[0], c[1], -(c[3]-c[2])))[:MAX_ROUTED_PER_PAGE]:
         try:
             left, right = project._mapped_span(raw["text"], snapshot, left, right)
         except ValueError:
@@ -584,7 +694,8 @@ def _integrity(settings, policy, pages, fingerprint, batches, summary, scope):
 
 
 def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, force=False, should_stop=None,
-                 include_refinement=True, confusions=None):
+                 include_refinement=True, confusions=None, page_context_fallback=False,
+                 target_limit=None):
     """Render and freeze the exact offline scope before any external request.
 
     ``confusions`` is an optional confusion_memory.LearnedConfusions. Without it,
@@ -619,7 +730,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
             image = ocr.render_page(project.source_path, number, dpi=scope["dpi"], should_stop=should_stop)
             try:
                 visual, found_ids, skipped_reasons = _selective_targets(project, page, runs, baseline, scope, policy, image,
-                                                                        requested_ids, learned)
+                                                                        requested_ids, learned, page_context_fallback)
                 seen_ids.update(found_ids)
                 if skipped_reasons:
                     selective_skips[str(number)] = skipped_reasons
@@ -703,7 +814,7 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                     target["context_before"] = scope["snapshot_text"][max(0, target["start"] - policy.context_chars):target["start"]]
                     target["context_after"] = scope["snapshot_text"][target["end"]:target["end"] + policy.context_chars]
                     target_count += 1
-                    if target_count > policy.max_targets:
+                    if target_count > (policy.max_targets if target_limit is None else target_limit):
                         raise AIReviewError("검증 항목 상한을 넘습니다. 쪽 범위를 나누세요. 일부만 몰래 전송하지 않습니다.")
                     phase_targets.append((phase, scope, target, descriptor))
         finally:
@@ -728,8 +839,12 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
     for phase in ("visual", "editorial"):
         for scope in scope_pages:
             items = [(t, image) for p, s, t, image in phase_targets if p == phase and s["page_number"] == scope["page_number"]]
-            for index in range(0, len(items), policy.batch_size):
-                group = items[index:index + policy.batch_size]
+            # Keep the old final partial batch intact when adding page-context
+            # targets; otherwise its already verified targets would be resent.
+            groups = [list(values) for _, values in itertools.groupby(items,
+                      key=lambda item: item[0].get('origin') == 'missing-geometry-page-context')]
+            for group in (values[index:index + policy.batch_size] for values in groups
+                          for index in range(0, len(values), policy.batch_size)):
                 batch_id = _hash([fingerprint, phase, scope["page_number"], [t["id"] for t, _ in group]])[:32]
                 images = {image["id"]: image for _, image in group}
                 for target, _ in group:
@@ -744,6 +859,23 @@ def prepare_plan(project, pages, policy=None, *, settings, suggestion_ids=None, 
                                if r.get("request", {}).get("scope_fingerprint") == fingerprint
                                and r.get("request", {}).get("batch_id") == batch_id), None)
                 completed = latest is not None and latest.get("status") == "completed"
+                if not completed and latest is None and policy.selective and phase == "visual":
+                    # New unresolved targets elsewhere must not invalidate an
+                    # identical completed request. Keep original review history;
+                    # only scheduling IDs may differ, never evidence or settings.
+                    def request_content(value):
+                        return {k: v for k, v in value.items() if k not in ('scope_fingerprint', 'batch_id')}
+                    for previous in reversed(project.page(scope['page_number']).get('ai_reviews', [])):
+                        metadata = previous.get('metadata', {})
+                        previous_settings = dict(metadata.get('settings', {}))
+                        previous_settings.pop('max_calls', None)
+                        previous_settings.pop('max_total_output_tokens', None)
+                        if (metadata.get('prompt_version') == PROMPT_VERSION
+                                and previous_settings == fingerprint_settings
+                                and previous.get('policy') == asdict(policy)
+                                and request_content(previous.get('request', {})) == request_content(batch)):
+                            completed = previous.get('status') == 'completed'
+                            break
                 if phase == "editorial" and completed:
                     current_basis = sorted(p["id"] for p in _visual_proposals(project, scope["page_number"], fingerprint, batch, policy))
                     old_basis = sorted(latest.get("metadata", {}).get("provisional_visual_proposal_ids", []))
@@ -1044,6 +1176,7 @@ def _validate_response(text, batch, policy, visual=()):
         raise AIReviewError("AI 응답의 항목 목록이 올바르지 않습니다.")
     targets = {t["id"]: t for t in batch["targets"]}
     seen, proposals = set(), []
+    identical = {}
     for item in value["items"]:
         if not isinstance(item, dict) or set(item) != {"target_id", "uncertain", "note", "proposals"}:
             raise AIReviewError("AI 응답 항목 형식이 올바르지 않습니다.")
@@ -1087,10 +1220,21 @@ def _validate_response(text, batch, policy, visual=()):
                 if not guarded and not _editorial_allowed(provisional, proposal["after"], proposal["kind"], policy):
                     raise AIReviewError("선택한 번체·부호 정책을 벗어난 문장 변경입니다.")
             proposal = {**proposal, "id": uuid.uuid4().hex, "uncertain": proposal["uncertain"] or item["uncertain"]}
+            signature = (start, end, proposal['before'], proposal['after'], proposal['kind'])
+            if signature in identical:
+                previous, owners = identical[signature]
+                if target_id not in owners:
+                    # Overlapping targets can independently report the same
+                    # literal patch. Keep one proposal, conservatively uncertain
+                    # if either witness was uncertain. Conflicts still fail.
+                    previous['uncertain'] |= proposal['uncertain']
+                    owners.add(target_id)
+                    continue
             for previous in proposals:
                 if max(start, previous["start"]) < min(end, previous["end"]) or (start == end and previous["start"] <= start <= previous["end"]) or (previous["start"] == previous["end"] and start <= previous["start"] <= end):
                     raise AIReviewError("AI 응답에 겹치거나 중복된 수정 위치가 있습니다.")
             proposals.append(proposal)
+            identical[signature] = (proposal, {target_id})
     if seen != set(targets):
         raise AIReviewError("AI 응답에서 요청한 대상이 빠졌습니다.")
     return proposals
@@ -1332,6 +1476,8 @@ class ApiTransport:
         usage = metadata.get("usage") or {}
         tokens = {"input_tokens": int(usage.get("input_tokens", usage.get("prompt_token_count", 0)) or 0),
                   "output_tokens": int(usage.get("output_tokens", usage.get("candidates_token_count", 0)) or 0)}
+        if "thoughts_token_count" in usage:
+            tokens["thoughts_token_count"] = usage["thoughts_token_count"]
         return text, complete, metadata.get("finish_reason"), tokens, metadata.get("actual_model", self.settings.model)
 
 

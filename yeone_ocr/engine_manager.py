@@ -84,16 +84,17 @@ class Option:
     min_vram_mb: int = 0        # 권장 최소 VRAM(가중치 크기에 여유를 둔 기준)
     script: str = ""
     notice: str = ""            # 설치 전에 알릴 것(가중치 라이선스 등)
+    min_python: tuple[int, ...] = ()  # 설치용 Python 하한(고정 버전이 요구). 비우면 검사하지 않음
 
 
 OPTIONS: tuple[Option, ...] = (
     Option("paddle_server", "paddle_server", "PaddleOCR server (CPU)",
            "간체·번체 한자 문서용 서버 크기 모델 · 한글은 지원하지 않음",
-           download_gb=0.4, disk_gb=0.8, script="install_paddle_server.py"),
+           download_gb=0.4, disk_gb=0.8, script="install_paddle_server.py", min_python=(3, 12)),
     Option("paddle_server_gpu", "paddle_server", "PaddleOCR server GPU 가속 (CUDA 12.8)",
            "같은 모델을 NVIDIA GPU로 실행 · CPU 설치는 그대로 보존",
            gpu=True, requires="paddle_server", download_gb=2.0, disk_gb=6.0, min_vram_mb=2048,
-           script="install_paddle_server_gpu.py"),
+           script="install_paddle_server_gpu.py", min_python=(3, 12)),
     Option("surya", "surya", "Surya OCR 2 (CPU)",
            "한글·한자 혼용 문서의 주력 엔진 · CPU만으로는 느림",
            download_gb=2.5, disk_gb=4.5, script="install_surya.py",
@@ -356,6 +357,34 @@ def base_python(log=None) -> Path:
         raise EngineManagerError("엔진을 설치하려면 설치판(Setup)으로 설치한 연어OCR이 필요합니다.\n"
                                  "휴대용 실행 파일에는 설치용 Python이 들어 있지 않습니다.")
     return prepare_base_python(source, destination, log)
+
+
+def python_version(python: Path) -> tuple[int, ...] | None:
+    """설치용 Python의 (major, minor, micro). 알아낼 수 없으면 None."""
+    if Path(python) == Path(sys.executable):
+        return tuple(sys.version_info[:3])
+    try:
+        done = subprocess.run([str(python), "-c", "import sys; print(*sys.version_info[:3])"],
+                              capture_output=True, text=True, timeout=30,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return tuple(int(part) for part in done.stdout.split()) if done.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def python_too_old(option: Option, python: Path) -> str:
+    """이 선택지의 고정 버전을 이 Python이 설치할 수 없으면 그 설명. 괜찮거나 알 수 없으면 빈 문자열.
+
+    pip은 Python 버전 때문에 받을 수 없는 고정 버전을 '의존성 충돌'로 알려 원인을 감춘다.
+    """
+    if not option.min_python:
+        return ""
+    found = python_version(python)
+    if found is None or found >= option.min_python:
+        return ""
+    need = ".".join(map(str, option.min_python))
+    return (f"이 엔진은 Python {need} 이상으로 설치해야 합니다(설치용 Python {'.'.join(map(str, found))}: {python}). "
+            f"예: py -{need} -m yeone_ocr.engine_manager --install {option.key}")
 
 
 # ---------------------------------------------------------------- 명령 구성·실행
@@ -642,6 +671,10 @@ def run_install(keys, *, selected_root=None, log=None, progress=None, cancel=Non
             if option.requires in failed:
                 failed.add(key)
                 record(key, "skipped", f"{OPTION_BY_KEY[option.requires].label} 설치가 끝나지 않음")
+                continue
+            if problem := python_too_old(option, python):
+                failed.add(key)
+                record(key, "failed", problem)
                 continue
             progress(index, len(order), option.label, "install")
             root = option_root(option, selected_root)

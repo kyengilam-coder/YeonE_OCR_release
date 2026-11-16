@@ -10,6 +10,7 @@ from yeone_ocr import plan_setup
 
 
 def test_install_commands_use_the_official_installers(monkeypatch):
+    monkeypatch.setattr(plan_setup, "standalone_codex", lambda: None)
     monkeypatch.setattr(plan_setup, "find_npm", lambda: "/usr/bin/npm")
     assert plan_setup.install_command("chatgpt") == ["/usr/bin/npm", "install", "-g", "@openai/codex"]
     assert plan_setup.install_command("claude") is None                     # Claude Code: its own installer

@@ -2112,9 +2112,34 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
     """검색 가능한 PDF: 판독 기록(merged)의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 새 PDF 로 저장한다(원본은 그대로, 모델 호출 없음).
     글자 자리는 판독에 쓴 쪽 이미지에서 잰다(textlayer.plan_page). 판독 기록이 있는 쪽만 넣고, 그 쪽에 있던 다른 OCR 의 숨은 글자층은
     지운다(--keep-old-layer 면 둠). report=False 면 진행 막대에 알리지 않는다(문서 만들기에 붙어 돌 때)."""
-    from .textlayer import searchable_pdf, out_path, TextlayerCancelled
+    from .textlayer import searchable_pdf, out_path, TextlayerCancelled, TextlayerVerificationError
+    import copy
     from .pdfio import page_frame
     records = {r["pdf_page"]: r for r in work.records(pages)}
+    # Editing a comparison project does not rewrite immutable OCR records.
+    # Build a transient output view using its current corrections instead.
+    projects = {}
+    for number, record in records.items():
+        reference = (record.get('local_first') or {}).get('project_path')
+        if not reference:
+            continue
+        from .comparison import ComparisonProject, ComparisonError
+        from .local_reading import reading_from_run
+        key = str(Path(reference).resolve())
+        if key not in projects:
+            projects[key] = ComparisonProject.load(key, source_path=args.pdf)
+        project = projects[key]
+        page = project.page(number)
+        if page.get('corrected_text') is None:
+            continue
+        baseline = next((r for r in page['runs'] if r['id'] == page['baseline_run_id']), None)
+        if baseline is None or project.source_sha256 != record['local_first'].get('source_sha256'):
+            raise ComparisonError('교정 프로젝트와 판독 기록의 원본·기준 판독을 확인하세요.')
+        corrected = reading_from_run(baseline['raw'], number,
+                    'horizontal' if record.get('mode') == 'horizontal_zh' else 'vertical', text=project.text(number))
+        record = copy.deepcopy(record)
+        record['merged']['regions'] = corrected.model_dump()['regions']
+        records[number] = record
     if not records:
         log("검색 가능한 PDF: 판독 기록이 없습니다. 먼저 [▶ 한 번에 인식](run) 이나 read 를 실행하십시오."); return 2
     out = Path(out) if out else out_path(work.dir, args.pdf)
@@ -2140,6 +2165,8 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
                                 step=(lambda d, t: progress("textlayer", d, t)) if report else None, should_stop=CANCEL.is_set)
         except TextlayerCancelled:
             log("중지: 검색 가능한 PDF 만들기를 멈췄습니다. 판독 기록은 보존되어 다시 실행할 수 있습니다."); return 130
+        except TextlayerVerificationError as exc:
+            log(f'오류: {exc} — 기존 출력 PDF와 OCR·교정 기록은 보존했습니다.'); return 1
         except PermissionError:
             log(f"오류: {out.name} 을(를) 저장하지 못했습니다 — PDF 뷰어에서 열려 있으면 닫고 다시 실행하십시오."); return 1
     finally:
@@ -2500,6 +2527,21 @@ def cmd_estimate(args, work: Work | None = None, doc=None):
 def cmd_run(args, work: Work | None = None, doc=None):
     """한 번에 인식: 준비 → (읽기 방향·인쇄 쪽수 차이 자동 판정) → 이전 판 기록 갱신 → 판독 → 3차 글자 판별 → 문서 → 검수 화면 → 보고(장부 포함).
     사용자는 PDF 를 고르고 이 명령 하나만 실행하면 된다."""
+    if (getattr(args, 'pdf_only', False) and not getattr(args, 'local_review_only', False)
+            and not getattr(args, 'force', False) and getattr(args, 'local_resume', 'unfinished') == 'unfinished'):
+        existing = work or Work(args.pdf, getattr(args, 'work', None), initialize=False)
+        if doc is None:
+            with open_pdf(args.pdf) as source_doc:
+                count = len(source_doc)
+        else:
+            count = len(doc)
+        selected = parse_pages(getattr(args, 'pages', None), count)
+        saved = [existing.load_record(n) for n in selected]
+        if (saved and existing.source_matches(getattr(args, 'dpi', 300))
+                and all(r and r.get('merged') and (r.get('local_first') or {}).get('review', {}).get('status')
+                        in ('reviewed','no-api-needed','blank-page','needs-local-review') for r in saved)):
+            log('기존 판독·교정 기록으로 문자 PDF를 만듭니다(AI 재호출 없음).')
+            return make_textlayer(args, existing, selected)
     if getattr(args, "ocr_strategy", "ai-full") == "local-first" and args.reader != "mock":
         from .local_first import command
         return command(args, work=work, doc=doc)
@@ -2804,11 +2846,11 @@ def build_parser():
     p.add_argument("--clear-check", action="store_true", help="'판독 확인 필요' 표시를 지움(사람이 확인한 뒤)"); p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("run"); common(p); read_opts(p); adjudicate_opts(p); build_opts(p); answered_opt(p); p.set_defaults(fn=cmd_run)
     p.add_argument("--ocr-strategy", choices=("local-first", "ai-full"), default="local-first",
-                   help="local-first(기본)=로컬 인식 뒤 의심 구간만 API 검증, ai-full=기존 전체 쪽 AI 판독")
+                   help="local-first(기본)=로컬 인식 뒤 AI 검증; 사용 가능한 구독이 있으면 기본으로 쪽 AI 판독·자동 반영도 수행. ai-full=기존 전체 쪽 AI 판독")
     p.add_argument("--local-engine-root", help="tools 폴더를 포함하는 로컬 엔진 설치 루트")
     p.add_argument("--local-profile", choices=("traditional", "simplified", "mixed"), default="traditional")
     p.add_argument("--local-ai-review", action=argparse.BooleanOptionalAction, default=True,
-                   help="로컬 인식의 불일치·어려운 구간만 선택한 AI로 검증(키가 없으면 대상으로 보관)")
+                   help="로컬 인식의 의심 구간을 구독 또는 API로 검증(연결이 없으면 대상으로 보관). 끄더라도 --local-ai-page 쪽 판독은 별도")
     p.add_argument("--local-engine-plan", choices=("all", "fast"), default="all",
                    help="(시험) fast=처음 5쪽은 모든 엔진, 그 뒤로는 이긴 엔진 1~2개만 먼저 읽고 점수가 낮은 쪽만 모든 엔진으로 다시")
     p.add_argument("--local-vote", action="store_true", help="(시험) 엔진 3개 이상 중 과반이 같게 읽은 글자를 기준 판독 대신 채택(초록, 되돌릴 수 있음)")
@@ -2828,6 +2870,8 @@ def build_parser():
                         "gemini=Antigravity CLI(agy -p, Google 계정 · 없으면 Gemini CLI). auto(기본)=로그인된 것 중 Antigravity(Google) → ChatGPT → Claude 순. "
                         "계정을 고르면 그것부터 쓰고, 한도에 닿으면 나머지 순서대로. "
                         "환경 변수 YEONE_OCR_AI_PLAN 으로도 지정. 상태 확인: `yeone-ocr plans`")
+    p.add_argument("--local-review-only", action="store_true",
+                   help="기존 OCR·쪽 AI 판독·교정문을 보존하고 미완료 검증만 실행. 새 교정은 제안으로 저장하며 자동 적용하지 않음")
     p.add_argument("--local-resume", choices=("unfinished", "continue", "all"), default="unfinished",
                    help="판독 기록이 있는 쪽(중간에 멈춘 실행을 이어서 할 때): unfinished(기본)=끝나고 조건이 같은 쪽은 건너뛰고 "
                         "보류·실패한 검증이나 바뀐 쪽만 다시, continue=앞선 쪽은 점검하지 않고 그대로 둔 채 기록 없는 쪽부터(가장 빠름), "
@@ -2886,7 +2930,7 @@ def build_parser():
     p.add_argument("--local-engine-parallel", type=int, choices=range(0, 9), metavar="0-8", default=0,
                    help="로컬 우선 인식에서 한 쪽을 동시에 읽을 엔진 수(0=코어·메모리로 자동, 1=차례로)")
     p.add_argument("--local-ai-max-calls", type=int, choices=range(1, 101), metavar="1-100", default=20,
-                   help="이번 실행 전체의 선택 구간 API 호출 상한(기본20, --max-calls도 함께 적용)")
+                   help="이번 실행 유료 API 호출 상한(기본20, --max-calls도 함께 적용). 구독에서 API로 넘어간 쪽 판독도 포함; 구독 한도와 별도")
     p.add_argument("--pdf-only", action="store_true", help="판독·3차 판별 뒤 검색 가능한 PDF만 만듦(문서 조립·자동 교정·HWPX 중간 저장 생략)")
     p = sub.add_parser("textlayer", help="검색 가능한 PDF: 판독 기록의 글을 원본 PDF 에 보이지 않는 글자층으로 넣어 새 PDF 로 저장(모델 호출 없음)"); common(p)
     p.add_argument("--out", help="저장할 PDF 경로(기본 결과 폴더 out/<이름>_글자층.pdf)")

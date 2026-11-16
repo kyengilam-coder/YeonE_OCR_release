@@ -460,6 +460,32 @@ def test_missing_base_python_fails_every_option_without_running_anything(home):
     assert not (home.user / "tools").exists()
 
 
+def test_old_installer_python_fails_only_options_that_need_a_newer_one(home):
+    # 고정 numpy 2.5는 Python 3.12 이상에만 있어, 낮으면 pip이 원인을 감춘 '의존성 충돌'을 낸다.
+    scripts = fake_scripts(home.tmp / "scripts")
+    with patch.object(em, "python_version", return_value=(3, 11, 9)):
+        outcome = em.run_install(["paddle_server_gpu", "surya"], scripts=scripts, verify=False)
+    states = {item["key"]: (item["status"], item["message"]) for item in outcome["results"]}
+    assert states["paddle_server"][0] == "failed" and "Python 3.12 이상" in states["paddle_server"][1]
+    assert "3.11.9" in states["paddle_server"][1] and "py -3.12" in states["paddle_server"][1]
+    assert states["paddle_server_gpu"][0] == "skipped"
+    assert states["surya"] == ("ok", "")
+    assert not (home.user / "tools" / "paddle_server").exists()
+
+
+def test_installer_python_version_is_checked_only_when_known_and_required():
+    paddle, surya = em.OPTION_BY_KEY["paddle_server"], em.OPTION_BY_KEY["surya"]
+    assert em.python_version(Path(sys.executable)) == tuple(sys.version_info[:3])
+    assert em.python_version(Path("C:/nowhere/python.exe")) is None
+    with patch.object(em, "python_version", return_value=None):
+        assert em.python_too_old(paddle, Path("python")) == ""            # 알 수 없으면 막지 않음
+    with patch.object(em, "python_version", return_value=(3, 12, 0)):
+        assert em.python_too_old(paddle, Path("python")) == ""
+    with patch.object(em, "python_version", return_value=(3, 10, 0)):
+        assert em.python_too_old(surya, Path("python")) == ""             # 자체 Python을 쓰는 엔진
+        assert "3.12" in em.python_too_old(paddle, Path("python"))
+
+
 def test_command_line_check_lists_options_without_installing(home, capsys):
     with patch.object(em, "probe_gpus", return_value={"gpus": [gpu()], "message": gpu().describe()}):
         assert em.main([]) == 0

@@ -1614,6 +1614,11 @@ def run(report_path: Path) -> int:
             return {"raw_runs": 6, "engines": list(texts), "unicode": "compatibility ideograph and variation selector preserved",
                     "audit": "candidate → undo → manual", "storage": "project and recovery reopen", "network_calls": 0}
         check("local-comparison-project", comparison_project_probe)
+        from .frozen_storage_smoke import storage_probe, resume_probe, review_gui_probe, confusion_probe
+        check("confusion-ledger-migration-coverage-routing", lambda: confusion_probe(folder))
+        check("gui-review-only", review_gui_probe)
+        check("incremental-storage-legacy-history", lambda: storage_probe(folder))
+        check("incremental-storage-cancel-resume", lambda: resume_probe(folder))
 
         def refinement_probe():
             from .comparison import ComparisonProject
@@ -1725,10 +1730,15 @@ def run(report_path: Path) -> int:
                 assert project.undo_edit(1)
             assert project.text(1) == original and project.page(1)["ai_reviews"] == reviews
             target = folder / "ai-comparison.yeone-compare.json"
-            project.save(target)
+            from unittest.mock import patch
+            from .comparison_storage import is_database
+            with patch("yeone_ocr.comparison.INCREMENTAL_PAGE_COUNT", 1):
+                project.save(target)
+            assert is_database(target)
             reopened = ComparisonProject.load(target)
             assert reopened.page(1)["runs"] == raw_runs and reopened.page(1)["ai_reviews"] == reviews
-            assert "offline-fixture-key" not in target.read_text(encoding="utf-8")
+            assert b"offline-fixture-key" not in reopened._encoded()
+            assert reopened.to_dict() == project.to_dict()
             resumed = prepare_plan(reopened, [1], policy, settings=settings)
             assert resumed.summary["calls"] == 0
             return {"stages": "image disagreement → whole-page traditional/punctuation proposals",

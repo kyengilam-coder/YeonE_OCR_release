@@ -31,7 +31,7 @@ class ConfusionLedgerDialog(tk.Toplevel):
         st.configure("Rules.Treeview", font=F["MONO_L"], rowheight=P(27))
         columns = (("engine", "엔진", 110, "w", True), ("read", "읽은 글자", 80, "center", False), ("to", "", 30, "center", False),
                    ("actual", "확정 글자", 80, "center", False), ("weight", "가중 오류", 80, "e", False),
-                   ("grades", "사람·AI확인·자동", 130, "center", False), ("rate", "오류율", 80, "e", False),
+                   ("grades", "사람·AI확인·자동", 130, "center", False), ("rate", "검증구간 비율", 110, "e", False),
                    ("risky", "의심", 50, "center", False))
         self.tree = ttk.Treeview(table, columns=[c[0] for c in columns], show="headings", selectmode="browse", height=7,
                                  style="Rules.Treeview")
@@ -95,11 +95,12 @@ class ConfusionLedgerDialog(tk.Toplevel):
                 grades = "·".join(str(counts.get(g, 0)) for g in ("human", "ai_confirmed", "ai_auto"))
                 self.tree.insert("", "end", iid=iid, tags=("odd",) if len(self.items) % 2 == 0 else (),
                                  values=(row.engine, row.read, "→", actual, f"{weight:g}", grades,
-                                         f"{row.rate:.1%}" if row.seen else "-", "예" if row.risky else ""))
+                                         f"{row.rate:.1%}" if row.rate_known else "미확인", "예" if row.risky else ""))
         risky = sum(r.risky for r in self.learned.rows)
         app = self.app
         parts = [(f"의심 글자 {risky}개 · 쌍 {len(self.items)}개", "bold"),
-                 (f" — 가중 오류 {MIN_WEIGHT:g} 이상이고 그 엔진이 읽은 횟수의 {MIN_RATE:.0%} 이상 틀린 글자를 의심 글자로 봅니다. "
+                 (f" — 가중 오류 {MIN_WEIGHT:g} 이상이고 실제 검증 범위 내 비율이 {MIN_RATE:.0%} 이상인 문자열을 다시 확인합니다. "
+                  "전체 OCR 정확도가 아닙니다. 구형 여러 글자 기록은 반복 건수로 활용하며 비율은 미확인으로 표시합니다. "
                   "가중치: 사람 교정 1 · 사람이 고르거나 검수한 기계 제안 0.7 · 자동 반영 0.3.", "")]
         if self.learned.warning:
             parts.append((" " + self.learned.warning, "warn"))
@@ -152,7 +153,7 @@ class ConfusionLedgerDialog(tk.Toplevel):
             self.v_pick.set("줄을 고르면 그 자리의 보기를 보입니다. 잘못 쌓인 쌍은 [선택 쌍 제외]로 뺍니다(다시 쌓이지 않음).")
             return
         row, actual, examples = picked
-        self.v_pick.set(f"{row.engine}: {row.read} → {actual} · 읽은 횟수 {row.seen}"
+        self.v_pick.set(f"{row.engine}: {row.read} → {actual} · 검증 범위 내 출현 {row.seen}회"
                         + (" · 보기 " + "  ".join(examples) if examples else ""))
 
     def _apply(self, action, *args):

@@ -32,9 +32,11 @@ VERSION = 1
 MAX_BYTES = 256_000_000          # project file on disk
 # The JSON itself. A whole book keeps every engine reading and every AI request it
 # sent (each batch carries its page's evidence), about 0.9 MB a page: a 462-page
-# book crossed 256 MB at page 300. Large projects are therefore stored gzip-compressed
-# (about a tenth of the size); this bounds what a file may expand to in memory.
+# book crossed 256 MB at page 300. Legacy gzip and page-wise SQLite storage both
+# retain a bound on expanded data. Long books no longer encode all earlier pages
+# at every checkpoint; short projects keep the existing JSON/gzip format.
 MAX_JSON_BYTES = 1_000_000_000
+INCREMENTAL_PAGE_COUNT = 64    # long books use a single transactional, page-wise database
 COMPRESS_ABOVE = 32_000_000      # smaller projects stay plain JSON (readable by earlier versions)
 _GZIP_MAGIC = b"\x1f\x8b"
 MAX_TEXT = 2_000_000
@@ -262,11 +264,15 @@ def _unpack(data):
 
 
 def _read(path):
+    from . import comparison_storage
     try:
         with path.open("rb") as stream:
+            prefix = stream.read(16)
+            if prefix == comparison_storage.MAGIC:
+                return comparison_storage.read(path)
             # A bounded read(n) may reserve n bytes even for a tiny project.
             # Avoid a 256 MB allocation while OCR models are in memory.
-            data = bytearray()
+            data = bytearray(prefix)
             while len(data) <= MAX_BYTES:
                 chunk = stream.read(min(1_048_576, MAX_BYTES+1-len(data)))
                 if not chunk:
@@ -322,35 +328,40 @@ def _atomic_write(target, content, *, protected=(), before_replace=None):
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        deadline = time.monotonic() + 1.8
-        last_lock = None
-        for attempt in range(20):
-            if last_lock is not None and time.monotonic() >= deadline:
-                raise last_lock
-            if before_replace is not None:
-                before_replace()
-            # Recheck the source/current file and hard-link aliases on EVERY
-            # attempt. Waiting for a Windows scanner must never grant permission
-            # to replace another window's newer project or a changed original.
-            for original in protected:
-                if original is not None and _same_file(target, Path(original)):
-                    raise ComparisonError("보호된 원본 경로에는 저장할 수 없습니다.")
-            try:
-                os.replace(temporary, target)
-                break
-            except PermissionError as exc:
-                if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 19:
-                    raise
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise
-                last_lock = exc
-                time.sleep(min(0.01 * 2 ** attempt, 0.1, remaining))
+        _replace_file(target, temporary, protected=protected, before_replace=before_replace)
         temporary = None
         return target
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _replace_file(target, temporary, *, protected=(), before_replace=None):
+    """Install a fully flushed JSON or SQLite file with the same retry guards."""
+    deadline = time.monotonic() + 1.8
+    last_lock = None
+    for attempt in range(20):
+        if last_lock is not None and time.monotonic() >= deadline:
+            raise last_lock
+        if before_replace is not None:
+            before_replace()
+        # Recheck the source/current file and hard-link aliases on EVERY
+        # attempt. Waiting for a Windows scanner must never grant permission
+        # to replace another window's newer project or a changed original.
+        for original in protected:
+            if original is not None and _same_file(target, Path(original)):
+                raise ComparisonError("보호된 원본 경로에는 저장할 수 없습니다.")
+        try:
+            os.replace(temporary, target)
+            break
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 19:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            last_lock = exc
+            time.sleep(min(0.01 * 2 ** attempt, 0.1, remaining))
 
 
 def _blank(number):
@@ -388,6 +399,10 @@ def usable_runs(page):
     if baseline is None or baseline["engine"] not in ENGINES or not _run_complete(baseline):
         return {}
     latest = _latest_runs(page)
+    # A pinned baseline remains valid evidence after another run of the same
+    # engine. Reviewing it must not silently replace the user's selected text.
+    if baseline.get("active", True):
+        latest[baseline["engine"]] = baseline
     result = {engine: latest[engine] for engine in ENGINES if engine in latest
               and latest[engine].get("active", True) and _run_complete(latest[engine])
               and _compatible(baseline, latest[engine])}
@@ -531,11 +546,14 @@ class ComparisonProject:
         self.project_path = None
         self._id = uuid.uuid4().hex
         self._pages = {}
+        self._page_versions = {}
+        self._saved_page_versions = {}
+        self._recovery_versions = {}
         self._lock = threading.RLock()
         self._revision = self._saved_revision = 0
-        self._disk_sha256 = None
-        # Recovery files this object wrote: path -> content digest. A file whose
-        # bytes still match needs no re-parse to prove it is this project's.
+        self._disk_sha256 = None  # legacy digest, or SQLite generation/stat token
+        # Recovery files this object wrote: path -> digest or generation token.
+        # Known files need no full re-parse at every checkpoint.
         self._recovery_sha256 = {}
         # Loading or explicitly choosing a baseline must not replace it merely
         # because a new release recommends a different recognition model.
@@ -582,12 +600,13 @@ class ComparisonProject:
                 page.setdefault("ai_reviews", [])
                 page.setdefault("ai_decisions", [])
             project._validate_page(page, number, run_ids)
-            project._pages[number] = copy.deepcopy(page)
+            project._pages[number] = page  # parsed storage is private to this newly loaded project
             if page.get("baseline_run_id") is not None:
                 project._preserve_baselines.add(number)
         project._id = identifier
         project.project_path = path
         project._disk_sha256 = digest
+        project._saved_page_versions = {n: 0 for n in project._pages}
         return project
 
     def _check_page(self, number):
@@ -1056,8 +1075,12 @@ class ComparisonProject:
         with self._lock:
             return copy.deepcopy(self._pages.get(number, _blank(number)))
 
+    def _touch(self, number):
+        self._page_versions[number] = self._page_versions.get(number, 0) + 1
+
     def _page(self, number):
         self._check_page(number)
+        self._touch(number)  # internal mutable access, including refinement helpers
         return self._pages.setdefault(number, _blank(number))
 
     def _baseline(self, page):
@@ -1416,6 +1439,7 @@ class ComparisonProject:
             page.setdefault("ai_reviews", reviews)
             page.setdefault("ai_decisions", [])
             reviews.append(review)
+            self._touch(number)
             self._revision += 1
             return review["id"]
 
@@ -1609,6 +1633,7 @@ class ComparisonProject:
             if image_proof is not None:
                 page["ai_decisions"][-1]["image_only_check"] = copy.deepcopy(image_proof)
                 page["edits"][-1]["image_only_check_sha256"] = _digest(image_proof)
+            self._touch(number)
             self._revision += 1
             return replacement
 
@@ -1625,6 +1650,7 @@ class ComparisonProject:
                 raise ComparisonError("처리할 수 있는 AI 교정 후보가 없습니다.")
             page.setdefault("ai_decisions", []).append({"id": uuid.uuid4().hex, "at": _now(), "review_id": review_id,
                                                         "proposal_id": proposal_id, "decision": "rejected"})
+            self._touch(number)
             self._revision += 1
 
     def to_dict(self):
@@ -1654,6 +1680,14 @@ class ComparisonProject:
         # this document id; only a different file has to be parsed.
         known = self._disk_sha256 if check_current and self.project_path == target else (
             None if check_current else self._recovery_sha256.get(target))
+        from . import comparison_storage
+        if comparison_storage.is_database(target):
+            identifier, digest = comparison_storage.identity(target)
+            if identifier != self._id:
+                raise ComparisonError("다른 프로젝트가 있는 경로입니다. 다른 이름으로 저장하세요.")
+            if known is not None and digest != known:
+                raise ComparisonError("다른 창에서 프로젝트가 변경되었습니다. 다른 이름으로 저장하세요.")
+            return
         if known is not None and _file_sha256(target) == known:
             return
         previous, digest = _read(target)
@@ -1671,7 +1705,18 @@ class ComparisonProject:
             if _same_file(target, self.source_path):
                 raise ComparisonError("원본 파일을 덮어쓸 수 없습니다.")
             self.validate_source()
+            from . import comparison_storage
+            incremental = self.page_count >= INCREMENTAL_PAGE_COUNT or comparison_storage.is_database(target)
+            if incremental:
+                comparison_storage._guard(self, target, False)
             self._check_existing(target)
+            if incremental:
+                digest = comparison_storage.save(self, target)
+                self.project_path = target
+                self._disk_sha256 = digest
+                self._saved_page_versions = {n: self._page_versions.get(n, 0) for n in self._pages}
+                self._saved_revision = self._revision
+                return target
             content = _pack(self._encoded())
             def verify():
                 self.validate_source()
@@ -1687,7 +1732,16 @@ class ComparisonProject:
             target = Path(path).expanduser().resolve()
             if self.project_path and _same_file(target, self.project_path):
                 raise ComparisonError("복구 파일은 정식 프로젝트와 다른 이름으로 저장하세요.")
+            from . import comparison_storage
+            incremental = self.page_count >= INCREMENTAL_PAGE_COUNT or comparison_storage.is_database(target)
+            if incremental:
+                comparison_storage._guard(self, target, True)
             self._check_existing(target, check_current=False)
+            if incremental:
+                digest = comparison_storage.save(self, target, recovery=True)
+                self._recovery_sha256 = {target: digest}
+                self._recovery_versions = {target: {n: self._page_versions.get(n, 0) for n in self._pages}}
+                return target
             content = _pack(self._encoded({"recovery": {"source_validation": "required_before_ocr_or_export", "at": _now()}}))
             written = _atomic_write(target, content, protected=[self.source_path, self.project_path],
                                     before_replace=lambda: self._check_existing(target, check_current=False))

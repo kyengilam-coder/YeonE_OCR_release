@@ -57,6 +57,37 @@ def _model_hashes(home: Path, manifest: dict) -> dict[str, str]:
     return result
 
 
+# Staging sits beside venv_cuda and is renamed onto it, so its name stays about as short as
+# "venv_cuda" (mkdtemp adds 8 characters, one more in all): the old "venv_cuda.installing-…"
+# pushed deep onnxruntime files past Windows' 260-character limit where the final runtime fit.
+STAGING_PREFIX = "vc"
+WINDOWS_MAX_PATH = 260
+
+
+def _long_paths_enabled() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+    except OSError:
+        return False
+
+
+def _check_path_length(canonical: Path, inventory: dict[str, str]) -> None:
+    """Refuse before copying when the runtime would not fit under MAX_PATH, naming the longest file."""
+    if not inventory or _long_paths_enabled():
+        return
+    longest = max(inventory, key=len)
+    # The staging copy is the longest place a file lives (prefix + 8 random characters).
+    length = len(str(canonical / (STAGING_PREFIX + "x" * 8) / longest))
+    if length >= WINDOWS_MAX_PATH:
+        raise ValueError(f"Engine home path is too long for the CUDA runtime ({length} characters, "
+                         f"Windows limit {WINDOWS_MAX_PATH - 1}): {canonical / 'venv_cuda' / longest}. "
+                         "Choose a shorter engine folder (for example C:\\YE) or enable Windows long paths.")
+
+
 def _runtime_inventory(directory: Path) -> dict[str, str]:
     directory = directory.resolve(strict=True)
     inventory = {}
@@ -156,8 +187,9 @@ def activate_gpu(engine_root: Path, gpu_home: Path) -> dict:
         if _runtime_inventory(destination) != inventory:
             raise ValueError("Existing canonical CUDA runtime differs; it will not be overwritten")
     else:
-        staging = Path(tempfile.mkdtemp(prefix="venv_cuda.installing-", dir=canonical)).resolve()
-        if not staging.is_relative_to(canonical) or not staging.name.startswith("venv_cuda.installing-"):
+        _check_path_length(canonical, inventory)
+        staging = Path(tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=canonical)).resolve()
+        if not staging.is_relative_to(canonical) or not staging.name.startswith(STAGING_PREFIX):
             raise ValueError("CUDA staging directory resolves outside the canonical engine home")
         try:
             shutil.copytree(source_runtime, staging, dirs_exist_ok=True)
@@ -167,7 +199,7 @@ def activate_gpu(engine_root: Path, gpu_home: Path) -> dict:
         finally:
             if staging.exists():
                 verified = staging.resolve()
-                if not verified.is_relative_to(canonical) or not verified.name.startswith("venv_cuda.installing-"):
+                if not verified.is_relative_to(canonical) or not verified.name.startswith(STAGING_PREFIX):
                     raise ValueError("Refusing cleanup outside the verified CUDA staging directory")
                 shutil.rmtree(verified)
     provenance = source["package_provenance"]

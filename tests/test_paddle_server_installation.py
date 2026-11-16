@@ -149,6 +149,37 @@ class PaddleServerActivationTests(unittest.TestCase):
         self.assertEqual((self.cpu / "installation.json").read_bytes(), self.original)
         self.assertEqual([event["action"] for event in receipt["events"]], ["recover_activation_receipt", "restore_cpu"])
 
+    def test_staging_name_is_no_longer_than_the_final_runtime_folder(self):
+        # Staging is renamed onto venv_cuda; a longer name pushed deep files past MAX_PATH.
+        created = []
+        real = installer.tempfile.mkdtemp
+
+        def record(*args, **kwargs):
+            created.append(Path(real(*args, **kwargs)).name)
+            return str(self.cpu / created[-1])
+        with mock.patch.object(installer.tempfile, "mkdtemp", side_effect=record):
+            installer.activate_gpu(self.root, self.gpu)
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].startswith(installer.STAGING_PREFIX))
+        self.assertLessEqual(len(created[0]), len("venv_cuda") + 1)
+        self.assertFalse((self.cpu / created[0]).exists())
+
+    def test_too_long_engine_home_is_refused_before_copying(self):
+        before = (self.cpu / "installation.json").read_bytes()
+        deep = "x" * 300
+        with mock.patch.object(installer, "_long_paths_enabled", return_value=False), \
+                mock.patch.object(installer, "_runtime_inventory", return_value={"Scripts/python.exe" if os.name == "nt" else "bin/python": "0" * 64,
+                                                                          deep + "/library.dll": "0" * 64}):
+            with self.assertRaisesRegex(ValueError, "too long for the CUDA runtime"):
+                installer.activate_gpu(self.root, self.gpu)
+        self.assertFalse((self.cpu / "venv_cuda").exists())
+        self.assertEqual([path.name for path in self.cpu.iterdir() if path.name.startswith(installer.STAGING_PREFIX)], [])
+        self.assertEqual((self.cpu / "installation.json").read_bytes(), before)
+
+    def test_long_paths_setting_lifts_the_length_check(self):
+        with mock.patch.object(installer, "_long_paths_enabled", return_value=True):
+            installer._check_path_length(self.cpu, {"x" * 300: "0" * 64})
+
     def test_interrupted_activation_with_changed_dll_cannot_forge_restore_identity(self):
         installer.activate_gpu(self.root, self.gpu)
         (self.cpu / "cuda-activation.json").unlink()

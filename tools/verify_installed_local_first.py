@@ -73,18 +73,28 @@ def verify(app, output):
     argv = [str(executable), "--cli", "run", str(image_path), "--work", str(work),
             "--ocr-strategy", "local-first", "--local-profile", "simplified", "--mode", "horizontal_zh",
             "--local-engine-root", str(app), "--no-local-ai-review", "--local-ai-max-calls", "1",
+            "--local-ai-auth", "api", "--local-ai-page", "off",
             "--pdf-only", "--checkpoint", "0"]
     runs = []
+    first_history = None
     for name in ("initial", "resume"):
         result = subprocess.run(argv, cwd=output, env=env, capture_output=True, timeout=300)
         (output / (name + ".log")).write_bytes(result.stdout + result.stderr)
         if result.returncode:
             raise RuntimeError(f"Installed local-first {name} failed: exit {result.returncode}")
         runs.append(inspect_outputs(work, app))
+        record = json.loads((work / "readings/p001.json").read_text(encoding="utf-8"))
+        page = json.loads(Path(record["local_first"]["project_path"]).read_text(encoding="utf-8"))["pages"]["1"]
+        history = {key: page.get(key, []) for key in ("runs", "edits", "ai_reviews", "ai_decisions")}
+        if first_history is None:
+            first_history = history
+        elif history != first_history:
+            raise ValueError("Installed resume duplicated or changed existing reading/correction history")
     if hashlib.sha256(image_path.read_bytes()).hexdigest() != source_hash:
         raise ValueError("Installed inference changed the synthetic input")
     report = {"ok": True, "installed_app": str(app), "runs": runs, "source_sha256": source_hash,
-              "network": "No API credentials; local worker blocks networking", "source_preserved": True}
+              "network": "API auth selected, AI page/review disabled; local worker blocks networking",
+              "source_preserved": True, "resume_history_preserved": True, "duplicate_readings": 0}
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
 

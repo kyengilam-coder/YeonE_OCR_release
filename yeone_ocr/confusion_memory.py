@@ -16,8 +16,8 @@
 - ai_auto      사람 확인 없이 자동 반영된 기계 제안(--local-ai-accept, 다수결 등, 출처 표시 없음)  0.3
 자동 반영분의 가중치를 낮게 두는 까닭: AI 의 오답이 장부에 쌓여 다시 의심 자리를 만드는 자기 강화를 줄이려는 것.
 
-오류율 = (가중 오류 건수) / (그 엔진이 그 글자를 읽은 횟수). 분모에는 사람·AI 가 실제로 확인하지 않은
-글자도 들어가므로 오류율은 낮게(보수적으로) 잡힌다.
+검증 범위 가중 오류 비율 = 가중 오류 건수 / 실제 검증 범위 안의 해당 문자열 출현 횟수.
+이는 선택된 구간의 참고 통계이며 전체 책의 OCR 정확도가 아니다. 구형 장부의 분모는 미확인으로 표시한다.
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ import unicodedata
 
 FORMAT = "yeone-ocr-confusions"
 VERSION = 1
+COVERAGE_BASIS = 'verified-spans-v2'
 ENV_PATH = "YEONE_OCR_CONFUSIONS_PATH"
 
 GRADES = ("human", "ai_confirmed", "ai_auto")
@@ -120,14 +121,23 @@ def _write_store(data: dict, path: Path) -> None:
 
 def _update(mutate, path=None):
     """읽고-고치고-쓰기를 한 번에. 깨진 장부는 덮어쓰기 전에 .broken 사본으로 남긴다."""
-    path = Path(path) if path is not None else store_path()
-    with _LOCK:
+    from .file_lock import exclusive_file_lock
+    path = (Path(path) if path is not None else store_path()).resolve()
+    with _LOCK, exclusive_file_lock(path.with_name(path.name + '.lock')):
         data, warning = read_store(path)
         if warning and path.exists():
             try:
                 path.replace(path.with_name(path.name + f".broken-{time.strftime('%Y%m%d-%H%M%S')}"))
             except OSError:
                 return warning
+        if not warning and path.exists() and any(
+                e.get('coverage_basis') != COVERAGE_BASIS for d in data['documents'].values() for e in d['engines'].values()):
+            backup = path.with_name(path.name + '.before-verified-spans.json')
+            try:
+                with backup.open('xb') as stream:
+                    stream.write(path.read_bytes())
+            except FileExistsError:
+                pass
         result = mutate(data)
         _write_store(data, path)
         return result
@@ -242,6 +252,60 @@ def span_grade(labels, upgraded: bool, start: int, end: int):
     return "ai_confirmed" if grade == "ai_auto" and upgraded else grade
 
 
+def verified_positions(page, aligned):
+    """Union in baseline offsets: explicit edits, human review, confident visual responses.
+
+    Editorial-only, failed, uncertain, stale-baseline and unmappable responses
+    do not establish coverage. Overlapping/retried requests count only once.
+    """
+    from .comparison import ComparisonProject
+    base = aligned['base']
+    if aligned['upgraded']:
+        return set(range(len(base)))
+    covered = set()
+    for op, a, b, c, d in aligned['opcodes']:
+        if op != 'equal':
+            covered.update(range(a, b))
+    for review in page.get('ai_reviews', []):
+        request = review.get('request', {})
+        if (review.get('status') != 'completed' or request.get('phase') != 'visual'
+                or request.get('baseline_run_id') != aligned['baseline']['id']
+                or request.get('source_sha256') != aligned['raw'].get('source_sha256')):
+            continue
+        snapshot = request.get('snapshot_text')
+        if not isinstance(snapshot, str):
+            continue
+        try:
+            response = json.loads(review.get('response_text', ''))
+            certain = {item['target_id'] for item in response['items'] if item.get('uncertain') is False}
+        except (ValueError, KeyError, TypeError):
+            continue
+        for target in request.get('targets', []):
+            a, b = target.get('start'), target.get('end')
+            if (target.get('id') not in certain or type(a) is not int or type(b) is not int
+                    or not 0 <= a < b <= len(snapshot) or target.get('before') != snapshot[a:b]):
+                continue
+            try:
+                left, right = ComparisonProject._mapped_span(snapshot, base, a, b)
+            except ValueError:
+                continue
+            covered.update(range(left, right))
+    return covered
+
+
+def _verified_counts(text, covered):
+    # All 1..4-character literal sequences, so a pair learned in another book
+    # also has a denominator here. Never join across gaps or unverified spans.
+    counts = Counter()
+    for start in sorted(covered):
+        for size in range(1, MAX_PAIR_CHARS + 1):
+            end = start + size
+            if end > len(text) or end-1 not in covered or not _countable(text[end-1]):
+                break
+            counts[text[start:end]] += 1
+    return counts
+
+
 def page_observations(page: dict):
     """한 쪽 기록에서 (엔진, 엔진 판, 읽은 글자 수, 혼동 쌍 목록)을 뽑는다. 쓸 수 없는 쪽은 None."""
     aligned = aligned_page(page)
@@ -267,7 +331,9 @@ def page_observations(page: dict):
                 continue
             context = base[max(0, a - 6):a] + "「" + read + "」" + base[b:b + 6]
             pairs.append((read, actual, grade, context))
-    seen = Counter(ch for ch in base if _countable(ch))
+    seen = _verified_counts(base, verified_positions(page, aligned))
+    if not seen and not pairs:
+        return None
     raw = aligned["raw"]
     return {"engine": aligned["baseline"]["engine"], "engine_version": raw.get("engine_version", ""),
             "seen": seen, "pairs": pairs}
@@ -293,7 +359,7 @@ def project_contribution(project) -> dict:
                 examples.append(context)
     result = {}
     for engine, entry in sorted(engines.items()):
-        result[engine] = {"versions": sorted(entry["versions"]),
+        result[engine] = {"versions": sorted(entry["versions"]), 'coverage_basis': COVERAGE_BASIS,
                           "seen": dict(sorted(entry["seen"].items())),
                           "pairs": [[read, actual, dict(sorted(counts.items())), examples]
                                     for (read, actual), (counts, examples) in sorted(entry["pairs"].items())]}
@@ -350,6 +416,8 @@ class Confusion:
     rate: float
     alternatives: tuple          # ((확정 글자, 가중치, {등급: 건수}, (보기, ...)), ...) 가중치 큰 순
     risky: bool
+    rate_known: bool = True
+    scoped_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -367,13 +435,18 @@ class LearnedConfusions:
         suppressed = frozenset(tuple(item) for item in data.get("suppressed", []))
         seen: dict[tuple[str, str], int] = Counter()
         pairs: dict[tuple[str, str], dict[str, list]] = {}
+        scoped_pairs = Counter()
+        legacy_pairs = Counter()
         for document in data.get("documents", {}).values():
             for engine, entry in document.get("engines", {}).items():
-                for char, count in entry.get("seen", {}).items():
-                    seen[(engine, char)] += count
+                scoped = entry.get('coverage_basis') == COVERAGE_BASIS
+                if scoped:
+                    for char, count in entry.get("seen", {}).items():
+                        seen[(engine, char)] += count
                 for read, actual, counts, examples in entry.get("pairs", []):
                     slot = pairs.setdefault((engine, read), {}).setdefault(actual, [Counter(), []])
                     slot[0].update(counts)
+                    (scoped_pairs if scoped else legacy_pairs)[(engine, read, actual)] += sum(WEIGHTS[g]*n for g,n in counts.items())
                     for example in examples:
                         if len(slot[1]) < MAX_EXAMPLES and example not in slot[1]:
                             slot[1].append(example)
@@ -389,11 +462,16 @@ class LearnedConfusions:
                 continue
             listed.sort(key=lambda a: (-a[1], a[0]))
             weight = round(sum(a[1] for a in listed), 3)
-            # 여러 글자로 읽힌 자리(口口)는 분모를 셀 수 없으니 오류 건수만으로 본다.
-            count = seen.get((engine, read), 0) if len(read) == 1 else 0
-            rate = min(1.0, weight / count) if count else 0.0
-            flagged = weight >= MIN_WEIGHT and rate >= MIN_RATE and len(read) == 1
-            row = Confusion(engine, read, count, weight, round(rate, 4), tuple(listed), flagged)
+            count = seen.get((engine, read), 0)
+            scoped_weight = round(sum(scoped_pairs[(engine, read, a[0])] for a in listed), 3)
+            legacy_weight = sum(legacy_pairs[(engine, read, a[0])] for a in listed)
+            rate = min(1.0, scoped_weight / count) if count else 0.0
+            flagged = (scoped_weight >= MIN_WEIGHT and rate >= MIN_RATE)
+            # Old multi-character observations had no denominator. Retain their
+            # repeated-error evidence as a count-based hint, never a fake rate.
+            flagged = flagged or (1 < len(read) <= MAX_PAIR_CHARS and legacy_weight >= MIN_WEIGHT)
+            row = Confusion(engine, read, count, weight, round(rate, 4), tuple(listed), flagged,
+                            count > 0 and legacy_weight == 0, scoped_weight)
             rows.append(row)
             if flagged:
                 risky.setdefault(engine, {})[read] = row
@@ -416,21 +494,18 @@ class LearnedConfusions:
     def hints(self, engine: str, text: str) -> list[dict]:
         """대상 글에 든 의심 글자의 참고 자료(프롬프트용). 글자를 바꾸라는 지시가 아니다."""
         risky = self.risky(engine)
-        result, seen = [], set()
-        for char in text:
-            row = risky.get(char)
-            if row is None or char in seen:
-                continue
-            seen.add(char)
+        result = []
+        for char in sorted((read for read in risky if read in text), key=lambda read: (text.find(read), -len(read), read)):
+            row = risky[char]
             result.append({"engine": engine, "read": char,
                            "verified_alternatives": [a[0] for a in row.alternatives[:MAX_ALTERNATIVES]],
-                           "past_error_rate": row.rate, "past_errors_weighted": row.weight})
+                           "past_error_rate": row.rate if row.rate_known else None, "past_errors_weighted": row.weight})
             if len(result) == MAX_HINTS_PER_TARGET:
                 break
         return result
 
     def digest(self) -> str:
-        payload = [[r.engine, r.read, r.rate, [a[0] for a in r.alternatives]] for r in self.rows if r.risky]
+        payload = [[r.engine, r.read, r.rate, r.rate_known, r.weight, [a[0] for a in r.alternatives]] for r in self.rows if r.risky]
         return hashlib.sha256(json.dumps([self.enabled, payload], ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -486,10 +561,11 @@ def summary_lines(learned: LearnedConfusions, top: int = 30) -> list[str]:
     if not learned.rows:
         return ["(엔진 혼동 장부가 비어 있습니다. 비교·교정 창에서 고치거나 로컬 우선 인식을 돌리면 쌓입니다.)"]
     lines = [f"엔진 혼동 장부: {learned.path} · 검증 경로에 {'사용' if learned.enabled else '사용 안 함'}",
-             "엔진 | 읽은 글자 → 확정 글자 | 가중 오류 / 읽은 횟수 = 오류율 | 의심 글자"]
+             "엔진 | 읽은 글자 → 확정 글자 | 검증 범위 가중 오류 비율(전체 OCR 정확도 아님) | 의심 글자"]
     for row in learned.rows[:top]:
         alternatives = ", ".join(f"{a[0]}({a[1]:g})" for a in row.alternatives[:MAX_ALTERNATIVES])
-        lines.append(f"{row.engine} | {row.read} → {alternatives} | {row.weight:g} / {row.seen} = {row.rate:.1%}"
+        ratio = f'{row.scoped_weight:g} / {row.seen} = {row.rate:.1%}' if row.rate_known else '검증 범위 미확인(구형 기록 포함)'
+        lines.append(f"{row.engine} | {row.read} → {alternatives} | {ratio}"
                      f" | {'예' if row.risky else '-'}")
     if len(learned.rows) > top:
         lines.append(f"… 외 {len(learned.rows) - top}개")

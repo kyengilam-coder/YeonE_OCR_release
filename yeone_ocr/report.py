@@ -40,6 +40,13 @@ def make_report(work: Work, total_pages: int) -> str:
             if rec.get("local_first"):
                 review = rec["local_first"].get("review", {})
                 d += f", 로컬 우선·선택 검증 {review.get('status', '')}·대상 {review.get('targets', 0)}개"
+                page_ai = rec["local_first"].get("ai_page")
+                if page_ai:
+                    d += f", 쪽 AI 판독 {page_ai.get('model', '')}"
+                    if page_ai.get("cached"):
+                        d += "(저장본 재사용, 새 쪽 판독 호출 없음)"
+                    if "usage" not in page_ai:
+                        d += "(이전 기록: 쪽 AI 사용량 미집계)"
             u = rec.get("usage") or {}
             if u.get("calls"):
                 d += f", 호출 {u['calls']}회·토큰 {u.get('prompt_tokens', 0):,}/{u.get('output_tokens', 0) + u.get('thinking_tokens', 0):,}"
@@ -58,7 +65,9 @@ def make_report(work: Work, total_pages: int) -> str:
         lines.append(f"- 모델: {', '.join(f'{m} {c}쪽' for m, c in models.items())}")
         lines.append(f"- {tot['pages']}쪽 · 호출 {tot['calls']}회 · 토큰 입력 {tot['prompt_tokens']:,} 출력 {tot['output_tokens']:,} · 판독 시간 {tot['seconds']:.0f}초")
         lines.append(f"- 쪽당 평균: 호출 {tot['calls'] / tot['pages']:.1f}회 · 입력 {tot['prompt_tokens'] / tot['pages']:,.0f} 출력 {tot['output_tokens'] / tot['pages']:,.0f} 토큰 · {tot['seconds'] / tot['pages']:.0f}초")
-        lines.append("- 출력 토큰에는 생각(thinking) 토큰이 포함되어 있습니다(출력 요금으로 과금). 비용은 Google AI Studio 의 모델별 단가(100만 토큰당)를 곱해 구합니다.")
+        lines.append("- 저장된 응답의 누적 사용량입니다. 쪽 AI 판독과 선택 구간 검증을 합산하며, 저장본 재사용은 원래 응답을 한 번만 셉니다. 이번 실행의 새 호출 수나 청구 금액이 아닙니다.")
+        lines.append("- 토큰은 제공사가 반환한 값만 집계합니다. 실패·재시도 등 저장되지 않은 응답은 포함하지 않으며, 이전 판의 쪽 AI 사용량은 기록에 없을 수 있습니다. 구독 사용량과 유료 API 요금은 각 제공사 내역에서 확인하세요.")
+        lines.append("- 출력 합계에는 별도로 보고된 생각 토큰을 더합니다. 판독 시간은 쪽별 경과시간의 합으로, 병렬 실행의 실제 전체 소요시간과 다릅니다.")
         lines.append("")
     try:
         from .ledger import build_ledger, ledger_text

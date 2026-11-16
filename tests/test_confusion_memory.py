@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import copy
+import multiprocessing
+import time
 
 from PIL import Image
 from ab_ocr.ocr import RecognitionResult
@@ -15,7 +18,7 @@ def ledger(engine="ppocrv6", read="己", actual="已", human=3, seen=20, **extra
     counts = {"human": human, **extra}
     return {"format": memory.FORMAT, "version": memory.VERSION, "enabled": True, "suppressed": [],
             "documents": {"d" * 32: {"at": "2026-11-15T00:00:00+0000", "source": "a.pdf", "pages": 1,
-                                     "engines": {engine: {"versions": [], "seen": {read: seen},
+                                     "engines": {engine: {"versions": [], "coverage_basis": memory.COVERAGE_BASIS, "seen": {read: seen},
                                                           "pairs": [[read, actual, counts, ["甲「己」丙"]]]}}}}}
 
 
@@ -49,7 +52,7 @@ class ObservationTests(Fixture):
         observed = self.observed()
         self.assertEqual(observed["engine"], "ppocrv6")
         self.assertEqual(observed["pairs"], [("己", "已", "human", "甲「己」丙")])
-        self.assertEqual(observed["seen"], {"甲": 1, "己": 1, "丙": 1})
+        self.assertEqual(observed["seen"], {"己": 1})
 
     def test_unchecked_page_contributes_nothing(self):
         self.add()
@@ -65,7 +68,7 @@ class ObservationTests(Fixture):
         self.add()
         self.project.set_text(1, "甲已丙")
         self.project.undo_edit(1)
-        self.assertEqual(self.observed()["pairs"], [])
+        self.assertIsNone(self.observed())
 
     def test_later_human_edit_overrides_machine_label(self):
         self.add()

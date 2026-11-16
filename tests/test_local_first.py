@@ -118,9 +118,34 @@ class LocalFirstTests(unittest.TestCase):
         store = memory.store_path()
         store.write_text(json.dumps({"format": memory.FORMAT, "version": memory.VERSION, "enabled": True, "suppressed": [],
             "documents": {"e" * 32: {"at": "2026-11-01T00:00:00+0000", "source": "other.pdf", "pages": 3,
-                "engines": {"ppocrv6": {"versions": [], "seen": {read: 10},
+                "engines": {"ppocrv6": {"versions": [], "coverage_basis": memory.COVERAGE_BASIS, "seen": {read: 10},
                                         "pairs": [[read, actual, {"human": 3}, []]]}}}}}), encoding="utf-8")
         return memory
+
+    def test_review_only_preserves_reading_and_does_not_reread_or_build(self):
+        self.confidence = 20
+        self.api_failure = True
+        command(self.args())
+        before = self.record()
+        project = ComparisonProject.load(before['local_first']['project_path'])
+        raw_before = project.page(1)['runs']
+        self.api_failure = False
+        local_before = list(self.local_calls)
+        self.make_textlayer.reset_mock()
+        with patch('yeone_ocr.local_first._ai_page_reader', side_effect=AssertionError('no page reread')):
+            self.assertEqual(command(self.args('--local-review-only')), 0)
+        after = self.record()
+        for key in before:
+            if key not in {'local_first', 'usage'}:
+                self.assertEqual(before[key], after[key], key)
+        self.assertEqual(self.local_calls, local_before)
+        self.make_textlayer.assert_not_called()
+        project = ComparisonProject.load(before['local_first']['project_path'])
+        self.assertEqual(project.page(1)['runs'], raw_before)
+        self.assertEqual(len(project.page(1)['ai_reviews']), 2)
+        calls = len(self.calls)
+        self.assertEqual(command(self.args('--local-review-only')), 0)
+        self.assertEqual(len(self.calls), calls)
 
     def test_learned_confusion_routes_a_confident_reading_and_the_run_joins_the_ledger(self):
         memory = self.seed_ledger()
@@ -134,7 +159,7 @@ class LocalFirstTests(unittest.TestCase):
         project = ComparisonProject.load(self.record()["local_first"]["project_path"])
         self.assertEqual(project.text(1), "天地玄黃")                # the ledger never changes text
         documents = json.loads(memory.store_path().read_text(encoding="utf-8"))["documents"]
-        self.assertEqual(documents[project._id]["engines"]["ppocrv6"]["seen"], {"天": 1, "地": 1, "玄": 1, "黃": 1})
+        self.assertEqual(documents[project._id]["engines"]["ppocrv6"]["seen"], {"地": 1})
 
     def test_learned_confusions_can_be_switched_off_for_a_run(self):
         self.seed_ledger()
@@ -447,11 +472,23 @@ class LocalFirstTests(unittest.TestCase):
 
             def request(self, **kwargs):
                 sent.append(kwargs)
-                return json.dumps({"lines": ["天地玄黃宇宙洪荒"], "uncertain": []}), True, "end_turn", {}, "opus"
+                return json.dumps({"lines": ["天地玄黃宇宙洪荒"], "uncertain": []}), True, "end_turn", {"input_tokens": 100, "output_tokens": 50}, "opus"
         with patch.object(subscription, "status", return_value={"usable": True, "plan": "max", "reason": None}), \
                 patch.object(subscription, "SubscriptionClient", return_value=FakeCLI()):
             self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review")), 0)
+            initial = self.record()
+            self.assertEqual(initial["usage"], {"calls": 1, "prompt_tokens": 100, "output_tokens": 50, "thinking_tokens": 0})
+            self.assertFalse(initial["local_first"]["ai_page"]["cached"])
+            self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review", "--local-resume", "all")), 0)
         rec = self.record()
+        self.assertEqual(rec["usage"], initial["usage"])   # cache reuse never adds another stored response
+        self.assertTrue(rec["local_first"]["ai_page"]["cached"])
+        self.assertEqual(rec["local_first"]["ai_page"]["usage"], rec["usage"])
+        from yeone_ocr.report import make_report
+        report = make_report(Work(str(self.source), str(self.work), initialize=False), 1)
+        self.assertIn("호출 1회", report)
+        self.assertIn("새 쪽 판독 호출 없음", report)
+        self.assertIn("이번 실행의 새 호출 수나 청구 금액이 아닙니다", report)
         self.assertIn("天地玄黃宇宙洪荒", json.dumps(rec["merged"], ensure_ascii=False))
         # 黄 (engine) / 黃 (AI) is one glyph in two scripts: the AI's form goes in, without a mark to check
         self.assertEqual((rec["local_first"]["ai_page"]["script_taken"], rec["local_first"]["ai_page"]["taken"]), (1, 0))
@@ -460,6 +497,28 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(project.text(1), "天地玄黄宇宙洪荒")                  # engine reading kept for the editor
         self.assertEqual(len(sent), 1)
         self.assertEqual(rec["local_first"]["options"], {"ai_page": "prefer"})
+
+    def test_page_usage_adds_to_review_even_when_merge_does_not_use_response(self):
+        from yeone_ocr import local_first
+        project = ComparisonProject.open(self.source)
+        self.recognize(project, 1, on_result=lambda _: None)
+        reviews = [{"metadata": {"usage": {"input_tokens": 12, "output_tokens": 8}}}]
+        args = self.args("--local-ai-page", "prefer")
+        for text in (self.recognized_text, "", "甲乙丙丁戊己庚辛"):
+            with self.subTest(text=text), patch.object(local_first, "_review_summary", return_value=([], reviews)):
+                rec = local_first._record(project, 1, args, None, 0, {"status": "no-api-needed"}, extras={"ai_page": {
+                    "text": text, "mode": "prefer", "model": "fake", "cached": False,
+                    "usage": {"prompt_token_count": 100, "candidates_token_count": 50, "thoughts_token_count": 3}}})
+                self.assertEqual(rec["usage"], {"calls": 2, "prompt_tokens": 112, "output_tokens": 58, "thinking_tokens": 3})
+                self.assertEqual(rec["local_first"]["ai_page"]["used"], text == self.recognized_text)
+                self.assertEqual(local_first._resume_done(rec, args, rec["local_first"]["resume_key"], True), bool(text))
+
+    def test_response_usage_only_keeps_finite_nonnegative_public_counts(self):
+        from yeone_ocr.local_first import _response_usage
+        self.assertEqual(_response_usage({"input_tokens": True, "output_tokens": -2,
+                                         "thoughts_token_count": float("nan"), "secret": "do-not-store"}),
+                         {"calls": 1, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0})
+        self.assertEqual(_response_usage(None), {"calls": 1, "prompt_tokens": 0, "output_tokens": 0, "thinking_tokens": 0})
 
     def test_ai_page_without_sign_in_keeps_the_engine_reading(self):
         from yeone_ocr import claude_subscription as subscription

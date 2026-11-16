@@ -22,7 +22,9 @@ if (-not $ExpectedVersion) {
     $ExpectedVersion = [regex]::Match($VersionSource, '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
     if (-not $ExpectedVersion) { throw 'Application version not found.' }
 }
-$AppPath = Join-Path $TestRoot 'installed app 한글'
+# Keep the script ASCII-compatible with Windows PowerShell 5.1's default
+# decoding, while still testing a real Korean installation path.
+$AppPath = Join-Path $TestRoot ('installed app ' + [char]0xD55C + [char]0xAE00)
 $RegistryKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{CDCDCE06-51D4-4AB5-B44D-B48133508FD9}_is1'
 if (Test-Path -LiteralPath $RegistryKey) {
     throw 'An installation with this AppId already exists. The test will not touch it.'
@@ -56,7 +58,7 @@ function Invoke-TestProcess([string]$File, [string[]]$ProcessArguments) {
         if ($Process.ExitCode -ne 0) { throw "Test process failed ($($Process.ExitCode)): $File" }
     } finally { $Process.Dispose() }
 }
-$InstallArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS','/TASKS=',('/DIR="' + $AppPath + '"'))
+$InstallArgs = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCLOSEAPPLICATIONS','/NORESTARTAPPLICATIONS','/SP-','/CURRENTUSER','/NOICONS','/TASKS=',('/DIR="' + $AppPath + '"'))
 try {
     if ($PreviousInstaller) {
         $PreviousInstaller = (Resolve-Path -LiteralPath $PreviousInstaller).Path
@@ -81,6 +83,7 @@ try {
     $Checks.install = $true
     $Checks.upgrade = [bool]$PreviousInstaller
     $InstalledHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
+    $Checks.installed_executable_sha256 = $InstalledHash.ToLowerInvariant()
     $SmokeReport = Join-Path $TestRoot 'installed-smoke.json'
     Invoke-TestProcess $Executable @('--smoke-test', ('"' + $SmokeReport + '"'))
     $Smoke = Get-Content -LiteralPath $SmokeReport -Raw -Encoding UTF8 | ConvertFrom-Json

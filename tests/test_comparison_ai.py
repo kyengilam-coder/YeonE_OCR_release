@@ -175,6 +175,17 @@ class PipelineTests(unittest.TestCase):
         value["items"].append(copy.deepcopy(value["items"][0]))
         with self.assertRaises(AIReviewError):
             _validate_response(json.dumps(value), batch, plan.policy)
+
+    def test_identical_patch_from_overlapping_targets_is_one_uncertain_proposal(self):
+        plan = self.plan()
+        batch = copy.deepcopy(plan.batches[0])
+        target = copy.deepcopy(batch['targets'][0]); target['id'] = 'overlapping-target'
+        batch['targets'].append(target)
+        value = json.loads(self.response({'targets':batch['targets']}, [(4,5,'误','论','recognition')]))
+        value['items'][-1]['uncertain'] = True
+        proposals = _validate_response(json.dumps(value),batch,plan.policy)
+        self.assertEqual(len(proposals),1)
+        self.assertTrue(proposals[0]['uncertain'])
         value["items"].pop()
         value["items"][0]["proposals"] *= 2
         with self.assertRaises(AIReviewError):

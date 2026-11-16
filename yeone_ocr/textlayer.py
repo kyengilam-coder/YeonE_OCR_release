@@ -35,6 +35,10 @@ class TextlayerCancelled(Exception):
     """중지 요청: 작업 중인 사본을 버리고 기존 출력 PDF 는 보존한다."""
 
 
+class TextlayerVerificationError(ValueError):
+    """Extraction failed; do not replace a previously generated PDF."""
+
+
 @dataclass
 class Line:
     dir: str                           # "v"(세로 열, 위→아래) | "h"(가로 줄, 왼→오른쪽)
@@ -355,6 +359,14 @@ def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
     폭은 전각 1000·반각 500. 글꼴 파일(GLYPHLESS_TTF)을 내장하고 CIDToGIDMap 으로 모든 CID 를 글리프 0 에 보낸다(보이지 않는 글이라 모양은 없어도 된다).
     돌려주는 값: (글꼴 xref, {글자: CID})."""
     cids = {c: i + 1 for i, c in enumerate(dict.fromkeys(c for c in chars if c))}
+    # MuPDF treats a ToUnicode U+FFFD as unmapped and falls back to the
+    # character code. Give an existing replacement character its own code
+    # so that exporting does not silently turn it into another character.
+    if '\ufffd' in cids:
+        for c, cid in list(cids.items()):
+            if cid == 0xFFFD:
+                cids[c] = cids['\ufffd']
+        cids['\ufffd'] = 0xFFFD
     cmap = ("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
             "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /YeonEOCR-UCS def\n/CMapType 2 def\n"
             "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n")
@@ -366,7 +378,7 @@ def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
     half = " ".join(f"{cid}[500]" for c, cid in items if adv(c) != 1.0)
     tu = doc.get_new_xref(); doc.update_object(tu, "<<>>"); doc.update_stream(tu, cmap.encode())
     ff = doc.get_new_xref(); doc.update_object(ff, f"<</Length1 {len(GLYPHLESS_TTF)}>>"); doc.update_stream(ff, GLYPHLESS_TTF)
-    c2g = doc.get_new_xref(); doc.update_object(c2g, "<<>>"); doc.update_stream(c2g, bytes(2 * (len(cids) + 1)))   # CID 0..n → 글리프 0
+    c2g = doc.get_new_xref(); doc.update_object(c2g, "<<>>"); doc.update_stream(c2g, bytes(2 * (max(cids.values(), default=0) + 1)))   # 모든 CID → 글리프 0
     desc = doc.get_new_xref()
     doc.update_object(desc, f"<</Type/FontDescriptor/FontName/{FONT_NAME}/Flags 4/FontBBox[0 {int(DESC * 1000)} 1000 {int(ASC * 1000)}]"
                             f"/ItalicAngle 0/Ascent {int(ASC * 1000)}/Descent {int(DESC * 1000)}/CapHeight {int(ASC * 1000)}/StemV 80/FontFile2 {ff} 0 R>>")
@@ -398,12 +410,23 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
     cs = [c for c, _ in kept]; bx = [b for _, b in kept]
     v = ln.dir == "v"
     sp = [((b[1], b[3]) if v else (b[0], b[2])) for b in bx]
+    axis_start, axis_size = (fy0, fh) if v else (fx0, fw)
+    low, high = min(a for a, _ in sp), max(b for _, b in sp)
+    if low < axis_start or high > axis_start + axis_size:
+        # Layout fallbacks can extrapolate beyond the scan when an OCR block
+        # contains more characters than its measured line. Keep that complete
+        # text inside the page; never emit off-page glyphs that readers drop.
+        ratio = min(1.0, (axis_size-.1) / max(.001, high-low))
+        sp = [(axis_start+.05+(a-low)*ratio, axis_start+.05+(b-low)*ratio) for a,b in sp]
     fs = _em(sp, cs)
+    fs = min(fs, (fw if v else fh)*.95)
     if v:                                                               # 아래로 가는 줄, 글자 위쪽이 오른쪽
         cx = float(np.median([(b[0] + b[2]) / 2 for b in bx]))
+        cx = min(fx0+fw-fs/2-.02, max(fx0+fs/2+.02, cx))
         origin = lambda along: (cx - (ASC + DESC) / 2 * fs, along); u, w = (0, 1), (1, 0)
     else:                                                               # 오른쪽으로 가는 줄, 글자 위쪽이 위
         cy = float(np.median([(b[1] + b[3]) / 2 for b in bx]))
+        cy = min(fy0+fh-fs/2-.02, max(fy0+fs/2+.02, cy))
         origin = lambda along: (along, cy + (ASC + DESC) / 2 * fs); u, w = (1, 0), (0, -1)
 
     def tm(along: float) -> str:
@@ -428,8 +451,16 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
     ops = []
     for r in runs:
         natural = sum(adv(cs[i]) for i in r) * fs
-        tz = max(50.0, min(200.0, (ends[r[-1]] - starts[r[0]]) / natural * 100)) if natural > 0 else 100.0
-        ops.append(f"{tm(starts[r[0]])} {tz:.1f} Tz <{''.join(f'{cids[cs[i]]:04X}' for i in r)}> Tj")
+        # A dense fallback line can legitimately need less than 50% scaling.
+        # Clamping it to 50% pushes the suffix outside the page, where readers
+        # omit it. Glyphless half-width characters also have a one-em glyph
+        # extent even though their advance is half an em: reserve that extent.
+        start = max((fy0 if v else fx0) + .02, starts[r[0]])
+        limit = (fy0 + fh if v else fx0 + fw) - .02
+        physical = (sum(adv(cs[i]) for i in r[:-1]) + max(1.0, adv(cs[r[-1]]))) * fs
+        desired = (ends[r[-1]] - starts[r[0]]) / natural * 100 if natural > 0 else 100.0
+        tz = max(.001, min(200.0, desired, max(.001, (limit-start)/physical*100)))
+        ops.append(f"{tm(start)} {tz:.6f} Tz <{''.join(f'{cids[cs[i]]:04X}' for i in r)}> Tj")
     return " ".join(ops)
 
 
@@ -629,6 +660,8 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
                 want = "".join(c for ln in lines for c, _ in ln.chars if c)
                 if re.sub(r"\s", "", "".join(own_text(check, n))) != want:  # 빈칸은 추출기가 큰 틈에 넣는 것이라 세지 않는다
                     stats["mismatch"].append(n)
+        if stats['mismatch']:
+            raise TextlayerVerificationError('문자 PDF 재추출 검증 불일치: ' + ', '.join(map(str, stats['mismatch'])))
         check_stop()
 
     write_atomic_with(out, save_and_check)
