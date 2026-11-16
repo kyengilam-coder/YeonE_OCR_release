@@ -1981,7 +1981,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             try:
                 st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
                                          highlight=not args.no_highlight, memos=getattr(args, "memo", "none") != "inline", preset=preset,
-                                         simple=simple_display)
+                                         simple=simple_display,edited=edit_document)
             except Exception as e:
                 log(f"오류: 양식 HWPX 를 쓸 수 없습니다({type(e).__name__}: {str(e)[:120]}) — 양식 없이 만듭니다"); ok = False
             else:
@@ -2785,7 +2785,7 @@ def build_parser():
         p.add_argument("--no-context-model", action="store_true",
                        help="번체 문맥 교정에 모델을 부르지 않음: 규칙 변환(간체→번체·부호)은 하고, 문맥으로 갈리는 후보(发→發/髮, 云/雲 등)는 원문을 두고 교정 보고에 남김")
         p.add_argument("--layout", choices=["page", "flow"], default="page",
-                       help="문서 짜임: page=원본 쪽마다 기록 줄·쪽 나누기(기본, 검수용) / flow=내용별(제목·문단으로 잇고 원본 쪽은 책갈피로)")
+                       help="문서 짜임: page=원본 쪽을 기준으로 조립(기본) / flow=제목·문단을 내용별로 이음. 기본 출력은 본문만 수록하고 작업용 책갈피·쪽 기록을 제외")
         p.add_argument("--template", help="내용별 문서(--layout flow)를 채울 양식 HWPX — 그 스타일(제목-장·제목-절·본경 원문·주석…)과 쪽 설정을 쓴다")
         p.add_argument("--preset", default=None,
                        help="내용별 짜임 규칙: basic(기본 · 제목·문단 스타일) · regions(영역 종류만) · kaibao(本草 조문 — 開寶本草·證類 계열) · 또는 규칙 JSON 파일 경로(README '짜임 규칙 파일 만들기')")

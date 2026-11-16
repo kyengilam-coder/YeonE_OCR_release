@@ -468,7 +468,7 @@ class TemplateLook:
     def finish(self, doc) -> None:
         sec0 = self.sec0; sec = sec0.element
         try:                                                          # 쪽 번호: 컨트롤을 구역 설정 문단으로 옮겨 맨 앞 빈 줄이 생기지 않게
-            if not self.has_page_num:
+            if not self.has_page_num and not getattr(self, 'body_only', False):
                 doc.set_page_number(position="BOTTOM_CENTER")
             paras = sec.findall(f"{HP}p")
             holder = next((q for q in paras[1:] if q.find(f".//{HP}pageNum") is not None and not "".join(t.text or "" for t in q.iter(f"{HP}t")).strip()), None)

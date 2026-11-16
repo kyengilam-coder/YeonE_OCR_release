@@ -454,8 +454,13 @@ class Command(unittest.TestCase):
                 cli.main(["run", str(src), "--work", w, "--reader", "mock", "--checkpoint", "0", "--mode", "vertical", "--no-normalize"])
                 rc = cli.main(["build", str(src), "--work", w, "--layout", "flow", "--template", str(tpl), "--no-normalize", "--out", "내용별"])
             self.assertEqual(rc, 0, log.getvalue()[-800:])
-            self.assertIn("원본 쪽 책갈피 1개", log.getvalue()); self.assertIn("내용별 짜임", log.getvalue())
+            self.assertIn("원본 쪽 책갈피 0개", log.getvalue()); self.assertIn("내용별 짜임", log.getvalue())
             self.assertTrue((tmp / "w" / "out" / "내용별.hwpx").exists())
+            from zipfile import ZipFile
+            with ZipFile(tmp / 'w' / 'out' / '내용별.hwpx') as archive:
+                section=ET.fromstring(archive.read('Contents/section0.xml'))
+                self.assertFalse(section.findall('.//'+HP+'bookmark'))
+                self.assertFalse(section.findall('.//'+HP+'pageNum'))
             self.assertIn("짜임 규칙: 기본 규칙 (basic)", log.getvalue())
 
     def test_bold_is_measured_only_when_the_preset_interprets_it(self):

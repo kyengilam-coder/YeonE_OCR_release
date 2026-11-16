@@ -1,3 +1,3 @@
 Version: 1.2.24
-Git commit: 2dc74af7b69300bf2f2dc157f2909f6fd7307554
+Git commit: 59b6e1977d4d7bb66b1caaf1318df4c8ca167e0c
 Source: committed Git tree only.
