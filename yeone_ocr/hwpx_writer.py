@@ -108,7 +108,7 @@ def template_styles(doc) -> dict[str, dict]:
     return out
 
 
-def _ensure_basic_styles(doc, preset: Preset, *, template: bool = False) -> dict[str, dict]:
+def _ensure_basic_styles(doc, preset: Preset, *, template: bool = False, font: str | None = None) -> dict[str, dict]:
     """기본 규칙의 여덟 문단 스타일을 만든다. 양식에 같은 이름이 있으면 그 모양을 그대로 쓴다.
     예전 이름만 있으면 그 스타일의 모양을 잇고, 없으면 번호 없는 기본 문단 모양에서 만든다."""
     header = doc.oxml.headers[0]
@@ -122,7 +122,7 @@ def _ensure_basic_styles(doc, preset: Preset, *, template: bool = False) -> dict
         if inherited:
             ppr, cpr = inherited["para"], inherited["char"]
         else:
-            cpr = doc.oxml.ensure_run_style(font=FONT_HEAD if bold else FONT_BODY, size=size, bold=bold,
+            cpr = doc.oxml.ensure_run_style(font=font or (FONT_HEAD if bold else FONT_BODY), size=size, bold=bold,
                                            color=COLOR_NOTE if role == "note" else "#000000")
             ppr = header.ensure_paragraph_format(base_para_pr_id=0, alignment=alignment, heading={"type": "NONE"},
                                                 margins={"prev": int(before * 100), "next": int(after * 100)})
@@ -195,6 +195,8 @@ class DefaultLook:
         except Exception:
             pass
         rs = self._rs
+        if getattr(self, 'body_font', None):
+            rs = lambda **kw: self._rs(**{**kw, 'font': self.body_font})
         self.S = {                   # 만드는 차례도 예전 그대로(글자 모양 id 차례)
             "body": rs(font=FONT_BODY, size=11),
             "small": rs(font=FONT_BODY, size=9.5),
@@ -215,7 +217,9 @@ class DefaultLook:
         return Para(text=text, key=key, base=self.S[key], para_pr=0, style=0, **kw)
 
     def paras(self, b: Block):
-        if b.type == "meta":
+        if b.type == "spacer":
+            yield self._para('', 'body', styled=False)
+        elif b.type == "meta":
             yield self._para(b.text, "meta", styled=False, notes=b.memos, page_break=self.page_breaks and not self._first_meta)
             self._first_meta = False
         elif b.type == "heading":
@@ -247,7 +251,7 @@ class DefaultLook:
         key = (para.key, kind)
         if key not in self._grade:                                     # 본문·소주 크기에 맞춘 등급 글자 모양(같은 것은 한 번만 만든다)
             g = self.grade_style[kind]
-            kw = dict(font=FONT_BODY, size=self.SIZE.get(para.key, 11), bold=g["bold"], color=g["color"])
+            kw = dict(font=getattr(self, 'body_font', FONT_BODY), size=self.SIZE.get(para.key, 11), bold=g["bold"], color=g["color"])
             if g["highlight"]:
                 kw["highlight"] = g["highlight"]
             if g["underline"]:
@@ -285,7 +289,7 @@ class BasicLook(DefaultLook):
 
     def open(self, highlight: bool):
         doc = super().open(highlight)
-        styles = _ensure_basic_styles(doc, self.preset)
+        styles = _ensure_basic_styles(doc, self.preset, font=getattr(self, 'body_font', None))
         self.role_styles = {}
         used = {}
         for role, names in self.preset.para_styles.items():
@@ -393,7 +397,9 @@ class TemplateLook:
                     cstyles=list(cstyles), cs_fill="small" if role == "small" else None, heading=role in HEADING_ROLES, skip_if_empty=role in HEADING_ROLES)
 
     def paras(self, b: Block):
-        if b.type in ("heading", "para"):
+        if b.type == "spacer":
+            yield self._para(b, "body")
+        elif b.type in ("heading", "para"):
             yield self._para(b, b.role or ("section" if b.type == "heading" else "body"), spans=b.spans, cstyles=b.cstyles)
         elif b.type in ("note", "meta"):
             yield self._para(b, "note")                                # 등급 범위·쓰임 범위 없이 메모·책갈피만

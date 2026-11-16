@@ -222,7 +222,8 @@ class SearchablePdf(unittest.TestCase):
                 fonts = [f for f in done[0].get_fonts(full=True) if f[3] == TL.FONT_NAME]
                 self.assertEqual(len(fonts), 1)
                 name, ext, _, buf, *_ = done.extract_font(fonts[0][0])
-                self.assertEqual((ext, buf[:4]), ("ttf", b"\x00\x01\x00\x00"))      # 글꼴 파일이 내장됨
+                self.assertEqual(ext, "cid")
+                self.assertGreater(len(buf),100_000)  # actual CID-keyed CFF outlines are embedded
                 self.assertEqual(pymupdf.TOOLS.mupdf_warnings(), "")
 
     def test_strip_old_keeps_links(self):

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "1.2.20"
+#define AppVersion "1.2.24"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\work\windows-release\dist\YeonE_OCR"
@@ -22,7 +22,7 @@ DefaultGroupName=연어OCR
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0
+MinVersion=10.0.17134
 OutputDir={#OutputDir}
 OutputBaseFilename=YeonE_OCR-{#AppVersion}-Setup-x64
 SetupIconFile=..\yeone_ocr\assets\YeonE_OCR.ico
@@ -50,6 +50,10 @@ Name: "enginemanager"; Description: "설치 뒤 엔진 관리 열기 (GPU 점검
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Public upstream OTF, installed for the current Windows user without elevation.
+; Keep the shared font after uninstall so existing HWP/PDF documents still work.
+Source: "..\yeone_ocr\assets\fonts\SourceHanSerifK-Medium.otf"; DestDir: "{autofonts}"; FontInstall: "Source Han Serif K Medium"; Flags: onlyifdoesntexist uninsneveruninstall fontisnttruetype
+Source: "..\yeone_ocr\assets\fonts\LICENSE.txt"; DestDir: "{autofonts}"; DestName: "SourceHanSerifK-Medium-LICENSE.txt"; Flags: onlyifdoesntexist uninsneveruninstall
 #ifdef PPOCRv6Dir
 Source: "{#PPOCRv6Dir}\*"; DestDir: "{app}\tools\ppocrv6"; Flags: ignoreversion recursesubdirs createallsubdirs
 #endif

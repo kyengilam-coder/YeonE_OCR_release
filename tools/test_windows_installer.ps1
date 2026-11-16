@@ -47,6 +47,11 @@ $UserData = Join-Path $TestRoot 'preserved-user-data.txt'
 [IO.File]::WriteAllText($UserData, 'synthetic OCR record - preserve through install and uninstall')
 $DataHash = (Get-FileHash -LiteralPath $UserData -Algorithm SHA256).Hash
 $Checks = [ordered]@{ previous_version = $null; upgrade = $false }
+$FontPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts\SourceHanSerifK-Medium.otf'
+$FontLicense = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Fonts\SourceHanSerifK-Medium-LICENSE.txt'
+$FontSource = Join-Path $RepoRoot 'yeone_ocr\assets\fonts\SourceHanSerifK-Medium.otf'
+$FontBeforeHash = if (Test-Path -LiteralPath $FontPath) { (Get-FileHash -LiteralPath $FontPath -Algorithm SHA256).Hash } else { $null }
+$FontExpectedHash = if ($FontBeforeHash) { $FontBeforeHash } else { (Get-FileHash -LiteralPath $FontSource -Algorithm SHA256).Hash }
 function Invoke-TestProcess([string]$File, [string[]]$ProcessArguments) {
     $Process = Start-Process -FilePath $File -ArgumentList $ProcessArguments -WindowStyle Hidden -PassThru
     try {
@@ -81,6 +86,12 @@ try {
     if ([IO.Path]::GetFullPath($Registered.InstallLocation).TrimEnd('\') -ne $AppPath) { throw 'Unexpected registered installation directory.' }
     if ($Registered.DisplayVersion -ne $ExpectedVersion) { throw 'Installed version mismatch.' }
     $Checks.install = $true
+    if (-not (Test-Path -LiteralPath $FontPath) -or -not (Test-Path -LiteralPath $FontLicense)) { throw 'PDF font or its redistribution license was not installed.' }
+    if ((Get-FileHash -LiteralPath $FontPath -Algorithm SHA256).Hash -ne $FontExpectedHash) { throw 'Font install changed an existing font or did not install the pinned original.' }
+    $FontRegistry = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
+    if ($FontRegistry.'Source Han Serif K Medium' -ne $FontPath) { throw 'Per-user PDF font registration is missing.' }
+    $Checks.pdf_font_installed = $true
+    $Checks.pdf_font_preexisting = [bool]$FontBeforeHash
     $Checks.upgrade = [bool]$PreviousInstaller
     $InstalledHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
     $Checks.installed_executable_sha256 = $InstalledHash.ToLowerInvariant()
@@ -95,6 +106,7 @@ try {
         $Reinstalled.DisplayVersion -ne $ExpectedVersion) { throw 'Reinstalled registration mismatch.' }
     if ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash -ne $InstalledHash) { throw 'Reinstall changed the executable unexpectedly.' }
     $Checks.reinstall = $true
+    if ((Get-FileHash -LiteralPath $FontPath -Algorithm SHA256).Hash -ne $FontExpectedHash) { throw 'Reinstall changed the shared PDF font.' }
     if ($TestPython) {
         & $TestPython (Join-Path $RepoRoot 'tools\verify_installed_local_first.py') --app $AppPath --output (Join-Path $TestRoot 'local-first')
         if ($LASTEXITCODE -ne 0) { throw 'Installed local-first real inference failed.' }
@@ -122,5 +134,9 @@ if ((Test-Path -LiteralPath (Join-Path $AppPath 'YeonE_OCR.exe')) -or (Test-Path
 if ((Get-FileHash -LiteralPath $UserData -Algorithm SHA256).Hash -ne $DataHash) { throw 'External user data changed.' }
 $Checks.uninstall = $true
 $Checks.external_data_preserved = $true
+if (-not (Test-Path -LiteralPath $FontPath) -or (Get-FileHash -LiteralPath $FontPath -Algorithm SHA256).Hash -ne $FontExpectedHash) { throw 'Uninstall removed or changed the shared PDF font.' }
+$FontRegistry = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts'
+if ($FontRegistry.'Source Han Serif K Medium' -ne $FontPath) { throw 'Uninstall removed the shared PDF font registration.' }
+$Checks.pdf_font_preserved_after_uninstall = $true
 $Checks | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $TestRoot 'result.json') -Encoding UTF8
 $Checks | ConvertTo-Json

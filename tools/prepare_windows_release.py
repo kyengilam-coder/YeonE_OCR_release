@@ -32,6 +32,8 @@ MODEL_SUFFIXES = {".onnx", ".ort", ".pth", ".pt", ".ckpt", ".safetensors", ".tra
 SOURCE_DATA = {"yeone_ocr/data/normalization_260929.json", "yeone_ocr/data/preset_basic.json",
                "yeone_ocr/data/preset_kaibao.json", "yeone_ocr/data/preset_regions.json",
                "yeone_ocr/data/unihan_source_protection_17_0_0.json"}
+SOURCE_FONTS = {"yeone_ocr/assets/fonts/SourceHanSerifK-Medium.otf", "yeone_ocr/assets/fonts/LICENSE.txt",
+                "yeone_ocr/assets/fonts/manifest.json"}
 SOURCE_ENGINE_LOCKS = {"scripts/tesseract-lock.json", "scripts/rapidocr-lock.json", "scripts/easyocr-lock.json", "scripts/ppocrv6-lock.json",
                        "scripts/paddle-server-lock.json", "scripts/paddle-server-gpu-lock.json",
                        "scripts/glmocr-models.lock.json", "scripts/surya-lock.json"}
@@ -75,6 +77,7 @@ def source_allowed(name: str) -> bool:
     if path.parts[0] == "yeone_ocr":
         return (path.suffix == ".py" or name == "yeone_ocr/지침.md"
                 or name in SOURCE_DATA
+                or name in SOURCE_FONTS
                 or (path.parts[1] == "assets" and path.suffix.lower() in {".ico", ".png", ".svg"}))
     if path.parts[0] in {"tools", "scripts", "tests"}:
         if path.parts[0] == "tools" and path.parts[1].lower() in ENGINE_RUNTIME_HOMES:

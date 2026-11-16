@@ -1,3 +1,3 @@
-Version: 1.2.22
-Git commit: ef1dc870621c79d8256a57d38439fd9733699f24
+Version: 1.2.24
+Git commit: 2dc74af7b69300bf2f2dc157f2909f6fd7307554
 Source: committed Git tree only.

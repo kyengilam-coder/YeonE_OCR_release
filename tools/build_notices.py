@@ -181,7 +181,19 @@ def main() -> int:
     bootloader = metadata.distribution("pyinstaller")
     lines.extend(["", "Executable bootloader", "=====================", "",
                   *copy_component(bootloader, args.licenses_dir, display_root, args.supplements), ""])
-    args.output.write_text("\n".join(lines), encoding="utf-8")
+    font_root = ROOT / "yeone_ocr" / "assets" / "fonts"
+    font_license = font_root / "LICENSE.txt"
+    if not font_license.is_file():
+        raise RuntimeError("Bundled Source Han Serif license is missing")
+    lines.extend(["Bundled PDF font", "================", "Source Han Serif K Medium (Adobe)",
+                  "Source: https://github.com/adobe-fonts/source-han-serif",
+                  "The original, unmodified OTF is bundled and installed for the current user.",
+                  "License: SIL Open Font License 1.1", "", font_license.read_text(encoding="utf-8"), ""])
+    font_destination = args.licenses_dir / "source-han-serif"
+    font_destination.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(font_license, font_destination / "LICENSE.txt")
+    shutil.copyfile(font_root / "manifest.json", font_destination / "provenance.txt")
+    args.output.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     print(f"Wrote {args.output} ({len(runtime)} runtime distributions, Python, Tcl/Tk, PyInstaller bootloader)")
     return 0
 

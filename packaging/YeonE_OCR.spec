@@ -22,6 +22,8 @@ VERSION = next(ast.literal_eval(node.value) for node in module.body if isinstanc
 VERSION_PARTS = tuple(int(part) for part in VERSION.split(".")) + (0,)
 
 datas = collect_data_files("yeone_ocr", includes=["지침.md", "data/*.json", "assets/*.ico", "assets/*.png", "assets/*.svg"])
+for name in ("SourceHanSerifK-Medium.otf", "LICENSE.txt", "manifest.json"):
+    datas.append((str(ROOT / "yeone_ocr" / "assets" / "fonts" / name), "yeone_ocr/assets/fonts"))
 datas += [(str(ROOT / "README.md"), ".")]
 # Isolated engine Python processes need real script files rather than modules
 # inside the executable's PYZ. Keep this explicit resource allowlist; never

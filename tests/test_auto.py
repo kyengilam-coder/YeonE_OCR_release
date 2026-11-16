@@ -1759,9 +1759,9 @@ class InterimCheckpoint(unittest.TestCase):
                 self.assertEqual(cli.main(["run", pdf, "--work", w, "--reader", "mock", "--checkpoint", "0"]), 0)
             _join_prepare_ahead()
             work = Work(pdf, w); rec = work.load_record(1)
-            self.assertTrue(rec["crops"], "1쪽의 도형이 도판으로 잡혀야 한다")
-            for c in rec["crops"].values():
-                os.remove(c["path"])
+            self.assertTrue(list(work.crops_dir.glob("p001_*.jpg")), "1쪽의 도형을 문서용 도판으로 잘라야 한다")
+            for path in work.crops_dir.glob("p001_*.jpg"):
+                path.unlink()
             rec["crops"] = {}; work.save_record(1, rec); before = work.record_path(1).read_bytes()
             args = cli.build_parser().parse_args(["run", pdf, "--work", w, "--reader", "mock"]); doc = pymupdf.open(pdf)
             with contextlib.redirect_stdout(io.StringIO()):
@@ -1770,7 +1770,10 @@ class InterimCheckpoint(unittest.TestCase):
             self.assertTrue(list(work.crops_dir.glob("p001_*.jpg"))); self.assertTrue((work.out_dir / "v_진행중.hwpx").exists())   # 도판·진행중 문서는 만든다
             with contextlib.redirect_stdout(io.StringIO()):
                 cli.build_outputs(work, doc, work.records([1]), args, interim=False)
-            self.assertTrue(work.load_record(1)["crops"])                                     # 최종 문서 때 적는다
+            self.assertEqual(work.record_path(1).read_bytes(), before)  # 최종 출력도 원시 기록에 파생 도판 경로를 덮어쓰지 않는다
+            from zipfile import ZipFile
+            with ZipFile(work.out_dir / "v_p001-001.hwpx") as archive:
+                self.assertTrue(any(name.startswith('BinData/') and name.endswith('.jpg') for name in archive.namelist()))
             doc.close()
 
 

@@ -12,6 +12,23 @@ REAL_TEXTLAYER = cli.make_textlayer
 
 
 class ExistingPDFTests(unittest.TestCase):
+    def test_hwpx_output_uses_current_correction_and_preserves_project(self):
+        from tests.test_local_first import LocalFirstTests
+        from yeone_ocr.local_reading import corrected_output_records
+        fixture=LocalFirstTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        with patch.dict(os.environ, {'YEONE_OCR_CLAUDE_AUTH':'api',
+             'YEONE_OCR_CONFUSIONS_PATH':str(fixture.root/'isolated-ledger.json')}):
+            self.assertEqual(command(fixture.args()),0)
+            project=ComparisonProject.load(fixture.record()['local_first']['project_path'])
+            project.set_text(1,'天地玄黃校',reason='source image checked');project.save()
+            path=Path(fixture.record()['local_first']['project_path'])
+            before=path.read_bytes();record=fixture.record()
+            view=corrected_output_records([record],str(project.source_path))
+            self.assertIn('校',json.dumps(view[0]['merged'],ensure_ascii=False))
+            self.assertNotIn('校',json.dumps(record['merged'],ensure_ascii=False))
+            self.assertEqual(path.read_bytes(),before)
+            self.assertEqual(fixture.calls,[])
+
     def test_existing_sqlite_book_uses_current_correction_without_ocr_or_record_mutation(self):
         from tests.test_local_first import LocalFirstTests
         fixture=LocalFirstTests();fixture.setUp();self.addCleanup(fixture.doCleanups)

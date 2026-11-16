@@ -5,16 +5,16 @@
    ① 먹 실측(쪽 이미지의 먹 띠·먹 구간)이 글자 수와 꼭 맞으면 그것 → ② 원본에 있던 다른 OCR 의 글자층에서 글자 상자를 빌림(글은 판독대로,
    자리만) → ③ 먹 범위를 글자 수로 나눔 → ④ 영역 상자를 균등 분할. 3차 판별의 자리 잡기(글자층 → 먹 → 균등)와 같은 재료를 쓰되 먹 실측을
    앞에 둔다: 실제 책(개보본초, PDF-XChange OCR 층)에서 다른 엔진의 글자 상자가 먹 실측보다 덜 맞았다.
-2) 쓰기(write_layer): 글리프 없는 CID 글꼴(Identity-H + ToUnicode)로 3 Tr(보이지 않음). 글꼴에 글리프가 없어도 되므로 확장 A·B 한자,
-   호환 한자, 한글이 그대로 남는다(내장 CJK 글꼴로 쓰면 㐀·䗪·𠮷 이 빈칸이 된다). 세로 열은 아래로 가는 줄(dir=(0,1))로 써서
+2) 쓰기(write_layer): 본명조 Medium 원본 글꼴과 명시적인 문자 매핑을 내장해 원문을 보존한다.
+   3 Tr로 스캔 위에는 보이지 않으며 복사할 때 실제 글꼴 이름이 전달된다. 세로 열은 아래로 가는 줄(dir=(0,1))로 써서
    pdfio.text_layer 가 세로 열로 다시 읽는다. 틈 없이 이어진 글자는 한 번에(Tz 로 길이를 맞춰) 써서 추출기가 글자 사이에 빈칸을 넣지 않게 한다.
 3) 이 글꼴(FONT_NAME)로 쓴 글자는 연어OCR 자신의 판독이므로 pdfio 가 기존 OCR 글자층(증인)으로 읽지 않는다 — 이 PDF 를 다시 넣어도
    판독을 판독과 대조하는 순환이 생기지 않는다.
 원본 PDF 는 고치지 않고 새 파일로 저장한다. 판독 기록이 있는 쪽에서만, 원본의 숨은 글자층(다른 OCR)은 지우고(검색이 두 번 걸리지 않게) 넣는다.
 보이는 글자가 있는 쪽(스캔이 아닌 쪽)은 건너뛴다. 도판·표 영역의 글자는 아직 넣지 않는다."""
 from __future__ import annotations
-import base64
 import re, unicodedata
+from functools import lru_cache
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -23,12 +23,45 @@ import pymupdf
 from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, SKIP_KINDS, bbox_frac
 from .merge import columns_in_reading_order
 from .layout import ink_runs, merge_glyph_runs
-from .pdfio import OWN_LAYER_FONT as FONT_NAME, is_own_span, layer_chars
+from .pdfio import OWN_LAYER_PREFIX, is_own_span, layer_chars, own_content_refs, layer_text_data, uses_own_font
 from .marks import MARK_RE, mark_kind, mark_reading
 
 FONT_KEY = "FYeonEOCR"               # 쪽 자원(/Font) 안의 이름
-ASC, DESC = 0.88, -0.12              # 글꼴의 위·아래 범위(em). 글자 상자 = 1em 정사각형(가운데에 맞춘다)
 INK_THR = 110                        # 먹으로 칠 밝기(layout·adjudicate 와 같은 값)
+
+_FONT_FILE = Path(__file__).parent / "assets" / "fonts" / "SourceHanSerifK-Medium.otf"
+FONT_NAME = OWN_LAYER_PREFIX + "Source Han Serif K Medium"
+
+
+@lru_cache(maxsize=1)
+def _pdf_font():
+    return pymupdf.Font(fontfile=str(_FONT_FILE))
+
+
+@lru_cache(maxsize=1)
+def _font_program():
+    """Let MuPDF extract the embeddable CID-keyed CFF from the original OTF.
+
+    CFF outlines need CIDFontType0 / FontFile3, not a TrueType CIDToGIDMap.
+    The shipped, installed font file remains the unmodified upstream OTF.
+    """
+    with pymupdf.open() as scratch:
+        xref = scratch.new_page().insert_font(fontname="Program", fontfile=str(_FONT_FILE))
+        descendant = int(re.search(r"(\d+) 0 R", scratch.xref_get_key(xref, "DescendantFonts")[1])[1])
+        descriptor = int(scratch.xref_get_key(descendant, "FontDescriptor")[1].split()[0])
+        stream = int(scratch.xref_get_key(descriptor, "FontFile3")[1].split()[0])
+        return scratch.xref_stream(stream)
+
+
+def _font_name():
+    return "".join(chr(b) if 33 <= b <= 126 and chr(b) not in "#%()/<>[]{}" else f"#{b:02X}"
+                   for b in FONT_NAME.encode("utf-8"))
+
+
+def _pdf_advance(c):
+    # OCR commonly places digits at full Han pitch. Use full-width digit CIDs
+    # and compress half-pitch runs, avoiding a text-matrix break inside 卷第12.
+    return 1.0 if c and c.isdecimal() else adv(c)
 
 
 class TextlayerCancelled(Exception):
@@ -59,15 +92,25 @@ def token_positions(text: str) -> list[tuple[str | None, int]]:
     글을 모르는 한 자리), 그 밖의 〔…〕(원본 결락 등 먹이 없는 표시)는 뺀다. 표시에서 나온 글자의 위치는 그 표시의 첫 글자."""
     text = text or ""
     out: list[tuple[str | None, int]] = []; pos = 0
+    def plain(part, offset):
+        # CJK spacing is reconstructed from ink positions. Latin word spaces
+        # are semantic and must survive even when no donor layer is available.
+        def latin(c):
+            return c.isascii() or 'LATIN' in unicodedata.name(c, '') or '\u2010' <= c <= '\u2027'
+        spaces = {i for m in re.finditer(r'(\S)([ \t]+)(?=\S)', part)
+                  if latin(m.group(1)) and latin(part[m.end()])
+                  for i in range(m.start(2), m.end(2))}
+        return [((' ' if i in spaces else c), offset+i) for i,c in enumerate(part)
+                if not c.isspace() or i in spaces]
     for m in MARK_RE.finditer(text):
-        out.extend((c, pos + k) for k, c in enumerate(text[pos:m.start()]) if not c.isspace())
+        out.extend(plain(text[pos:m.start()], pos))
         inner = m.group(0)[1:-1]; kind = mark_kind(inner)
         if kind in ("doubt", "ab"):
             out.extend((c, m.start()) for c in mark_reading(inner) if not c.isspace())
         elif kind == "unknown":
             out.append((None, m.start()))
         pos = m.end()
-    out.extend((c, pos + k) for k, c in enumerate(text[pos:]) if not c.isspace())
+    out.extend(plain(text[pos:], pos))
     return out
 
 
@@ -287,11 +330,137 @@ def _direction(reg, vertical: bool) -> str:
     return "h" if reg.kind == "쪽번호" or not vertical else "v"
 
 
+def _page_context_layout(pr, ink, frame, layer_lines, vertical):
+    """Position page-context text jointly, never as independent full-page lines.
+
+    A full-page box is a review fallback, not a measured line rectangle. Align
+    the authoritative text to the *whole* original layer, using its coordinates
+    only, then measure ink inside each physical line. This also splits logical
+    paragraphs across physical rows without changing their text or order.
+    """
+    items = []
+    for reg in pr.regions:
+        if reg.kind not in TEXT_KINDS | TITLE_KINDS | SKIP_KINDS | {"기타"}:
+            continue
+        texts = line_texts(reg)
+        if reg.kind in SKIP_KINDS:
+            texts = texts or [pr.page_label if reg.kind == "쪽번호" else pr.running_header]
+        frac = bbox_frac(reg.bbox)
+        broad = frac[2]-frac[0] >= .75 and frac[3]-frac[1] >= .5
+        for index, text in enumerate(texts):
+            chars = tokens(text)
+            if chars:
+                items.append((reg.id, index, chars, _direction(reg, vertical), broad))
+    recovered = {}
+    fx, fy, fw, fh = frame
+    for direction in ("h", "v"):
+        group = [item for item in items if item[3] == direction]
+        if not any(item[4] for item in group):
+            continue
+        references = [(c, box, row) for row, line in enumerate(layer_lines or [])
+                      if line.get("dir") == direction for c, box in line.get("chars", [])
+                      if c and not c.isspace()]
+        target = [c for item in group for c in item[2]]
+        source = "".join(fold(c) for c, _, _ in references)
+        matcher = SequenceMatcher(None, "".join(fold(c) for c in target), source, autojunk=False)
+        if not references or matcher.ratio() < .35:
+            # Image-only scans still need a shared row assignment. Looking
+            # for one row independently for each page-context item selects
+            # the same thickest ink band repeatedly.
+            bands, px = ink_bands(ink, (0,0,1,1), direction, len(group))
+            H, W = ink.shape
+            for li,(region,index,chars,_,broad) in enumerate(group):
+                if not broad:
+                    continue
+                if bands:
+                    band = bands[li]
+                    frac = ((band[0]/W,0,band[1]/W,1) if direction == "v"
+                            else (0,band[0]/H,1,band[1]/H))
+                    boxes, how = by_ink_in_band(chars,ink,px,band,direction,frac)
+                else:
+                    boxes, how = [], "uniform"
+                if not boxes:
+                    boxes = by_uniform(chars,(0,0,1,1),li,len(group),direction)
+                recovered[(region,index)] = [Line(direction,list(zip(chars,boxes)),"page-context/"+how,region,index)]
+            continue
+        positions = [None] * len(target)
+        for tag, a, b, c, d in matcher.get_opcodes():
+            if b == a:
+                continue
+            for k in range(b-a):
+                # A replacement borrows positions, never the donor's text.
+                positions[a+k] = min(len(references)-1, c + min(max(0,d-c-1), int(k*(d-c)/(b-a))))
+        offset = 0
+        anchored_rows = set()
+        for region, index, chars, _, broad in group:
+            assigned = positions[offset:offset+len(chars)];offset += len(chars)
+            if not broad:
+                continue
+            # A strong single-row anchor keeps unmatched leaders / page
+            # numbers on their own TOC row. Global character alignment alone
+            # can attach those missing suffixes to the following row.
+            row_matches = []
+            wanted = "".join(fold(c) for c in chars if c and c.isalpha())
+            for row, reference in enumerate(layer_lines or []):
+                if row in anchored_rows or reference.get("dir") != direction:
+                    continue
+                donor = "".join(fold(c) for c, _ in reference.get("chars", []) if c and c.isalpha())
+                match = SequenceMatcher(None, wanted, donor, autojunk=False)
+                equal = sum(size for _, _, size in match.get_matching_blocks())
+                if match.ratio() >= .65 and equal >= 6 and len(wanted) <= len(donor) * 1.65:
+                    row_matches.append((match.ratio(), row))
+            if row_matches:
+                _, row = max(row_matches)
+                anchored_rows.add(row)
+                assigned = [next(j for j, (_, _, r) in enumerate(references) if r == row)] * len(chars)
+            else:
+                # A corrupt donor can attach the first character of the next
+                # OCR line to the preceding, already occupied row. That places
+                # e.g. 发 before 痫 when Acrobat sorts by physical position.
+                # Keep a tiny stray fragment with its overwhelmingly dominant
+                # row; never borrow the donor's spelling or change text order.
+                counts = {}
+                for j in assigned:
+                    counts[references[j][2]] = counts.get(references[j][2], 0) + 1
+                dominant = max(counts, key=counts.get)
+                if counts[dominant] >= len(chars) * .8:
+                    first = next(j for j, (_, _, r) in enumerate(references) if r == dominant)
+                    for k,j in enumerate(assigned):
+                        row = references[j][2]
+                        if row != dominant and row in anchored_rows and counts[row] <= 2:
+                            assigned[k] = first
+                    anchored_rows.add(dominant)
+            parts = []
+            start = 0
+            while start < len(chars):
+                row = references[assigned[start]][2]
+                end = start+1
+                while end < len(chars) and references[assigned[end]][2] == row:
+                    end += 1
+                boxes = ([box for _, box, r in references if r == row] if row_matches
+                         else [references[j][1] for j in assigned[start:end]])
+                frac = ((min(b[0] for b in boxes)-fx)/fw, (min(b[1] for b in boxes)-fy)/fh,
+                        (max(b[2] for b in boxes)-fx)/fw, (max(b[3] for b in boxes)-fy)/fh)
+                if row_matches:
+                    # The donor can omit right-side TOC numbers. Measure the
+                    # complete physical row rather than extrapolating off it.
+                    frac = (frac[0], 0, frac[2], 1) if direction == "v" else (0, frac[1], 1, frac[3])
+                bands, px = ink_bands(ink, frac, direction, 1)
+                got, how = by_ink_in_band(chars[start:end], ink, px, bands[0], direction, frac) if bands else ([], "")
+                if not got:
+                    got, how = by_uniform(chars[start:end], frac, 0, 1, direction), "uniform"
+                parts.append(Line(direction, list(zip(chars[start:end], got)), "page-layer/"+how, region, index))
+                start = end
+            recovered[(region,index)] = parts
+    return recovered
+
+
 def plan_page(pr: PageReading, img, frame, layer_lines: list[dict] | None = None, vertical: bool = True) -> list[Line]:
     """쪽 판독 → 글자 자리 계획. img 는 판독에 쓴 쪽 이미지(영역 상자의 기준), frame 은 그 이미지가 덮는 PDF 좌표 틀(pdfio.page_frame),
     layer_lines 는 원본의 다른 OCR 글자층(pdfio.layer_chars, 없으면 None). 쪽번호·머리말도 쪽에 보이는 글이므로 넣는다(문서에는 안 넣는 것들)."""
     ink = (np.asarray(img.convert("L")) < INK_THR) if not isinstance(img, np.ndarray) else img
     out: list[Line] = []; used: set = set()
+    page_layout = _page_context_layout(pr, ink, frame, layer_lines, vertical)
     for reg in pr.regions:
         if reg.kind in SKIP_KINDS:
             texts = [t for t in (line_texts(reg) or [pr.page_label if reg.kind == "쪽번호" else pr.running_header]) if t.strip()]
@@ -307,6 +476,9 @@ def plan_page(pr: PageReading, img, frame, layer_lines: list[dict] | None = None
             continue
         bands, box_px = ink_bands(ink, frac, want, len(toks))
         for li, (index, chars) in enumerate(items):
+            if (reg.id,index) in page_layout:
+                out.extend(page_layout[(reg.id,index)])
+                continue
             boxes, how = None, ""
             got = by_ink_in_band(chars, ink, box_px, bands[li], want, frac) if bands else ([], "")
             if got[0] and got[1] != "ink~":
@@ -319,6 +491,31 @@ def plan_page(pr: PageReading, img, frame, layer_lines: list[dict] | None = None
                 boxes, how = by_uniform(chars, frac, li, len(toks), want), "uniform"
             out.append(Line(want, list(zip(chars, boxes)), how, reg.id, index))
     return out
+
+
+def _check_line_collisions(lines, number):
+    """Reject grossly collapsed placement independently of text round-trip."""
+    entries=[]
+    for line in lines:
+        boxes=[b for c,b in line.chars if c]
+        if len(boxes)<6:
+            continue
+        entries.append(((line.region,line.index),line.dir,
+                        (min(b[0] for b in boxes),min(b[1] for b in boxes),
+                         max(b[2] for b in boxes),max(b[3] for b in boxes))))
+    logical={key for key,_,_ in entries};collided=set()
+    if len(logical)<3:
+        return
+    for i,(key,direction,a) in enumerate(entries):
+        for other,way,b in entries[i+1:]:
+            if key==other or direction!=way:
+                continue
+            overlap=max(0,min(a[2],b[2])-max(a[0],b[0]))*max(0,min(a[3],b[3])-max(a[1],b[1]))
+            area=min((a[2]-a[0])*(a[3]-a[1]),(b[2]-b[0])*(b[3]-b[1]))
+            if area>0 and overlap/area>.75:
+                collided.update((key,other))
+    if len(collided)>=max(3,len(logical)*.5):
+        raise TextlayerVerificationError(f'문자 PDF 글자 위치 겹침: {number}쪽 ({len(collided)}/{len(logical)}줄)')
 
 
 # ---- 쓰기 ----
@@ -337,27 +534,12 @@ def drop_bad_chars(lines: list[Line]) -> int:
     return bad
 
 
-# 글리프 하나(.notdef, 빈 모양)만 든 768바이트 TrueType — 글꼴을 내장하지 않은 Identity 인코딩 CID 글꼴은 Acrobat 이 열 때마다
-# "글꼴을 찾거나 만들 수 없습니다" 창을 띄우므로(검토에서 지적) Tesseract 처럼 빈 글꼴을 내장하고 모든 CID 를 글리프 0 으로 보낸다.
-GLYPHLESS_TTF = base64.b64decode("".join((
-    "AAEAAAAKAIAAAwAgT1MvMkTfRiQAAAEoAAAAYGNtYXAADABGAAABjAAAACxnbHlmAAAAAAAAAbwAAAABaGVhZC0B3dAAAACsAAAA",
-    "NmhoZWEDcgNyAAAA5AAAACRobXR4A+gAAAAAAYgAAAAEbG9jYQAAAAAAAAG4AAAABG1heHAAAgACAAABCAAAACBuYW1lOToKEgAA",
-    "AcAAAAEacG9zdAADAAAAAALcAAAAJAABAAAAAQAAQIw4el8PPPUAAwPoAAAAAOb1zngAAAAA5vXOeAAAAAAAAAAAAAAAAwACAAAA",
-    "AAAAAAEAAANw/4gAAAPoAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAEAAAABAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAwPo",
-    "AZAABQAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPz8/PwAAAAAAAANw/4gAAANwAHgA",
-    "AAAAAAAAAAAAAAAAAAAgAAAD6AAAAAAAAgAAAAMAAAAUAAMAAQAAABQABAAYAAAAAgACAAAAAP//AAD//wABAAAAAAAAAAAAAAAA",
-    "AAwAlgABAAAAAAABAAgAAAABAAAAAAACAAcACAABAAAAAAADABIADwABAAAAAAAEAAgAAAABAAAAAAAFAAsAIQABAAAAAAAGAAgA",
-    "AAADAAEECQABABAALAADAAEECQACAA4APAADAAEECQADACQASgADAAEECQAEABAALAADAAEECQAFABYAbgADAAEECQAGABAALFll",
-    "b25FT0NSUmVndWxhclllb25FT0NSIGdseXBobGVzc1ZlcnNpb24gMS4wAFkAZQBvAG4ARQBPAEMAUgBSAGUAZwB1AGwAYQByAFkA",
-    "ZQBvAG4ARQBPAEMAUgAgAGcAbAB5AHAAaABsAGUAcwBzAFYAZQByAHMAaQBvAG4AIAAxAC4AMAAAAAIAAAAAAAAAAAAAAAAAAAAA",
-    "AAAAAAAAAAAAAAAAAAAAAQAA",
-)))
-
-
 def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
-    """문서에 글리프 없는 Type0 글꼴 하나를 넣는다. CID 는 글자마다 1부터, ToUnicode 로 유니코드에 잇는다(확장 B 는 UTF-16 대리 쌍).
-    폭은 전각 1000·반각 500. 글꼴 파일(GLYPHLESS_TTF)을 내장하고 CIDToGIDMap 으로 모든 CID 를 글리프 0 에 보낸다(보이지 않는 글이라 모양은 없어도 된다).
-    돌려주는 값: (글꼴 xref, {글자: CID})."""
+    """Embed a real plain font and explicit Unicode mapping, including rare Han.
+
+    CID widths describe the OCR placement; CIDToGIDMap selects real glyphs.
+    ToUnicode always retains the authoritative text, even for a missing glyph.
+    """
     cids = {c: i + 1 for i, c in enumerate(dict.fromkeys(c for c in chars if c))}
     # MuPDF treats a ToUnicode U+FFFD as unmapped and falls back to the
     # character code. Give an existing replacement character its own code
@@ -375,25 +557,47 @@ def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
         part = items[k:k + 100]
         cmap += f"{len(part)} beginbfchar\n" + "\n".join(f"<{cid:04X}> <{_u16(c)}>" for c, cid in part) + "\nendbfchar\n"
     cmap += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
-    half = " ".join(f"{cid}[500]" for c, cid in items if adv(c) != 1.0)
+    half = " ".join(f"{cid}[500]" for c, cid in items if _pdf_advance(c) != 1.0)
     tu = doc.get_new_xref(); doc.update_object(tu, "<<>>"); doc.update_stream(tu, cmap.encode())
-    ff = doc.get_new_xref(); doc.update_object(ff, f"<</Length1 {len(GLYPHLESS_TTF)}>>"); doc.update_stream(ff, GLYPHLESS_TTF)
-    c2g = doc.get_new_xref(); doc.update_object(c2g, "<<>>"); doc.update_stream(c2g, bytes(2 * (max(cids.values(), default=0) + 1)))   # 모든 CID → 글리프 0
+    font = _pdf_font(); font_data = _font_program(); name = _font_name()
+    # The layer is invisible: normalize its selection box about the measured
+    # ink center. Symmetric metrics also survive reflected text matrices on
+    # rotated pages; the embedded font retains its real outlines and names.
+    asc, descender = .5, -.5
+    ff = doc.get_new_xref(); doc.update_object(ff, "<</Subtype/CIDFontType0C>>"); doc.update_stream(ff, font_data)
+    glyphs = {c: int(font.has_glyph(ord(c), fallback=0)) for c, _ in items}
+    if '\ufffd' in glyphs:
+        # MuPDF uses the CID fallback for U+FFFD instead of ToUnicode. Keep
+        # the existing uncertainty marker as U+FFFD, never CID 0 / NUL.
+        # This outline is invisible (3 Tr); the Unicode marker is authoritative.
+        glyphs['\ufffd'] = 0xFFFD
+    encoding = ("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+                "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n"
+                "/CMapName /YeonEOCR-CID def\n/CMapType 1 def\n/WMode 0 def\n"
+                "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n")
+    for k in range(0, len(items), 100):
+        part = items[k:k+100]
+        encoding += f"{len(part)} begincidchar\n" + "\n".join(f"<{cid:04X}> {glyphs[c]}" for c,cid in part) + "\nendcidchar\n"
+    encoding += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
+    enc = doc.get_new_xref(); doc.update_object(enc, "<<>>"); doc.update_stream(enc, encoding.encode())
+    widths = {glyphs[c]: int(_pdf_advance(c)*1000) for c,_ in items}
+    half = " ".join(f"{gid}[{width}]" for gid,width in sorted(widths.items()) if width != 1000)
     desc = doc.get_new_xref()
-    doc.update_object(desc, f"<</Type/FontDescriptor/FontName/{FONT_NAME}/Flags 4/FontBBox[0 {int(DESC * 1000)} 1000 {int(ASC * 1000)}]"
-                            f"/ItalicAngle 0/Ascent {int(ASC * 1000)}/Descent {int(DESC * 1000)}/CapHeight {int(ASC * 1000)}/StemV 80/FontFile2 {ff} 0 R>>")
+    doc.update_object(desc, f"<</Type/FontDescriptor/FontName/{name}/FontFamily({FONT_NAME.split('+',1)[1]})/Flags 32/FontBBox[0 {int(descender * 1000)} 1000 {int(asc * 1000)}]"
+                            f"/ItalicAngle 0/Ascent {int(asc * 1000)}/Descent {int(descender * 1000)}/CapHeight {int(asc * 1000)}/StemV 100/FontWeight 500/FontFile3 {ff} 0 R>>")
     cidf = doc.get_new_xref()
-    doc.update_object(cidf, f"<</Type/Font/Subtype/CIDFontType2/BaseFont/{FONT_NAME}/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>"
-                            f"/FontDescriptor {desc} 0 R/DW 1000{f'/W[{half}]' if half else ''}/CIDToGIDMap {c2g} 0 R>>")
+    doc.update_object(cidf, f"<</Type/Font/Subtype/CIDFontType0/BaseFont/{name}/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>"
+                            f"/FontDescriptor {desc} 0 R/DW 1000{f'/W[{half}]' if half else ''}>>")
     f0 = doc.get_new_xref()
-    doc.update_object(f0, f"<</Type/Font/Subtype/Type0/BaseFont/{FONT_NAME}/Encoding/Identity-H/DescendantFonts[{cidf} 0 R]/ToUnicode {tu} 0 R>>")
+    doc.update_object(f0, f"<</Type/Font/Subtype/Type0/BaseFont/{name}/Encoding {enc} 0 R/DescendantFonts[{cidf} 0 R]/ToUnicode {tu} 0 R>>")
     return f0, cids
 
 
 def _em(spans, chars) -> float:
     """줄의 글자 크기(전각 한 칸, pt): 이웃한 전각 글자 중심 간격의 중앙값(칸 = 글자 + 글자 사이). 없으면 전각 글자 상자 크기."""
-    full = [s for s, c in zip(spans, chars) if adv(c) == 1.0] or spans
-    size = float(np.median([e - s for s, e in full]))
+    full = [s for s, c in zip(spans, chars) if adv(c) == 1.0]
+    size = float(np.median([e - s for s,e in full])) if full else float(np.median([(e-s)/adv(c) for (s,e),c in zip(spans,chars)]))
+    full = full or spans
     mids = [(s + e) / 2 for s, e in full]
     d = [b - a for a, b in zip(mids, mids[1:]) if 0.6 * size < b - a < 1.6 * size]
     return float(np.median(d)) if d else size
@@ -418,16 +622,18 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
         # text inside the page; never emit off-page glyphs that readers drop.
         ratio = min(1.0, (axis_size-.1) / max(.001, high-low))
         sp = [(axis_start+.05+(a-low)*ratio, axis_start+.05+(b-low)*ratio) for a,b in sp]
-    fs = _em(sp, cs)
-    fs = min(fs, (fw if v else fh)*.95)
+    asc, desc = .5, -.5
+    extent = asc - desc
+    thickness = float(np.median([(b[2]-b[0]) if v else (b[3]-b[1]) for b in bx]))
+    fs = min(_em(sp, cs), thickness * 1.2 / extent, (fw if v else fh)*.95/extent)
     if v:                                                               # 아래로 가는 줄, 글자 위쪽이 오른쪽
         cx = float(np.median([(b[0] + b[2]) / 2 for b in bx]))
-        cx = min(fx0+fw-fs/2-.02, max(fx0+fs/2+.02, cx))
-        origin = lambda along: (cx - (ASC + DESC) / 2 * fs, along); u, w = (0, 1), (1, 0)
+        cx = min(fx0+fw-fs*extent/2-.02, max(fx0+fs*extent/2+.02, cx))
+        origin = lambda along: (cx - (asc + desc) / 2 * fs, along); u, w = (0, 1), (1, 0)
     else:                                                               # 오른쪽으로 가는 줄, 글자 위쪽이 위
         cy = float(np.median([(b[1] + b[3]) / 2 for b in bx]))
-        cy = min(fy0+fh-fs/2-.02, max(fy0+fs/2+.02, cy))
-        origin = lambda along: (along, cy + (ASC + DESC) / 2 * fs); u, w = (1, 0), (0, -1)
+        cy = min(fy0+fh-fs*extent/2-.02, max(fy0+fs*extent/2+.02, cy))
+        origin = lambda along: (along, cy + (asc + desc) / 2 * fs); u, w = (1, 0), (0, -1)
 
     def tm(along: float) -> str:
         o = pymupdf.Point(origin(along)); p = o * to_pdf
@@ -439,7 +645,7 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
         near = [abs(mids[j] - mids[i]) for j in (i - 1, i + 1) if 0 <= j < len(cs)]   # 반 칸만 주면 글자 사이 틈이 반 칸이 되어 '1 2' 로 읽힌다
         if wid[i] < fs and near and min(near) > 0.75 * fs:
             wid[i] = fs
-    scale = [w / (adv(c) * fs) for w, c in zip(wid, cs)]                # 칸 / 글꼴 폭: 1(제 폭) 또는 2(반각을 전각 칸에)
+    scale = [w / (_pdf_advance(c) * fs) for w, c in zip(wid, cs)]
     starts = [m - w / 2 for m, w in zip(mids, wid)]
     ends = [m + w / 2 for m, w in zip(mids, wid)]
     runs, cur = [], [0]
@@ -450,14 +656,14 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
     runs.append(cur)
     ops = []
     for r in runs:
-        natural = sum(adv(cs[i]) for i in r) * fs
+        natural = sum(_pdf_advance(cs[i]) for i in r) * fs
         # A dense fallback line can legitimately need less than 50% scaling.
         # Clamping it to 50% pushes the suffix outside the page, where readers
         # omit it. Glyphless half-width characters also have a one-em glyph
         # extent even though their advance is half an em: reserve that extent.
         start = max((fy0 if v else fx0) + .02, starts[r[0]])
         limit = (fy0 + fh if v else fx0 + fw) - .02
-        physical = (sum(adv(cs[i]) for i in r[:-1]) + max(1.0, adv(cs[r[-1]]))) * fs
+        physical = (sum(_pdf_advance(cs[i]) for i in r[:-1]) + max(1.0, _pdf_advance(cs[r[-1]]))) * fs
         desired = (ends[r[-1]] - starts[r[0]]) / natural * 100 if natural > 0 else 100.0
         tz = max(.001, min(200.0, desired, max(.001, (limit-start)/physical*100)))
         ops.append(f"{tm(start)} {tz:.6f} Tz <{''.join(f'{cids[cs[i]]:04X}' for i in r)}> Tj")
@@ -496,7 +702,7 @@ def strip_hidden_text(page: pymupdf.Page) -> tuple[bool, int]:
 
 def has_own_layer(page: pymupdf.Page) -> bool:
     """이 글자층(FONT_NAME 글꼴)의 글자가 쪽에 있는가."""
-    return any(is_own_span(s) for s in page.get_texttrace())
+    return uses_own_font(page) or any(is_own_span(s) for s in page.get_texttrace())
 
 
 def content_refs(doc: pymupdf.Document, page: pymupdf.Page) -> list[int]:
@@ -521,9 +727,9 @@ def strip_own_layer(doc: pymupdf.Document, page: pymupdf.Page) -> bool:
     """이전에 넣은 이 글자층만 지운다(다른 OCR 층은 그대로). 이 층은 /Contents 배열에 따로 붙인 내용 흐름(머리 'q BT 3 Tr /<이름> 1 Tf')이라
     그 흐름만 뺀다. 글꼴 자원은 둔다 — 다른 쪽과 같이 쓰는(물려받은) 자원이면 그 쪽의 글자가 깨진다. 다른 도구가 흐름을 하나로 합쳐 가려낼 수
     없으면 지우지 않고 False."""
-    names = {f[4].encode() for f in page.get_fonts(full=True) if f[3] == FONT_NAME}
     refs = content_refs(doc, page)
-    keep = [x for x in refs if not ((m := re.match(rb"\s*q BT 3 Tr /(\S+) 1 Tf", doc.xref_stream(x) or b"")) and m.group(1) in names)]
+    own = set(own_content_refs(page))
+    keep = [x for x in refs if x not in own]
     if len(keep) == len(refs):
         return False
     _set_contents(doc, page, keep)
@@ -582,9 +788,12 @@ def write_lines(doc: pymupdf.Document, page: pymupdf.Page, lines: list[Line], fr
 def own_text(doc: pymupdf.Document, pno: int) -> list[str]:
     """쪽에서 이 글자층(FONT_NAME 글꼴)의 글만, 줄마다(검증용)."""
     out = []
-    for b in doc[pno - 1].get_text("rawdict")["blocks"]:
+    page = doc[pno - 1]
+    separate = bool(own_content_refs(page))
+    data = layer_text_data(page, only_own=True) if separate else page.get_text("rawdict")
+    for b in data["blocks"]:
         for l in b.get("lines", []):
-            t = "".join(c["c"] for s in l["spans"] if is_own_span(s) for c in s["chars"])
+            t = "".join(c["c"] for s in l["spans"] if separate or is_own_span(s) for c in s["chars"])
             if t.strip():
                 out.append(t)
     return out
@@ -615,6 +824,7 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
         else:
             pr, img, frame, vertical = page_data(n)
             plans[n] = plan_page(pr, img, frame, layer_chars(doc, n) if state == "hidden" else None, vertical); frames[n] = frame
+            _check_line_collisions(plans[n], n)
             stats["bad_chars"] += drop_bad_chars(plans[n])
             del img
         if step: step(i + 1, total)
@@ -658,7 +868,17 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
             for n, lines in plans.items():
                 check_stop()
                 want = "".join(c for ln in lines for c, _ in ln.chars if c)
-                if re.sub(r"\s", "", "".join(own_text(check, n))) != want:  # 빈칸은 추출기가 큰 틈에 넣는 것이라 세지 않는다
+                extracted = "\n".join(own_text(check, n))
+                bad = re.sub(r"\s", "", extracted) != re.sub(r"\s", "", want)
+                # Also check semantic Latin word boundaries. Removing all
+                # spaces alone would miss an English 'quickbrownfox' defect.
+                normalized = re.sub(r"\s+", " ", extracted)
+                for line in lines:
+                    text = "".join(c for c,_ in line.chars if c)
+                    for left,right in re.findall(r"\b([^\W\d_]+) +(?=([^\W\d_]+)\b)", text):
+                        if not re.search(re.escape(left)+r"\s+"+re.escape(right), normalized):
+                            bad = True
+                if bad:
                     stats["mismatch"].append(n)
         if stats['mismatch']:
             raise TextlayerVerificationError('문자 PDF 재추출 검증 불일치: ' + ', '.join(map(str, stats['mismatch'])))

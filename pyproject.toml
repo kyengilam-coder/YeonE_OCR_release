@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yeone-ocr"
-version = "1.2.22"
+version = "1.2.24"
 description = "YeonE_OCR · 연어OCR · 한자·한글 혼용 문헌 OCR·교정 처리기 (Gemini·ChatGPT·Claude 판독, HWPX 출력)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,4 +33,4 @@ yeone-ocr-gui = "yeone_ocr.gui:main"
 packages = ["yeone_ocr", "yeone_ocr.collate", "ab_ocr"]
 
 [tool.setuptools.package-data]
-yeone_ocr = ["지침.md", "data/*.json", "assets/*.ico", "assets/*.png", "assets/*.svg"]
+yeone_ocr = ["지침.md", "data/*.json", "assets/*.ico", "assets/*.png", "assets/*.svg", "assets/fonts/SourceHanSerifK-Medium.otf", "assets/fonts/LICENSE.txt", "assets/fonts/manifest.json"]

@@ -224,7 +224,7 @@ def page_text_of(pr: PageReading) -> str:
 def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: int | None = None,
                     check_list: str = "none", grades: bool = True, context: dict | None = None,
                     memo_mode: str = "notice", legend: bool = True, stats: dict | None = None,
-                    layout: str = "page", bold: dict | None = None, display: str = "standard") -> list[Block]:
+                    layout: str = "page", bold: dict | None = None, display: str = "standard", edit_paragraphs: bool = False) -> list[Block]:
     """grades=True 면 글자마다 확인 등급(초록·파랑·빨강 안 문맥 밑줄)과 고지 메모를 블록에 단다(grades.page_grades).
     context 는 {쪽: 문맥 추정 기록}(context.analyze). 글 자체는 바꾸지 않는다.
     layout="flow"(내용별): 쪽마다의 기록 줄을 넣지 않고, 그 쪽이 시작되는 글자 자리에 책갈피 이름(anchors)과 쪽 고지 메모를 단다.
@@ -339,15 +339,19 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     sp, me = grade_of(reg.id, i, raw, t, len(prefix))
                     bd = bold_of(n, reg.id, i, raw, t, len(prefix))
                     t = prefix + t
-                    joinable = (i == 0 and not first_text_done) if not flow else True    # 내용별은 쪽 안의 영역 사이도 잇는다
-                    if join_pages and joinable and p.continues_from_previous:
+                    inferred = edit_paragraphs and reg.id in rec.get('_document_continuations', ())
+                    joinable = ((i == 0 and not first_text_done) if not flow else True) or inferred
+                    if (join_pages or inferred) and joinable and p.continues_from_previous:
                         if flow:                                # 바로 앞 글 블록(쪽 끝 확인 목록은 건너뜀)에, 소주는 소주끼리·본문은 본문끼리만 잇는다
                             last = next((b for b in reversed(blocks) if b.type != "uncertain"), None)
                             prev = last if last is not None and last.type == "para" and (last.kind == "소주") == (reg.kind == "소주") else None
                         else:
                             prev = next((b for b in reversed(blocks) if b.type == "para"), None)
                         if prev is not None:
-                            prev.extend("" if anchored else f"〔→PDF {n}쪽" + (f"/인쇄 {pr.print_page}쪽" if pr.print_page else "") + "〕")
+                            if inferred and prev.text and t and prev.text[-1].isascii() and t[0].isascii() and prev.text[-1].isalnum() and t[0].isalnum():
+                                prev.extend(' ')
+                            if not inferred:
+                                prev.extend("" if anchored else f"〔→PDF {n}쪽" + (f"/인쇄 {pr.print_page}쪽" if pr.print_page else "") + "〕")
                             base = prev.extend(t, spans=sp, memos=me, cstyles=bd)
                             if anchored:
                                 place(prev, base)

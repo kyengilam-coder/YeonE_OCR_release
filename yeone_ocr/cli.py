@@ -1820,6 +1820,14 @@ def _normalization_resolver(work: Work, args):
 def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False) -> bool:
     """판독 기록들로 HWPX(+DOCX)를 만든다. interim=True 면 '<이름>_진행중.hwpx' 한 파일만 조용히 만든다(중간 저장)."""
     from .hwpx_builder import build_hwpx
+    import copy
+    from .local_reading import corrected_output_records
+    records=copy.deepcopy(records) if interim else copy.deepcopy(corrected_output_records(records,args.pdf))
+    edit_document=not interim and not getattr(args,'no_document_editing',False)
+    entry_names=set()
+    if edit_document:
+        from .document_editing import prepare_records
+        records,entry_names=prepare_records(records)
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
         progress("build", 0, steps)
@@ -1832,14 +1840,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         new_crops = make_crops(work, rec, img)
         if new_crops != (rec.get("crops") or {}):
             rec["crops"] = new_crops
-            if not interim:                                  # 중간 저장은 기록을 쓰지 않는다 — 다시 읽는 중인 쪽의 새 기록을 옛 기록으로 덮을 수 있다(도판 파일만 남기고 최종 문서 때 적는다)
-                work.save_record(n, rec)
-        if not interim and rec["crops"]:
-            touching = [k for k, c in rec["crops"].items() if c["touching"]]
-            if touching:
-                work.set_status(n, "판독 확인 필요", note=f"도판 외곽에 글자·선이 닿음: {touching}")
-            else:
-                work.set_status(n, "이미지 보존 확인 완료")
+            # Derived document crops belong to this output view. Never save
+            # corrected text or inferred paragraph boundaries over raw OCR.
     if not interim:
         progress("build", len(records), steps)                  # 쪽 다 함 → 이제 문서 조립
     whole = len(records) == len(doc)
@@ -1917,7 +1919,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                                  check_list=getattr(args, "check_list", "none") or "none", grades=not interim,
                                  context=ctx, memo_mode=getattr(args, "memo", "none") or "none",
                                  legend=not args.no_highlight, stats=gstats, layout=layout if not interim else "page", bold=bold,
-                                 display=simple_display and "simple" or "standard")
+                                 display=simple_display and "simple" or "standard",edit_paragraphs=edit_document)
         if layout == "flow" and not interim:
             from .structure import apply_structure
             blocks, roles = apply_structure(blocks, preset, bold_measured=bold_measured)
@@ -1956,6 +1958,23 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         elif not interim:
             norm_report = {"schema_version": 1, "enabled": False, "complete": True,
                            "output": out_h.name, "summary": {"changes": 0, "review": 0}}
+        if edit_document:
+            from .document_editing import format_blocks, clean_output_blocks
+            # Names were collected before normalization; add the converted
+            # forms too, without touching the source name inventory.
+            from .collate.zh import _cc
+            from .korean_forms import korean_forms
+            names=entry_names | {_cc('s2t').convert(n) for n in entry_names}
+            if norm_options and norm_options.korean_forms:
+                names |= {korean_forms(n) for n in names}
+            blocks,edit_stats=format_blocks(blocks,names,punctuation=bool(norm_options and norm_options.punctuation))
+            blocks=clean_output_blocks(blocks)
+            excluded=[dict(page=r['pdf_page'],**item) for r in chunk for item in r.get('_document_excluded',())]
+            edit_stats['excluded_marginalia']=excluded
+            edit_stats['navigation_bookmarks']=0
+            if norm_report is not None:
+                norm_report['document_editing']=edit_stats
+            log(f"문단·공백 정리: 약재 {edit_stats['entries']}개 · 빈 줄 {edit_stats['blank_paragraphs']}개 · 문단 안 줄바꿈 {edit_stats['removed_line_breaks']}개 제거")
         st = None
         if template and not interim:
             from .hwpx_template import build_hwpx_template
@@ -1976,7 +1995,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             st = build_hwpx(blocks, str(out_h), min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
                             highlight=not args.no_highlight, page_breaks=not args.no_page_breaks and not simple_display,
                             memos=getattr(args, "memo", "none") != "inline",
-                            preset=preset if layout == "flow" else None, simple=simple_display)
+                            preset=preset if layout == "flow" else None, simple=simple_display,edited=edit_document)
         fissues = check_hwpx_file(str(out_h))
         vi = st.get("validate_issues")
         if isinstance(vi, int) and vi > 0:                              # python-hwpx 스키마·꾸러미 검증(양식으로 만든 파일만 값이 있음)
@@ -2049,7 +2068,8 @@ def normalization_options(args):
     return NormalizationOptions(traditional=enabled and not getattr(args, "no_traditional", False),
                                 yun=enabled and not getattr(args, "no_yun", False),
                                 punctuation=punctuation, punctuation_rules=rules,
-                                korean_forms=enabled and not getattr(args, "no_korean_forms", False))
+                                korean_forms=enabled and not getattr(args, "no_korean_forms", False),
+                                editorial_simplified=not getattr(args,'no_document_editing',False))
 
 
 def _check_document(args) -> str | None:
@@ -2754,6 +2774,7 @@ def build_parser():
         p.add_argument("--check-list", choices=["none", "extra", "all"], default="none",
                        help="쪽 끝 확인 목록: none=없음(기본, 문서에는 OCR 본문만), extra=본문에 표시 못 한 항목만, all=전부. 전체 목록은 검수 화면에 있음")
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
+        p.add_argument("--no-document-editing", action="store_true", help="기본 HWPX의 문단 이음·약재 사이 빈 줄·약재명과 쉼표 뒤 공백 정리를 끔")
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
         p.add_argument("--no-traditional", action="store_true", help="간체→번체 변환과 한자 치환 문맥 후보를 끔(云/雲·부호는 별도)")
         p.add_argument("--no-yun", action="store_true", help="云/雲 문맥 교정을 끔(원래 글자 보존)")

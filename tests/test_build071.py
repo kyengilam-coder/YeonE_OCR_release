@@ -99,7 +99,8 @@ class BuildNormalization(unittest.TestCase):
             with ZipFile(self.work.out_dir / name) as archive:
                 self.assertIn("髒 / 汉书。", archive.read(xml_name).decode("utf-8"))
         audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
-        self.assertEqual(audit["options"], {"traditional": False, "yun": False, "punctuation": True})
+        self.assertEqual(audit["options"], {"traditional": False, "yun": False, "punctuation": True,
+                                            "korean_forms": True, "editorial_simplified": True})
         self.assertTrue(audit["custom_punctuation"])
         self.assertTrue(audit["complete"])
         self.assertEqual(self.work.record_path(1).read_text(encoding="utf-8"), self.original)

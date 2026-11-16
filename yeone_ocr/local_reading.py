@@ -10,6 +10,31 @@ import difflib
 import math
 import re
 
+
+def corrected_output_records(records, source):
+    """Overlay current comparison edits on a transient output view only."""
+    import copy
+    from pathlib import Path
+    from .comparison import ComparisonProject, ComparisonError
+    projects={};output=[]
+    for record in records:
+        reference=(record.get('local_first') or {}).get('project_path')
+        if not reference:
+            output.append(record);continue
+        key=str(Path(reference).resolve())
+        if key not in projects:
+            projects[key]=ComparisonProject.load(key,source_path=source)
+        project=projects[key];number=record['pdf_page'];page=project.page(number)
+        if page.get('corrected_text') is None:
+            output.append(record);continue
+        baseline=next((r for r in page['runs'] if r['id']==page['baseline_run_id']),None)
+        if baseline is None or project.source_sha256!=record['local_first'].get('source_sha256'):
+            raise ComparisonError('교정 프로젝트와 판독 기록의 원본·기준 판독을 확인하세요.')
+        reading=reading_from_run(baseline['raw'],number,'horizontal' if record.get('mode')=='horizontal_zh' else 'vertical',text=project.text(number))
+        current=copy.deepcopy(record);current['merged']['regions']=reading.model_dump()['regions']
+        output.append(current)
+    return output
+
 from .schema import Column, PageReading, Paragraph, Region, Uncertain
 
 

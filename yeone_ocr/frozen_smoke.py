@@ -1535,6 +1535,34 @@ def run(report_path: Path) -> int:
             return {"raster_text_directions": checked, "network_calls": 0}
         check("image-reading-direction", direction_probe)
 
+        def pdf_font_probe():
+            import hashlib
+            import pymupdf
+            from . import textlayer as layer
+            from .pdfio import text_layer
+            manifest = json.loads(layer._FONT_FILE.with_name("manifest.json").read_text(encoding="utf-8-sig"))
+            assert hashlib.sha256(layer._FONT_FILE.read_bytes()).hexdigest() == manifest["sha256"]
+            assert "SIL OPEN FONT LICENSE" in layer._FONT_FILE.with_name("LICENSE.txt").read_text(encoding="utf-8")
+            samples = ["English OCR: save and reopen 123.", "日本語ひらがなカタカナ漢字", "青黛㕮䈽䓖䗪䚡䵟�"]
+            with pymupdf.open() as pdf:
+                page = pdf.new_page(width=600, height=400)
+                font, cids = layer.add_font(pdf, "".join(samples))
+                lines = [layer.Line("h", [(c, (.05+i*.025, .15+row*.15, .075+i*.025, .19+row*.15))
+                                         for i,c in enumerate(text)], "uniform") for row,text in enumerate(samples)]
+                layer.write_lines(pdf, page, lines, (0,0,600,400), font, cids)
+                target = folder / "pdf-font.pdf"
+                pdf.save(target, deflate=True)
+            with pymupdf.open(target) as pdf:
+                got = layer.own_text(pdf, 1)
+                assert "".join("".join(got).split()) == "".join("".join(samples).split())
+                assert pdf[0].search_for("save and reopen")
+                assert text_layer(pdf, 1).char_count == 0
+                assert pdf[0].get_fonts()[0][2] == "Type0"
+            return {"font": "Source Han Serif K Medium", "font_hash": manifest["sha256"],
+                    "english_word_spaces": True, "japanese_and_rare_han": True,
+                    "existing_uncertainty_marker_preserved": True, "os_font_required_for_pdf": False}
+        check("bundled-pdf-font-and-languages", pdf_font_probe)
+
         def pipeline_probe():
             from .cli import CANCEL, main
             from .verify import check_hwpx_file
@@ -1919,6 +1947,27 @@ def run(report_path: Path) -> int:
             assert reopened.page(1)["auto_selections"] == project.page(1)["auto_selections"]
             return {"selected": "ppocrv6", "engines_compared": 4, "history": "saved and reopened", "network_calls": 0}
     check("automatic-local-engine-selection", automatic_probe)
+
+    def document_editing_probe():
+        from .blocks import Block
+        from .document_editing import format_blocks, clean_output_blocks
+        from .hwpx_builder import build_hwpx
+        from zipfile import ZipFile
+        from xml.etree import ElementTree as ET
+        blocks,stats=format_blocks([Block(type='para',text='靑黛味咸,寒。\n主治。'),
+                                    Block(type='para',text='胡黃連味苦,平。')],{'靑黛','胡黃連'})
+        assert stats['entries']==2 and blocks[0].text=='靑黛 味咸, 寒。主治。'
+        blocks=clean_output_blocks(blocks)
+        with tempfile.TemporaryDirectory(prefix='yeone-edit-smoke-') as temporary:
+            target=Path(temporary)/'edited.hwpx'
+            build_hwpx(blocks,str(target),edited=True)
+            with ZipFile(target) as archive:
+                root=ET.fromstring(archive.read('Contents/section0.xml'))
+                assert not any(node.tag.endswith('}lineBreak') for node in root.iter())
+                assert not any(node.tag.endswith('}bookmark') for node in root.iter())
+                assert b'Source Han Serif K Medium' in archive.read('Contents/header.xml')
+        return {'paragraphs':2,'blank_paragraphs':1,'hard_line_breaks':0,'network_calls':0}
+    check('edited-hwpx-paragraph-spacing', document_editing_probe)
 
     report["ok"] = all(item["ok"] for item in report["checks"])
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

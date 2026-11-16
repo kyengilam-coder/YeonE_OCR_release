@@ -8,6 +8,7 @@ EXIF 방향 태그가 있는 사진(휴대전화 세로 사진)은 JPEG 를 그�
 """
 from __future__ import annotations
 import hashlib, io, os, re
+from threading import RLock
 from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
@@ -20,6 +21,54 @@ _TURN = {3: 180, 6: 270, 8: 90}  # EXIF 방향(순수 회전) → insert_image �
 
 PAGE_LABEL_RE = re.compile(r"^\s*[-–—ー一]\s*(\d{1,4})\s*[-–—ー一]\s*$")
 OWN_LAYER_FONT = "YeonEOCR-Glyphless"   # 연어OCR 이 넣은 글자층(textlayer)의 글꼴. 이 글자는 자기 판독이므로 기존 OCR(증인)로 읽지 않는다
+OWN_LAYER_PREFIX = "YEOOCR+"
+_LAYER_LOCK = RLock()
+
+
+def own_font_names(page):
+    return {f[4].encode() for f in page.get_fonts(full=True)
+            if f[3] == OWN_LAYER_FONT or f[3].startswith(OWN_LAYER_PREFIX)}
+
+
+def uses_own_font(page):
+    names = own_font_names(page)
+    return bool(names) and any(name in names for name in re.findall(rb"/(\S+)\s+[\d.]+\s+Tf", page.read_contents()))
+
+
+def own_content_refs(page):
+    """Identify our separate hidden streams by resource identity, not family name.
+
+    Ordinary source PDFs may use the same installed font. They remain valid
+    independent witnesses; the reserved subset prefix marks only our layer.
+    """
+    from .textlayer import content_refs
+    names = own_font_names(page)
+    return [x for x in content_refs(page.parent, page)
+            if (m := re.match(rb"\s*q BT 3 Tr /(\S+) 1 Tf", page.parent.xref_stream(x) or b""))
+            and m.group(1) in names]
+
+
+def layer_text_data(page, kind="rawdict", *, include_own=False, only_own=False):
+    """Extract a selected layer without changing the saved PDF or its resources."""
+    with _LAYER_LOCK:
+        if include_own:
+            return page.get_text(kind)
+        refs = own_content_refs(page)
+        if not include_own and not only_own and not refs and uses_own_font(page):
+            # A third-party optimizer merged the streams. Do not treat our
+            # own OCR as independent evidence when it cannot be isolated.
+            return {"blocks": []}
+        if include_own or (not refs and not only_own):
+            return page.get_text(kind)
+        from .textlayer import content_refs, _set_contents
+        doc = page.parent
+        original = doc.xref_get_key(page.xref, "Contents")[1]
+        selected = refs if only_own else [x for x in content_refs(doc, page) if x not in refs]
+        try:
+            _set_contents(doc, page, selected)
+            return page.get_text(kind)
+        finally:
+            doc.xref_set_key(page.xref, "Contents", original)
 
 
 def is_own_span(span: dict) -> bool:
@@ -305,7 +354,7 @@ def text_layer(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0, ow
     연어OCR 이 넣은 글자층(textlayer)은 자기 판독이라 빼고 읽는다(own=True 면 그것도)."""
     page = doc[pdf_page - 1]
     tl = TextLayer(page_width=page.rect.width, page_height=page.rect.height)
-    d = page.get_text("dict")
+    d = layer_text_data(page, "dict", include_own=own)
     box, way = _shown(page)                                  # /Rotate 쪽: 쪽 이미지와 같은 틀로
     vlines, hlines = [], []
     for b in d["blocks"]:
@@ -352,7 +401,7 @@ def layer_chars(doc: pymupdf.Document, pdf_page: int, col_tol_pt: float = 4.0, o
     세로 줄(dir=(0,1))은 text_layer 처럼 x 중심으로 묶어 열 하나로(글자는 위→아래), 가로 줄은 y 중심으로 묶어 줄 하나로(왼→오른쪽).
     연어OCR 이 넣은 글자층은 text_layer 처럼 빼고 읽는다(own=True 면 그것도)."""
     page = doc[pdf_page - 1]
-    d = page.get_text("rawdict")
+    d = layer_text_data(page, "rawdict", include_own=own)
     box, way = _shown(page)                                  # /Rotate 쪽: 쪽 이미지·page_frame 과 같은 틀로(3차 조각이 반대편 구석을 자르지 않게)
     vparts: list[tuple[float, list]] = []; hparts: list[tuple[float, list]] = []
     for b in d["blocks"]:

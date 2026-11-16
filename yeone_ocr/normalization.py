@@ -146,6 +146,7 @@ class NormalizationOptions:
     punctuation_rules: list[dict] | None = None
     # 한국 표준 한자체(KS X 1001): 為→爲, 真→眞, 説→說 … 간체→번체 뒤에 적용(korean_forms.py).
     korean_forms: bool = True
+    editorial_simplified: bool = False  # document editing: choose OpenCC's contextual form for simplified-only characters
 
     @property
     def enabled(self) -> bool:
@@ -354,7 +355,8 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
     replacements = []
     # 1:多 글자와 云/雲은 원래 글자를 보존하고 아래에서 문맥 후보로 보낸다.
     if len(text) == len(converted):
-        after = "".join(old if old in "云雲" or old in ambiguous else new for old, new in zip(text, converted))
+        after = "".join(old if old in "云雲" or (old in ambiguous and
+                       (not options.editorial_simplified or old in ambiguous[old])) else new for old,new in zip(text,converted))
         # 반복 글자도 같은 위치끼리 대응한다. SequenceMatcher는 雲云 같은 경우 글자를
         # 삽입/삭제로 정렬할 수 있어, 길이가 같은 정자 변환에는 쓰지 않는다.
         runs = re.finditer(r"1+", "".join("1" if a != b else "0" for a, b in zip(text, after)))
@@ -367,12 +369,13 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
             continue
         after = converted[c:d]
         if b - a == d - c:
-            after = "".join(old if old in "云雲" or old in ambiguous else new for old, new in zip(text[a:b], after))
+            after = "".join(old if old in "云雲" or (old in ambiguous and
+                           (not options.editorial_simplified or old in ambiguous[old])) else new for old,new in zip(text[a:b],after))
         if a == b:
             # 중국어 정자 변환기는 보통 글을 삽입하지 않는다. 미지원 결과를 통째로 버리기보다 명시적으로 거부.
             raise ValueError("정자 변환기가 원문에 없는 삽입을 반환했습니다.")
         replacements.append((a, b, after, {}))
-    _replace_spans(result, replacements, "opencc_s2t")
+    _replace_spans(result, replacements, "opencc_s2t_editorial" if options.editorial_simplified else "opencc_s2t")
     if options.korean_forms:
         # OpenCC gives Chinese Traditional forms (为→為, 真 stays 真); a Korean book and its answer files
         # use the KS X 1001 forms (爲, 眞). One character for one, so positions do not move. Characters
@@ -515,7 +518,8 @@ def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | N
     report = {"schema_version": 1, "rule_version": RULE_VERSION,
               "msr_source": data["source_name"], "msr_sha256": data["sha256"],
               "rule_count": len(rules), "changes": [], "review": [], "blocks": [], "decisions": [],
-              "options": {"traditional": options.traditional, "yun": options.yun, "punctuation": options.punctuation},
+              "options": {"traditional": options.traditional, "yun": options.yun, "punctuation": options.punctuation,
+                          "korean_forms": options.korean_forms, "editorial_simplified": options.editorial_simplified},
               "punctuation_rules": [dict(r) for r in rules if _punctuation_rule(r)],
               "custom_punctuation": options.punctuation_rules is not None}
     prepared = []

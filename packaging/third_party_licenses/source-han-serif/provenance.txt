@@ -1,0 +1,9 @@
+{
+  "font": "SourceHanSerifK-Medium.otf",
+  "family": "Source Han Serif K Medium",
+  "upstream": "https://github.com/adobe-fonts/source-han-serif",
+  "revision": "7889f11bf31170b5d092a083b357c8c8130f89e0",
+  "sha256": "037bd686a2e93e04402ee29abd684285a80ba32f39e794caae8e13a456f7e792",
+  "license": "SIL Open Font License 1.1",
+  "license_file": "LICENSE.txt"
+}

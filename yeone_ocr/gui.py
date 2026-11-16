@@ -2860,7 +2860,7 @@ class App(tk.Tk):
                     Tip(cb, "판독·간체→번체 결과의 자형을 한국 표준 한자체(KS X 1001)로 맞춥니다: 為→爲, 真→眞, 説→說, 黄→黃, "
                             "教→敎, 即→卽 등. 한국 자형에 함께 있는 글자(余와 餘 등)는 바꾸지 않습니다. 끄면 읽은 자형 그대로 둡니다.", self)
             return f
-        R["rules"] = row(b, "적용할 교정", "규칙으로 바꿈 · 모델 호출 없음", rules)
+        R["rules"] = row(b, "적용할 교정", "HWPX 기본: 문단 내부 줄 이음 · 약재 사이 빈 줄 · 이름/쉼표 뒤 공백", rules)
 
         def punctuation(parent):
             f = boxed(parent); self._punc_btns = []
