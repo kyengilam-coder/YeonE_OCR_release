@@ -419,8 +419,22 @@ class Template(unittest.TestCase):
                 sec = ET.fromstring(z.read("Contents/section0.xml"))
         self.assertTrue(st["page_number_from_template"]); self.assertEqual(st["template_dropped"]["footers"], 0)
         count = lambda s: (len(s.findall(f".//{HP}ctrl/{HP}footer")), len(s.findall(f".//{HP}ctrl/{HP}footer//{HP}autoNum")) + len(s.findall(f".//{HP}ctrl/{HP}footer//{HP}pageNum")))
-        self.assertEqual(count(sec), count(tsec))                                             # 양식의 쪽 번호 꼬리말 그대로, 하나만
+        self.assertEqual(count(sec), count(tsec))
         self.assertEqual(count(sec)[0], 1); self.assertGreater(count(sec)[1], 0)
+
+    def test_body_only_template_excludes_existing_header_footer_numbers(self):
+        from yeone_ocr.hwpx_template import build_hwpx_template
+        with tempfile.TemporaryDirectory() as td:
+            template=Path(td)/'numbered.hwpx';make_template2(template,page_number=True)
+            out=Path(td)/'body.hwpx'
+            build_hwpx_template([Block(type='para',text='本文與原注')],str(out),str(template),edited=True)
+            from zipfile import ZipFile
+            with ZipFile(out) as archive:
+                root=ET.fromstring(archive.read('Contents/section0.xml'))
+                for name in ('header','footer','pageNum','bookmark'):
+                    self.assertFalse(root.findall('.//'+HP+name),name)
+                self.assertFalse([n for n in root.iter(HP+'autoNum') if n.get('numType')=='PAGE'])
+                self.assertEqual(''.join(n.text or '' for n in root.iter(HP+'t')),'本文與原注')
 
     def test_green_and_blue_spans_keep_template_bold(self):
         from yeone_ocr.hwpx_template import build_hwpx_template

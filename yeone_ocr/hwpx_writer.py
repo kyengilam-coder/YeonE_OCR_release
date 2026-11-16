@@ -353,6 +353,16 @@ class TemplateLook:
         rep = sec0.clear_body(on_control_content="strip")             # 본문과 글·개체가 든 머리말·꼬리말을 비운다(쪽 설정은 그대로)
         for hide in list(sec0.element.iter(f"{HP}pageHiding")):      # 양식 첫 쪽(표지)의 머리말·쪽 번호 감추기는 빼고
             ctrl = hide.getparent(); ctrl.getparent().remove(ctrl)
+        if getattr(self, 'body_only', False):
+            for node in list(sec0.element.iter()):
+                if node.tag in (HP+'header', HP+'footer', HP+'pageNum', HP+'bookmark') or (node.tag==HP+'autoNum' and node.get('numType')=='PAGE'):
+                    parent=node.getparent()
+                    if parent is not None:
+                        parent.remove(node)
+            for control in list(sec0.element.iter(HP+'ctrl')):
+                if not len(control) and control.getparent() is not None:
+                    control.getparent().remove(control)
+            sec0.mark_dirty()
         after = stories()
         dropped.update(headers=before[0] - after[0], footers=before[1] - after[1],
                        controls=getattr(rep, "stripped_controls", 0), paragraphs=getattr(rep, "removed_paragraphs", 0))
