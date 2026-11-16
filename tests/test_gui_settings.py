@@ -308,7 +308,7 @@ class SettingsTabRealTk(unittest.TestCase):
         from yeone_ocr.gui_confusions import ConfusionLedgerDialog
         memory.store_path().write_text(json.dumps({"format": memory.FORMAT, "version": memory.VERSION, "enabled": True,
             "suppressed": [], "documents": {"d" * 32: {"at": "2026-11-15T00:00:00+0000", "source": "a.pdf", "pages": 1,
-                "engines": {"ppocrv6": {"versions": [], "seen": {"己": 20},
+                "engines": {"ppocrv6": {"versions": [], "seen": {"己": 20}, "coverage_basis": memory.COVERAGE_BASIS,
                                         "pairs": [["己", "已", {"human": 3}, ["甲「己」丙"]]]}}}}}), encoding="utf-8")
         dlg = ConfusionLedgerDialog(app)
         try:
