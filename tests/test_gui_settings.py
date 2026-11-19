@@ -167,7 +167,15 @@ class SettingsTabRealTk(unittest.TestCase):
             with mock.patch.object(gemini_quota, 'inventory', return_value=dict(models=rows, current=rows[0]['id'])), \
                     mock.patch.object(self.gui, 'write_config') as save, mock.patch.object(self.gui.messagebox, 'showinfo') as info:
                 app.show_gemini_models()
-                win = next(w for w in app.winfo_children() if w.winfo_class() == 'Toplevel' and w.title() == 'Gemini 구독 모델·잔여 한도')
+                win = next(w for w in app.winfo_children() if w.winfo_class() == 'Toplevel' and w.title() == 'Antigravity 모델·잔여 한도')
+                widgets = list(self.walk(win))
+                self.assertTrue(any('다른 Google 계정' in w.cget('text') and '프로필 메뉴' in w.cget('text')
+                                    for w in widgets if w.winfo_class() == 'TLabel'))
+                open_app = next(w for w in widgets if w.winfo_class() == 'TButton' and w.cget('text') == 'Gemini 앱 열기')
+                with mock.patch.object(self.gui.webbrowser, 'open') as browser:
+                    open_app.invoke()
+                browser.assert_called_once_with('https://gemini.google.com/app')
+                self.assertEqual(app.cfg, old)
                 tree = next(w for w in self.walk(win) if w.winfo_class() == 'Treeview')
                 deadline = time.monotonic() + 5
                 while not tree.get_children() and time.monotonic() < deadline:

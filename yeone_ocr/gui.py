@@ -2463,7 +2463,7 @@ class App(ResultNavigation, tk.Tk):
                                          tip="쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 봅니다(실행 때와 같은 방식 · 구독 사용량에서 조금 차감). "
                                              "답하는지, 어느 모델인지, 실패하면 그 프로그램이 말한 이유를 보여 줍니다. 긴 작업 전에 눌러 보세요.")
             self.b_plan_test.pack(side="left", padx=(P(8), 0))
-            self._btn(f, "Gemini 모델·한도…", lambda: App.show_gemini_models(self), lock=False).pack(side="left", padx=(P(8), 0))
+            self._btn(f, "Antigravity 모델·한도…", lambda: App.show_gemini_models(self), lock=False).pack(side="left", padx=(P(8), 0))
             return f
         def split(parent):
             cb = ttk.Checkbutton(parent, text="로그인된 구독 여러 개에 쪽 나눠 보내기", variable=self.v_local_ai_split)
@@ -4736,10 +4736,12 @@ class App(ResultNavigation, tk.Tk):
         import queue
         from . import gemini_quota
         win = tk.Toplevel(self)
-        win.title("Gemini 구독 모델·잔여 한도")
+        win.title("Antigravity 모델·잔여 한도")
         win.geometry("1100x560")
         ttk.Label(win, text="Google 제공 잔여 비율 · 같은 한도 그룹은 공유됨 · 시간은 이 PC의 현지 시간\n"
-                  "선택 모델부터 시작하고 한도가 소진되면 다른 Gemini 모델 → ChatGPT → Claude 순으로 전환합니다. 유료 API·AI 크레딧은 사용하지 않습니다.").pack(anchor="w", padx=12, pady=10)
+                  "선택 모델부터 시작하고 한도가 소진되면 다른 Gemini 모델 → ChatGPT → Claude 순으로 전환합니다. 유료 API·AI 크레딧은 사용하지 않습니다.\n"
+                  "Gemini 앱의 한도는 앱에서 확인할 수 있습니다. 다른 Google 계정을 쓰려면 브라우저에서 Gemini 앱의 프로필 메뉴를 여세요.",
+                  justify="left").pack(anchor="w", padx=12, pady=10)
         note = tk.StringVar(value="조회 중… (모델 호출 없음)")
         ttk.Label(win, textvariable=note, wraplength=1060).pack(anchor="w", padx=12)
         frame = ttk.Frame(win)
@@ -4801,6 +4803,7 @@ class App(ResultNavigation, tk.Tk):
         refresh_button = ttk.Button(bar, text="새로고침", command=refresh)
         refresh_button.pack(side="left")
         ttk.Button(bar, text="선택 적용", command=apply).pack(side="left", padx=8)
+        ttk.Button(bar, text="Gemini 앱 열기", command=lambda: webbrowser.open("https://gemini.google.com/app")).pack(side="left")
         ttk.Button(bar, text="닫기", command=win.destroy).pack(side="right")
         refresh()
 
