@@ -3899,7 +3899,7 @@ class App(ResultNavigation, tk.Tk):
                                       state="readonly", width=1)
         self.cb_resume.pack(fill="x")
         Tip(self.cb_resume, RESUME_TIP, self)
-        from .gui_document_actions import make_hwpx, export_menu, review_menu
+        from .gui_document_actions import make_hwpx, export_menu, review_menu, gemini_app_menu
         self.b_run = self._btn(b, RUN_TEXT, lambda: make_hwpx(self), style="Seal.TButton",
                                tip="기본 OCR 작업에서 기록을 이어 쓰고 HWPX를 만듭니다.")
         self.b_run.grid(row=2, column=0, sticky="ew", pady=(P(8), 0))
@@ -3909,6 +3909,10 @@ class App(ResultNavigation, tk.Tk):
         self.b_export = self._btn(actions, EXPORT_TEXT, lambda: export_menu(self, self.b_export),
                                   tip="현재 또는 다른 폴더의 판독으로 HWPX·문자 PDF를 만듭니다.")
         self.b_export.pack(fill="x")
+        self.b_gemini_app = self._btn(actions, "Gemini 앱으로 판독 ▾",
+                                    lambda: gemini_app_menu(self, self.b_gemini_app),
+                                    tip="남은 쪽을 Gemini 앱에 직접 올릴 PDF로 내보내고, 답변을 기본 OCR 작업에 합칩니다.")
+        self.b_gemini_app.pack(fill="x", pady=(P(6), 0))
         self.b_review_pending = self._btn(actions, REVIEW_ONLY_TEXT, lambda: self.do_run_pdf(review_only=True),
             tip='기본 OCR 작업에서 저장된 쪽의 미완료 AI 검증만 진행합니다. 새 쪽을 판독하거나 문서를 다시 만들지 않습니다.')
         self.b_run_pdf.grid(row=3, column=0, sticky="ew", pady=(P(6), 0))
@@ -3916,7 +3920,7 @@ class App(ResultNavigation, tk.Tk):
         self.b_stop = ttk.Button(stops, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
         self.b_stop.pack(fill="x")
         Tip(self.b_stop, STOP_TIP, self)
-        for btn in (self.b_run, self.b_run_pdf, self.b_stop, self.b_review_pending, self.b_export):
+        for btn in (self.b_run, self.b_run_pdf, self.b_stop, self.b_review_pending, self.b_export, self.b_gemini_app):
             btn.configure(width=1)                                          # 글 길이로 오른쪽 단(340)을 넓히지 않는다 — 단 너비를 다 쓰고, 긴 글(실행 중)은 끝을 줄임
         self.t_run_status = App._rich_line(self, b)                        # 중지를 누른 뒤·끝난 뒤(·입력을 비운 뒤의 안내)만 — v_status
         self.l_run_cap = L(b, "", "CAP", "MUTED", wrap=True); self.l_run_cap.grid(row=7, column=0, sticky="ew", pady=(P(8), 0))
@@ -3988,7 +3992,7 @@ class App(ResultNavigation, tk.Tk):
         self.l_led_total_name = L(tr, "합계", "BODY_B"); self.l_led_total_name.pack(side="left")
         self.l_led_total = L(tr, "—", "BODY_B"); self.l_led_total.pack(side="right")
         # 원본이 있어야 눌리는 단추: 실행 둘·[비용 미리 보기](실행 중에도 잠김), 열기 넷(열기만 함 — 실행 중에도 눌림)
-        self._src_locked = [self.b_run, self.b_run_pdf, self.b_export, self.b_review_pending, self.b_estimate]
+        self._src_locked = [self.b_run, self.b_run_pdf, self.b_export, self.b_gemini_app, self.b_review_pending, self.b_estimate]
         self._src_open = [self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work, self.b_open_result_editor]
         return run
 

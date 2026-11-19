@@ -355,19 +355,23 @@ class Work:
         with self._lock:
             return self._source_state(dpi)[2]
 
-    def ensure_source(self, dpi: int | None = None) -> None:
+    def ensure_source(self, dpi: int | None = None, *, expected_sha256: str | None = None) -> None:
         """원본 내용과 영상 설정이 같은 작업만 재사용한다. 옛 결과는 삭제하지 않고 archives/에 보관한다."""
         if not self.pdf_path.exists():
             return                                      # 기록만 다루는 평가·시험은 원본이 없을 수 있다
         with self._lock:
             manifest_path = self.dir / "source.json"
             previous, current, same = self._source_state(dpi)
+            if expected_sha256 is not None and current["sha256"] != expected_sha256:
+                raise ValueError("판독 결과에 연결된 원본과 현재 원본이 다릅니다.")
             names = ("pages", "textlayer", "readings", "crops", "out", "collate", "eval", "state.json",
                      "review.html", "report.md", "confusion.json", "context.json", "source.json")
             where = lambda n: (self.public if n in PUBLIC_NAMES else self.dir) / n    # 문서·검수 화면·보고는 결과 폴더에
             populated = any(where(n).is_file() or
                             (where(n).is_dir() and any(where(n).iterdir())) for n in names)
             if not same and populated:
+                if expected_sha256 is not None:
+                    raise ValueError("기존 작업 자료의 원본을 검증할 수 없습니다.")
                 root = self.dir.resolve()
                 archive_root = root / "archives"
                 if archive_root.is_symlink() or archive_root.resolve() != archive_root:
@@ -465,6 +469,23 @@ class Work:
 
     def save_record(self, page: int, rec: dict) -> None:
         write_atomic(self.record_path(page), json.dumps(rec, ensure_ascii=False, indent=1))
+
+    def save_new_record(self, page: int, rec: dict) -> bool:
+        """Publish a complete record only if the destination is still free."""
+        path = self.record_path(page)
+        tmp = _tmp_path(path)
+        try:
+            tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+            try:
+                if os.name == "nt":
+                    os.rename(tmp, path)
+                else:
+                    os.link(tmp, path)
+            except FileExistsError:
+                return False
+            return True
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def backup_record(self, page: int) -> Path | None:
         """기록을 readings/prev/ 에 복사해 둔다. 다시 비교·다시 판독으로 덮어쓰기 전에 — 손으로 고친 merged 가 남게.
