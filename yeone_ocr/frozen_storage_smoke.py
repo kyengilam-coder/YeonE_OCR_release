@@ -55,16 +55,23 @@ def review_gui_probe():
     root = tk.Tk()
     root.withdraw()
     try:
-        variable = tk.StringVar(root, value=gui.RESUME_LABELS['review-only'])
-        widget = ttk.Combobox(root, textvariable=variable, values=list(gui.RESUME_LABELS.values()), state='readonly')
-        app = SimpleNamespace(cfg={'ocr_strategy': 'local-first'}, v_local_resume=variable,
-            v_ocr_strategy=tk.StringVar(root, value=gui.OCR_STRATEGY_LABELS['local-first']))
-        flags = gui.App._strategy_opts(app)
-        assert widget.get() == gui.RESUME_LABELS['review-only']
-        assert '--local-review-only' in flags and '--local-resume' not in flags
-        parsed = cli.build_parser().parse_args(['run', 'synthetic.pdf', *flags])
-        assert parsed.local_review_only
-        return {'choice': widget.get(), 'gui_to_cli': True, 'network_calls': 0}
+        launches = []
+        app = SimpleNamespace(cfg={'ocr_strategy': 'local-first'},
+            v_local_resume=tk.StringVar(root, value=gui.RESUME_LABELS['unfinished']),
+            v_reader=tk.StringVar(root, value='gemini'),
+            _need_pdf=lambda: True, _prepare_env=lambda: True, _save_book=lambda **_: None,
+            pdf=lambda: 'synthetic.pdf', work=lambda: Path('synthetic-work'), _pages=lambda: [],
+            _read_opts=lambda: ['--reader', 'gemini'], _glyph_opts=lambda **_: [], _answered_opts=lambda: [],
+            nb=SimpleNamespace(select=lambda _: None), _with_plan=lambda kind, go: go([]),
+            start=lambda args, label, **options: launches.append((args, label, options)))
+        button = ttk.Button(root, text=gui.REVIEW_ONLY_TEXT, command=lambda: gui.App.do_run_pdf(app, review_only=True))
+        with patch.object(gui.App, '_result_editors_ready', return_value=True), patch.object(gui.App, '_save_ledger'):
+            button.invoke()
+        (args, label, options), = launches
+        assert label == gui.REVIEW_ONLY_TEXT and options['open_after'] is None and '--out' not in args
+        parsed = cli.build_parser().parse_args(args)
+        assert parsed.local_review_only and parsed.local_ai_review
+        return {'choice': label, 'gui_to_cli': True, 'network_calls': 0}
     finally:
         root.destroy()
 
