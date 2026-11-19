@@ -173,6 +173,7 @@ class ScreenshotStorage(unittest.TestCase):
     def test_saved_screenshot_runs_through_existing_ocr_and_hwpx_pipeline(self):
         from yeone_ocr.cli import CANCEL, main
         from yeone_ocr.reader_mock import MockReader
+        from yeone_ocr.result_versions import latest_document
         from yeone_ocr.schema import PageReading, Region, Paragraph, Column
         from yeone_ocr.verify import check_hwpx_file
 
@@ -196,7 +197,8 @@ class ScreenshotStorage(unittest.TestCase):
                          "--no-adjudicate", "--no-second-pass", "--no-context", "--checkpoint", "0", "--upscale", "1"])
         self.assertEqual(code, 0, output.getvalue())
         self.assertEqual(seen, [((300, 240), (3, 5, 7))])
-        hwpx = work / "out" / f"{source.stem}.hwpx"
+        hwpx = latest_document(source, work, '.hwpx')
+        self.assertIsNotNone(hwpx)
         self.assertEqual(check_hwpx_file(str(hwpx)), [])
         with ZipFile(hwpx) as archive:
             self.assertIn("天地玄黃 스크린샷", archive.read("Contents/section0.xml").decode("utf-8"))

@@ -441,7 +441,8 @@ class SubscriptionClient:
         if isinstance(structured, (dict, list)):
             text = json.dumps(structured, ensure_ascii=False)
         else:
-            text = _json_text(structured if isinstance(structured, str) else reply if isinstance(reply, str) else "")
+            text = _json_text(structured if isinstance(structured, str) and structured.strip()
+                              else reply if isinstance(reply, str) else "")
         ended = data.get("finished_reason")
         if isinstance(ended, str) and ended:               # print_timeout / interrupted / error: a partial answer
             return text, False, ended[:80], tokens, actual

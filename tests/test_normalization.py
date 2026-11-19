@@ -96,8 +96,7 @@ class ContextNormalization(unittest.TestCase):
 
     def test_macro_hanzi_is_a_proposal_not_a_global_replacement(self):
         result = normalize_text("技術，白術；樹幹，干燥；贏得，羸弱；學校教育。", resolver=keep_valid)
-        self.assertEqual(result.text, "技術, 白術; 樹幹, 乾燥; 贏得, 羸弱; 學校敎育. ")   # 敎: Korean standard form; dry sense is now contextual.
-        self.assertNotIn("朮", result.text)
+        self.assertEqual(result.text, "技術, 白朮; 樹幹, 乾燥; 贏得, 羸弱; 學校敎育. ")
         self.assertNotIn("樹乾", result.text)
         self.assertNotIn("羸得", result.text)
 
@@ -108,17 +107,17 @@ class ContextNormalization(unittest.TestCase):
             decisions = keep_valid(items)
             for item in items:
                 before = item["context"][:item["target_offset"]]
-                if item["source"] == "術" and before.endswith("白"):
+                if item["source"] == "術" and before.endswith("何"):
                     decisions[item["id"]] = "朮"
                 elif item["source"] == "干" and before.endswith("樹"):
                     decisions[item["id"]] = "幹"
                 elif item["source"] == "干" and item["context"][item["target_offset"] + 1:].startswith("燥"):
                     decisions[item["id"]] = "乾"
             return decisions
-        out, report = normalize_blocks([Block(type="para", text="技術，白術；樹干，干燥。", page=12)], resolver=decide)
-        self.assertEqual(out[0].text, "技術, 白朮; 樹幹, 乾燥. ")
+        out, report = normalize_blocks([Block(type="para", text="技術，何術；樹干，干燥。", page=12)], resolver=decide)
+        self.assertEqual(out[0].text, "技術, 何朮; 樹幹, 乾燥. ")
         self.assertTrue(report["complete"])
-        self.assertTrue(all(r["original_context"] == "技術，白術；樹干，干燥。" for r in requests))
+        self.assertTrue(all(r["original_context"] == "技術，何術；樹干，干燥。" for r in requests))
         self.assertTrue(all(d["page"] == 12 and d["block"] == 0 for d in report["decisions"]))
 
     def test_simplified_only_source_is_never_accepted_as_completed(self):
@@ -126,8 +125,8 @@ class ContextNormalization(unittest.TestCase):
         def keep_wrong(items):
             requests.extend(items)
             return {item["id"]: item["source"] for item in items}
-        out, report = normalize_blocks([Block(type="para", text="白术发言。")], resolver=keep_wrong)
-        self.assertEqual(out[0].text, "白术发言. ")
+        out, report = normalize_blocks([Block(type="para", text="何术发言。")], resolver=keep_wrong)
+        self.assertEqual(out[0].text, "何术发言. ")
         for item in requests:
             self.assertFalse(item["source_is_valid_traditional"])
             self.assertNotIn(item["source"], item["candidates"])
@@ -148,8 +147,8 @@ class ContextNormalization(unittest.TestCase):
     def test_missing_invalid_or_invented_choices_preserve_source(self):
         for reply in ({}, {"1": "任意插入"}, {"999": "朮"}, {"1": None}):
             with self.subTest(reply=reply):
-                out, report = normalize_blocks([Block(type="para", text="白術")], resolver=lambda _: reply)
-                self.assertEqual(out[0].text, "白術")
+                out, report = normalize_blocks([Block(type="para", text="何術")], resolver=lambda _: reply)
+                self.assertEqual(out[0].text, "何術")
                 self.assertFalse(report["complete"])
                 self.assertEqual(report["summary"]["context_unresolved"], 1)
 
@@ -196,28 +195,28 @@ class ContextNormalization(unittest.TestCase):
         self.assertEqual(block.memos[0][0], 3)
 
     def test_tables_are_independent_and_source_rebuild_does_not_add_spaces_twice(self):
-        source = [Block(type="table", rows=[["简体；", "白術"], ["云雨", "詩雲"]], page=4)]
+        source = [Block(type="table", rows=[["简体；", "何術"], ["云雨", "詩雲"]], page=4)]
         def resolve(items):
             return {i["id"]: {"云雨": "雲", "詩雲": "云"}.get(i["original_context"], i["source"]) for i in items}
         first, report = normalize_blocks(source, resolver=resolve)
         second, _ = normalize_blocks(source, resolver=resolve)
         self.assertEqual(first, second)
-        self.assertEqual(first[0].rows, [["簡體; ", "白術"], ["雲雨", "詩云"]])
+        self.assertEqual(first[0].rows, [["簡體; ", "何術"], ["雲雨", "詩云"]])
         self.assertTrue(any(d.get("row") == 0 and d.get("column") == 1 for d in report["decisions"]))
         self.assertEqual(source[0].rows[0][0], "简体；")
 
     def test_resolver_failure_is_audited_without_secret_and_cancel_propagates(self):
         def fail(_):
             raise RuntimeError("api_key=DO-NOT-LEAK")
-        out, report = normalize_blocks([Block(type="para", text="白術")], resolver=fail)
-        self.assertEqual(out[0].text, "白術")
+        out, report = normalize_blocks([Block(type="para", text="何術")], resolver=fail)
+        self.assertEqual(out[0].text, "何術")
         self.assertFalse(report["complete"])
         self.assertEqual(report["resolver_errors"][0]["type"], "RuntimeError")
         self.assertNotIn("DO-NOT-LEAK", json.dumps(report))
         def cancel(_):
             raise KeyboardInterrupt()
         with self.assertRaises(KeyboardInterrupt):
-            normalize_blocks([Block(type="para", text="白術")], resolver=cancel)
+            normalize_blocks([Block(type="para", text="何術")], resolver=cancel)
 
     def test_many_candidates_are_bounded_and_ids_unique(self):
         batches = []

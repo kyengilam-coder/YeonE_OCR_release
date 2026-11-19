@@ -660,7 +660,9 @@ class MemoAndMarks(unittest.TestCase):
                 x = zipfile.ZipFile(out).read("Contents/section0.xml").decode()
                 self.assertEqual(x.count(legend_head(COLLATE_LEGEND)), 1); self.assertEqual(x.count(legend_head(LEGEND)), 1)
                 ed2 = Editor(HwpxBook(out), memo="notice")
-                self.assertIn(runs["日"].get("charPrIDRef"), ed2._ours); self.assertNotIn(runs["〔"].get("charPrIDRef"), ed2._ours)
+                self.assertIn(runs["日"].get("charPrIDRef"), ed2._ours)
+                bracket = next(run for text, run in runs.items() if "〔" in text)
+                self.assertNotIn(bracket.get("charPrIDRef"), ed2._ours)
                 self.assertTrue(all("이미 표시" in l.note for l in ed2.apply(marks())))           # 교정이 칠한 자리는 다시 표시하지 않음
 
     def test_untagged_marks_in_old_corrected_copy_still_count(self):

@@ -116,6 +116,15 @@ def test_prose_is_incomplete_and_a_non_object_schema_is_not_passed():
     assert "--json-schema" not in seen["args"]
 
 
+def test_blank_structured_output_uses_valid_response():
+    def run(args, **kwargs):
+        return _done(_envelope(response='{"lines": ["宇宙洪荒"]}', structured_output='  '))
+
+    client = agy.SubscriptionClient(cli="agy", runner=run)
+    text, complete, reason, _, _ = client.request(model_name="", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert (json.loads(text), complete, reason) == ({"lines": ["宇宙洪荒"]}, True, "STOP")
+
+
 @pytest.mark.parametrize("stdout, stderr, code, kind", [
     ("", 'AGY_ERROR: {"status": "RESOURCE_EXHAUSTED", "code": 429, "retryable": false, "message": "Individual quota reached"}',
      3, "limit"),

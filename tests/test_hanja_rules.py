@@ -61,7 +61,7 @@ def test_default_rules_are_organized_and_cover_user_examples():
     by_source = {r['find']: r for r in rules}
     assert by_source['產']['replace'] == '産' and by_source['產']['mode'] == 'auto'
     assert by_source['叶']['mode'] == 'leaf'
-    assert by_source['術']['mode'] == 'review'
+    assert by_source['術']['mode'] == 'atractylodes'
     out = normalize_text('牛膝春夏用叶，經候胎產諸病，醫術。', options=NormalizationOptions(editorial_simplified=True, hanja_rules=rules))
     assert out.text == '牛膝春夏用葉, 經候胎産諸病, 醫術. '
 
