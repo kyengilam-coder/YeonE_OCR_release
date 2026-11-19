@@ -76,31 +76,44 @@ def test_successful_fallback_is_reused_and_actual_model_is_recorded(monkeypatch)
     assert catalog.call_count == 1 and len(client.model_switches) == 1
 
 
-def test_hydrogen_five_hour_limit_falls_back_to_argon_from_cli_inventory(monkeypatch):
+def test_ocr_session_uses_cli_inventory_to_fall_back_from_hydrogen_to_argon(monkeypatch):
     import subprocess
 
     hydrogen = 'gemini-4-hydrogen-low'
     argon = 'gemini-4-argon-low'
     monkeypatch.setattr(agy, 'find_cli', lambda: 'agy')
-    def cli(args, **_kwargs):
+    commands = []
+
+    def popen(args, *, stdin, **kwargs):
+        assert stdin == subprocess.DEVNULL
+        commands.append(args[-1])
         responses = {
             '--version': '2.0.0',
-            '/quota': ('Gemini Models\tFive Hour Limit Remaining\t0%\t2026-11-18T06:14:45Z\n'
-                       'Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t100%\t2026-11-25T04:26:35Z\n'),
+            '/quota': ('Gemini Models\tWeekly Limit Remaining\t14%\t2026-11-25T01:14:45Z\n'
+                       'Gemini Models\tFive Hour Limit Remaining\t0%\t2026-11-19T07:08:16Z\n'
+                       'Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t1%\t2026-11-25T04:27:07Z\n'),
             'models': f'{hydrogen}\tHydrogen\n{argon}\tArgon',
             '/model': hydrogen,
         }
-        return subprocess.CompletedProcess(args, 0, responses[args[-1]], '')
-    client = agy.SubscriptionClient(cli='agy', runner=cli)
+        proc = Mock(returncode=0)
+        proc.communicate.return_value = (responses[args[-1]], '')
+        return proc
+
+    monkeypatch.setattr(subprocess, 'Popen', popen)
+    session = subscriptions.Session('gemini', gemini_model=hydrogen, log=lambda _: None)
+    client = agy.SubscriptionClient(cli='agy', runner=session._run)
+    session._factory = {'gemini': client}.__getitem__
     def send(**kwargs):
         if kwargs['model_name'] == hydrogen:
             raise limited()
         return answer(kwargs['model_name'])
     client._request_once = Mock(side_effect=send)
     try:
-        assert request(client, hydrogen)[-1] == argon
-        assert request(client, hydrogen)[-1] == argon
+        assert request(session, hydrogen)[-1] == argon
+        assert request(session, hydrogen)[-1] == argon
         assert [c.kwargs['model_name'] for c in client._request_once.call_args_list] == [hydrogen, argon, argon]
+        assert commands == ['--version', '/quota', 'models', '/model']
+        assert session.plan == 'gemini' and not session.switches
     finally:
         agy.reset_status_cache()
 

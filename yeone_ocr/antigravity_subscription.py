@@ -361,11 +361,14 @@ class SubscriptionClient:
                     from . import gemini_quota
                     try:
                         catalog = gemini_quota.inventory(runner=self._run)
-                    except Exception:
-                        raise exc  # A failed status query must never enable unknown/paid models.
+                    except (OSError, subprocess.SubprocessError) as inventory_error:
+                        self.log(f'  Gemini: 대체 모델 한도 조회 실패({type(inventory_error).__name__}).')
+                        raise exc from inventory_error
                     if self.should_stop():
                         raise
                     rows = catalog['models']
+                    if not rows and catalog.get('reason'):
+                        self.log(f"  Gemini: 대체 모델 한도 조회 실패 — {catalog['reason']}")
                     failed_id = chosen if chosen and chosen != label('') else catalog.get('current')
                     failed = next((row for row in rows if row['id'] == failed_id), None)
                     now = time.monotonic()

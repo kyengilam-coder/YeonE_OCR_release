@@ -19,6 +19,7 @@ network) is tried again on the same plan first, and then rests the plan for a sh
 from __future__ import annotations
 
 import importlib
+from contextlib import contextmanager, ExitStack
 import os
 import signal
 import subprocess
@@ -294,6 +295,9 @@ class Session:
         self._factory = factory or (lambda name: module(name).SubscriptionClient(runner=self._run))
         self._client = None
         self._lock = threading.RLock()
+        self._request_gate = threading.Condition()
+        self._requests_active = 0
+        self._requests_paused = False
         self._procs = set()
         self.reason = ""
         self.switches = []
@@ -366,6 +370,37 @@ class Session:
 
     # ---- requests ----
     def request(self, *, model_name, system, prompt, images, schema):
+        from .comparison_ai import _cancel
+
+        with self._request_gate:
+            while self._requests_paused and not self.should_stop():
+                self._request_gate.wait(.1)
+            _cancel(self.should_stop)
+            self._requests_active += 1
+        try:
+            return self._request(model_name=model_name, system=system, prompt=prompt, images=images, schema=schema)
+        finally:
+            with self._request_gate:
+                self._requests_active -= 1
+                self._request_gate.notify_all()
+
+    @contextmanager
+    def pause_requests(self):
+        with self._request_gate:
+            self._requests_paused = True
+        try:
+            yield
+        finally:
+            with self._request_gate:
+                self._requests_paused = False
+                self._request_gate.notify_all()
+
+    def wait_for_requests(self):
+        with self._request_gate:
+            while self._requests_active and not self.should_stop():
+                self._request_gate.wait(.1)
+
+    def _request(self, *, model_name, system, prompt, images, schema):
         from .claude_subscription import RequestRejected, SubscriptionError
         attempts, rested = 0, []                 # this request: tries on the plan in use, plans it sent to rest
         timed_out, last_timeout = set(), None    # plans that did not answer this request in time
@@ -533,16 +568,26 @@ class Session:
         _notify(self)
 
     # ---- the user's [다음 구독으로 넘기기] ----
-    def switch(self, target=None) -> str:
+    def switch(self, target=None, *, subscription_only=False) -> str:
         """Stop the plan in use and connect to `target` (a plan or "api"); None, or a target that
         cannot be used, takes the next one in order. Returns what happened, for the window."""
         with self._lock:
             old = self.plan
+            if subscription_only:
+                if target == old and target is not None:
+                    return f"이미 {NAMES[old]} 구독에 연결되어 있습니다."
+                if target not in PLANS or not status(target, refresh=True)["usable"]:
+                    return "선택한 구독에 연결할 수 없어 현재 연결을 유지합니다. 로그인 상태를 확인하세요."
+                if self.should_stop() or (_active is not self and self not in _team):
+                    return "작업이 중지되어 구독을 전환하지 않았습니다."
             if old is not None:
                 mark_exhausted(old, "사용자가 넘김")
             note = ""
             chosen = None
-            if target in PLANS and target != old:
+            if subscription_only:
+                release(target)
+                chosen = target
+            elif target in PLANS and target != old:
                 state = status(target, refresh=True)
                 if state["usable"]:
                     release(target)                        # chosen by hand: try it again even if it failed earlier
@@ -576,10 +621,13 @@ class Session:
         from .comparison_ai import _cancel
         _cancel(self.should_stop)
         popen = dict(kwargs)
+        if input is not None and popen.get('stdin') is not None:
+            raise ValueError('stdin and input arguments may not both be used.')
+        if popen.get('stdin') is None:
+            popen['stdin'] = subprocess.PIPE if input is not None else subprocess.DEVNULL
         if sys.platform != "win32":
             popen["start_new_session"] = True              # its own process group: killpg stops the CLI's children too
-        proc = subprocess.Popen(args, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen)
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen)
         with self._lock:
             self._procs.add(proc)
         done = threading.Event()
@@ -675,18 +723,27 @@ def state() -> dict | None:
     return data
 
 
-def switch(target=None) -> str:
+def switch(target=None, *, after_pending=False, subscription_only=False) -> str:
     """[다음 구독으로 넘기기]: switch the running connection (see Session.switch); the other sessions
     of a split run that are on the same plan leave it too."""
     session = _active
     if session is None:
         return "지금 구독 계정으로 연결된 실행이 없습니다."
     old = session.plan
-    message = session.switch(target)
-    if old is not None and session.plan != old:
-        for member in list(_team):
-            if member.plan == old:
-                member.switch(target)
+    team = [member for member in _team if old is not None and member.plan == old]
+    with ExitStack() as stack:
+        if after_pending:
+            for member in [session, *team]:
+                stack.enter_context(member.pause_requests())
+            for member in [session, *team]:
+                member.wait_for_requests()
+        if _active is not session or session.should_stop():
+            return "작업이 끝나거나 중지되어 구독을 전환하지 않았습니다."
+        message = session.switch(target, subscription_only=subscription_only)
+        if old is not None and session.plan != old:
+            for member in team:
+                if member.plan == old:
+                    member.switch(target, subscription_only=subscription_only)
     return message
 
 

@@ -111,13 +111,31 @@ class LocalFirstGuiTests(unittest.TestCase):
         with mock.patch("yeone_ocr.subscriptions.switch", return_value="넘김") as switch, \
                 mock.patch("yeone_ocr.subscriptions.state", return_value=None):
             gui.App.switch_subscription(app)                                # 고르지 않음: 정해진 순서
-            self.assertEqual(app.q.get(timeout=5), ("log", "  넘김\n"))
+            self.assertEqual(app.q.get(timeout=5), ("ai_switch_done", "넘김", None))
+            app._subscription_switch_busy = False
             app.v_ai_next.set("Antigravity 구독")
             gui.App.switch_subscription(app)
-            app.q.get(timeout=5); app.q.get(timeout=5)
+            self.assertEqual(app.q.get(timeout=5), ("ai_switch_done", "넘김", None))
         self.assertEqual([c.args for c in switch.call_args_list], [(None,), ("gemini",)])
         gui.App._show_ai_link(app, None)
         row.grid_remove.assert_called_once()
+
+    def test_settings_switch_uses_the_current_connection_and_waits_for_pending_requests(self):
+        import queue
+        gui = self.gui
+        app = SimpleNamespace(_ai_link_row=None, l_settings_ai_link=mock.Mock(), cb_settings_ai_next=mock.Mock(),
+                              b_settings_ai_switch=mock.Mock(), v_settings_ai_next=Var(''),
+                              b_ai_switch=mock.Mock(), q=queue.Queue())
+        state = {'label': 'Claude 구독', 'available': True, 'targets': ['chatgpt', 'api']}
+        gui.App._show_ai_link(app, state)
+        app.l_settings_ai_link.configure.assert_called_with(text='Claude 구독')
+        app.cb_settings_ai_next.configure.assert_called_with(values=['ChatGPT 구독'], state='readonly')
+        with mock.patch('yeone_ocr.subscriptions.switch', return_value='전환 완료') as switch, \
+                mock.patch('yeone_ocr.subscriptions.state', return_value=None):
+            gui.App.switch_subscription(app, after_pending=True)
+            gui.App.switch_subscription(app, after_pending=True)
+            self.assertEqual(app.q.get(timeout=5), ('ai_switch_done', '전환 완료', None))
+        switch.assert_called_once_with('chatgpt', after_pending=True, subscription_only=True)
 
     def test_ai_link_row_names_every_connection_and_the_resting_plans_and_the_test_button_reports(self):
         import queue
@@ -165,19 +183,6 @@ class LocalFirstGuiTests(unittest.TestCase):
             gui.App.do_partial(app)                                                     # 실행 중에는 시작하지 않는다
             app.start.assert_not_called()
 
-    def test_partial_button_shows_only_for_a_book_read_part_way(self):
-        gui = self.gui
-        app = SimpleNamespace(pdf=lambda: "book.pdf", _counts={"target": 462, "records": 193, "to_read": 269})
-        with mock.patch.object(gui.App, "_n_records", return_value=193):
-            self.assertTrue(gui.App._partial_wanted(app))
-            app._counts = {"target": 462, "records": 462, "to_read": 0}
-            self.assertFalse(gui.App._partial_wanted(app))                              # 다 읽은 책
-            self.assertTrue(gui.App._partial_wanted(app, {"kind": "stopped"}))          # 방금 중지: 엔진만 읽고 AI를 기다리던 쪽이 있을 수 있다
-            app._counts = None
-            self.assertTrue(gui.App._partial_wanted(app))                               # 아직 세는 중
-        with mock.patch.object(gui.App, "_n_records", return_value=0):
-            self.assertFalse(gui.App._partial_wanted(app, {"kind": "stopped"}))         # 판독 기록이 없으면 만들 것이 없다
-
     def test_stopping_a_run_offers_a_document_of_the_pages_read_so_far(self):
         import queue
         gui = self.gui
@@ -221,10 +226,7 @@ class LocalFirstGuiTests(unittest.TestCase):
             self.assertEqual(flags[flags.index("--local-resume") + 1], key)
         app.v_local_resume = Var(gui.RESUME_LABELS["unfinished"])
         self.assertNotIn("--local-resume", gui.App._strategy_opts(app))
-        app.v_local_resume = Var(gui.RESUME_LABELS['review-only'])
-        flags = gui.App._strategy_opts(app)
-        self.assertIn('--local-review-only', flags)
-        self.assertNotIn('--local-resume', flags)
+        self.assertNotIn('--local-review-only', gui.App._strategy_opts(app))
 
     def test_parallel_requests_add_a_flag_only_when_not_the_default(self):
         gui = self.gui
@@ -393,8 +395,6 @@ class LocalFirstGuiTests(unittest.TestCase):
             with self.subTest(pdf_only=pdf_only):
                 gui = self.gui
                 app = self.app(v_local_profile=gui.LOCAL_PROFILE_LABELS["simplified"], v_local_ai_max_calls="9")
-                if pdf_only == 'review-only':
-                    app.v_local_resume = Var(gui.RESUME_LABELS['review-only'])
                 app._need_pdf = lambda: True
                 app._prepare_env = mock.Mock(return_value=True)
                 app._save_book = mock.Mock()
@@ -411,7 +411,10 @@ class LocalFirstGuiTests(unittest.TestCase):
                 app._with_plan = lambda kind, go: gui.App._with_plan(app, kind, go)
                 with mock.patch.object(gui.App, "_corrections_ok", return_value=True), \
                      mock.patch.object(gui, "template_ok", return_value=True), mock.patch.object(gui, "preset_ok", return_value=True):
-                    (gui.App.do_run_pdf if pdf_only is True else gui.App.do_run)(app)
+                    if pdf_only:
+                        gui.App.do_run_pdf(app, review_only=pdf_only == 'review-only')
+                    else:
+                        gui.App.do_run(app)
                 argv = app.start.call_args.args[0]
                 for flag in ("--ocr-strategy", "local-first", "--local-profile", "simplified", "--local-ai-max-calls", "9"):
                     self.assertIn(flag, argv)
@@ -419,7 +422,7 @@ class LocalFirstGuiTests(unittest.TestCase):
                 if pdf_only == 'review-only':
                     self.assertIn('--local-review-only', argv)
                     self.assertIsNone(app.start.call_args.kwargs['open_after'])
-                    self.assertEqual(app.start.call_args.args[1], '미완료 검증만 · 기존 결과 보존')
+                    self.assertEqual(app.start.call_args.args[1], gui.REVIEW_ONLY_TEXT)
                 self.assertTrue(app._env_optional_key)
 
     def test_main_pipeline_project_opens_for_proposal_adoption(self):

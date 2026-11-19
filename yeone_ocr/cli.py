@@ -2316,7 +2316,7 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
         log(f"▶ 검색 가능한 PDF: 판독 기록이 있는 {len(todo)}쪽에 보이지 않는 글자층을 넣습니다 → {out}")
         try:
             st = searchable_pdf(doc, todo, page_data, out, strip_old=not getattr(args, "keep_old_layer", False), log=log,
-                                step=(lambda d, t: progress("textlayer", d, t)) if report else None, should_stop=CANCEL.is_set)
+                                step=lambda d, t: progress('textlayer', d, t), should_stop=CANCEL.is_set)
         except TextlayerCancelled:
             log("중지: 검색 가능한 PDF 만들기를 멈췄습니다. 판독 기록은 보존되어 다시 실행할 수 있습니다."); return 130
         except TextlayerVerificationError as exc:

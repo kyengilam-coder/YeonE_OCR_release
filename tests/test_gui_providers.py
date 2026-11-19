@@ -50,7 +50,7 @@ class ProviderSettings(unittest.TestCase):
             self.assertEqual((app.v_key.get(), app.v_model.get(), app.v_model2.get()), ("openai-key", "gpt-custom", "gpt-small"))
             self.assertFalse(app.v_force.get())
             app.running = True; gui.App._reader_changed(app)
-            self.assertEqual((app.cb_provider.state, app.e_key.state, app.e_model.state), ("disabled", "disabled", "disabled"))
+            self.assertEqual((app.cb_provider.state, app.e_key.state, app.e_model.state), ("readonly", "normal", "normal"))
 
     def test_prepare_env_sets_only_selected_provider_key(self):
         with gui_module() as gui, mock.patch.dict(os.environ, {"GEMINI_API_KEY": "original-gemini", "OPENAI_API_KEY": "old-openai"}, clear=True):

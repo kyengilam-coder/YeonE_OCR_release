@@ -19,21 +19,10 @@ def _show(app, menu, button):
 
 
 def make_hwpx(app):
-    """For a saved book expose the choice between formatting and more OCR."""
-    from .gui import App
-    from .gui_run_start import recorded_pages
+    """Start or continue OCR for the basic work, with HWPX output."""
     if app.running or not app._need_pdf():
         return
-    current = app.selected_result_work()
-    pages = recorded_pages(current)
-    if not pages or '--local-review-only' in App._strategy_opts(app):
-        app.do_run()
-        return
-    menu = tk.Menu(app, tearoff=False)
-    menu.add_command(label=f'저장된 판독 {len(pages)}쪽으로 HWPX 만들기',
-                     command=lambda: export_records(app, folder=current))
-    menu.add_command(label='기본 OCR 작업에서 판독 이어서 HWPX 만들기', command=app.do_run)
-    _show(app, menu, app.b_run)
+    app.do_run()
 
 
 def export_menu(app, button):
@@ -42,17 +31,21 @@ def export_menu(app, button):
     current = app.selected_result_work()
     menu = tk.Menu(app, tearoff=False)
     state = 'normal' if (current / 'source.json').is_file() else 'disabled'
-    menu.add_command(label='현재 결과의 판독으로 HWPX 만들기', state=state,
+    menu.add_command(label='현재 결과 → HWPX', state=state,
                      command=lambda: export_records(app, folder=current))
-    menu.add_command(label='현재 결과의 판독으로 문자 PDF 만들기', state=state,
+    menu.add_command(label='현재 결과 → 문자 PDF', state=state,
                      command=lambda: export_records(app, pdf_only=True, folder=current))
+    basic = app.work()
+    if basic != current:
+        basic_state = 'normal' if (basic / 'source.json').is_file() else 'disabled'
+        menu.add_command(label='기본 OCR 작업 → HWPX', state=basic_state,
+                         command=lambda: export_records(app, folder=basic))
+        menu.add_command(label='기본 OCR 작업 → 문자 PDF', state=basic_state,
+                         command=lambda: export_records(app, pdf_only=True, folder=basic))
     other = tk.Menu(menu, tearoff=False)
     other.add_command(label='HWPX 만들기…', command=app.do_reuse_build)
     other.add_command(label='문자 PDF 만들기…', command=app.do_reuse_textlayer)
-    menu.add_cascade(label='다른 OCR 작업 폴더 사용', menu=other)
-    menu.add_separator()
-    menu.add_command(label='원본을 판독해 문자 PDF 만들기', command=app.do_run_pdf)
-    menu.add_command(label='현재 문자 PDF 열기', command=app.open_textlayer)
+    menu.add_cascade(label='다른 OCR 작업 폴더에서 내보내기', menu=other)
     _show(app, menu, button)
 
 

@@ -363,7 +363,7 @@ class ProgressCardRealTk(unittest.TestCase):
         try:
             self.assertEqual(app.l_pill.cget("text"), "● 판독 중")
             self.assertEqual([c["head"][0] for c in app._band_cols], ["done", "now", "wait", "wait", "wait", "wait"])
-            self.assertEqual(app.l_pct.cget("text"), f"전체 {(0.03 + 0.75 * 2 / 5) * 100:.0f}%")
+            self.assertEqual(app.l_pct.cget("text"), f"이번 작업 {(0.03 + 0.75 * 2 / 5) * 100:.0f}%")
             self.assertEqual(str(app.b_adv.cget("state")), "disabled")
             self.assertEqual(app.l_adv_cap.cget("text"), "실행 중에는 고급 도구를 쓸 수 없습니다")
             for b in (app.b_open_hwpx, app.b_open_pdf, app.b_open_review, app.b_open_work, app._book_cards[0]["source"]):
@@ -372,6 +372,14 @@ class ProgressCardRealTk(unittest.TestCase):
             self.assertEqual([str(x) for x in app.tk.splitlist(app._tool_rows[0][1][2].cget("image"))],     # 잠긴 영수증 단추는 흐린 영수증(점무늬 없이)
                              [str(app.icons["receipt"]), "disabled", str(app.icons["receipt_dis"])])
             self.assertEqual(str(app._tab_buttons[1].cget("state")), "disabled")
+            self.assertEqual(str(app._tab_buttons[3].cget('state')), 'normal')
+            source, pages = app.v_pdf, app.v_pages
+            app.select_tab(3)
+            self.assertTrue(app.e_pages_set.instate(['disabled']))
+            self.assertTrue(app.e_print_offset.instate(['!disabled']))
+            self.assertEqual(str(app.cb_provider.cget('state')), 'readonly')
+            app.return_to_ocr()
+            self.assertEqual((app._selected_tab, app.v_pdf, app.v_pages), (0, source, pages))
             self.assertEqual(app._lockline.winfo_manager(), "pack")                                     # 잠금 줄(한 줄 안내)
         finally:
             app._set_running(False); self.settle()

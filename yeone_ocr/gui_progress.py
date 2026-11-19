@@ -279,6 +279,23 @@ PAGE_ACTIVITIES = {'checking': '저장 기록 확인', 'ocr': '새 쪽 OCR',
                    'reocr': '기존 쪽 OCR 보완', 'ai-review': 'AI 판독·미완료 검증'}
 
 
+def document_output_status(seen, *, phase, result=None):
+    """Describe output steps independently from the source book's OCR coverage."""
+    parts = []
+    if 'build' in seen:
+        done, total = seen['build']
+        pages = max(0, total - 1)  # The final build step writes the assembled document.
+        if pages:
+            status = ' 완료' if done >= total else ' · 저장 중' if done == pages and phase == 'running' else ''
+            parts.append(f'HWPX {min(done, pages):,}/{pages:,}쪽{status}')
+    if 'textlayer' in seen:
+        done, total = seen['textlayer']
+        if total > 0:
+            finished = done >= total and phase == 'done' and (result or {}).get('kind') in ('ok', 'partial')
+            parts.append('문자 PDF 완료' if finished else f'문자 PDF {min(1, done / total):.0%}')
+    return '이번 문서 출력 · ' + ' · '.join(parts) if parts else ''
+
+
 def big_view(cmd: str, *, phase: str, stage: str = "", done: int = 0, total: int = 0, note: str = "", seen: dict | None = None,
              result: dict | None = None, counts: dict | None = None, screenshot: bool = False, label: str = "",
              now_pages=(), page_activities=None) -> list[tuple[str, str]]:

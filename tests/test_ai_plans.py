@@ -464,6 +464,50 @@ def test_stop_cancels_running_subscription_cli_and_does_not_fall_back():
         assert not session._procs and not fallback.models and subscriptions.exhausted() == {}
 
 
+def test_settings_switch_drains_existing_requests_and_routes_new_requests_to_selected_plan():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from unittest.mock import patch
+
+    started, finish, waiting = Event(), Event(), Event()
+    with _with(_states(claude=True, chatgpt=True, gemini=False)):
+        first, second = _Plan('claude'), _Plan('chatgpt')
+        request = first.request
+
+        def busy_request(**kwargs):
+            started.set()
+            assert finish.wait(10)
+            return request(**kwargs)
+
+        first.request = busy_request
+        session = subscriptions.Session('claude', factory={'claude': first, 'chatgpt': second}.__getitem__)
+        subscriptions.activate(session)
+        try:
+            assert '유지' in subscriptions.switch('gemini', subscription_only=True)
+            assert session.plan == 'claude' and not subscriptions.exhausted()
+            wait_for_requests = session.wait_for_requests
+
+            def observe_wait():
+                waiting.set()
+                wait_for_requests()
+
+            with patch.object(session, 'wait_for_requests', side_effect=observe_wait), ThreadPoolExecutor(3) as workers:
+                active = workers.submit(_ask, session)
+                try:
+                    assert started.wait(5)
+                    switching = workers.submit(subscriptions.switch, 'chatgpt', after_pending=True, subscription_only=True)
+                    assert waiting.wait(5) and session.plan == 'claude'
+                    queued = workers.submit(_ask, session)
+                    assert not switching.done() and not queued.done()
+                finally:
+                    finish.set()
+                assert active.result(timeout=5)[-1] == 'claude'
+                assert 'ChatGPT' in switching.result(timeout=5)
+                assert queued.result(timeout=5)[-1] == 'chatgpt'
+        finally:
+            subscriptions.deactivate()
+
+
 def test_switch_without_a_choice_follows_the_order_and_ends_at_the_api_key():
     api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
     with _with(_states(claude=True, chatgpt=True, gemini=False)):

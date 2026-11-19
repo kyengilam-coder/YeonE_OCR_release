@@ -320,7 +320,8 @@ class SettingsTabRealTk(unittest.TestCase):
             self.assertEqual(str(app.e_pages_set.cget("textvariable")), str(app._input_vars[tab]["pages"]))
             self.assertEqual(str(app.e_print_offset.cget("textvariable")), str(app._input_vars[tab]["print_offset"]))
             self.assertEqual(str(app.cb_mode.cget("textvariable")), str(app._mode_vars[2 if tab == 2 else 0]))
-        self.assertIn(app.e_pages_set, app._lock_entries); self.assertIn(app.e_print_offset, app._lock_entries)
+        self.assertIn(app.e_pages_set, app._lock_entries)
+        self.assertNotIn(app.e_print_offset, app._lock_entries)
         app.select_tab(0)
 
     def test_7_notice_line_shows_last_news_only_on_settings_tab(self):

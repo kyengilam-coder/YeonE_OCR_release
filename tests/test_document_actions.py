@@ -14,7 +14,7 @@ from yeone_ocr.result_versions import ResultVersion, remember
 from yeone_ocr.state import Work
 
 
-def test_main_hwpx_and_export_use_active_readings_and_book_style(tmp_path, monkeypatch):
+def test_primary_ocr_and_saved_export_are_separate_and_export_uses_book_style(tmp_path, monkeypatch):
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"reader": "mock", "auto_update": False, "input_tab": 0}))
     monkeypatch.setattr(gui, "CONFIG_PATH", config)
@@ -22,6 +22,7 @@ def test_main_hwpx_and_export_use_active_readings_and_book_style(tmp_path, monke
     monkeypatch.setattr(gui, "missing_packages", lambda: [])
     source = tmp_path / "책.pdf"
     with pymupdf.open() as doc:
+        doc.new_page()
         doc.new_page()
         doc.save(source)
     original = Work(source, gui.work_dir_for(str(source)))
@@ -41,28 +42,41 @@ def test_main_hwpx_and_export_use_active_readings_and_book_style(tmp_path, monke
         app.use_book_rule(str(rule))
         select_template(app.v_template, app.v_layout, str(template))
         app.update_idletasks()
+        app._counts = {'target': 2, 'records': 1, 'to_read': 1}
+        app._sync_run_card()
+        assert app.b_run.cget('text') == gui.RESUME_TEXT
+        app._ocr_coverage = (str(source), 2, {1})
+        app._set_running(True, 'build')
+        app._on_progress('build', 2, 2)
+        assert app.l_ocr_coverage.cget('text') == '전체 OCR 기록 1/2쪽 · 남은 1쪽'
+        assert app.l_output_coverage.cget('text') == '이번 문서 출력 · HWPX 1/1쪽 완료'
+        app._on_progress('textlayer', 1, 2)
+        assert app.l_output_coverage.cget('text') == '이번 문서 출력 · HWPX 1/1쪽 완료 · 문자 PDF 50%'
+        app._set_running(False)
         monkeypatch.setattr(app, "_prepare_env", lambda: True)
         launch = Mock()
         monkeypatch.setattr(app, "start", launch)
         with patch.object(gui_document_actions, "_show") as popup:
-            for button in (app.b_run, app.b_export):
-                assert not button.instate(["disabled"]), button.cget("text")
-                button.invoke()
-                menu = popup.call_args.args[1]
-                menu.invoke(0)
-                args = launch.call_args.args[0]
-                assert args[0] == "build" and "--reuse-records" in args
-                parsed = cli.build_parser().parse_args(args)
-                assert Path(parsed.work) == active.dir
-                assert Path(parsed.template) == template and Path(parsed.preset) == rule
-                assert parsed.layout == "flow"
-                launch.reset_mock()
-                popup.reset_mock()
+            with patch.object(app, 'do_run') as run:
+                app.b_run.invoke()
+                run.assert_called_once_with()
+                popup.assert_not_called()
+            app.b_export.invoke()
+            menu = popup.call_args.args[1]
+            menu.invoke(0)
+            args = launch.call_args.args[0]
+            assert args[0] == 'build' and '--reuse-records' in args
+            parsed = cli.build_parser().parse_args(args)
+            assert Path(parsed.work) == active.dir
+            assert Path(parsed.template) == template and Path(parsed.preset) == rule
+            assert parsed.layout == 'flow'
             menu.invoke(1)
             pdf_args = launch.call_args.args[0]
             assert pdf_args[0] == "textlayer"
             parsed = cli.build_parser().parse_args(pdf_args)
             assert Path(parsed.work) == active.dir and Path(parsed.out).parent == active.out_dir
+            menu.invoke(2)
+            assert Path(cli.build_parser().parse_args(launch.call_args.args[0]).work) == original.dir
         assert cli.main(args) == 0
         output, = active.out_dir.glob("*.hwpx")
         with ZipFile(output) as package:

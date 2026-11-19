@@ -244,11 +244,18 @@ class InputTabs(unittest.TestCase):
         self.assertEqual(app.actions, [app.act_cards[1]])
         self.assertEqual({tab: self.input_values(app, tab) for tab in (0, 2)}, before)
 
-    def test_settings_cannot_be_left_while_work_is_running(self):
-        app = self.app(); app.select_tab(2); app.select_tab(3); app.running = True
-        app.return_to_ocr()
-        self.assertEqual((app._selected_tab, app.v_tab.get(), app._last_ocr_tab), (3, 3, 2))
+    def test_running_work_can_open_settings_and_return_without_switching_inputs(self):
+        app = self.app(); app.select_tab(2); app.running = True
+        inputs = (app.v_pdf, app.v_pages, app.v_off)
+        app.select_tab(3)
         self.assertEqual(app.actions, [app.act_cards[2]])
+        app.v_model.set('next-run-model')
+        app.select_tab(0)
+        self.assertEqual((app._selected_tab, app.v_tab.get()), (3, 3))
+        app.return_to_ocr()
+        self.assertEqual((app._selected_tab, app.v_tab.get(), app._last_ocr_tab), (2, 2, 2))
+        self.assertEqual((app.v_pdf, app.v_pages, app.v_off), inputs)
+        self.assertEqual(app.v_model.get(), 'next-run-model')
 
     def test_stop_is_enabled_for_stoppable_work_and_settings_footer_has_no_own_stop(self):
         """설정 탭에서는 실행을 시작할 일이 없어 바닥 줄의 [■ 중지](b_stop3)를 없앴다(명세 §6.3·§14-8) — 실행 중 잠금과 함께 쓰는 [■ 중지]의 켜고 끔은 그대로."""
@@ -260,8 +267,10 @@ class InputTabs(unittest.TestCase):
         self.gui.App._set_running(app, True, "read")
         app.b_stop.configure.assert_called_with(state="normal"); app.b_stop2.configure.assert_called_with(state="normal")
         self.assertEqual(app.actions, [app.act_cards[2]])
-        for button in app.buttons + app._tab_buttons:
+        for button in [*app.buttons, app._tab_buttons[1], app._tab_buttons[2]]:
             button.configure.assert_called_with(state="disabled")
+        for tab in (0, 3):
+            app._tab_buttons[tab].configure.assert_called_with(state='normal')
         self.gui.App._set_running(app, False)
         app.b_stop.configure.assert_called_with(state="disabled")
         self.gui.App._set_running(app, True, "update")                                  # 업데이트 내려받기는 멈출 수 없다

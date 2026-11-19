@@ -43,15 +43,15 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
 OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 설정에 따라 AI 판독·검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (Antigravity → ChatGPT → Claude)", "gemini": "Antigravity (Google 계정)",
                   "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}
-RESUME_LABELS = {"unfinished": "끝나지 않은 쪽만 점검(기본)", "continue": "바로 이어가기(앞선 쪽 점검 안 함)",
-                 "all": "모두 다시 점검한 뒤 이어가기", "review-only": "미완료 검증만 · 기존 결과 보존"}
+RESUME_LABELS = {'unfinished': '남은 쪽 OCR + 보류 검증', 'continue': '기록 없는 쪽만 OCR',
+                 'all': '기존 기록 전체 점검 후 OCR'}
+RESUME_CHOICES = tuple(RESUME_LABELS.values())
 YU_POLICY_LABELS={'classical':'고전 문헌 · 일반 문장의 于→於 (기본)',
                   'post1900':'1900년 이후 출판물 · 于 유지','vernacular':'현대 중국 백화문 · 于 유지'}
 RESUME_TIP = ("판독 기록이 있는 쪽(중간에 멈춘 실행)을 어떻게 지날지 고릅니다. "
-              "끝나지 않은 쪽만 점검(기본): 같은 조건에서 끝난 자동 검증과 사람 판단만 남은 쪽은 건너뜁니다. 보류·실패한 검증을 재개하고 기록 없는 쪽을 OCR합니다. 사람이 고친 쪽·조건이 바뀐 쪽은 다시 점검합니다. "
-              "바로 이어가기: 앞선 쪽은 점검하지 않고 기록 그대로 둔 채 기록 없는 쪽부터 합니다(가장 빠름 · 보류된 검증도 그대로). "
-              "모두 다시 점검: 앞선 쪽을 모두 다시 점검(조건 확인·검증 계획·남은 검증 보내기)한 뒤 이어갑니다(느림 · 끝난 검증은 다시 사지 않음). "
-              "미완료 검증만: 기존 OCR·교정문·출력 파일을 보존하고 남은 검증만 합니다. 새 교정은 제안으로 저장하며 자동 적용하지 않습니다.")
+              "남은 쪽 OCR + 보류 검증: 기록 없는 쪽을 읽으면서 보류·실패한 자동 검증도 확인합니다. "
+              "기록 없는 쪽만 OCR: 같은 원본의 기존 판독 기록과 보류 상태를 유지합니다. "
+              "기존 기록 전체 점검 후 OCR: 기존 판독의 상태와 조건을 확인한 뒤 이어갑니다. 완료 응답은 재사용합니다.")
 SETUP_LABELS = {"gemini": "Antigravity (Google 계정)", "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}   # 설치·로그인 줄
 AI_NEXT_AUTO = "자동(순서대로)"                                     # 진행 카드 [다음 구독으로 넘기기] 옆 — 고르지 않으면 정해진 순서
 AI_TARGET_LABELS = {"claude": "Claude 구독", "chatgpt": "ChatGPT 구독", "gemini": "Antigravity 구독", "api": "API 키"}
@@ -79,7 +79,7 @@ HELP = f"""{APP_NAME} · 연어OCR {__version__}
 PDF에서 편집용 HWPX 만들기
 1. [일반 OCR]에서 [PDF 고르기…]로 책을 엽니다. 쪽 범위를 비우면 책 전체를 판독합니다.
 2. [이 책 설정]에서 참고 OCR, 양식 HWPX와 책별 규칙을 고릅니다. [출력 모양]에서 제목·본문 스타일을 연결하고 대표 쪽의 HWPX를 미리 볼 수 있습니다.
-3. [HWPX 만들기]를 누릅니다. 이미 읽은 책은 저장된 판독으로 문서를 만들거나 기본 작업에서 판독을 이어갈 수 있습니다.
+3. [OCR 시작] 또는 [남은 쪽 OCR 이어서 하기]를 누릅니다. 이미 읽은 쪽만 출력하려면 [저장된 판독 내보내기]를 사용합니다.
 4. [HWPX 열기]로 문서를 확인합니다. [검수·편집]에서 원본과 결과를 나란히 대조합니다.
 
 기존 OCR과 재판독
@@ -531,17 +531,17 @@ def elide_middle(text: str, font, px: int) -> str:
 # 이 책의 설정 판: 짜임 규칙 이름 아래 한 줄 설명(예전 이름은 그 내장의 설명, 규칙 파일은 파일 이름)
 PRESET_HINTS = {"basic": "대제목·중제목·소제목 · 문단-1~5", "regions": "제목 1~3단계 · 본문 · 소주 · 그림 제목", "kaibao": "약재명 제목 · 주석 · 출처 · 本經/別錄"}
 # 실행 카드(디자인 명세 §6.1): 두 실행은 모두 판독부터 해서 돈이 든다(인주) — HWPX 가 주(채움 48), 문자 PDF 가 버금(테두리 40), [■ 중지]는 둘 아래 하나
-RUN_TEXT, RUN_PDF_TEXT = "HWPX 만들기", "원본 판독 → 문자 PDF"
+RUN_TEXT, RUN_PDF_TEXT = "OCR 시작", "OCR 후 문자 PDF 만들기"
+RESUME_TEXT = '남은 쪽 OCR 이어서 하기'
+REVIEW_ONLY_TEXT = '보류된 AI 검증만 이어서 하기'
+EXPORT_TEXT = '저장된 판독 내보내기 ▾'
 RUN_TIP = ("준비 → 판독(1차·2차) → 3차 글자 판별 → 문서 → 검수 화면 → 보고까지 이어서 합니다. "
            "먼저 판독·모델 단계의 예상 비용을 한 창에 보여 주고 묻습니다.")
 RUN_PDF_TIP = ("판독(1차·2차) → 3차 글자 판별 → 원본 모양 그대로 찾기·복사가 되는 PDF(out\\<이름>_글자층.pdf)까지 이어서 합니다. "
                "양식·짜임·HWPX 자동 교정은 쓰지 않습니다. 먼저 예상 비용을 한 창에 보여 주고 묻습니다.")
-PARTIAL_TEXT = PARTIAL_LABEL = "읽은 쪽까지 HWPX 만들기"
-PARTIAL_TIP = ("중간에 멈춘 실행에서, 지금까지 판독 기록이 있는 쪽만으로 HWPX를 만듭니다(모델을 부르지 않음 · 요금·사용량 없음). "
-               "엔진만 읽고 AI 검증 차례를 기다리던 쪽은 엔진 판독 그대로 들어갑니다. 쪽 범위를 적었으면 그 범위 안의 읽은 쪽만. "
-               "남은 쪽은 [한 번에 인식]을 다시 누르면 이어서 읽고, 끝나면 전체 문서로 바뀝니다.")
+PARTIAL_LABEL = '저장된 판독으로 HWPX 내보내기'
 STOP_TIP = "진행 중인 판독을 멈추고 저장된 쪽을 보존합니다. 다시 실행하면 남은 쪽부터 이어서 합니다."
-READY_CAP = "기존 판독이 있으면 저장된 글로 문서를 만들거나 판독을 이어갈 수 있습니다."
+READY_CAP = "OCR은 기본 작업에서 이어갑니다. 내보내기에서는 저장된 판독으로 문서를 만듭니다."
 RUN_CAP = "중지하면 저장된 쪽은 남습니다."
 EMPTY_CAP = "먼저 원본을 고르세요."
 COPY_NOTE = "실행 중에는 지난 결과의 읽기용 사본을 엽니다."
@@ -549,7 +549,7 @@ CLEARED_STATUS = "새 이미지나 스크린샷을 입력하십시오"          
 COPY_TIP = "실행 중에는 읽기용 사본을 엽니다 — 실행이 끝날 때 이 파일을 다시 쓰는데, 한글·PDF 뷰어가 쥐고 있으면 저장이 막히기 때문입니다."
 TAG_TIP = "[아니요]면 뺌: 실행 전 비용 창에서 [아니요]를 누르면 이번 실행에서 빠지는 단계"
 LEDGER_GROUPS = (("판독", "1차·2차", ("read1", "read2")), ("모델 단계", "", ("glyph", "suspect", "choice")))   # 장부 묶음(비용 창의 run 묶음과 같은 단계)
-PAGE_CMDS = ("run", "run-pdf", "read")       # 쪽 띠를 쪽 알림(cli.PAGE_EVENT)으로 움직이는 명령 — 이 탭 원본의 쪽을 판독한다
+PAGE_CMDS = ("run", "run-pdf", "read", 'review-only')
 # 설정 탭(디자인 명세 §6.3): 바닥 알림 줄의 평소 글 · 문서 짜임에 따라 바뀌는 줄 설명 · 책별 설정의 저장 상태(이 책의 설정 판과 같은 말)
 PKG_OK = ("패키지 모두 있음", "설치 구성요소 모두 있음")              # 명령 띠에 적지 않는 정상 상태(_fit_pkg)
 SETTINGS_NOTE = "바꾼 설정은 다음 실행에 적용됩니다. [설정 저장]으로 다음 시작에도 유지할 수 있습니다."
@@ -1878,7 +1878,8 @@ class App(ResultNavigation, tk.Tk):
 
     def select_tab(self, i: int):
         """작업별 입력을 보관하고 설정 탭에서는 마지막 작업의 상태를 유지한다."""
-        if self.running:
+        run_tab = vars(self).get('_running_tab', self._last_ocr_tab)
+        if self.running and (vars(self).get('_running_cmd') == 'update' or i not in (3, run_tab)):
             self.v_tab.set(self._selected_tab)
             return
         if self._inputs_ready and i in (0, 2) and i != self._active_input:
@@ -1892,7 +1893,7 @@ class App(ResultNavigation, tk.Tk):
             self._last_ocr_tab = i
             self.v_mode = self._mode_vars[2 if i == 2 else 0]
             self.cb_mode.configure(textvariable=self.v_mode)
-        if i in (0, 2):
+        if i in (0, 2) and not self.running:
             self._input_force[self._active_input] = self.v_force.get()
             self._active_input = i
             variables = self._input_vars[i]
@@ -2171,11 +2172,11 @@ class App(ResultNavigation, tk.Tk):
         self._pkg_tip = Tip(pkg, self.v_pkg.get(), self)
         self.v_pkg.trace_add("write", lambda *_: App._fit_pkg(self))
         pkg.bind("<Configure>", lambda e: App._fit_pkg(self), add="+")
-        # 잠금 줄(실행 중에만): 탭이 왜 눌리지 않는지 — 끝나거나 [■ 중지]로 멈추면 풀린다
+        # 실행 중 현재 작업에 고정된 입력과 설정 적용 시점을 알린다.
         lk = self._lockline = tk.Frame(self, bg=C["QUIET"], height=P(30)); lk.pack_propagate(False)
         tk.Frame(lk, bg=C["LINE"], height=max(1, P(1))).pack(side="bottom", fill="x")
         self._lock_label = tk.Label(lk, image=self.icons["lock"], compound="left", bg=C["QUIET"], fg=C["INK"], font=self.fonts["BODY"], bd=0, padx=0,
-                                    text="  실행 중에는 다른 탭으로 옮길 수 없습니다. 끝나거나 [■ 중지]로 멈추면 풀립니다.")
+                                    text="  실행 중인 원본·쪽 범위는 잠겨 있습니다. 설정 변경은 다음 실행부터 적용됩니다.")
         self._lock_label.pack(side="left", padx=(P(24), 0))
         # 본문은 스크롤 캔버스 하나(머리띠·잠금 줄은 고정 — 지난 판의 위·아래 칸과 경계 손잡이는 없앴다: 진행·기록 카드가 작업 탭 안에 든다).
         # 내용이 창보다 낮으면 캔버스 높이만큼 늘려 기록 카드가 남은 높이를 채우고(_fit_host), 높으면 스크롤한다.
@@ -2235,7 +2236,8 @@ class App(ResultNavigation, tk.Tk):
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_api_fallback = tk.BooleanVar(value=False)
         self.cfg["local_ai_api_fallback"] = False
-        self.v_local_resume = tk.StringVar(value=RESUME_LABELS.get(self.cfg.get("local_resume"), RESUME_LABELS["unfinished"]))
+        saved_resume = RESUME_LABELS.get(self.cfg.get('local_resume'))
+        self.v_local_resume = tk.StringVar(value=saved_resume if saved_resume in RESUME_CHOICES else RESUME_LABELS['unfinished'])
         self.v_local_ai_parallel = tk.StringVar(value=str(self.cfg.get("local_ai_parallel", 3)))
         self.v_local_ai_split = tk.BooleanVar(value=bool(self.cfg.get("local_ai_split", True)))
         self.v_local_ai_pages = tk.StringVar(value=str(self.cfg.get("local_ai_pages", 2)))
@@ -2413,7 +2415,7 @@ class App(ResultNavigation, tk.Tk):
         R["local_gpu_engines"] = row(b, "GPU 엔진", "설치된 GLM-OCR·Surya 중 하나를 쪽마다 더 읽기(느림)", local_gpu_engines)
 
         def engines(parent):
-            return self._btn(parent, "엔진 관리…", lambda: App.open_engine_manager(self), lock=False,
+            return self._btn(parent, "엔진 관리…", lambda: App.open_engine_manager(self),
                              tip="이 PC의 NVIDIA GPU를 점검하고, Surya · GLM-OCR · PaddleOCR server 와 그 GPU 가속을 골라 내려받아 설치합니다. "
                                  "사용자 폴더에 설치하므로 앱을 업데이트해도 남고, 설치한 엔진은 로컬 인식의 자동 선택에 들어갑니다. "
                                  "설치할 때만 공개 파일을 내려받으며 문서와 API 키는 읽지 않습니다.")
@@ -2423,7 +2425,7 @@ class App(ResultNavigation, tk.Tk):
         R["force"] = row(b, "", "켜면 판독 기록이 있는 쪽도 다시 삼 · 책마다 남기지 않음", check(self.v_force), receipt=True, textvariable=self.v_force_scope)
 
         def resume(parent):
-            cb = ttk.Combobox(parent, textvariable=self.v_local_resume, values=list(RESUME_LABELS.values()), state="readonly", width=chars(280))
+            cb = ttk.Combobox(parent, textvariable=self.v_local_resume, values=RESUME_CHOICES, state="readonly", width=chars(280))
             Tip(cb, RESUME_TIP, self)
             return cb
         R["resume"] = row(b, "이어서 할 때", "판독 기록이 있는 쪽을 어떻게 지날지 · 실행 카드에서도 고름", resume)
@@ -2446,7 +2448,7 @@ class App(ResultNavigation, tk.Tk):
             plan = ttk.Combobox(f, textvariable=self.v_local_ai_plan, values=list(AI_PLAN_LABELS.values()), state="readonly",
                                 width=chars(300))
             plan.pack(side="left", padx=(P(8), 0))
-            Tip(plan, "어느 구독을 쓸지. 자동은 로그인된 것 중 Antigravity(Google) → ChatGPT → Claude 순으로 고르고, 고른 계정이 있으면 그것부터 씁니다. "
+            Tip(plan, "다음 실행에 우선할 구독입니다. 자동은 로그인된 것 중 Antigravity(Google) → ChatGPT → Claude 순으로 고릅니다. "
                       "사용량 한도에 닿으면 로그인된 다음 구독으로, 남은 구독이 없으면 미완료로 보존합니다"
                       ". 유료 API 자동 전환은 하지 않습니다. 상태 확인: 명령 프롬프트에서 yeone-ocr plans", self)
             return f
@@ -2457,7 +2459,7 @@ class App(ResultNavigation, tk.Tk):
             f = boxed(parent)
             self._btn(f, "상태 확인", lambda: App.refresh_plans(self), lock=False,
                       tip="Claude Code · Codex CLI · Antigravity CLI 의 설치·로그인 상태를 다시 봅니다(모델은 부르지 않음).").pack(side="left")
-            self.b_plan_test = self._btn(f, "연결 시험", lambda: App.test_plans(self), lock=False,
+            self.b_plan_test = self._btn(f, "연결 시험", lambda: App.test_plans(self),
                                          tip="쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 봅니다(실행 때와 같은 방식 · 구독 사용량에서 조금 차감). "
                                              "답하는지, 어느 모델인지, 실패하면 그 프로그램이 말한 이유를 보여 줍니다. 긴 작업 전에 눌러 보세요.")
             self.b_plan_test.pack(side="left", padx=(P(8), 0))
@@ -2492,6 +2494,20 @@ class App(ResultNavigation, tk.Tk):
         self._plans_tip = Tip(self.l_plans, "", self)                        # 계정마다 이유·찾은 경로·설치·로그인 방법
         Tip(R["plans"]["name"], "구독마다 공식 프로그램의 설치·로그인 상태입니다. 상태 글을 누르면 계정마다 이유·찾아본 곳·해결 방법을 봅니다. "
                                 "[연결 시험]은 실제로 작은 요청을 보내 봅니다.", self)
+
+        def current_subscription(parent):
+            f = boxed(parent)
+            self.v_settings_ai_next = tk.StringVar()
+            self.cb_settings_ai_next = ttk.Combobox(f, textvariable=self.v_settings_ai_next, state='disabled', width=18)
+            self.cb_settings_ai_next.pack(side='left')
+            self.b_settings_ai_switch = self._btn(f, '요청 완료 후 전환',
+                lambda: App.switch_subscription(self, after_pending=True), lock=False,
+                tip='진행 중인 AI 요청의 응답을 받은 뒤 선택한 구독으로 전환합니다. 다음 실행의 기본 계정은 설정에서 따로 고릅니다.')
+            self.b_settings_ai_switch.configure(state='disabled')
+            self.b_settings_ai_switch.pack(side='left', padx=(P(8), 0))
+            return f
+        R['current_subscription'] = row(b, '현재 작업의 AI 연결', '활성 구독 연결 없음', current_subscription)
+        self.l_settings_ai_link = R['current_subscription']['desc']
 
         def plan_setup(parent):
             f = boxed(parent)
@@ -2681,8 +2697,8 @@ class App(ResultNavigation, tk.Tk):
             lab = self.te_template = ttk.Label(f, text="", style="SetVal.TLabel", compound="left")   # 이름만(전체 경로는 풍선) — 원본 쪽대로면 흐리게(_layout_changed)
             lab.pack(side="left", padx=(0, P(8)))
             self._tpl_tip = Tip(lab, "", self)
-            self._btn(f, "고르기…", self.pick_template, tip="내용별 문서를 채울 양식 HWPX 를 고릅니다(비우면 기본 모양).").pack(side="left")
-            self._btn(f, "비우기", lambda: self.v_template.set(""), tip="양식을 비웁니다 — 내용별 문서를 기본 모양으로 만듭니다.").pack(side="left", padx=(P(6), 0))
+            self._btn(f, "고르기…", self.pick_template, lock=False, tip="내용별 문서를 채울 양식 HWPX 를 고릅니다(비우면 기본 모양).").pack(side="left")
+            self._btn(f, "비우기", lambda: self.v_template.set(""), lock=False, tip="양식을 비웁니다 — 내용별 문서를 기본 모양으로 만듭니다.").pack(side="left", padx=(P(6), 0))
             return f
         R["template"] = row(b, "양식 HWPX", TPL_DESC, template)
         R['book_styles'] = row(b, '양식 스타일', '이 책의 제목·소분류·본문·출전을 원본 HWPX 스타일에 연결',
@@ -2698,8 +2714,8 @@ class App(ResultNavigation, tk.Tk):
                 path = filedialog.askopenfilename(parent=self, title="기존 OCR 참고 HWPX", filetypes=[("HWPX", "*.hwpx")])
                 if path:
                     self.v_reference_hwpx.set(path)
-            self._btn(f, "고르기…", choose).pack(side="left", padx=(P(6), 0))
-            self._btn(f, "비우기", lambda: self.v_reference_hwpx.set("")).pack(side="left", padx=(P(6), 0))
+            self._btn(f, "고르기…", choose, lock=False).pack(side="left", padx=(P(6), 0))
+            self._btn(f, "비우기", lambda: self.v_reference_hwpx.set(""), lock=False).pack(side="left", padx=(P(6), 0))
             return f
         R["reference_hwpx"] = row(b, "참고 OCR HWPX", "기존 초벌 OCR을 이미지 검증에 참고 · 본문과 교정 이력은 보존", reference)
         R['yu_policy']=row(b,'于/於 표기 기준','이 책의 시대·문체에 따라 선택 · 연도는 자동 추정하지 않음',
@@ -2737,7 +2753,6 @@ class App(ResultNavigation, tk.Tk):
             f = boxed(parent)
             L(f, "원본 쪽수 +").pack(side="left", padx=(0, P(6)))
             e = self.e_print_offset = ttk.Entry(f, textvariable=self.v_off, width=chars(60)); e.pack(side="left")   # select_tab 이 지금 입력 탭의 변수로 다시 묶는다
-            self._lock_entries.append(e)
             Tip(e, "책에 적힌 쪽수와 파일 쪽수를 맞춰 검수 기록에 표시합니다. 원본 파일과 실제 쪽 순서는 바뀌지 않습니다. 비우면 자동 판정합니다.", self)
             return f
         R["offset"] = row(self._book_adv, "인쇄 쪽수 보정", "책에 적힌 쪽수와 파일 쪽수를 맞춰 검수 기록에 표시 · 원본 파일·쪽 순서는 그대로 · "
@@ -3793,6 +3808,8 @@ class App(ResultNavigation, tk.Tk):
         if not refresh and key == d.get("_counts_key"):
             return
         self._counts_key = key; self._counts = None
+        if not refresh and key[0] != (d.get('_ocr_coverage') or (None,))[0]:
+            self._ocr_coverage = None
         self._counts_seq = seq = d.get("_counts_seq", 0) + 1
         if not pdf:
             self._strip_pages, self._strip_marks = [], {}
@@ -3809,7 +3826,11 @@ class App(ResultNavigation, tk.Tk):
             if res is not None:
                 try:
                     pages = target_pages(pdf, key[1])
-                    marks = {"pages": pages, "marks": page_marks(work, pages, key[2])}
+                    from .gui_run_start import recorded_pages
+                    full_count = len(target_pages(pdf, '')) if key[1] else len(pages)
+                    saved = {n for n in recorded_pages(work) if n <= full_count}
+                    marks = {'pages': pages, 'marks': page_marks(work, pages, key[2]),
+                             'coverage': (pdf, full_count, saved)}
                 except Exception:
                     marks = None
             self.q.put(("pagemap", seq, marks))                           # 쪽 띠(실행 전): 기록 있음 · 실패 · 남음
@@ -3819,6 +3840,7 @@ class App(ResultNavigation, tk.Tk):
         if seq == vars(self).get("_counts_seq"):
             self._counts = res
             App._sync_book_card(self, self._active_input)
+            App._sync_run_card(self)
 
     def _plan_counts(self, priced: dict, sig: dict | None) -> None:
         """어림(미리 보기·실행)이 오면 그 계획의 대상·기록·새로 읽을 쪽으로 바꾼다 — 원본이 바뀌어 옮겨질 낡은 기록까지 센 값이라 더 맞다."""
@@ -3861,11 +3883,9 @@ class App(ResultNavigation, tk.Tk):
         L = self._lab
         run = ttk.Frame(parent, style="Card.TFrame", padding=(P(18), P(16)))         # select_tab 이 실행 자리(_run_slot)에 넣고 뺀다
         b = tk.Frame(run, bg=C["PANEL"]); b.pack(fill="both", expand=True); b.columnconfigure(0, weight=1)
-        head = tk.Frame(b, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
-        L(head, "문서 만들기", "SECTION").pack(side="left")
-        cap = L(head, "원본 판독 · 저장된 판독 재사용", "CAP", "MUTED"); cap.pack(side="left", padx=(P(8), 0), pady=(P(2), 0))
-        App._detail_only(self, cap)
-        self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton",
+        head = tk.Frame(b, bg=C['PANEL']); head.grid(row=0, column=0, sticky='ew')
+        L(head, 'OCR·내보내기', 'SECTION').pack(side='left')
+        self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton", lock=False,
                   tip="판독기·모델·자동 교정·문서 옵션(모든 책 공통)과 이 책의 설정을 설정 탭에서 고칩니다.").pack(side="right")
         top = tk.Frame(b, bg=C["PANEL"]); top.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
         self.l_run_summary = L(top, "", "BODY_B", wrap=True); self.l_run_summary.pack(fill="x")
@@ -3874,35 +3894,33 @@ class App(ResultNavigation, tk.Tk):
                                 "(한 실행 「로컬 뒤 AI 검증」 횟수까지). 지금 실제로 쓰는 연결은 진행 카드 아래의 'AI 연결' 줄에 나옵니다.", self)
         # 이어서 할 때: 이 책에 판독 기록이 있을 때만(중간에 멈춘 실행) — 설정 「인식」의 같은 칸
         self._resume_row = tk.Frame(top, bg=C["PANEL"])
-        L(self._resume_row, "이어서 할 때", "CAP", "MUTED").pack(anchor="w", pady=(P(6), P(2)))
-        self.cb_resume = ttk.Combobox(self._resume_row, textvariable=self.v_local_resume, values=list(RESUME_LABELS.values()),
+        L(self._resume_row, '이어 읽기 방식', 'CAP', 'MUTED').pack(anchor='w', pady=(P(6), P(2)))
+        self.cb_resume = ttk.Combobox(self._resume_row, textvariable=self.v_local_resume, values=RESUME_CHOICES,
                                       state="readonly", width=1)
         self.cb_resume.pack(fill="x")
         Tip(self.cb_resume, RESUME_TIP, self)
         from .gui_document_actions import make_hwpx, export_menu, review_menu
         self.b_run = self._btn(b, RUN_TEXT, lambda: make_hwpx(self), style="Seal.TButton",
-                               tip="새 책은 원본을 판독합니다. 기존 판독은 현재 양식으로 HWPX를 만들거나 OCR을 이어갈 수 있습니다.")
+                               tip="기본 OCR 작업에서 기록을 이어 쓰고 HWPX를 만듭니다.")
         self.b_run.grid(row=2, column=0, sticky="ew", pady=(P(8), 0))
         self.b_run_pdf = self._btn(b, RUN_PDF_TEXT, self.do_run_pdf, style="SealOut.TButton", tip=RUN_PDF_TIP)
         actions = tk.Frame(b, bg=C["PANEL"])
-        actions.grid(row=3, column=0, sticky="ew", pady=(P(6), 0))
-        self.b_export = self._btn(actions, "내보내기 ▾", lambda: export_menu(self, self.b_export),
+        actions.grid(row=4, column=0, sticky="ew", pady=(P(6), 0))
+        self.b_export = self._btn(actions, EXPORT_TEXT, lambda: export_menu(self, self.b_export),
                                   tip="현재 또는 다른 폴더의 판독으로 HWPX·문자 PDF를 만듭니다.")
-        self.b_export.pack(side="left", fill="x", expand=True)
-        # Keep the secondary OCR slot for detailed progress while a PDF run is active.
+        self.b_export.pack(fill="x")
+        self.b_review_pending = self._btn(actions, REVIEW_ONLY_TEXT, lambda: self.do_run_pdf(review_only=True),
+            tip='기본 OCR 작업에서 저장된 쪽의 미완료 AI 검증만 진행합니다. 새 쪽을 판독하거나 문서를 다시 만들지 않습니다.')
         self.b_run_pdf.grid(row=3, column=0, sticky="ew", pady=(P(6), 0))
-        self.b_run_pdf.grid_remove()
-        stops = tk.Frame(b, bg=C["PANEL"]); stops.grid(row=4, column=0, sticky="ew", pady=(P(6), 0))
+        stops = tk.Frame(b, bg=C["PANEL"]); stops.grid(row=5, column=0, sticky="ew", pady=(P(6), 0))
         self.b_stop = ttk.Button(stops, text="■  중지", command=self.do_stop, state="disabled", style="Stop.TButton", cursor="hand2")
         self.b_stop.pack(fill="x")
         Tip(self.b_stop, STOP_TIP, self)
-        # 중간에 멈춘 책에서만 보인다(_sync_run_card): 지금까지 읽은 쪽으로 문서
-        self.b_partial = self._btn(stops, PARTIAL_TEXT, lambda: App.do_partial(self), tip=PARTIAL_TIP)
-        for btn in (self.b_run, self.b_run_pdf, self.b_stop, self.b_partial):
+        for btn in (self.b_run, self.b_run_pdf, self.b_stop, self.b_review_pending, self.b_export):
             btn.configure(width=1)                                          # 글 길이로 오른쪽 단(340)을 넓히지 않는다 — 단 너비를 다 쓰고, 긴 글(실행 중)은 끝을 줄임
         self.t_run_status = App._rich_line(self, b)                        # 중지를 누른 뒤·끝난 뒤(·입력을 비운 뒤의 안내)만 — v_status
-        self.l_run_cap = L(b, "", "CAP", "MUTED", wrap=True); self.l_run_cap.grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
-        opens = tk.Frame(b, bg=C["PANEL"]); opens.grid(row=7, column=0, sticky="ew", pady=(P(12), 0))
+        self.l_run_cap = L(b, "", "CAP", "MUTED", wrap=True); self.l_run_cap.grid(row=7, column=0, sticky="ew", pady=(P(8), 0))
+        opens = tk.Frame(b, bg=C["PANEL"]); opens.grid(row=8, column=0, sticky="ew", pady=(P(12), 0))
         opens.columnconfigure(0, weight=1, uniform="open"); opens.columnconfigure(1, weight=1, uniform="open")
         tk.Frame(opens, bg=C["HAIR"], height=max(1, P(1))).grid(row=0, column=0, columnspan=2, sticky="ew")      # 실행 | 결과 — 한 카드 안의 두 걸음
         L(opens, "결과", "SECTION").grid(row=1, column=0, columnspan=2, sticky="w", pady=(P(10), P(8)))
@@ -3970,7 +3988,7 @@ class App(ResultNavigation, tk.Tk):
         self.l_led_total_name = L(tr, "합계", "BODY_B"); self.l_led_total_name.pack(side="left")
         self.l_led_total = L(tr, "—", "BODY_B"); self.l_led_total.pack(side="right")
         # 원본이 있어야 눌리는 단추: 실행 둘·[비용 미리 보기](실행 중에도 잠김), 열기 넷(열기만 함 — 실행 중에도 눌림)
-        self._src_locked = [self.b_run, self.b_run_pdf, self.b_export, self.b_estimate]
+        self._src_locked = [self.b_run, self.b_run_pdf, self.b_export, self.b_review_pending, self.b_estimate]
         self._src_open = [self.b_open_hwpx, self.b_open_pdf, self.b_open_review, self.b_open_work, self.b_open_result_editor]
         return run
 
@@ -3983,21 +4001,28 @@ class App(ResultNavigation, tk.Tk):
         P = self.px
         running = bool(self.running); has = bool(self.pdf()); res = d.get("_run_result")
         self.l_run_summary.configure(text=App._ai_summary(self))
+        counts = d.get('_counts') or {}
+        records = counts['records'] if 'records' in counts else App._n_records(self.pdf()) if has else 0
+        if not running:
+            coverage = d.get('_ocr_coverage')
+            has_saved = records or (coverage and coverage[0] == self.pdf() and coverage[2])
+            self.b_run.configure(text=RESUME_TEXT if has_saved and counts.get('to_read', 1) else RUN_TEXT)
         row = d.get("_resume_row")
         if row is not None:
             self.cb_resume.configure(state="disabled" if running else "readonly")      # 실행 중에는 잠근다(읽기 전용 칸)
-            records = App._n_records(self.pdf()) if has and App._local_first(self) else 0
-            if records and not row.winfo_manager():
+            resumes = records and App._local_first(self)
+            if resumes and not row.winfo_manager():
                 row.pack(fill="x")
-            elif not records and row.winfo_manager():
+            elif not resumes and row.winfo_manager():
                 row.pack_forget()
-        partial = d.get("b_partial")
-        if partial is not None:                                         # 읽다 만 책(판독 기록은 있고 남은 쪽이 있거나 방금 중지함)에서만
-            want = has and App._partial_wanted(self, res)
-            if want and not partial.winfo_manager():
-                partial.pack(fill="x", pady=(P(6), 0))
-            elif not want and partial.winfo_manager():
-                partial.pack_forget()
+        pending = d.get('b_review_pending')
+        if pending is not None:
+            if has and records and App._local_first(self):
+                if not pending.winfo_manager():
+                    pending.pack(fill='x', pady=(P(6), 0))
+                pending.configure(text='보류된 AI 검증 진행 중' if running and d.get('_running_cmd') == 'review-only' else REVIEW_ONLY_TEXT)
+            elif pending.winfo_manager():
+                pending.pack_forget()
         parts = []
         if running and d.get("_stop_requested"):
             parts = [(self.v_status.get(), "plain")]
@@ -4008,7 +4033,7 @@ class App(ResultNavigation, tk.Tk):
         elif not running and not has and self.v_status.get() == CLEARED_STATUS:
             parts = [(CLEARED_STATUS, "plain")]
         if parts:
-            App._set_rich(self, self.t_run_status, parts); self.t_run_status.grid(row=5, column=0, sticky="ew", pady=(P(8), 0))
+            App._set_rich(self, self.t_run_status, parts); self.t_run_status.grid(row=6, column=0, sticky="ew", pady=(P(8), 0))
         else:
             self.t_run_status.grid_remove()
         if running:
@@ -4034,16 +4059,6 @@ class App(ResultNavigation, tk.Tk):
             self.l_copy_note.grid(row=8, column=0, sticky="ew", pady=(P(6), 0))
         else:
             self.l_copy_note.grid_remove()
-
-    def _partial_wanted(self, res=None) -> bool:
-        """[읽은 쪽까지 HWPX 만들기]를 보일지: 이 원본에 판독 기록이 있고, 아직 읽을 쪽이 남았거나(셈을 모르면 남았다고 봄) 방금 실행을 중지했을 때."""
-        d = vars(self)
-        if not App._n_records(self.pdf()):
-            return False
-        if res and res.get("kind") == "stopped":
-            return True
-        counts = d.get("_counts")
-        return not counts or bool(counts.get("to_read"))
 
     def _rich_line(self, parent, font: str = "BODY", fg: str = "INK") -> tk.Text:
         """굵은 글·빨강·주의 글을 한 문단에 섞어 차지한 너비대로 줄을 바꾸는 읽기 전용 글줄(높이는 줄 수에 맞춤). 설정 줄 설명은 font='CAP'·fg='MUTED'
@@ -4084,9 +4099,8 @@ class App(ResultNavigation, tk.Tk):
         if b1 is None or b2 is None:
             return
         if not self.running:
-            b2.grid_remove()
-            review_only = '--local-review-only' in App._strategy_opts(self)
-            b1.configure(style="Seal.TButton", text="미완료 검증 이어서" if review_only else RUN_TEXT, image="")
+            counts = d.get('_counts') or {}
+            b1.configure(style="Seal.TButton", text=RESUME_TEXT if counts.get('records') and counts.get('to_read') else RUN_TEXT, image="")
             b2.configure(style="SealOut.TButton", text=RUN_PDF_TEXT, image="")
             return
         cmd = d.get("_running_cmd") or ""
@@ -4114,7 +4128,7 @@ class App(ResultNavigation, tk.Tk):
             b2.grid()
             b2.configure(style="SealOutBusy.TButton", image=lock, compound="left",
                          text="  " + fit(b2, (f"한 번에 인식 (문자 PDF) · {doing}", f"문자 PDF 만들기 · {doing}", f"문자 PDF · {doing}"), "BTN_L_B"))
-        elif cmd and cmd != "update":
+        elif cmd and cmd not in ('update', 'review-only'):
             label = d.get("_run_label") or {"install": "패키지 설치·점검"}.get(cmd, cmd)
             b1.configure(style="SealBusy.TButton", image=lock, compound="left", text="  " + fit(b1, (f"{label} 중",), "RUN"))
 
@@ -4575,13 +4589,16 @@ class App(ResultNavigation, tk.Tk):
         C, P, L = self.colors, self.px, self._lab
         card = ttk.Frame(parent, style="Card.TFrame", padding=(P(20), P(14), P(20), P(14)))
         b = tk.Frame(card, bg=C["PANEL"]); b.pack(fill="both", expand=True); b.columnconfigure(0, weight=1)
-        head = tk.Frame(b, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
+        header = tk.Frame(b, bg=C['PANEL']); header.grid(row=0, column=0, sticky='ew')
+        head = tk.Frame(header, bg=C['PANEL']); head.pack(fill='x')
         L(head, "진행", "SECTION").pack(side="left")
         self.l_pill = ttk.Label(head, text="준비됨", style="Pillidle.TLabel"); self.l_pill.pack(side="left", padx=(P(10), 0))
-        self.l_pct = L(head, "전체 0%", "BODY_B"); self.l_pct.pack(side="right")
+        self.l_pct = L(head, '이번 작업 0%', 'BODY_B'); self.l_pct.pack(side='right')
         self.progress = ttk.Progressbar(head, style="Panel.Bar.Horizontal.TProgressbar", mode="determinate", maximum=1000, value=0)
         self.progress.pack(side="left", fill="x", expand=True, padx=(P(10), P(12)))
         Tip(self.progress, "전체 진행 — 단계마다 걸리는 시간의 어림 무게로 셈(판독이 대부분)", self)
+        self.l_ocr_coverage = L(header, '', 'CAP_B'); self.l_ocr_coverage.pack(anchor='w', pady=(P(6), 0))
+        self.l_output_coverage = L(header, '', 'CAP', 'MUTED'); self.l_output_coverage.pack(anchor='w', pady=(P(2), 0))
         # 단계 띠: 열마다 동그라미 + 이음줄 / 이름(+ 영수증) / (3번) 꼬리표 / 상태 줄 / 비용 줄 — 줄 하나 = Label 하나(한 줄에 표지 둘을 두지 않음)
         band = self._band = tk.Frame(b, bg=C["PANEL"]); band.grid(row=1, column=0, sticky="ew", pady=(P(14), 0))
         self._band_cols: list[dict] = []
@@ -4646,7 +4663,18 @@ class App(ResultNavigation, tk.Tk):
 
     def _show_ai_link(self, state):
         """subscriptions.ON_CHANGE 로 온 연결 상태(None=연결 없음)를 AI 연결 줄에 보인다."""
-        row = vars(self).get("_ai_link_row")
+        d = vars(self)
+        if d.get('l_settings_ai_link') is not None:
+            targets = {AI_TARGET_LABELS[plan]: plan for plan in (state or {}).get('targets', ()) if plan != 'api'}
+            self._settings_ai_targets = targets
+            busy = d.get('_subscription_switch_busy', False)
+            self.l_settings_ai_link.configure(text=('AI 요청 처리 후 전환 중…' if busy else
+                                                   state['label'] if state and state['available'] else '활성 구독 연결 없음'))
+            self.cb_settings_ai_next.configure(values=list(targets), state='readonly' if targets and not busy else 'disabled')
+            if self.v_settings_ai_next.get() not in targets:
+                self.v_settings_ai_next.set(next(iter(targets), ''))
+            self.b_settings_ai_switch.configure(state='normal' if targets and not busy else 'disabled')
+        row = d.get("_ai_link_row")
         if row is None:
             return
         if not state:
@@ -4671,7 +4699,8 @@ class App(ResultNavigation, tk.Tk):
         self.cb_ai_next.configure(values=list(targets))
         if self.v_ai_next.get() not in targets:
             self.v_ai_next.set(auto)
-        self.b_ai_switch.configure(state="normal" if state["available"] and (following or state["targets"]) else "disabled")
+        enabled = state['available'] and (following or state['targets']) and not d.get('_subscription_switch_busy')
+        self.b_ai_switch.configure(state='normal' if enabled else 'disabled')
 
     def refresh_plans(self):
         """AI 판독기 ① 구독 계정의 '로그인 상태' 줄: 세 공식 프로그램의 설치·로그인을 뒤에서 확인한다(창이 멈추지 않게)."""
@@ -4841,21 +4870,43 @@ class App(ResultNavigation, tk.Tk):
         messagebox.showinfo("로그인", (message + "\n\n" if message else "새 창이 열렸습니다. ")
                             + plan_setup.LOGIN_NOTES[plan] + " 로그인한 뒤 [상태 확인]을 누르세요.", parent=self)
 
-    def switch_subscription(self):
+    def switch_subscription(self, *, after_pending=False):
         """[다음 구독으로 넘기기]: 고른 곳(없으면 정해진 순서의 다음)으로 실행 중인 연결을 옮긴다.
         상태 확인(로그인 여부)이 잠깐 걸릴 수 있어 창이 멈추지 않게 뒤에서 한다."""
-        target = vars(self).get("_ai_targets", {}).get(self.v_ai_next.get())
+        from . import subscriptions
+
+        d = vars(self)
+        if d.get('_subscription_switch_busy'):
+            return
+        if after_pending:
+            target = d.get('_settings_ai_targets', {}).get(self.v_settings_ai_next.get())
+            if target is None:
+                return
+        else:
+            target = d.get('_ai_targets', {}).get(self.v_ai_next.get())
+        session = subscriptions.active()
+        self._subscription_switch_busy = True
         self.b_ai_switch.configure(state="disabled")
+        if d.get('b_settings_ai_switch') is not None:
+            self.b_settings_ai_switch.configure(state='disabled')
+            self.cb_settings_ai_next.configure(state='disabled')
+            self.l_settings_ai_link.configure(text='AI 요청 처리 후 전환 중…' if after_pending else '구독 전환 중…')
         def work():
-            from . import subscriptions
-            message = subscriptions.switch(target)
-            self.q.put(("log", "  " + message + "\n"))
-            self.q.put(("ai_link", subscriptions.state()))
+            try:
+                if subscriptions.active() is session:
+                    message = subscriptions.switch(target, after_pending=after_pending, subscription_only=after_pending)
+                else:
+                    message = '작업이 끝나 구독을 전환하지 않았습니다.'
+                state = subscriptions.state()
+            except Exception as exc:
+                message = f'구독 전환 실패: {exc}'
+                state = None
+            self.q.put(('ai_switch_done', message, state))
         threading.Thread(target=work, daemon=True, name="ai-switch").start()
 
     def test_plans(self):
         """[연결 시험]: 쓸 수 있는 구독마다 작은 요청 하나를 실제로 보내 본다(뒤에서 — 계정마다 수십 초 걸릴 수 있음). 결과는 창과 진행 기록에."""
-        if vars(self).get("_plan_test_busy"):
+        if getattr(self, 'running', False) or vars(self).get("_plan_test_busy"):
             return
         self._plan_test_busy = True
         button = vars(self).get("b_plan_test")
@@ -4877,7 +4928,7 @@ class App(ResultNavigation, tk.Tk):
         self._plan_test_busy = False
         button = vars(self).get("b_plan_test")
         if button is not None:
-            button.configure(state="normal")
+            button.configure(state='disabled' if getattr(self, 'running', False) else 'normal')
         for line in lines:
             self.q.put(("log", "  연결 시험 — " + line + "\n"))
         App.refresh_plans(self)
@@ -4931,7 +4982,20 @@ class App(ResultNavigation, tk.Tk):
             frac = 1.0 if res.get("kind") in ("ok", "partial") else tr.frac
         else:
             frac = 0.0
-        self.l_pct.configure(text=f"전체 {frac * 100:.0f}%")
+        self.l_pct.configure(text=f'이번 작업 {frac * 100:.0f}%')
+        if d.get('l_ocr_coverage') is not None:
+            coverage = d.get('_ocr_coverage')
+            if coverage and coverage[0] == self.pdf():
+                _, total, saved = coverage
+                live = d.get('_page_live') if phase in ('running', 'done') and cmd in PAGE_CMDS else None
+                live_records = {n for n, status in (live or {}).items()
+                                if 1 <= n <= total and status in ('done', 'record', 'review_pending', 'engine_issue', 'engine_and_review')}
+                recorded = len(saved | live_records)
+                self.l_ocr_coverage.configure(text=f'전체 OCR 기록 {recorded:,}/{total:,}쪽 · 남은 {total - recorded:,}쪽')
+            else:
+                self.l_ocr_coverage.configure(text='전체 OCR 기록 확인 중…' if self.pdf() else '')
+            seen = d.get('_seen') if phase in ('running', 'done') else None
+            self.l_output_coverage.configure(text=G.document_output_status(seen or {}, phase=phase, result=res))
         if not (phase == "running" and not cmd):                        # 이미지 묶기·키 확인은 막대를 스스로 움직인다(_bundle_msg)
             self.progress.configure(value=self._bar_value(frac))
         led = d.get("_ledger"); live = bool(d.get("_ledger_live")) and led is not None
@@ -5106,6 +5170,9 @@ class App(ResultNavigation, tk.Tk):
             marks = merge_marks(marks, d.get("_page_live"), finished=not d.get("running"), before=before)
         self._strip_pages = list(data.get("pages") or [])
         self._strip_marks = marks
+        if 'coverage' in data:
+            self._ocr_coverage = data['coverage']
+            App._sync_run_card(self)
         App._sync_progress(self)
         App._draw_strip(self); App._draw_legend(self)
 
@@ -5487,10 +5554,10 @@ class App(ResultNavigation, tk.Tk):
         act = self._build_run_column(self._run_slot)
         act2 = self._build_collate_run(self._collate_cols["run"])
         settings = tk.Frame(self._footer, bg=self.colors["PANEL"], padx=P(24), pady=P(12))
-        self._btn(settings, "설정 저장", self.save_settings, style="FootInk.TButton",
+        self._btn(settings, "설정 저장", self.save_settings, style="FootInk.TButton", lock=False,
                   tip="지금 설정을 저장합니다(실행할 때와 창을 닫을 때도 저절로 저장). 쪽 범위·인쇄 쪽수·읽기 방향·문서 짜임·양식·짜임 규칙·획 굵기는 "
                       "이 책의 결과 폴더(book_settings.json)에도 — 결과 폴더가 아직 없으면 실행할 때 남깁니다.").pack(side="left")
-        self._btn(settings, "OCR로 돌아가기", self.return_to_ocr, style="Foot.TButton").pack(side="left", padx=(P(10), 0))
+        self._btn(settings, "OCR로 돌아가기", self.return_to_ocr, style="Foot.TButton", lock=False).pack(side="left", padx=(P(10), 0))
         self.v_auto_update = tk.BooleanVar(value=bool(self.cfg.get("auto_update", True)))
         self.b_update = self._btn(settings, "업데이트 확인", self.check_updates, style="Foot.TButton",
                                   tip="지금 새 판이 있는지 확인합니다(명령 띠의 [더 보기] → [업데이트 확인]과 같음). 실행 중에는 잠깁니다.")
@@ -5791,7 +5858,7 @@ class App(ResultNavigation, tk.Tk):
         b = tk.Frame(card, bg=C["PANEL"]); b.pack(fill="both", expand=True); b.columnconfigure(0, weight=1)
         head = tk.Frame(b, bg=C["PANEL"]); head.grid(row=0, column=0, sticky="ew")
         L(head, "교정 실행", "SECTION").pack(side="left")
-        self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton",
+        self._btn(head, "설정 바꾸기", lambda: self.select_tab(3), style="Link.TButton", lock=False,
                   tip="판독기·모델·속도·읽기 방향과 교정 정책·표시 방식은 설정 탭에서 고릅니다.").pack(side="right")
         self.l_crun_summary = L(b, "", "BODY_B", wrap=True); self.l_crun_summary.grid(row=1, column=0, sticky="ew", pady=(P(6), 0))
         self.l_crun_opts = L(b, "", "CAP", "MUTED", wrap=True); self.l_crun_opts.grid(row=2, column=0, sticky="ew", pady=(P(2), 0))
@@ -6477,7 +6544,7 @@ class App(ResultNavigation, tk.Tk):
 
     def open_engine_manager(self):
         """엔진 관리 창(하나만): GPU 점검 · 추가 로컬 엔진 설치. 인식 작업과 따로 돈다."""
-        if getattr(self, "_closing", False):
+        if self.running or getattr(self, "_closing", False):
             return
         existing = vars(self).get("_engine_manager")
         if existing is not None and existing.winfo_exists():
@@ -6622,9 +6689,7 @@ class App(ResultNavigation, tk.Tk):
             options += ["--local-ai-pages", str(together)]
         variable = vars(self).get("v_local_resume")
         resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
-        if resume == "review-only":
-            options += ["--local-review-only"]
-        elif resume in RESUME_LABELS and resume != "unfinished":
+        if resume in RESUME_LABELS and resume != 'unfinished':
             options += ["--local-resume", resume]
         variable = vars(self).get("v_local_ai_subscription")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))):
@@ -7015,6 +7080,7 @@ class App(ResultNavigation, tk.Tk):
         d = vars(self)
         if on:
             self._running_cmd = command; self._stop_requested = False; self._run_result = None
+            self._running_tab = d.get('_last_ocr_tab', 0)
             self._ledger_live = d.get("_ledger_for") == command and command in ("run", "run-pdf")   # 이번 실행의 어림이 장부에 있음(go 안에서 남김)
             self._ledger_for = None
             self._calls_by_stage = {}; self._calls_base = None; self._calls_tail = None; self._calls_used = 0
@@ -7033,8 +7099,9 @@ class App(ResultNavigation, tk.Tk):
                     b.configure(text="■  중지")                          # '멈추는 중…' 을 되돌린다
         for b in self.buttons:
             b.configure(state="disabled" if on else "normal")
-        for button in getattr(self, "_tab_buttons", []):
-            button.configure(state="disabled" if on else "normal")
+        for tab, button in enumerate(getattr(self, "_tab_buttons", [])):
+            locked = on and (command == 'update' or tab not in (3, self._running_tab))
+            button.configure(state='disabled' if locked else 'normal')
         self._reader_changed()
         for b in (self.b_stop, getattr(self, "b_stop2", None)):
             if b is not None:
@@ -7085,6 +7152,8 @@ class App(ResultNavigation, tk.Tk):
         f = self.tracker.update(stage, done, total)
         if self.tracker.stage:
             vars(self).setdefault("_seen", {})[self.tracker.stage] = (self.tracker.done, self.tracker.total)
+        if stage == 'textlayer':  # Also emitted when a companion PDF is built after HWPX.
+            vars(self).setdefault('_seen', {})[stage] = (done, total)
         if self.tracker.stage != before:
             App._sync_run_slot(self)
         self.progress.configure(value=self._bar_value(f)); self._prog_shown = time.time()
@@ -7096,12 +7165,15 @@ class App(ResultNavigation, tk.Tk):
             return
         if len(argv) > 1 and argv[0] in ("run", "build") and not App._result_editors_ready(self, argv[1]):
             return
+        argv = list(argv)
         self.open_after = open_after
         self._pending_output_run = OutputRun.capture(argv)
         cmd = argv[0] if argv else ""
-        if cmd == "run" and "--pdf-only" in argv:
+        if cmd == 'run' and '--local-review-only' in argv:
+            cmd = 'review-only'
+        elif cmd == "run" and "--pdf-only" in argv:
             cmd = "run-pdf"
-        self._run_local_first = (cmd in ("run", "run-pdf") and "--ocr-strategy" in argv
+        self._run_local_first = (cmd in ("run", "run-pdf", 'review-only') and "--ocr-strategy" in argv
                                  and argv[argv.index("--ocr-strategy") + 1] == "local-first"
                                  and ("--reader" not in argv or argv[argv.index("--reader") + 1] != "mock"))
         self._run_label = label                                         # 한 번에 인식이 아닌 명령은 실행 단추 자리에 '{label} 중'
@@ -7165,6 +7237,10 @@ class App(ResultNavigation, tk.Tk):
                         self.v_hstyles.set(item[1])
                 elif item[0] == "ai_link":
                     App._show_ai_link(self, item[1])
+                elif item[0] == 'ai_switch_done':
+                    self._subscription_switch_busy = False
+                    self._append('  ' + item[1] + '\n')
+                    App._show_ai_link(self, item[2] if self.running else None)
                 elif item[0] == "setup_done":
                     App._setup_done(self, *item[1:])
                 elif item[0] == "plan_test":
@@ -7276,7 +7352,7 @@ class App(ResultNavigation, tk.Tk):
             if n and messagebox.askyesno(APP_NAME, f"중지했습니다. 지금까지 판독 기록이 있는 {n:,}쪽으로 HWPX를 만들까요?\n\n"
                                          "모델을 부르지 않고 읽은 쪽만 문서로 만듭니다(AI 검증 차례를 기다리던 쪽은 엔진 판독 그대로). "
                                          "남은 쪽은 [한 번에 인식]을 다시 누르면 이어서 읽습니다.\n\n"
-                                         f"지금 만들지 않아도 실행 카드의 [{PARTIAL_TEXT}]로 나중에 만들 수 있습니다."):
+                                         '나중에는 [저장된 판독 내보내기]에서 만들 수 있습니다.'):
                 self.after(50, lambda: App.do_partial(self))
         self.open_after = None
 
@@ -7688,11 +7764,11 @@ class App(ResultNavigation, tk.Tk):
             self._active_reader = reader
             self.save_settings(quiet=True)
         self.v_provider.set(PROVIDER_LABELS[reader])
-        self.cb_provider.configure(state="disabled" if self.running else "readonly")
-        st = "normal" if reader != "mock" and not self.running else "disabled"
+        self.cb_provider.configure(state="readonly")
+        st = "normal" if reader != "mock" else "disabled"
         self.e_model.configure(state=st); self.e_key.configure(state=st); self.e_model2.configure(state=st)
         for widget, enabled in self._gemini_widgets:
-            widget.configure(state=enabled if reader == "gemini" and not self.running else "disabled")
+            widget.configure(state=enabled if reader == "gemini" else "disabled")
 
     def save_settings(self, quiet=False):
         remember_provider(self.cfg, self.v_reader.get(), self.v_model.get(), self.v_key.get(), self.v_model2.get().strip())
@@ -7829,12 +7905,19 @@ class App(ResultNavigation, tk.Tk):
         """비용 한 창: 판독·3차 판별·합의 의심·문맥 교정의 어림(costplan.count_plan)을 작업 스레드에서 세고(462쪽이면 몇 초 — 창이 멈추지 않게
         작은 진행 창을 띄우고 단추를 잠근다) 끝나면 _poll → _plan_done. go(extra) 는 실행(extra = 모델 단계를 뺄 선택), go=None 은 [비용 미리 보기].
         mock 판독기는 모델을 부르지 않아 어림하지 않는다. 어림 중에 다시 눌러도(창이 잠겨 있지만) 두 번 세지 않는다."""
-        if kind in ("run", "run-pdf") and App._local_first(self):
+        if kind in ('run', 'run-pdf', 'review-only') and App._local_first(self):
             cfg = vars(self).get("cfg", {})
             variable = vars(self).get("v_local_ai_max_calls")
             cap = max_calls_value(variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20))
             if cap is None or not 1 <= cap <= 100:
                 messagebox.showwarning(APP_NAME, "로컬 뒤 AI 검증 호출 상한은 1~100 사이 정수여야 합니다.")
+                return
+            if kind == 'review-only':
+                vars(self).pop('_ledger_pending', None)
+                self._ledger = None
+                if hasattr(self, '_append'):
+                    self._append('보류된 AI 검증만 진행합니다. 기존 OCR과 출력은 보존하고 검증 결과는 제안으로 저장합니다.\n')
+                go([])
                 return
             variable = vars(self).get("v_local_ai_review")
             review = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_review", True))
@@ -8049,8 +8132,6 @@ class App(ResultNavigation, tk.Tk):
         return True
 
     def do_run(self):
-        if '--local-review-only' in App._strategy_opts(self):
-            return App.do_run_pdf(self)
         if not self._need_pdf() or not App._result_editors_ready(self, self.pdf()) or not App._corrections_ok(self):
             return
         if not App._choose_run_start(self):
@@ -8067,11 +8148,10 @@ class App(ResultNavigation, tk.Tk):
                            + self._answered_opts() + extra + self._build_opts() + App._strategy_opts(self), "한 번에 인식 (전체 → HWPX)" if not pages else f"한 번에 인식 ({pages}쪽 → HWPX)")
             self._with_plan("run", go)
 
-    def do_run_pdf(self):
+    def do_run_pdf(self, *, review_only=False):
         """Read the selected source and produce a searchable PDF without HWPX assembly."""
         if not self._need_pdf():
             return
-        review_only = '--local-review-only' in App._strategy_opts(self)
         if review_only and not App._result_editors_ready(self, self.pdf()):
             return
         if App._local_first(self):
@@ -8086,9 +8166,15 @@ class App(ResultNavigation, tk.Tk):
                 argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
                 if not review_only: argv += ['--out', str(out)]
                 argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra + App._strategy_opts(self)
-                self.start(argv, "미완료 검증만 · 기존 결과 보존" if review_only else "한 번에 인식 (문자 PDF 만들기)",
+                if review_only:
+                    argv = [flag for flag in argv if flag != '--no-local-ai-review']
+                    if '--local-review-only' not in argv:
+                        argv.append('--local-review-only')
+                    if '--local-ai-review' not in argv:
+                        argv.append('--local-ai-review')
+                self.start(argv, REVIEW_ONLY_TEXT if review_only else RUN_PDF_TEXT,
                            open_after=None if review_only else out)
-            self._with_plan("run-pdf", go)
+            self._with_plan('review-only' if review_only else 'run-pdf', go)
 
     def do_stop(self):
         """Request cancellation while the worker finishes preserving its checkpoints."""

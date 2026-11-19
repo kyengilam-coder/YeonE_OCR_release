@@ -100,9 +100,3 @@ class RunStartTests(TestCase):
                 self.gui.App,'_choose_run_start',return_value=False):
             self.gui.App.do_run(app)
         app._prepare_env.assert_not_called();app._with_plan.assert_not_called();app.start.assert_not_called()
-
-    def test_review_only_keeps_dedicated_non_destructive_path(self):
-        with mock.patch.object(self.gui.App,'_strategy_opts',return_value=['--local-review-only']), mock.patch.object(
-                self.gui.App,'do_run_pdf') as run, mock.patch.object(self.gui.App,'_choose_run_start') as choose:
-            app=SimpleNamespace();self.gui.App.do_run(app)
-        run.assert_called_once_with(app);choose.assert_not_called()
