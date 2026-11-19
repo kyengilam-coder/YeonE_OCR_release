@@ -1,8 +1,8 @@
 """HWPX 작성기 하나: 블록 → 문단·런·책갈피·메모·그림·표 → 저장 → 다시 열어 검사. 모양은 '모양 원천(look)' 이 정한다.
 
 - DefaultLook(기본 모양, hwpx_builder.build_hwpx): 새 문서, 함초롬 글자 모양, 원본 쪽마다 기록 줄·쪽 나누기, 제목 문단 모양(가운데·앞뒤 간격).
-- TemplateLook(사용자 양식, hwpx_template.build_hwpx_template): 양식의 쪽 설정은 두고 본문을 비운 뒤 쓰임(role)마다 양식 스타일, 한문 문단은
-  줄 나눔을 글자 단위로 바꾼 문단 모양 사본, 양식 글자 모양 위에 등급 색 덧입히기, 쪽 번호·첫 문단 합치기.
+- TemplateLook(사용자 양식, hwpx_template.build_hwpx_template): 양식의 쪽 설정은 두고 본문을 비운 뒤 쓰임(role)마다 양식 스타일,
+  원본 스타일의 줄 나눔·정렬·간격 유지, 양식 글자 모양 위에 등급 색 덧입히기, 쪽 번호·첫 문단 합치기.
 문단 하나를 쓰는 셈(고지 글 속 넣기, 등급·표시 조각, 책갈피 자리, 쓰임별 글자 스타일 범위, 메모, 등급 수 세기)과 그림·표·저장·검사는 여기 한곳에 있다.
 두 모양의 차이는 look 의 Para 와 몇 가지 깃발(count_pieces·styled·skip_if_empty·heading)로만 둔다 — 예전 두 작성기의 출력 그대로(tests/test_hwpx_golden)."""
 from __future__ import annotations
@@ -60,7 +60,10 @@ BASIC_FORMATS = {
     "small": (9.5, False, "JUSTIFY", 0, 0),
     "caption": (9.5, False, "CENTER", 3, 3),
     "note": (9, False, "LEFT", 0, 0),
+    "citation_source": (10.5, False, "LEFT", 6, 0),
+    "quotation": (10.5, False, "JUSTIFY", 0, 0),
 }
+CITATION_STYLES = {'citation_source': ('출전', '표-11(내쓰)'), 'quotation': ('인용문', '표-20(_들쓰)')}
 _HAN = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003134f]")   # 한자(확장 A·통합·호환·확장 B~) — 이스케이프로 적는다(호환 한자 豈 가 NFC 로 바뀌면 한글까지 한자로 센다)
 
 
@@ -124,8 +127,10 @@ def _ensure_basic_styles(doc, preset: Preset, *, template: bool = False, font: s
         else:
             cpr = doc.oxml.ensure_run_style(font=font or (FONT_HEAD if bold else FONT_BODY), size=size, bold=bold,
                                            color=COLOR_NOTE if role == "note" else "#000000")
+            margins={"prev": int(before * 100), "next": int(after * 100)}
+            if role == 'quotation': margins.update(left=1070, intent=1000)
             ppr = header.ensure_paragraph_format(base_para_pr_id=0, alignment=alignment, heading={"type": "NONE"},
-                                                margins={"prev": int(before * 100), "next": int(after * 100)})
+                                                margins=margins)
         style_id = header.ensure_style(names[0], style_type="PARA", para_pr_id_ref=ppr, char_pr_id_ref=cpr, next_style_id_ref=0)
         existing[names[0]] = {"id": style_id, "type": "PARA", "para": str(ppr), "char": str(cpr)}
         created.append(names[0])
@@ -179,7 +184,7 @@ class DefaultLook:
     개요 모양을 받아 한컴이 "가. 나. 다." 자동 번호를 붙이던 문제를 막는다."""
     count_pieces = False             # 등급 수를 조각(seg)마다 — 예전 기본 모양 그대로
     grade_style = GRADE_STYLE        # 단순 표시면 SIMPLE_GRADE_STYLE(형광 바탕 + 글자색만)
-    SIZE = {"body": 11, "small": 9.5, "chk": 9, "note": 9, "meta": 8}
+    SIZE = {"body": 11, "small": 9.5, "chk": 9, "note": 9, "meta": 8,"h1":16,"h2":14,"h3":12}
 
     def __init__(self, page_breaks: bool = True, author: str = MEMO_AUTHOR):
         self.page_breaks, self.author = page_breaks, author
@@ -210,6 +215,7 @@ class DefaultLook:
             "chk": rs(font=FONT_BODY, size=9, color=COLOR_NOTE),
         }
         self.highlight = highlight; self._grade: dict = {}; self._first_meta = True
+        self._doc=doc
         self._grade_bases, self._ambiguous_grade_bases = {}, set()
         return doc
 
@@ -226,7 +232,7 @@ class DefaultLook:
             # 개요 스타일(add_heading)을 쓰지 않는다: 한컴이 개요 번호("1." "가.")를 덧붙여 원본에 없는 글자가 생긴다.
             # 제목은 바탕글 문단에 굵은 큰 글자로 두고, 자리 잡기(가운데·앞뒤 간격)만 문단 모양으로 준다. 제목의 등급 범위는 칠하지 않는다(예전 그대로).
             lvl = "h1" if b.level <= 1 else ("h2" if b.level == 2 else "h3")
-            yield self._para(b.text, lvl, styled=False, notes=b.memos, anchors=b.anchors, heading=True, fmt=HEADING_FORMAT[lvl])
+            yield self._para(b.text, lvl, styled=bool(b.layout), spans=b.spans if b.layout else [], notes=b.memos, anchors=b.anchors, heading=True, fmt=HEADING_FORMAT[lvl])
         elif b.type == "para":
             yield self._para(b.text, "small" if b.kind == "소주" else "body", spans=b.spans, notes=b.memos, anchors=b.anchors)
         elif b.type == "note":
@@ -248,6 +254,12 @@ class DefaultLook:
             return self.S["note"]
         if not self.highlight:
             return self.S[para.key]
+        if kind=='pending':
+            key=(str(para.base),'pending')
+            if key not in self._grade:
+                self._grade[key]=self._doc.oxml.ensure_run_style(base_char_pr_id=para.base,color='#C00000')
+            _remember_grade_base(self,self._grade[key],para.base)
+            return self._grade[key]
         key = (para.key, kind)
         if key not in self._grade:                                     # 본문·소주 크기에 맞춘 등급 글자 모양(같은 것은 한 번만 만든다)
             g = self.grade_style[kind]
@@ -285,7 +297,8 @@ class BasicLook(DefaultLook):
 
     def __init__(self, preset: Preset, page_breaks: bool = True, author: str = MEMO_AUTHOR):
         super().__init__(page_breaks=page_breaks, author=author)
-        self.preset = replace(preset, para_styles={**resolve_preset("basic").para_styles, **preset.para_styles})
+        self.preset = replace(preset, para_styles={**resolve_preset("basic").para_styles,
+                              **(CITATION_STYLES if preset.citation else {}), **preset.para_styles})
 
     def open(self, highlight: bool):
         doc = super().open(highlight)
@@ -324,10 +337,11 @@ class BasicLook(DefaultLook):
 class TemplateLook:
     """사용자 양식(HWPX)의 스타일로 내용별 문서를 채운다. 양식의 쪽 설정(용지·여백)은 그대로 두고 본문은 비운 뒤, 블록의 쓰임(structure.ROLES)마다
     양식 스타일을 골라 문단을 넣는다. 확인 등급 색·고지 메모는 양식 글자 모양 위에 덧입힌다(바탕은 양식 그대로, 색·굵기·형광펜만 바꾼 글자 모양을 따로).
-    한문 문단은 줄 나눔을 '글자 단위'로 바꾼 문단 모양을 쓴다: 양식 스타일 대부분이 '어절 단위'(KEEP_WORD)라 띄어쓰기 없는 한문이 긴 덩어리째
-    다음 줄로 넘어가며 줄 가운데 큰 빈칸이 생긴다. 스타일 연결은 그대로라 한글에서 스타일을 다시 적용하면 양식대로 돌아간다."""
+    문단의 줄 나눔·정렬·간격은 양식 스타일을 그대로 따른다. 검수 색상과
+    명시적인 제목 배치·출전 연결 등 필요한 편집 기능만 별도로 적용한다."""
     count_pieces = True              # 등급 수를 조각(cut)마다 — 예전 양식 작성기 그대로
     grade_style = GRADE_STYLE
+    preserve_template_styles = True
 
     def __init__(self, template: str, preset: Preset | None = None, author: str = "YeonE_OCR"):
         """preset: 쓰임 → 스타일 이름을 줄 짜임 규칙. None 이면 kaibao(본초학 양식 이름 — 예전 PARA_STYLES·CHAR_STYLES 그대로).
@@ -337,6 +351,9 @@ class TemplateLook:
         self.preset = preset
         self.template, self.author = template, author
         self.para_styles = {**base.para_styles, **preset.para_styles}
+        if preset.citation:
+            self.para_styles = {**CITATION_STYLES, **self.para_styles}
+            self.preset = replace(preset,para_styles=self.para_styles)
         self.char_styles = {**base.char_styles, **preset.char_styles}
 
     def open(self, highlight: bool):
@@ -371,21 +388,29 @@ class TemplateLook:
         # 비운 본문이 쓰던 양식 그림(BinData)은 꾸러미에 그대로 둔다: 구역이 둘 이상인 양식에서 remove_unused_images() 를 부르면 뒤에 넣는
         # 그림이 꾸러미 목록(content.hpf)에 오르지 않아 한글이 열지 못하는 파일이 된다. 한글이 저장할 때 알아서 지운다.
         self.doc, self.sec0, self.header = doc, sec0, doc.oxml.headers[0]
-        self.styles = _ensure_basic_styles(doc, self.preset, template=True) if self.preset.id == "basic" else template_styles(doc)
+        from .verify import numbered_paragraph_formats
+        self._numbering = numbered_paragraph_formats(self.header.element)
+        self.styles = _ensure_basic_styles(doc, self.preset, template=True) if self.preset.id == "basic" or self.preset.citation else template_styles(doc)
         self.base = self.styles.get("바탕글") or {"id": "0", "type": "PARA", "para": "0", "char": "0"}
-        self.extra_stats = {"styles": {}, "missing": [], "template_dropped": dropped, "page_number_from_template": self.has_page_num}
+        self.extra_stats = {"styles": {}, "missing": [], "template_numbering": {},
+                            "template_dropped": dropped, "page_number_from_template": self.has_page_num}
         self.body_w, self.body_h = _body_size_mm(doc)
         self.highlight = highlight; self._brk: dict = {}; self._run: dict = {}; self._pic_ppr: list = []
         self._grade_bases, self._ambiguous_grade_bases = {}, set()
         self._author_char_ids = {style.get("id") for style in self.header.element.iter(HH + "charPr")}
         return doc
 
-    def para_style(self, role: str) -> dict:
+    def para_style(self, role: str, *, marked_entry=False) -> dict:
         st_ = self.extra_stats
-        for name in self.para_styles.get(role, ("바탕글",)):
+        names = self.para_styles.get(role, ("바탕글",))
+        if marked_entry and "제목-본초명" in names:
+            names = ("제목-본초명", *(name for name in names if name != "제목-본초명"))
+        for name in names:
             st = self.styles.get(name)
             if st and st["type"] == "PARA":
                 st_["styles"][role] = name
+                if role in self.para_styles and st["para"] in self._numbering:
+                    st_["template_numbering"][st["id"]] = self._numbering[st["para"]]
                 return st
         if role not in st_["missing"]:
             st_["missing"].append(role)
@@ -400,9 +425,8 @@ class TemplateLook:
         return None
 
     def _para(self, b: Block, role: str, *, spans=(), cstyles=()) -> Para:
-        st = self.para_style(role)
-        han = len(_HAN.findall(b.text)) >= max(1, len(b.text.strip())) * 0.5
-        ppr = _break_word_para(self.header, st["para"], self._brk) if han and role not in HEADING_ROLES else st["para"]
+        st = self.para_style(role, marked_entry=role == 'entry' and b.layout.get('kind') == 'entry')
+        ppr = st["para"]
         return Para(text=b.text, key=role, base=st["char"], para_pr=ppr, style=st["id"], spans=list(spans), notes=list(b.memos), anchors=list(b.anchors),
                     cstyles=list(cstyles), cs_fill="small" if role == "small" else None, heading=role in HEADING_ROLES, skip_if_empty=role in HEADING_ROLES)
 
@@ -479,7 +503,19 @@ class TemplateLook:
         sec0 = self.sec0; sec = sec0.element
         try:                                                          # 쪽 번호: 컨트롤을 구역 설정 문단으로 옮겨 맨 앞 빈 줄이 생기지 않게
             if not self.has_page_num and not getattr(self, 'body_only', False):
-                doc.set_page_number(position="BOTTOM_CENTER")
+                doc.page.set_page_number(position="BOTTOM_CENTER")
+                # python-hwpx may copy the first title's numbered format into
+                # its generated page-number footer. Keep the footer centered
+                # without adding a second, unrelated number next to the page.
+                from .verify import numbered_paragraph_formats
+                numbered = numbered_paragraph_formats(self.header.element)
+                for footer in sec.iter(HP + "footer"):
+                    for paragraph in footer.iter(HP + "p"):
+                        fmt = paragraph.get("paraPrIDRef")
+                        if fmt in numbered and paragraph.find(f".//{HP}autoNum[@numType='PAGE']") is not None:
+                            plain = self.header.ensure_paragraph_format(base_para_pr_id=fmt, heading={"type": "NONE"})
+                            paragraph.set("paraPrIDRef", str(plain))
+                            sec0.mark_dirty()
             paras = sec.findall(f"{HP}p")
             holder = next((q for q in paras[1:] if q.find(f".//{HP}pageNum") is not None and not "".join(t.text or "" for t in q.iter(f"{HP}t")).strip()), None)
             if holder is not None and paras:
@@ -502,12 +538,14 @@ class TemplateLook:
 
 
 def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, large_min_mm: float = 120,
-               highlight: bool = True, memos: bool = True, simple: bool = False) -> dict:
+               highlight: bool = True, memos: bool = True, simple: bool = False,
+               source_pdf=None, source_records=None) -> dict:
     """blocks 를 look 의 모양으로 out_path 에 쓴다. highlight=False 면 등급 색·형광펜·밑줄 없이 글자만(〔〕 표기는 그대로).
     memos=False 면 고지를 메모 대신 회색 〔고지: …〕 로 글 속에. 돌려주는 값: 문단·제목·그림·표·의심 표시·등급·메모·책갈피 수와
     다시 열어 센 그림(images_in_file)·python-hwpx 검사(validate_issues·validate_messages), 그리고 look 의 통계(양식: styles·missing·template_dropped …)."""
     from hwpx import HwpxDocument
     from .hwpx_memo import MemoWriter
+    from .contents_layout import shape_contents_blocks, paragraph_format, add_contents_run
     if simple:
         look.grade_style = SIMPLE_GRADE_STYLE                          # 밑줄·굵게 없이 형광 바탕 + 글자색
     doc = look.open(highlight)
@@ -515,6 +553,11 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
     stats = {"paragraphs": 0, "headings": 0, "images": 0, "tables": 0, "uncertain_items": 0, "marks": 0, "page_breaks": 0,
              "green": 0, "blue": 0, "red_ctx": 0, "memos": 0, "bookmarks": 0}
     names: set = set()
+    index_rows = {}
+    contents_rows = set()
+    contents_width = round(_body_size_mm(doc)[0] * HWPUNIT_PER_MM)
+    contents_formats = {}
+    contents_chars = {}
 
     def bookmark(p, label: str, cpr) -> None:
         """원본 쪽 책갈피(내용별 문서). 같은 이름이 또 나오면 (2)·(3) 을 붙인다."""
@@ -523,8 +566,16 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
             name = f"{label} ({k})"; k += 1
         names.add(name); p.add_bookmark(name, char_pr_id_ref=cpr); stats["bookmarks"] += 1
 
-    def write(para: Para) -> None:
+    def write(para: Para, layout=None) -> None:
+        layout=layout or {}
+        if 'page_break_before' in layout:
+            para=replace(para,page_break=bool(layout['page_break_before']))
+        if layout.get('source_index_title'):
+            para=replace(para,page_break=True)
         text, notes = para.text, list(para.notes)
+        contents = layout.get('source_contents')
+        if contents and contents['start'] and (stats['paragraphs'] or stats['images'] or stats['tables']):
+            para = replace(para, page_break=True)
         if simple:
             notes = []                                                 # 단순 표시: 메모도 글 속 고지도 넣지 않는다(보고·검수 화면에 있음)
         elif not memos and notes:                                      # 메모를 쓰지 않으면 고지를 글 끝에 회색으로
@@ -534,11 +585,25 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
             return
         p = doc.add_paragraph("", para_pr_id_ref=para.para_pr, style_id_ref=para.style, char_pr_id_ref=para.base, include_run=False, inherit_style=False,
                               **({"pageBreak": "1"} if para.page_break else {}))
+        if 'source_index' in layout:
+            index_rows[p.element] = layout['source_index']
+        if contents:
+            contents_rows.add(p.element)
+            ref, size = paragraph_format(doc, para.para_pr, text, contents, contents_width, contents_formats)
+            p.element.set('paraPrIDRef', str(ref))
+
+        def add_run(value, cpr):
+            if not contents:
+                return p.add_run(value, char_pr_id_ref=cpr)
+            key = (cpr, size)
+            if key not in contents_chars:
+                contents_chars[key] = doc.oxml.ensure_run_style(base_char_pr_id=cpr, size=size)
+            return add_contents_run(p, value, contents_chars[key], contents)
         if para.styled or para.spans or notes or para.anchors:
             stats["marks"] += sum(1 for _, k in split_marks(text) if k == "mark")
             segs = styled_runs(text, para.spans if highlight else (), notes)
             if not segs and not amap:
-                p.add_run("", char_pr_id_ref=para.base)                # 빈 줄도 런 하나는 있어야 한다
+                add_run("", para.base)                                # 빈 줄도 런 하나는 있어야 한다
             cs = None
             if para.cstyles is not None:                               # 글자마다 글자 스타일(양식의 소주·출처·본경 조문)
                 cs = [para.cs_fill] * len(text)
@@ -556,7 +621,7 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                     cpr = look.char(para, kind, cs[a] if cs is not None and a < len(cs) else None)
                     for label in amap.pop(a, []):
                         bookmark(p, label, cpr)
-                    r = p.add_run(text[a:e], char_pr_id_ref=cpr)
+                    r = add_run(text[a:e], cpr)
                     if look.count_pieces and kind in GRADES and text[a:e].strip():
                         stats[kind] += 1
                     for m in (msgs if a == pos else []):
@@ -567,15 +632,33 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                 for label in amap[o]:
                     bookmark(p, label, para.base)
         else:
-            p.add_run(text, char_pr_id_ref=para.base)
+            add_run(text, para.base)
         if para.page_break:
             stats["page_breaks"] += 1
         stats["paragraphs"] += 1
         if para.heading:
             stats["headings"] += 1
         look.after_para(doc, para)
+        if layout and not contents:
+            flags={k:layout[k] for k in ('keep_with_next','keep_lines','widow_orphan') if k in layout}
+            alignment=layout.get('alignment')
+            preserve=getattr(look,'preserve_template_styles',False) and not para.heading
+            if preserve:
+                # Merely assigning styleIDRef while replacing its paragraph
+                # format makes reapplying the same style visibly reflow text.
+                # Body/quotation paragraphs inherit the actual template format.
+                flags={'keep_with_next':True} if para.key=='citation_source' and layout.get('keep_with_next') else {}
+                alignment=alignment if layout.get('kind')=='body' and layout.get('evidence') in (
+                    'image-reviewed-layout','measured-isolated-centered-paragraph') else None
+            if not preserve or flags or alignment is not None:
+                flags['page_break_before']=False  # the paragraph's pageBreak flag is the single break source
+                header=doc.oxml.headers[0]
+                ref=header.ensure_paragraph_format(base_para_pr_id=p.element.get('paraPrIDRef','0'),
+                                                   alignment=alignment,break_setting=flags)
+                p.element.set('paraPrIDRef',str(ref))
+                p.section.mark_dirty()
 
-    for b in blocks:
+    for b in shape_contents_blocks(blocks):
         if b.type == "image":
             data = Path(b.path).read_bytes(); fmt = Path(b.path).suffix.lstrip(".").lower() or "png"
             kw = look.picture(doc, b, min_mm, large_min_mm)
@@ -589,13 +672,34 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
             for i, row in enumerate(b.rows):
                 for j, cell in enumerate(row):
                     t.cell(i, j).text = cell
+                    if b.cell_spans.get((i,j)):
+                        paragraph=t.cell(i,j).paragraphs[0]
+                        for run in list(paragraph.element.findall(HP+'run')):
+                            paragraph.element.remove(run)
+                        proto=next(look.paras(Block(type='para',text=cell)))
+                        paragraph.element.set('paraPrIDRef',str(proto.para_pr))
+                        paragraph.element.set('styleIDRef',str(proto.style))
+                        for value,kind,_notes in styled_runs(cell,b.cell_spans[(i,j)]):
+                            paragraph.add_run(value,char_pr_id_ref=look.char(proto,kind,None))
+                        paragraph.section.mark_dirty()
             stats["tables"] += 1
         else:
             for para in look.paras(b):
-                write(para)
+                write(para,b.layout)
             if b.type == "uncertain":
                 stats["uncertain_items"] += len(b.items)
     look.finish(doc)
+    evidence = None
+    if source_pdf:
+        from .source_lists import pdf_lists, apply_source_lists
+        evidence = pdf_lists(source_pdf, source_records)
+        stats.update(apply_source_lists(doc, evidence, excluded=set(index_rows) | contents_rows))
+    if index_rows:
+        from .index_layout import apply_index_columns
+        stats['source_index_pages'] = apply_index_columns(doc, index_rows)
+    from .toc_tabs import align_toc_tabs
+    stats.update(align_toc_tabs(doc, source_evidence=evidence, index_rows=index_rows, excluded=contents_rows))
+    stats['source_contents_rows'] = len(contents_rows)
     try:
         # Package metadata only: no private paths, OCR text or user settings.
         # This also replaces a stale record inherited from a document template.
@@ -606,6 +710,9 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
         doc.save_to_path(out_path)
     finally:
         doc.close()
+    if source_pdf:
+        from .list_review import write_list_review
+        stats['list_review_html'],stats['list_review_json']=write_list_review(out_path,stats)
     re_ = HwpxDocument.open(out_path)
     try:
         try:                                                          # 본문이 가리키는 그림이 꾸러미 목록(content.hpf)에 있고 파일도 있는 것만 센다

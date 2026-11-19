@@ -1,7 +1,7 @@
 """작업 폴더와 쪽별 상태·판독 기록. '완료'는 실제 수행한 범위에만 붙는다(지침 33)."""
 from __future__ import annotations
 import hashlib, json, os, shutil, time, threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 STATUSES = ["미처리", "영역 분류 완료", "1차 OCR 완료", "2차 독립 판독 비교 완료", "판독 확인 필요",
             "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료", "원본 대조 완료(사람)"]
@@ -10,7 +10,7 @@ HUMAN_ONLY = {"원본 대조 완료(사람)"}   # 프로그램이 스스로 붙�
 WARN = lambda msg: print(msg, flush=True)      # 깨진 파일을 치웠을 때의 한 줄 알림('주의:'). 창 프로그램은 stdout 을 모으므로 그대로 보인다
 
 BOOK_SETTINGS = "book_settings.json"           # 결과 폴더의 책별 설정(창이 읽고 쓴다 — 명령줄은 읽지 않고 창이 늘 선택지로 넘긴다). 원본이 바뀌어 보관할 때도 그대로 둔다
-BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
+BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "reference_hwpx": str, "yu_policy": ('classical','post1900','vernacular'), "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
              "mode": ("auto", "vertical", "horizontal_zh")}           # 값의 꼴(tuple = 허용 값). '다시 판독'(force)은 넣지 않는다 — 책마다 남으면 모르는 새 다시 산다
 LAST_COST = "last_cost.json"                   # 결과 폴더의 마지막 실행 전 비용 어림(창의 장부 — 실행을 고른 뒤에만 쓴다). 결과물이 아니라 원본이 바뀌어 보관할 때도 그대로 둔다
 
@@ -216,6 +216,13 @@ def target_pages(pdf: str, pages: str = "") -> list[int]:
     return list(parse_pages((pages or "").strip() or None, n))
 
 
+def review_page_mark(review, success='done'):
+    review = review or {}
+    engine = bool(review.get('engine_errors'))
+    pending = review.get('status') in ('pending', 'failed', 'cancelled', 'reviewing', 'needs-local-review')
+    return 'engine_and_review' if engine and pending else 'engine_issue' if engine else 'review_pending' if pending else success
+
+
 def page_marks(work, pages: list[int], force: bool = False) -> dict[int, str]:
     """쪽 띠(실행 전)의 칸 상태 {쪽: 'record'|'fail'|'remain'}: 판독 기록(readings/p###.json)이 있으면 record(다시 판독이면 remain),
     기록이 없고 상태에 '판독 확인 필요'가 있으면 fail(cmd_read 의 두 갈래 — '판독 실패(다시 시도 가능)'·'판독 중 예외' — 모두 기록 없이 이 상태만 남김),
@@ -231,6 +238,12 @@ def page_marks(work, pages: list[int], force: bool = False) -> dict[int, str]:
     for n in pages:
         if n in have:
             out[n] = "remain" if force else "record"
+            if not force:
+                try:
+                    data = json.loads((rd / f'p{n:03d}.json').read_text(encoding='utf-8'))
+                    out[n] = review_page_mark((data.get('local_first') or {}).get('review'), success='record')
+                except (OSError, ValueError, AttributeError):
+                    pass
         elif "판독 확인 필요" in ((st.get(str(n)) or {}).get("statuses") or []):
             out[n] = "fail"
         else:
@@ -323,6 +336,14 @@ class Work:
         current = {"sha256": digest.hexdigest(), "path": str(self.pdf_path.resolve()),
                    "image_pipeline": 2, "dpi": int(dpi) if dpi is not None else previous.get("dpi")}
         same = previous.get("sha256") == current["sha256"] and previous.get("image_pipeline") == current["image_pipeline"]
+        # Legacy digests include the filename; verify renamed files with the
+        # recorded basename and the current bytes, never with the path alone.
+        if not same and self.pdf_path.is_file() and previous.get("image_pipeline") == current["image_pipeline"]:
+            old_name = PureWindowsPath(str(previous.get("path", ""))).name
+            if old_name:
+                old_digest = hashlib.sha256(old_name.encode("utf-8") + b"\0"
+                                            + bytes.fromhex(stable_file_sha256(self.pdf_path)))
+                same = old_digest.hexdigest() == previous.get("sha256")
         if dpi is not None and previous.get("dpi") is not None:
             same = same and previous["dpi"] == current["dpi"]
         return previous, current, same
@@ -438,9 +459,9 @@ class Work:
             WARN(f"주의: 판독 기록 {p.name} 이(가) 깨져 있어(쓰다 만 JSON) readings/broken/{dst.name} 으로 옮겼습니다. 그 쪽은 다시 판독합니다.")
             return None
 
-    def load_record(self, page: int) -> dict | None:
+    def load_record(self, page: int, *, repair: bool = True) -> dict | None:
         p = self.record_path(page)
-        return self._read_record(p) if p.exists() else None
+        return self._read_record(p, repair=repair) if p.exists() else None
 
     def save_record(self, page: int, rec: dict) -> None:
         write_atomic(self.record_path(page), json.dumps(rec, ensure_ascii=False, indent=1))

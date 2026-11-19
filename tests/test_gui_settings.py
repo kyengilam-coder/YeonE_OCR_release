@@ -72,6 +72,122 @@ class SettingsTabRealTk(unittest.TestCase):
             yield c
             yield from self.walk(c)
 
+    def test_template_selection_reaches_output_command_from_all_book_controls(self):
+        from yeone_ocr.gui_rule_generation import BookRuleDialog
+        from tests._hwpx_fixtures import make_template
+        app = self.app
+        previous = app.v_template.get(), app.v_layout.get()
+        template = self.td / 'selected-book-template.hwpx'
+        make_template(template)
+        dialog = BookRuleDialog(app, app._input_vars[0]['pdf'].get(), self.td)
+        try:
+            for select in (app.pick_template, dialog.pick_template,
+                           lambda: dialog.template_entry.insert('end', str(template))):
+                app.v_template.set('')
+                app.v_layout.set(self.gui.LAYOUT_LABELS['page'])
+                with mock.patch.object(self.gui.filedialog, 'askopenfilename', return_value=str(template)):
+                    select()
+                argv = app._build_opts()
+                self.assertEqual(argv[argv.index('--template') + 1], str(template))
+                self.assertEqual(argv[argv.index('--layout') + 1], 'flow')
+            app.v_layout.set(self.gui.LAYOUT_LABELS['page'])
+            self.assertNotIn('--template', app._build_opts())
+        finally:
+            dialog.close()
+            app.v_template.set(previous[0]); app.v_layout.set(previous[1])
+
+    def test_book_style_editor_saves_template_mapping_and_reopens(self):
+        from yeone_ocr.gui_book_styles import BookStylesDialog
+        from test_template_headings import template
+        from yeone_ocr.presets import DATA, load_preset
+        app=self.app;old=(app._preset_ref,app.v_template.get(),app.v_layout.get());dialog=again=None
+        path=self.td/'style-template.hwpx';template(path);target=self.td/'my-book-styles.json'
+        try:
+            app._preset_ref=str(DATA/'book_rule_yaolun.json');app.v_template.set(str(path))
+            dialog=BookStylesDialog(app);dialog.withdraw()
+            self.assertIn('book_styles',app._set_rows)
+            self.assertEqual(dialog.variables['subsection'].get(),'제목-본초명(소)')
+            self.assertIn('14pt',dialog.details['subsection'].get())
+            # Different valid choices persist; recognition data is not opened.
+            dialog.variables['body'].set('제목-본초명(소)')
+            with mock.patch('yeone_ocr.gui_book_styles.filedialog.asksaveasfilename',return_value=str(target)):
+                dialog.save()
+            rule=load_preset(target)
+            self.assertEqual(rule.template,str(path.resolve()))
+            self.assertEqual(rule.para_styles['body'],('제목-본초명(소)',))
+            self.assertEqual(app.preset_ref(),str(target.resolve()))
+            again=BookStylesDialog(app);again.withdraw()
+            self.assertEqual(again.variables['body'].get(),'제목-본초명(소)')
+        finally:
+            for win in (again,dialog):
+                if win is not None and win.winfo_exists():win.destroy()
+            app._preset_ref=old[0];app.v_template.set(old[1]);app.v_layout.set(old[2])
+            app.v_preset.set(self.gui.preset_label(old[0]))
+
+    def test_hanja_editor_add_edit_delete_save_reload_and_command(self):
+        from yeone_ocr.gui_hanja_rules import HanjaRulesDialog
+        from yeone_ocr.hanja_rules import MODES, load_hanja_rules
+        app = self.app; previous = app.v_hanja_rules.get(); dialog = again = None
+        path = self.td / 'editable-hanja.json'
+        try:
+            app.v_hanja_rules.set(''); dialog = HanjaRulesDialog(app); dialog.withdraw()
+            self.assertIn('hanja', app._set_rows)
+            index = next(i for i,r in enumerate(dialog.rules) if r['find']=='產')
+            dialog.tree.selection_set(str(index)); dialog.remove()
+            self.assertFalse(any(r['find']=='產' for r in dialog.rules))
+            dialog.find.set('測試字'); dialog.replace.set('試驗字'); dialog.mode.set(MODES['auto']); dialog.add()
+            dialog.replace.set('試用字'); dialog.update_rule()
+            self.assertEqual(dialog.rules[-1]['replace'],'試用字')
+            with mock.patch('yeone_ocr.gui_hanja_rules.filedialog.asksaveasfilename',return_value=str(path)), \
+                    mock.patch.object(self.gui,'write_config',side_effect=lambda a:self.gui.save_config(a.cfg)):
+                dialog.save()
+            self.assertEqual(app.v_hanja_rules.get(),str(path.resolve()))
+            saved = json.loads(self.gui.CONFIG_PATH.read_text(encoding='utf-8'))
+            self.assertEqual(saved['hanja_rules'],str(path.resolve()))
+            again = HanjaRulesDialog(app); again.withdraw()
+            self.assertFalse(any(r['find']=='產' for r in again.rules))
+            self.assertEqual(again.rules[-1]['replace'],'試用字')
+            self.assertIn('--hanja-rules', self.gui.App._normalization_opts(app))
+        finally:
+            for win in (again,dialog):
+                if win is not None and win.winfo_exists():win.destroy()
+            app.v_hanja_rules.set(previous)
+
+    def test_gemini_quota_dialog_selects_available_model_and_blocks_exhausted_model(self):
+        import time
+        from yeone_ocr import gemini_quota
+        from test_gemini_quota import REPORT
+        quotas = gemini_quota.parse_quotas(REPORT)
+        rows = [dict(id=slug, title=slug, quotas=gemini_quota.model_quotas(slug, '', quotas), blocked=blocked)
+                for slug, blocked in [('gemini-4-argon-high', True), ('gemini-4-hydrogen-high', False)]]
+        app = self.app
+        old = dict(app.cfg)
+        win = None
+        try:
+            with mock.patch.object(gemini_quota, 'inventory', return_value=dict(models=rows, current=rows[0]['id'])), \
+                    mock.patch.object(self.gui, 'write_config') as save, mock.patch.object(self.gui.messagebox, 'showinfo') as info:
+                app.show_gemini_models()
+                win = next(w for w in app.winfo_children() if w.winfo_class() == 'Toplevel' and w.title() == 'Gemini 구독 모델·잔여 한도')
+                tree = next(w for w in self.walk(win) if w.winfo_class() == 'Treeview')
+                deadline = time.monotonic() + 5
+                while not tree.get_children() and time.monotonic() < deadline:
+                    app.update(); time.sleep(0.01)
+                self.assertEqual(len(tree.get_children()), 2)
+                apply = next(w for w in self.walk(win) if w.winfo_class() == 'TButton' and w.cget('text') == '선택 적용')
+                tree.selection_set(rows[0]['id']); apply.invoke()
+                info.assert_called_once(); save.assert_not_called()
+                tree.selection_set(rows[1]['id']); apply.invoke()
+                save.assert_called_once()
+                self.assertEqual(app.cfg['gemini_subscription_model'], rows[1]['id'])
+                options = app._strategy_opts()
+                self.assertIn('--no-local-ai-api-fallback', options)
+                self.assertEqual(options[options.index('--local-gemini-model') + 1], rows[1]['id'])
+                self.assertEqual(options[options.index('--local-ai-auth') + 1], 'subscription')
+        finally:
+            if win is not None:
+                win.destroy()
+            app.cfg.clear(); app.cfg.update(old)
+
     def test_1_sections_two_columns_and_one_column(self):
         app = self.app; gui = self.gui; S = app._set_sections
         def column(name):
@@ -141,7 +257,7 @@ class SettingsTabRealTk(unittest.TestCase):
                  "v_memo", "v_chk", "v_traditional", "v_yun", "v_punctuation", "v_ctxmodel", "v_suspects", "v_blind", "v_skipany", "v_model2", "v_workers",
                  "v_up", "v_ckpt", "v_chunk", "v_mres", "v_second", "v_cache", "v_think2", "v_think1", "v_mres1", "v_maxcalls", "v_policy", "v_cmemo",
                  "v_cforce", "v_auto_update", "v_mode", "v_pages", "v_off", "v_local_ai_subscription", "v_local_ai_plan",
-                 "v_local_ai_api_fallback", "v_local_ai_review", "v_local_ai_max_calls", "v_local_resume", "v_local_ai_parallel", "v_local_ai_split", "v_local_ai_pages")
+                 "v_local_ai_review", "v_local_ai_max_calls", "v_local_resume", "v_local_ai_parallel", "v_local_ai_split", "v_local_ai_pages")
         missing = [n for n in names if str(getattr(app, n)) not in bound]
         self.assertEqual(missing, [])
         texts = {str(w.cget("text")).strip() for w in self.walk(app._common_frame) if w.winfo_class() == "TButton"}

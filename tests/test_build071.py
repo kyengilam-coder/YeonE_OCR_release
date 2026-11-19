@@ -14,6 +14,17 @@ from yeone_ocr.state import Work
 
 
 class BuildNormalization(unittest.TestCase):
+    def test_absolute_output_path_saves_reports_without_invalid_name_and_preserves_ocr(self):
+        stem=self.root/'내보내기 한글'/'book'
+        with patch.object(cli,'create_reader') as reader:
+            self.assertEqual(self.run_build(self.args('--out',str(stem),'--no-context-model')),0)
+            reader.assert_not_called()
+        self.assertTrue(stem.with_suffix('.hwpx').is_file())
+        self.assertTrue(stem.with_name('book_normalization.json').is_file())
+        self.assertTrue(stem.with_name('book_normalization.html').is_file())
+        self.assertEqual(self.work.load_state()['last_build']['outputs'],[str(stem.with_suffix('.hwpx').resolve())])
+        self.assertEqual(self.work.record_path(1).read_text(encoding='utf-8'),self.original)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -23,6 +34,11 @@ class BuildNormalization(unittest.TestCase):
             document.new_page()
             document.save(self.pdf)
         self.work = Work(str(self.pdf), str(self.root / "work"))
+        self.rules = self.root / "hanja.json"
+        self.rules.write_text(json.dumps([
+            {"find": "髒", "replace": "臟", "mode": "review"},
+            {"find": "云", "replace": "雲", "mode": "yun"},
+        ], ensure_ascii=False), encoding="utf-8")
         reading = PageReading(pdf_page=1, regions=[Region(id="r1", kind="본문", bbox=[0, 0, 1000, 1000],
                               paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="髒，汉书。")])])])
         self.record = {"file": self.pdf.name, "pdf_page": 1, "pass1": reading.model_dump(), "merged": reading.model_dump(), "crops": {}}
@@ -32,7 +48,8 @@ class BuildNormalization(unittest.TestCase):
 
     def args(self, *flags):
         return cli.build_parser().parse_args(["build", str(self.pdf), "--work", str(self.work.dir),
-                    "--reader", "openai", "--model", "gpt-test", "--no-context", "--no-highlight", *flags])
+                    "--reader", "openai", "--model", "gpt-test", "--no-context", "--no-highlight",
+                    "--out", "source", "--hanja-rules", str(self.rules), *flags])
 
     def run_build(self, args):
         with fitz.open(self.pdf) as document:
@@ -100,7 +117,7 @@ class BuildNormalization(unittest.TestCase):
                 self.assertIn("髒 / 汉书。", archive.read(xml_name).decode("utf-8"))
         audit = json.loads((self.work.out_dir / "source_normalization.json").read_text(encoding="utf-8"))
         self.assertEqual(audit["options"], {"traditional": False, "yun": False, "punctuation": True,
-                                            "korean_forms": True, "editorial_simplified": True})
+                                            "yu_policy": "classical", "korean_forms": True, "editorial_simplified": True})
         self.assertTrue(audit["custom_punctuation"])
         self.assertTrue(audit["complete"])
         self.assertEqual(self.work.record_path(1).read_text(encoding="utf-8"), self.original)
@@ -467,7 +484,7 @@ class BuildNormalization(unittest.TestCase):
             self.assertEqual(cli.cmd_run(run_args, self.work, document), 2)
         self.assertIn("양식 HWPX 가 없습니다", buf.getvalue())
         self.assertFalse(any(self.work.pages_dir.iterdir()))                            # 준비(쪽 꺼내기)도 하지 않았다
-        self.assertIsNone(cli._check_document(self.args("--layout", "flow", "--template", str(self.pdf))))   # 있는 파일 + 내용별이면 통과
+        self.assertIn("양식 HWPX를 열 수 없습니다", cli._check_document(self.args("--layout", "flow", "--template", str(self.pdf))))
 
     def test_unusable_preset_stops_before_any_model_work(self):
         """내용별 문서의 짜임 규칙 파일이 없거나 --preset 과 예전 --structure 를 함께 주면 모델을 부르기 전에 끝 코드 2(run 도 판독 전에).

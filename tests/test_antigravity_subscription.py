@@ -63,14 +63,14 @@ def test_request_runs_agy_headless_in_default_mode_with_the_schema_and_images(mo
     assert message.startswith("SYSTEM TEXT") and "PROMPT" in message and "@image1.png @image2.png" in message
     assert args[args.index("--output-format") + 1] == "json" and "--disable-slash-commands" in args
     # agy 1.5.9: --mode takes only accept-edits/auto/plan and runs "default" in Auto; --settings gives Default.
-    assert "--mode" not in args and seen["settings"] == {"agentMode": "", "toolPermission": "request-review"}
+    assert "--mode" not in args and seen["settings"] == {"agentMode": "", "toolPermission": "request-review", "useG1Credits": False}
     assert "--dangerously-skip-permissions" not in args and "--model" not in args
     assert seen["schema"] == SCHEMA and seen["image"] == b"png-1" and seen["input"] == ""   # stdin: empty, closed
     assert seen["files"] == ["image1.png", "image2.png", "schema.json", "yeone-settings.json"]
     assert "GEMINI_API_KEY" not in env and "AGY_ADC_AUTH" not in env and env["NO_COLOR"] == "1"
 
 
-def test_a_chosen_model_is_passed_and_one_the_account_lacks_falls_back():
+def test_a_chosen_model_is_passed_and_an_unknown_choice_never_silently_falls_back():
     calls = []
 
     def run(args, **kwargs):
@@ -84,8 +84,9 @@ def test_a_chosen_model_is_passed_and_one_the_account_lacks_falls_back():
     assert (json.loads(text), complete, actual) == ({"lines": ["天地玄黃"]}, True, "gemini-4-argon")
     assert calls[0][calls[0].index("--model") + 1] == "gemini-4-argon" and "Attached images" not in calls[0][2]
     calls.clear()
-    _, complete, _, _, actual = client.request(model_name="gemini-9", system="s", prompt="p", images=[], schema=SCHEMA)
-    assert complete and actual == "agy-auto" and len(calls) == 2 and "--model" not in calls[1]
+    with pytest.raises(SubscriptionError):
+        client.request(model_name="gemini-9", system="s", prompt="p", images=[], schema=SCHEMA)
+    assert len(calls) == 1 and "--model" in calls[0]
 
 
 def test_a_long_request_goes_in_a_file_and_a_cut_off_answer_is_incomplete():

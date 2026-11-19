@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_ops import gui_module  # noqa: E402
 
 from yeone_ocr import cli  # noqa: E402
+from yeone_ocr.output_names import latest_document_path
 from yeone_ocr.state import (INTERNAL_DIR, PUBLIC_NAMES, Work, has_flat_work, public_root,  # noqa: E402
                              tidy_result_dir, work_dir_in)
 
@@ -49,7 +50,7 @@ class Layout(unittest.TestCase):
         self.assertEqual(_run(self.pdf, work), 0)
         top = sorted(p.name for p in self.root.iterdir())
         self.assertEqual(top, sorted(["out", "review.html", "report.md", INTERNAL_DIR]))
-        self.assertTrue((self.root / "out" / "책.hwpx").is_file())
+        self.assertTrue(latest_document_path(self.root / "out", self.pdf, ".hwpx").is_file())
         inner = {p.name for p in work.iterdir()}
         self.assertTrue({"readings", "pages", "state.json", "source.json"} <= inner)
         self.assertFalse(inner & set(PUBLIC_NAMES))                                    # 작업자료 안에는 문서·검수 화면·보고가 없다
@@ -62,7 +63,8 @@ class Layout(unittest.TestCase):
         work = self.td / "work" / "책"
         self.assertEqual(public_root(work), work)
         self.assertEqual(_run(self.pdf, work), 0)
-        self.assertTrue((work / "out" / "책.hwpx").is_file()); self.assertTrue((work / "review.html").is_file())
+        self.assertTrue(latest_document_path(work / "out", self.pdf, ".hwpx").is_file())
+        self.assertTrue((work / "review.html").is_file())
         self.assertTrue((work / "readings").is_dir())
 
     def test_older_flat_folder_is_used_in_place_until_tidied_then_resumes_without_rereading(self):
@@ -75,7 +77,8 @@ class Layout(unittest.TestCase):
         (self.root / "comparison").mkdir(); (self.root / "comparison" / "x.yeone-compare.json").write_text("{}", encoding="utf-8")
         (self.root / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         records = sorted(p.name for p in (self.root / "readings").glob("p*.json"))
-        hwpx = (self.root / "out" / "책.hwpx").read_bytes()
+        document = latest_document_path(self.root / "out", self.pdf, ".hwpx")
+        hwpx = document.read_bytes()
 
         done = tidy_result_dir(self.root)
         inner = self.root / INTERNAL_DIR
@@ -83,7 +86,7 @@ class Layout(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.root.iterdir()), sorted(["out", "review.html", "report.md", INTERNAL_DIR]))
         self.assertIn("readings", done["moved"]); self.assertNotIn("out", done["moved"])
         self.assertEqual(sorted(p.name for p in (inner / "readings").glob("p*.json")), records)
-        self.assertEqual((self.root / "out" / "책.hwpx").read_bytes(), hwpx)          # 문서는 손대지 않는다
+        self.assertEqual(document.read_bytes(), hwpx)
         self.assertTrue((inner / "book_settings.json").is_file())
         moved_state = json.loads((inner / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(moved_state["local_first_project"], str(inner / "comparison" / "x.yeone-compare.json"))

@@ -23,7 +23,11 @@ _PAIRS = (
     "党黨 盗盜 稲稻 闘鬪 徳德 独獨 読讀 届屆 弐貳 悩惱 脳腦 拝拜 廃廢 売賣 麦麥 髪髮 抜拔 蛮蠻 瓶甁 払拂 "
     "仏佛 併倂 並竝 餅餠 辺邊 舗鋪 穂穗 宝寶 翻飜 毎每 満滿 黙默 弥彌 訳譯 薬藥 与與 誉譽 揺搖 謡謠 頼賴 "
     "乱亂 覧覽 竜龍 両兩 猟獵 緑綠 涙淚 塁壘 礼禮 励勵 戻戾 霊靈 齢齡 暦曆 歴歷 恋戀 錬鍊 炉爐 労勞 楼樓 "
-    "録錄 湾灣 姫姬 頬頰 概槪 既旣"
+    "録錄 湾灣 姫姬 頬頰 概槪 既旣 "
+    # Same-character Korean forms in the user's 260929 MSR. Meaning-changing
+    # corrections (e.g. 髒→臟, 贏→羸, 胺→脘) deliberately do not belong here.
+    "飲飮 顛顚 填塡 俞兪 榆楡 喻喩 舉擧 隂陰 值値 尚尙 瘘瘻 癫癲 強强 產産 眾衆 腳脚 "
+    "卻却 澀澁 沉沈 横橫 敘敍 啟啓 鄉鄕 涼凉 吞呑 彥彦 顏顔 ⻄西 ⻑長 ⺠民 諸諸 溼濕"
 )
 KOREAN_FORMS = {pair[0]: pair[1] for pair in _PAIRS.split()}
 _TABLE = str.maketrans(KOREAN_FORMS)

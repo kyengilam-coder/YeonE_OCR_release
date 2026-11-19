@@ -685,6 +685,8 @@ class Editor:
         """같은 폴더의 임시 파일(<이름>.tmp.hwpx)에 다 쓴 뒤 바꿔 넣는다 — 쓰다 멈춰도 쌓아 온 교정본이 깨지지 않게.
         있던 교정본은 <이름>.bak.hwpx 로 한 세대만 남긴다(이전 .bak 은 덮어씀). 백업은 옮기지 않고 복사 — 바꿔 넣기가 실패해도
         (한컴에 열린 교정본 등) 교정본이 사라지는 틈이 없고, 어디서 실패하든 임시 파일은 지운다."""
+        from ..toc_tabs import align_toc_tabs
+        align_toc_tabs(self.doc)
         for sec in getattr(self.doc, "sections", []) or []:
             if hasattr(sec, "mark_dirty"):
                 sec.mark_dirty()

@@ -106,6 +106,7 @@ class Worker:
         self.timeout, self.max_tokens = timeout, max_tokens
         self.process = None
         self.base_url = ""
+        self._server_log = None
         self.client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def _request(self, endpoint: str, body: dict | None = None, *, timeout: float = 5) -> dict:
@@ -113,8 +114,12 @@ class Worker:
         encoded = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         request = urllib.request.Request(self.base_url + endpoint, data=encoded,
                                          headers={"Content-Type": "application/json"})
-        with self.client.open(request, timeout=timeout) as response:
-            content = response.read(32_000_001)
+        try:
+            with self.client.open(request, timeout=timeout) as response:
+                content = response.read(32_000_001)
+        except urllib.error.HTTPError as error:
+            detail = error.read(4096).decode('utf-8', errors='replace')
+            raise RuntimeError(f'Private GLM-OCR HTTP {error.code}: {detail}') from error
         if len(content) > 32_000_000:
             raise ValueError("GLM-OCR response exceeds the size limit")
         value = json.loads(content)
@@ -134,9 +139,10 @@ class Worker:
                            OLLAMA_NO_CLOUD="1", OLLAMA_DEBUG="0", OLLAMA_KEEP_ALIVE="0",
                            OLLAMA_MAX_LOADED_MODELS="1", OLLAMA_NUM_PARALLEL="1")
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self._server_log = tempfile.TemporaryFile()
         self.process = subprocess.Popen([str(self.executable), "serve"], env=environment,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, creationflags=flags)
+                                        stderr=self._server_log, creationflags=flags)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
@@ -157,14 +163,27 @@ class Worker:
                 time.sleep(0.1)
         raise TimeoutError("Private GLM-OCR server startup timed out")
 
+    def failure_diagnostic(self, error):
+        tail = ''
+        if self._server_log is not None:
+            self._server_log.seek(0, 2)
+            self._server_log.seek(max(0, self._server_log.tell() - 8192))
+            tail = self._server_log.read().decode('utf-8', errors='replace')
+        return {'error_type': type(error).__name__, 'message': str(error)[:2000],
+                'server_exit_code': self.process.poll() if self.process is not None else None,
+                'server_stderr_tail': tail, 'device': self.device}
+
     def close(self) -> None:
         if self.process is None:
+            if self._server_log is not None:
+                self._server_log.close()
+                self._server_log = None
             return
         process, self.process = self.process, None
         if process.poll() is None:
             try:
                 self._request("/api/generate", {"model": self.manifest["model_id"], "keep_alive": 0}, timeout=10)
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 pass
             process.terminate()
             try:
@@ -172,6 +191,9 @@ class Worker:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        if self._server_log is not None:
+            self._server_log.close()
+            self._server_log = None
 
     def recognize(self, image_path: Path, languages: str) -> dict:
         if languages not in LANGUAGES:
@@ -188,10 +210,21 @@ class Worker:
         options = {"temperature": 0, "seed": 0, "num_predict": self.max_tokens,
                    "num_ctx": 8192, "num_thread": self.threads,
                    "num_gpu": 0 if self.device == "cpu" else 99}
-        result = self._request("/api/generate", {
+        body = {
             "model": self.manifest["model_id"], "prompt": PROMPT,
             "images": [base64.b64encode(image_path.read_bytes()).decode("ascii")],
-            "stream": False, "keep_alive": "5m", "options": options}, timeout=self.timeout)
+            "stream": False, "keep_alive": "5m", "options": options}
+        recovery = None
+        try:
+            result = self._request('/api/generate', body, timeout=self.timeout)
+        except RuntimeError as error:
+            if 'token repeat limit reached' not in str(error):
+                raise
+            recovery = {'reason': 'token-repeat-limit', 'failed_attempts': 1,
+                        'first_error': str(error)[:1000], 'retry_limit': 1,
+                        'repeat_penalty': 1.1, 'repeat_last_n': 64}
+            options.update(repeat_penalty=1.1, repeat_last_n=64)
+            result = self._request('/api/generate', body, timeout=self.timeout)
         if _digest(image_path) != image_digest:
             raise ValueError("OCR input changed during recognition")
         text = result.get("response")
@@ -209,10 +242,11 @@ class Worker:
             "ollama_version": self.manifest["ollama_version"], "device_requested": self.device,
             "actual_size_vram": running.get("size_vram"), "model_details": self.manifest.get("model_details", {}),
             "device_requirement_satisfied": device_ok,
+            "repetition_recovery": recovery,
             "requested_languages": languages, "language_route": "single multilingual transcription model",
             "input_image_sha256": image_digest,
             "network": "private child-owned loopback server only; cloud disabled; no pull endpoint",
-            "server_logs": "discarded; no request body or document text logging",
+            "server_logs": "bounded diagnostic tail on failure; no request body logging",
             "prompt": PROMPT, "settings": options, "generation_complete": complete,
             "done_reason": result.get("done_reason"), "raw_response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "prompt_eval_count": result.get("prompt_eval_count"), "eval_count": result.get("eval_count"),

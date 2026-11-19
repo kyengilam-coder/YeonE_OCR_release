@@ -263,13 +263,13 @@ def _unpack(data):
     return plain
 
 
-def _read(path):
+def _read(path, *, paged=False):
     from . import comparison_storage
     try:
         with path.open("rb") as stream:
             prefix = stream.read(16)
             if prefix == comparison_storage.MAGIC:
-                return comparison_storage.read(path)
+                return comparison_storage.paged_read(path) if paged else comparison_storage.read(path)
             # A bounded read(n) may reserve n bytes even for a tiny project.
             # Avoid a 256 MB allocation while OCR models are in memory.
             data = bytearray(prefix)
@@ -427,6 +427,15 @@ def _matcher(a, b):
     return difflib.SequenceMatcher(None, a, b, autojunk=max(len(a), len(b)) > 20_000)
 
 
+from functools import lru_cache
+
+@lru_cache(maxsize=32)
+def _matching_blocks(a,b):
+    # A review contains many spans on the same immutable text pair. Keep only
+    # immutable blocks, never a mutable SequenceMatcher or project state.
+    return tuple(_matcher(a,b).get_matching_blocks())
+
+
 def _union(intervals):
     result = []
     for start, end in sorted(intervals):
@@ -565,9 +574,9 @@ class ComparisonProject:
         return cls(info["source_path"], info["source_sha256"], info["page_count"], info.get("kind", ""))
 
     @classmethod
-    def load(cls, path, source_path=None, *, allow_missing_source=False):
+    def load(cls, path, source_path=None, *, allow_missing_source=False, paged=False, lazy_pages=False):
         path = Path(path).expanduser().resolve()
-        value, digest = _read(path)
+        value, digest = _read(path, paged=paged)
         source = value.get("source")
         if not isinstance(source, dict) or not isinstance(source.get("path"), str):
             raise ComparisonError("원본 정보가 올바르지 않습니다.")
@@ -588,8 +597,16 @@ class ComparisonProject:
         pages = value.get("pages")
         if not isinstance(pages, dict) or len(pages) > project.page_count:
             raise ComparisonError("쪽별 기록이 올바르지 않습니다.")
+        from . import comparison_storage
+        streamed = paged and isinstance(pages, comparison_storage.StreamPages)
+        if streamed:
+            for number in pages.numbers:
+                project._check_page(number)
+            project._pages = comparison_storage.CheckpointPages(
+                project, path, digest, pages.numbers, validate_on_access=lazy_pages,
+            )
         run_ids = set()
-        for key, page in pages.items():
+        for key, page in (() if streamed and lazy_pages else pages.items()):
             if not isinstance(key, str) or not key.isdecimal() or str(int(key)) != key:
                 raise ComparisonError("쪽 번호 형식이 올바르지 않습니다.")
             number = int(key)
@@ -603,6 +620,9 @@ class ComparisonProject:
             project._pages[number] = page  # parsed storage is private to this newly loaded project
             if page.get("baseline_run_id") is not None:
                 project._preserve_baselines.add(number)
+            if isinstance(project._pages, comparison_storage.CheckpointPages):
+                project._pages.trim()
+        project._paged_checkpoints = paged
         project._id = identifier
         project.project_path = path
         project._disk_sha256 = digest
@@ -1336,7 +1356,7 @@ class ComparisonProject:
     def _mapped_span(baseline, current, start, end):
         if baseline == current:
             return start, end
-        blocks = _matcher(baseline, current).get_matching_blocks()
+        blocks = _matching_blocks(baseline,current)
         if start < end:
             for i, j, length in blocks:
                 if i <= start and end <= i + length:
@@ -1711,11 +1731,20 @@ class ComparisonProject:
                 comparison_storage._guard(self, target, False)
             self._check_existing(target)
             if incremental:
-                digest = comparison_storage.save(self, target)
+                try:
+                    digest = comparison_storage.save(self, target)
+                except OSError as exc:
+                    raise comparison_storage.storage_failure(target,exc) from exc
                 self.project_path = target
                 self._disk_sha256 = digest
                 self._saved_page_versions = {n: self._page_versions.get(n, 0) for n in self._pages}
                 self._saved_revision = self._revision
+                if isinstance(self._pages, comparison_storage.CheckpointPages):
+                    self._pages.path, self._pages.token = target, digest
+                    self._pages.trim()
+                elif getattr(self, '_paged_checkpoints', False):
+                    self._pages = comparison_storage.CheckpointPages(self, target, digest, self._pages, self._pages)
+                    self._pages.trim()
                 return target
             content = _pack(self._encoded())
             def verify():
@@ -1834,7 +1863,8 @@ def _effective_device(run):
 
 def run_page(project, number, profile="traditional", direction="horizontal", dpi=300,
              should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
-              engines=None, primary_engine=None, recognizer=None, device=None, parallel=1, input_enhancement=None):
+              engines=None, primary_engine=None, recognizer=None, device=None, parallel=1, input_enhancement=None,
+              on_recognition=None):
     """Run an explicit local engine set; legacy callers still run three engines.
 
     A failed engine never removes successful raw results or human edits.  Model
@@ -1959,6 +1989,9 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
             options["verify_chinese_glyphs"] = True
         jobs.append((engine, engine_request, resolved_root, languages, psm, options))
 
+    if jobs and on_recognition is not None:
+        on_recognition()
+
     def recognize(job):
         engine, _request, resolved_root, languages, psm, options = job
         if recognizer is None and device is not None:
@@ -1997,6 +2030,13 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
                 project.validate_source()
                 # Engine subprocess stderr is deliberately not copied into a project.
                 message = f"{engine} 인식 실패: 엔진 설치·언어·원본 상태를 확인하세요. ({type(exc).__name__})"
+                try:
+                    from .engine_diagnostics import save_failure
+                    diagnostic = save_failure(project.project_path, number, engine, exc)
+                    if diagnostic is not None:
+                        message += f" · 상세 진단: engine-diagnostics/{diagnostic.name}"
+                except OSError:
+                    message += " · 상세 진단 파일 저장 실패"
                 project.record_error(number, engine, message)
                 outcome["errors"][engine] = message
             else:

@@ -377,6 +377,21 @@ class ProgressCardRealTk(unittest.TestCase):
             app._set_running(False); self.settle()
         self.assertEqual(str(app.b_adv.cget("state")), "normal")
 
+    def test_engine_and_ai_warning_marks_have_distinct_visible_labels(self):
+        app = self.app
+        old_pages, old_marks = app._strip_pages, app._strip_marks
+        try:
+            app._strip_pages = [1,2,3]
+            app._strip_marks = {1:'engine_issue',2:'review_pending',3:'engine_and_review'}
+            app._draw_strip(); app._draw_legend()
+            texts=[app.c_legend.itemcget(i,'text') for i in app.c_legend.find_all() if app.c_legend.type(i)=='text']
+            self.assertIn('엔진 문제 1',texts)
+            self.assertIn('AI 보류·검수 1',texts)
+            self.assertIn('엔진·AI 문제 1',texts)
+        finally:
+            app._strip_pages, app._strip_marks = old_pages, old_marks
+            app._draw_strip(); app._draw_legend()
+
     def test_4_pdf_run_band_and_strip_click_opens_page_row(self):
         app = self.app; app.select_tab(0); app._use_pdf(str(self.pdf)); self.wait_strip()
         app._run_label = "한 번에 인식 (문자 PDF 만들기)"

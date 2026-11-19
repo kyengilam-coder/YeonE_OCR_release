@@ -13,7 +13,7 @@
 원본 PDF 는 고치지 않고 새 파일로 저장한다. 판독 기록이 있는 쪽에서만, 원본의 숨은 글자층(다른 OCR)은 지우고(검색이 두 번 걸리지 않게) 넣는다.
 보이는 글자가 있는 쪽(스캔이 아닌 쪽)은 건너뛴다. 도판·표 영역의 글자는 아직 넣지 않는다."""
 from __future__ import annotations
-import re, unicodedata
+import re, struct, unicodedata
 from functools import lru_cache
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -40,17 +40,14 @@ def _pdf_font():
 
 @lru_cache(maxsize=1)
 def _font_program():
-    """Let MuPDF extract the embeddable CID-keyed CFF from the original OTF.
-
-    CFF outlines need CIDFontType0 / FontFile3, not a TrueType CIDToGIDMap.
-    The shipped, installed font file remains the unmodified upstream OTF.
-    """
-    with pymupdf.open() as scratch:
-        xref = scratch.new_page().insert_font(fontname="Program", fontfile=str(_FONT_FILE))
-        descendant = int(re.search(r"(\d+) 0 R", scratch.xref_get_key(xref, "DescendantFonts")[1])[1])
-        descriptor = int(scratch.xref_get_key(descendant, "FontDescriptor")[1].split()[0])
-        stream = int(scratch.xref_get_key(descriptor, "FontFile3")[1].split()[0])
-        return scratch.xref_stream(stream)
+    """Return the raw CID-keyed CFF table required by /CIDFontType0C."""
+    data = _FONT_FILE.read_bytes()
+    if data[:4] == b"OTTO":
+        count = struct.unpack_from(">H", data, 4)[0]
+        for tag, _, offset, length in struct.iter_unpack(">4sIII", data[12:12 + 16 * count]):
+            if tag == b"CFF " and 0 < length <= len(data) - offset:
+                return data[offset:offset + length]
+    raise ValueError("PDF 글꼴의 CFF 테이블을 읽을 수 없습니다.")
 
 
 def _font_name():
@@ -82,9 +79,10 @@ class Line:
 
 
 def out_path(work_dir, pdf) -> Path:
-    """기본 저장 자리: 결과 폴더 out/<원본 이름>_글자층.pdf (창 프로그램도 같은 규칙으로 연다)."""
+    """Most recent dated PDF, legacy PDF, or the first new output path."""
     from .state import public_root
-    return public_root(work_dir) / "out" / f"{Path(pdf).stem}_글자층.pdf"
+    from .output_names import latest_document_path
+    return latest_document_path(public_root(work_dir)/'out',pdf,'.pdf')
 
 
 def token_positions(text: str) -> list[tuple[str | None, int]]:
@@ -535,20 +533,29 @@ def drop_bad_chars(lines: list[Line]) -> int:
 
 
 def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
-    """Embed a real plain font and explicit Unicode mapping, including rare Han.
-
-    CID widths describe the OCR placement; CIDToGIDMap selects real glyphs.
-    ToUnicode always retains the authoritative text, even for a missing glyph.
-    """
-    cids = {c: i + 1 for i, c in enumerate(dict.fromkeys(c for c in chars if c))}
-    # MuPDF treats a ToUnicode U+FFFD as unmapped and falls back to the
-    # character code. Give an existing replacement character its own code
-    # so that exporting does not silently turn it into another character.
-    if '\ufffd' in cids:
-        for c, cid in list(cids.items()):
-            if cid == 0xFFFD:
-                cids[c] = cids['\ufffd']
-        cids['\ufffd'] = 0xFFFD
+    """Embed real CFF outlines and a Unicode mapping for every OCR character."""
+    characters = list(dict.fromkeys(c for c in chars if c))
+    if len(characters) > 65535:
+        raise ValueError("문자 PDF의 두 바이트 글자 코드 범위를 초과했습니다.")
+    font = _pdf_font()
+    glyphs = {c: int(font.has_glyph(ord(c), fallback=0)) for c in characters}
+    # MuPDF uses the character code as a fallback for a literal U+FFFD.
+    if '\ufffd' in glyphs:
+        glyphs['\ufffd'] = 0xFFFD
+    # Identity-H is widely supported. A missing outline or an outline shared
+    # by multiple Unicode characters still needs a unique CID for copying.
+    # Only these invisible glyphs use otherwise unused slots in the font.
+    reserved = set(glyphs.values())
+    spare = (i for i in range(1, min(font.glyph_count, 65536)) if i not in reserved)
+    cids = {}
+    assigned = set()
+    for c, gid in glyphs.items():
+        if not gid or gid in assigned or (gid == 0xFFFD and c != '\ufffd' and '\ufffd' in glyphs):
+            gid = next(spare, None)
+            if gid is None:
+                raise ValueError("문자 PDF의 글꼴에 사용할 수 있는 글자 코드가 부족합니다.")
+        cids[c] = gid
+        assigned.add(gid)
     cmap = ("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
             "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /YeonEOCR-UCS def\n/CMapType 2 def\n"
             "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n")
@@ -557,30 +564,14 @@ def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
         part = items[k:k + 100]
         cmap += f"{len(part)} beginbfchar\n" + "\n".join(f"<{cid:04X}> <{_u16(c)}>" for c, cid in part) + "\nendbfchar\n"
     cmap += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
-    half = " ".join(f"{cid}[500]" for c, cid in items if _pdf_advance(c) != 1.0)
     tu = doc.get_new_xref(); doc.update_object(tu, "<<>>"); doc.update_stream(tu, cmap.encode())
-    font = _pdf_font(); font_data = _font_program(); name = _font_name()
+    font_data = _font_program(); name = _font_name()
     # The layer is invisible: normalize its selection box about the measured
     # ink center. Symmetric metrics also survive reflected text matrices on
     # rotated pages; the embedded font retains its real outlines and names.
     asc, descender = .5, -.5
     ff = doc.get_new_xref(); doc.update_object(ff, "<</Subtype/CIDFontType0C>>"); doc.update_stream(ff, font_data)
-    glyphs = {c: int(font.has_glyph(ord(c), fallback=0)) for c, _ in items}
-    if '\ufffd' in glyphs:
-        # MuPDF uses the CID fallback for U+FFFD instead of ToUnicode. Keep
-        # the existing uncertainty marker as U+FFFD, never CID 0 / NUL.
-        # This outline is invisible (3 Tr); the Unicode marker is authoritative.
-        glyphs['\ufffd'] = 0xFFFD
-    encoding = ("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
-                "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n"
-                "/CMapName /YeonEOCR-CID def\n/CMapType 1 def\n/WMode 0 def\n"
-                "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n")
-    for k in range(0, len(items), 100):
-        part = items[k:k+100]
-        encoding += f"{len(part)} begincidchar\n" + "\n".join(f"<{cid:04X}> {glyphs[c]}" for c,cid in part) + "\nendcidchar\n"
-    encoding += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend"
-    enc = doc.get_new_xref(); doc.update_object(enc, "<<>>"); doc.update_stream(enc, encoding.encode())
-    widths = {glyphs[c]: int(_pdf_advance(c)*1000) for c,_ in items}
+    widths = {cid: int(_pdf_advance(c)*1000) for c, cid in items}
     half = " ".join(f"{gid}[{width}]" for gid,width in sorted(widths.items()) if width != 1000)
     desc = doc.get_new_xref()
     doc.update_object(desc, f"<</Type/FontDescriptor/FontName/{name}/FontFamily({FONT_NAME.split('+',1)[1]})/Flags 32/FontBBox[0 {int(descender * 1000)} 1000 {int(asc * 1000)}]"
@@ -589,7 +580,7 @@ def add_font(doc: pymupdf.Document, chars) -> tuple[int, dict]:
     doc.update_object(cidf, f"<</Type/Font/Subtype/CIDFontType0/BaseFont/{name}/CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>"
                             f"/FontDescriptor {desc} 0 R/DW 1000{f'/W[{half}]' if half else ''}>>")
     f0 = doc.get_new_xref()
-    doc.update_object(f0, f"<</Type/Font/Subtype/Type0/BaseFont/{name}/Encoding {enc} 0 R/DescendantFonts[{cidf} 0 R]/ToUnicode {tu} 0 R>>")
+    doc.update_object(f0, f"<</Type/Font/Subtype/Type0/BaseFont/{name}/Encoding/Identity-H/DescendantFonts[{cidf} 0 R]/ToUnicode {tu} 0 R>>")
     return f0, cids
 
 
@@ -770,7 +761,7 @@ def visible_to_pdf(page: pymupdf.Page) -> pymupdf.Matrix:
     return page.derotation_matrix * pymupdf.Matrix(1, 0, 0, -1, cb.x0, mb.y1 - cb.y0)
 
 
-def write_lines(doc: pymupdf.Document, page: pymupdf.Page, lines: list[Line], frame, font_xref: int, cids: dict) -> None:
+def write_lines(doc: pymupdf.Document, page: pymupdf.Page, lines: list[Line], frame, font_xref: int, cids: dict) -> str | None:
     """쪽에 글자층을 덧붙인다(기존 내용은 q/Q 로 감싸 그대로)."""
     to_pdf = visible_to_pdf(page)
     ops = [o for o in (line_ops(ln, frame, to_pdf, cids) for ln in lines) if o]
@@ -783,6 +774,19 @@ def write_lines(doc: pymupdf.Document, page: pymupdf.Page, lines: list[Line], fr
     sx = doc.get_new_xref(); doc.update_object(sx, "<<>>")
     doc.update_stream(sx, ("q BT 3 Tr /" + key + " 1 Tf\n" + "\n".join(ops) + "\nET Q\n").encode())
     _set_contents(doc, page, content_refs(doc, page) + [sx])
+    return key
+
+
+def _verify_saved_font(page, resource):
+    """Check our shared font in the serialized PDF, after xrefs are renumbered."""
+    for xref, ext, kind, _, key, encoding, owner in page.get_fonts(full=True):
+        if key == resource and owner == 0:
+            if (ext, kind, encoding) == ("cid", "Type0", "Identity-H"):
+                data = page.parent.extract_font(xref)[3]
+                if data.startswith(b"\x01\x00") and data == _font_program():
+                    return
+            break
+    raise TextlayerVerificationError("문자 PDF의 내장 CFF 글꼴 또는 Identity-H 인코딩이 올바르지 않습니다.")
 
 
 def own_text(doc: pymupdf.Document, pno: int) -> list[str]:
@@ -831,6 +835,7 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
     check_stop()
     if plans:
         font_xref, cids = add_font(doc, [c for ls in plans.values() for ln in ls for c, _ in ln.chars])
+    font_location = None
     for i, (n, lines) in enumerate(list(plans.items())):
         check_stop()
         page = doc[n - 1]
@@ -848,7 +853,9 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
                 stats["skipped"][n] = "이전에 넣은 이 글자층을 가려내 지우지 못함(--keep-old-layer 없이 다시 실행)"; del plans[n]
                 if step: step(len(pages) + i + 1, total)
                 continue
-        write_lines(doc, page, lines, frames[n], font_xref, cids)
+        key = write_lines(doc, page, lines, frames[n], font_xref, cids)
+        if key and font_location is None:
+            font_location = (n, key)
         stats["pages"] += 1; stats["chars"] += sum(1 for ln in lines for c, _ in ln.chars if c)
         for ln in lines:
             stats["how"][ln.how] = stats["how"].get(ln.how, 0) + 1
@@ -865,6 +872,11 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
         doc.save(tmp, garbage=3, deflate=True)
         check_stop()
         with pymupdf.open(tmp) as check:                              # 검증·중지가 끝난 뒤에만 최종 이름으로 바꾼다
+            if check.is_repaired or len(check) != len(doc):
+                raise TextlayerVerificationError("저장한 문자 PDF의 구조 또는 쪽 수가 올바르지 않습니다.")
+            if font_location:
+                number, key = font_location
+                _verify_saved_font(check[number - 1], key)
             for n, lines in plans.items():
                 check_stop()
                 want = "".join(c for ln in lines for c, _ in ln.chars if c)

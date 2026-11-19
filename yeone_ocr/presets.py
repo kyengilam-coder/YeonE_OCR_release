@@ -5,11 +5,11 @@
 kaibao 가 짜는 정규식은 0.7.x structure.py 의 상수와 같다(tests/test_presets 의 말뭉치 비교). 표준 라이브러리만 쓴다 — 창 프로그램이 처음부터 불러온다."""
 from __future__ import annotations
 import json, re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from functools import lru_cache
 from pathlib import Path
 
-ROLES = ("chapter", "section", "subsection", "entry", "body", "bonjing", "bielu", "commentary", "small", "caption", "note")   # 블록의 쓰임(structure 가 붙임)
+ROLES = ("chapter", "section", "subsection", "entry", "body", "bonjing", "bielu", "commentary", "small", "caption", "note", "citation_source", "quotation")
 EMPHASIS_ROLES = ("body", "bonjing", "bielu", "commentary")           # 굵은/보통 글씨 조문에 붙일 수 있는 쓰임
 BUILTIN = ("basic", "regions", "kaibao")
 ALIASES = {"none": ("regions", None), "auto": ("kaibao", None), "bencao": ("kaibao", "always")}   # 예전 --structure 값 → (내장, entry.when 덮어쓰기)
@@ -17,10 +17,12 @@ DEFAULT_PRESET = "basic"
 DATA = Path(__file__).with_name("data")                               # data/preset_<id>.json
 _HAN = "㐀-䶿一-鿿豈-﫿\U00020000-\U0003134f"   # 한자(확장 A·통합·호환·확장 B~) — 이스케이프로 적는다(호환 한자 豈 가 NFC 로 바뀌면 한글까지 한자로 센다)
 _ALIAS_LABELS = {"none": "영역 종류만 (예전 설정 none)", "auto": "本草 조문 (예전 설정 auto)", "bencao": "本草 조문 · 약재명 늘 떼기(예전 설정 bencao)"}
-_KEYS = {"": ("schema", "id", "label", "description", "entry", "commentary", "source", "emphasis", "styles"),
+PAGE_TYPES = ('차례', '목차', '본문', '각주', '문헌 목록', '제목', '주석', '색인', '표', '도판', '표지', '빈 쪽', '기타', '판단 불가')
+_KEYS = {"": ("schema", "id", "label", "description", "entry", "commentary", "source", "emphasis", "styles", "citation", "template", "headings", "page_types"),
          "entry": ("when", "min_hits", "min_ratio", "max_name", "openers", "heading_openers", "name_end_not", "name_start_not"),
          "commentary": ("open", "close", "max_label", "markers"), "source": ("after", "tags"), "emphasis": ("bold", "plain"),
-         "styles": ("paragraph", "character")}
+         "styles": ("paragraph", "character"), "citation": ("mode", "max_title", "continuations"),
+         "headings": ("chapter", "section", "subsection"), "page_types": ("source_sha256", "pages")}
 
 
 class PresetError(ValueError):
@@ -41,6 +43,12 @@ class Entry:
 
 
 @dataclass(frozen=True)
+class Citation:
+    max_title: int = 80
+    continuations: bool = True
+
+
+@dataclass(frozen=True)
 class Preset:
     ref: str                       # 고른 이름 그대로(내장 id · 예전 이름 · 파일 경로) — 설정·명령줄에 적는 값
     id: str
@@ -56,6 +64,10 @@ class Preset:
     emphasis: tuple[str, str] | None    # (굵은 글씨 쓰임, 보통 글씨 쓰임)
     para_styles: dict              # {쓰임: (양식 문단 스타일 이름, …)} 앞의 것이 양식에 있으면 그것
     char_styles: dict              # {글자 범위 종류: (양식 글자 스타일 이름, …)}
+    citation: Citation | None = None
+    template: str = ""
+    headings: dict = field(default_factory=dict)
+    page_types: dict = field(default_factory=dict)
 
 
 def _cls(chars: str) -> str:
@@ -88,9 +100,9 @@ def _compile(data, where: str, ref: str, stem: str) -> Preset:
             raise bad(f"{path}{k} 는 글자열이어야 합니다")
         return v
 
-    def words(d: dict, k: str, path: str, msg: str, default=None) -> tuple[str, ...]:
+    def words(d: dict, k: str, path: str, msg: str, default=None, *, allow_empty=False) -> tuple[str, ...]:
         v = d.get(k, default)
-        if not isinstance(v, (list, tuple)) or not v or not all(isinstance(w, str) and w for w in v):
+        if not isinstance(v, (list, tuple)) or (not allow_empty and not v) or not all(isinstance(w, str) and w for w in v):
             raise bad(msg)
         return tuple(v)
 
@@ -154,9 +166,37 @@ def _compile(data, where: str, ref: str, stem: str) -> Preset:
                 raise bad(f"styles.{part} 의 {k!r} 는 {what}{'이' if what == '쓰임' else '가'} 아닙니다 — 가능: {', '.join(allowed)}")
             words(got, k, "", f"styles.{part}.{k} 는 스타일 이름 목록(비지 않은 글자열)이어야 합니다")
         maps[part] = {k: tuple(v) for k, v in got.items()}
+    citation = None
+    if (c := obj(data.get("citation"), "citation")) is not None:
+        if c.get("mode") != "separate":
+            raise bad('citation.mode 는 "separate"(출전 별도 줄) 이어야 합니다')
+        if type(c.get("continuations", True)) is not bool:
+            raise bad("citation.continuations 는 true 또는 false 이어야 합니다")
+        citation = Citation(num(c, "max_title", 80, 1, 120, "citation.max_title 은 1~120 정수"), c.get("continuations", True))
+    template = text(data, "template", "", "")
+    if template and (Path(template).suffix.lower() != ".hwpx" or any(ord(c) < 32 for c in template)):
+        raise bad("template 은 HWPX 파일 경로이어야 합니다")
+    if template:
+        template = str((Path(ref).resolve().parent / template).resolve())
+    headings = obj(data.get('headings'), 'headings') or {}
+    for role in headings:
+        values = words(headings, role, '', f'headings.{role}에 제목 문자열 목록을 적으십시오. 등록할 제목이 없으면 []를 쓰거나 이 칸을 생략하십시오.',
+                       allow_empty=True)
+        if len(values)>3000 or any(len(title)>120 for title in values):
+            raise bad('headings 는 종류당 3000개 이하, 제목당 120자 이하이어야 합니다')
+    page_types = obj(data.get('page_types'), 'page_types') or {}
+    if page_types:
+        digest = page_types.get('source_sha256')
+        pages = page_types.get('pages')
+        if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest):
+            raise bad('page_types.source_sha256는 분석한 PDF의 SHA-256이어야 합니다')
+        if not isinstance(pages, dict) or any(kind not in PAGE_TYPES or not isinstance(numbers, list)
+                or any(type(n) is not int or n < 1 for n in numbers) for kind, numbers in pages.items()):
+            raise bad('page_types.pages는 쪽 유형별 양의 정수 목록이어야 합니다')
     return Preset(ref=ref, id=pid, label=label, description=desc, entry=entry, entry_re=entry_re, entry_start_re=entry_start_re,
                   heading_next_re=heading_next_re, name_re=name_re, comment_re=comment_re, source_re=source_re, emphasis=emphasis,
-                  para_styles=maps["paragraph"], char_styles=maps["character"])
+                  para_styles=maps["paragraph"], char_styles=maps["character"], citation=citation, template=template,
+                  headings=headings, page_types=page_types)
 
 
 def load_preset(path, *, ref: str | None = None) -> Preset:
@@ -231,7 +271,8 @@ def template_suggests(template, ref: str | None) -> list[str]:
     import zipfile
     import xml.etree.ElementTree as ET
     try:
-        if resolve_preset(ref).entry is not None:
+        selected = resolve_preset(ref)
+        if selected.entry is not None or selected.citation is not None:
             return []
         k, r = _builtin("kaibao"), _builtin("regions")
         common = {n for v in r.para_styles.values() for n in v}

@@ -33,6 +33,42 @@ COMPARISON_DOCUMENTS = ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "C
                         "GLM_OCR.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md", "release-notes.md", "AB_OCR_PROVENANCE.json")
 
 
+def whole_book_rules_probe(folder) -> dict:
+    import pymupdf
+    from types import SimpleNamespace
+    from .rule_generation import generate_rule, save_generated
+    from .gui_rule_generation import BookRuleDialog
+    from .presets import load_preset
+    assert callable(BookRuleDialog.apply_result)
+    source = folder / 'whole-book-rules.pdf'
+    with pymupdf.open() as document:
+        for _ in range(13):
+            document.new_page(width=150, height=200)
+        document.save(source)
+    seen = []
+    def request(**kwargs):
+        number = json.loads(kwargs['prompt'])['evidence']['pages'][0]['pdf_page']
+        seen.append(number)
+        assert len(kwargs['images']) == 5
+        payload = {'rule_json': json.dumps({'schema': 1, 'headings': {'section': [f'Heading {number}']}}),
+                   'types': ['각주', '문헌 목록'] if number == 13 else ['본문'],
+                   'summary': 'Synthetic structure', 'warnings': []}
+        return json.dumps(payload), True, 'stop', {}, 'offline-fixture'
+    client = SimpleNamespace(request=request)
+    result = generate_rule(source, client=client, cache_dir=folder / 'rule-cache')
+    assert seen == list(range(1, 14))
+    assert result['type_pages']['각주'] == [13]
+    assert result['type_pages']['문헌 목록'] == [13]
+    assert len(result['rule']['headings']['section']) == 13
+    seen.clear()
+    resumed = generate_rule(source, client=client, cache_dir=folder / 'rule-cache')
+    assert not seen and resumed['coverage']['cached_pages'] == 13
+    saved = save_generated(result, folder / 'generated-rules')
+    assert len(load_preset(saved).headings['section']) == 13
+    return {'pages': 13, 'full_page_and_detail_images': True, 'rare_types_detected': True,
+            'cached_pages': 13, 'validated_rule_saved': True, 'network_calls': 0, 'ai_response': 'mock'}
+
+
 def comparison_resources_probe() -> dict:
     from ab_ocr.runtime import resource_root, worker_path
     checked = []
@@ -1410,6 +1446,14 @@ def run(report_path: Path) -> int:
         assert korean == "대계", korean
         rules = rule_data()
         assert len(rules["rules"]) >= 100
+        from .hanja_rules import default_hanja_rules
+        from .template_headings import read_template_headings
+        assert callable(read_template_headings)
+        assert any(r['find']=='產' and r['replace']=='産' for r in default_hanja_rules())
+        from .gui_hanja_rules import HanjaRulesDialog
+        assert HanjaRulesDialog.__name__=='HanjaRulesDialog'
+        from .gui_book_styles import BookStylesDialog
+        assert BookStylesDialog.__name__=='BookStylesDialog'
         assert all(resolve_preset(i).label for i in BUILTIN)                # 짜임 규칙 내장 파일(data/preset_*.json)이 꾸러미에 — 없으면 本草 짜임을 잃는다
         assert resolve_preset("kaibao").source_re.search("所在有之。　唐附")
         return {"guide_chars": len(guide), "msr_rules": len(rules["rules"]), "hanja": korean, "opencc": "漢書", "presets": list(BUILTIN)}
@@ -1549,7 +1593,7 @@ def run(report_path: Path) -> int:
                 font, cids = layer.add_font(pdf, "".join(samples))
                 lines = [layer.Line("h", [(c, (.05+i*.025, .15+row*.15, .075+i*.025, .19+row*.15))
                                          for i,c in enumerate(text)], "uniform") for row,text in enumerate(samples)]
-                layer.write_lines(pdf, page, lines, (0,0,600,400), font, cids)
+                font_key = layer.write_lines(pdf, page, lines, (0,0,600,400), font, cids)
                 target = folder / "pdf-font.pdf"
                 pdf.save(target, deflate=True)
             with pymupdf.open(target) as pdf:
@@ -1557,7 +1601,7 @@ def run(report_path: Path) -> int:
                 assert "".join("".join(got).split()) == "".join("".join(samples).split())
                 assert pdf[0].search_for("save and reopen")
                 assert text_layer(pdf, 1).char_count == 0
-                assert pdf[0].get_fonts()[0][2] == "Type0"
+                layer._verify_saved_font(pdf[0], font_key)
             return {"font": "Source Han Serif K Medium", "font_hash": manifest["sha256"],
                     "english_word_spaces": True, "japanese_and_rare_han": True,
                     "existing_uncertainty_marker_preserved": True, "os_font_required_for_pdf": False}
@@ -1576,17 +1620,19 @@ def run(report_path: Path) -> int:
                 code = main(["run", str(folder / "fixture.pdf"), "--work", str(work), "--reader", "mock",
                              "--no-adjudicate", "--no-second-pass", "--no-context", "--checkpoint", "0", "--docx"])
             assert code == 0, f"mock pipeline exit {code}: {output.getvalue()[-3000:]}"
-            hwpx = work / "out" / "fixture.hwpx"
-            docx = work / "out" / "fixture.docx"
+            from .output_names import latest_document_path
+            hwpx = latest_document_path(work/'out',folder/'fixture.pdf','.hwpx')
+            docx = hwpx.with_suffix('.docx')
             assert hwpx.is_file() and docx.is_file()
             assert check_hwpx_file(str(hwpx)) == []
             for path, member in ((hwpx, "Contents/section0.xml"), (docx, "word/document.xml")):
                 with ZipFile(path) as archive:
                     assert "天地玄黃" in archive.read(member).decode("utf-8")
             assert (work / "review.html").is_file()
-            assert (work / "out" / "fixture_normalization.html").is_file()
+            assert hwpx.with_name(hwpx.stem+'_normalization.html').is_file()
             return {"pipeline": "mock PDF → OCR records → HWPX/DOCX → normalization/review", "network_calls": 0}
         check("offline-ocr-pipeline", pipeline_probe)
+        check("whole-book-rule-generation-and-resume", lambda: whole_book_rules_probe(folder))
         check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
         check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
         check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))
@@ -1968,6 +2014,152 @@ def run(report_path: Path) -> int:
                 assert b'Source Han Serif K Medium' in archive.read('Contents/header.xml')
         return {'paragraphs':2,'blank_paragraphs':1,'hard_line_breaks':0,'network_calls':0}
     check('edited-hwpx-paragraph-spacing', document_editing_probe)
+
+    def editorial_policy_probe():
+        from .blocks import Block
+        from .document_editing import format_blocks
+        from .normalization import normalize_blocks
+        from .hanja_rules import default_hanja_rules
+        blocks,_=normalize_blocks([Block(type='para',role='citation_source',text='3.『綱目』 : '),
+            Block(type='para',text='元素 曰 : 甘咸溫潤. 『本草征要』. 【注】[1]原注. [2]次注.')])
+        blocks,_=format_blocks(blocks)
+        assert blocks[0].text=='3.『本草綱目』'
+        assert blocks[1].text.startswith('元素曰: 甘鹹溫潤.') and '本草徵要' in blocks[1].text
+        assert blocks[2].text.startswith('【注】[1]') and blocks[3].text.startswith('[2]')
+        assert any(r['mode']=='yu' for r in default_hanja_rules())
+        from .grades import styled_runs,GRADE_STYLE
+        rendered=styled_runs('甲, 乙; 丙。',[(0,8,'red')])
+        for text,kind,_ in rendered:
+            if any(c in ',;。' for c in text):assert kind=='body'
+            if any(c in '甲乙丙' for c in text):assert kind=='red'
+        assert normalize_blocks([Block(type='para',text='炮制')])[0][0].text=='炮製'
+        assert normalize_blocks([Block(type='para',text='咽干，根中虛松竅大者，松柏，干戈')])[0][0].text=='咽乾, 根中虛鬆竅大者, 松柏, 干戈'
+        assert normalize_blocks([Block(type='para',text='此藥質极黏膩，土旺則能胜溼，成根荄枝干，干姜，五髒')])[0][0].text=='此藥質極黏膩, 土旺則能胜濕, 成根荄枝幹, 乾薑, 五臟'
+        from .normalization import NormalizationOptions,normalize_text
+        assert normalize_text('用于治病',options=NormalizationOptions(yu_policy='post1900')).text=='用于治病'
+        from .document_editing import numbered_source_title
+        from .citation_layout import heading_key
+        title='一〇一·論十劑要義(『要藥分劑』)'
+        assert numbered_source_title('一 ○ 一 、 論 十 劑 要 義 (『 要 藥 分 劑 』)本文', {heading_key(title):('catalog','')})
+        from .gui_run_start import recorded_pages
+        assert callable(recorded_pages)
+        from .ai_priority import confirmed_positions
+        assert confirmed_positions('天地玄黃宇宙洪荒','天地玄黃宇宙洪荒',red=[(0,1)])==set(range(1,8))
+        return {'citation_titles':True,'separate_printed_notes':True,'contextual_hanja':True,'network_calls':0}
+    check('edited-source-notes-and-contextual-hanja',editorial_policy_probe)
+
+    def common_layout_probe():
+        from .blocks import Block
+        from .common_layout import apply_common_layout
+        from .normalization import normalize_blocks
+        from .hwpx_builder import build_hwpx
+        from zipfile import ZipFile
+        from xml.etree import ElementTree as ET
+        blocks,_=normalize_blocks([Block(type='heading',text='書名',level=1),Block(type='para',text='云'),
+                                  Block(type='heading',text='第二章',level=1),Block(type='para',text='正文'),
+                                  Block(type='heading',text='第一節',level=2),Block(type='para',text='正文')])
+        blocks,stats=apply_common_layout(blocks)
+        assert stats['chapter_page_breaks']==1 and any(k=='pending' for b in blocks for a,e,k in b.spans)
+        with tempfile.TemporaryDirectory(prefix='yeone-layout-smoke-') as temporary:
+            target=Path(temporary)/'common.hwpx';build_hwpx(blocks,str(target),edited=True)
+            with ZipFile(target) as z:
+                hp='{http://www.hancom.co.kr/hwpml/2011/paragraph}'
+                root=ET.fromstring(z.read('Contents/section0.xml'))
+                assert sum(p.get('pageBreak')=='1' for p in root.findall(hp+'p'))==1
+                assert b'#C00000' in z.read('Contents/header.xml')
+        return {'headings_centered':3,'major_page_breaks':1,'section_page_breaks':0,'pending_text_color':'red','network_calls':0}
+    check('common-hwpx-layout-and-pending-colors',common_layout_probe)
+
+    def book_rules_probe():
+        from unittest.mock import patch
+        from .rule_library import ensure_examples, library_choices
+        from .presets import load_preset
+        from .blocks import Block
+        from .structure import apply_structure
+        from .hwpx_builder import build_hwpx
+        with tempfile.TemporaryDirectory(prefix='yeone-rules-smoke-') as temporary:
+            with patch.dict(os.environ,{'YEONE_OCR_RULES_DIR':temporary}):
+                directory=ensure_examples(); preset=load_preset(directory/'중의역대약론선.json')
+                assert load_preset(directory/'개보본초.json').entry is not None
+                blocks,_=apply_structure([Block(type='para',text='1.《本草綱目》：原文。')],preset)
+                assert [b.role for b in blocks]==['citation_source','quotation']
+                build_hwpx(blocks,str(directory/'test.hwpx'),preset=preset,edited=True)
+                custom_rule = directory / '빈 제목 목록.json'
+                custom_rule.write_text('{"schema":1,"headings":{"chapter":["一、補益類"],"section":[]}}', encoding='utf-8')
+                assert load_preset(custom_rule).headings == {'chapter': ['一、補益類'], 'section': []}
+                assert str(custom_rule.resolve()) in dict(library_choices())
+        return {'separate_rule_files':3,'citation_source_and_body':True,'empty_heading_list':True,'network_calls':0}
+    check('reusable-book-rule-files',book_rules_probe)
+
+    def output_recovery_probe():
+        from .output_recovery import unexpected_latin_lines, quality_report, apply_repairs
+        from .document_editing import format_blocks
+        from .blocks import Block
+        text='天地玄黃宇宙洪荒'*8+'\nRE AN EN NARSN'
+        assert len(unexpected_latin_lines(text))==1
+        blocks,_=format_blocks([Block(type='para',text='甘遂1.『綱目』: 腎主水。')],
+                               titles={'甘遂':('section','')})
+        assert blocks[0].type=='heading' and blocks[0].text=='甘遂'
+        assert blocks[1].text.startswith('1.『綱目』')
+        assert quality_report([Block(type='para',text=text,page=1)],[])['status']=='needs-review'
+        assert apply_repairs([],{'schema':1,'source_sha256':'a'*64,'pages':[]},'a'*64)==[]
+        return {'herb_heading_separated':True,'latin_row_review':True,'history_writes':0}
+    check('output-recovery-and-quality-report',output_recovery_probe)
+
+    def recheck_probe():
+        from unittest.mock import patch
+        import pymupdf
+        from . import cli, recheck, gui_recheck
+        from .schema import PageReading
+        from .state import Work
+        assert callable(gui_recheck.open_dialog)
+        with tempfile.TemporaryDirectory(prefix='yeone-recheck-') as directory:
+            root = Path(directory); pdf = root / 'original.pdf'
+            with pymupdf.open() as doc:
+                doc.new_page(); doc.save(pdf)
+            old = Work(pdf, root / 'old' / '작업자료')
+            old.save_record(1, {'pdf_page': 1, 'merged': PageReading(pdf_page=1).model_dump(), 'history': ['preserve']})
+            before = old.record_path(1).read_bytes()
+            args = cli.build_parser().parse_args(['run', str(pdf), '--reader', 'mock', '--recheck-from', str(old.dir),
+                                                  '--recheck-mode', 'all', '--work', str(root / 'new' / '작업자료')])
+            def read(args, work):
+                assert not work.record_path(1).exists() and args.force and args.no_cache
+                work.save_record(1, {'pdf_page': 1, 'merged': PageReading(pdf_page=1).model_dump()})
+                return 0
+            with patch.object(cli, 'cmd_run', side_effect=read), patch.object(cli, 'cmd_build', return_value=0):
+                assert recheck.command(args) == 0
+            assert old.record_path(1).read_bytes() == before
+            assert (root / 'new' / '재판독_비교.html').is_file()
+        return {'independent_reading': True, 'history_preserved': True, 'network_calls': 0}
+    check('preserved-ocr-recheck', recheck_probe)
+
+    def selected_output_probe():
+        from .gui_result_versions import ResultNavigation
+        from .result_versions import OutputRun, remember
+        from .state import Work
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix='result-selection-') as directory:
+            root = Path(directory); pdf = root / 'book.pdf'
+            pdf.write_bytes(b'source fixture')
+            old = Work(pdf, root / 'original' / '작업자료')
+            (old.out_dir / 'book.hwpx').write_bytes(b'old')
+            work = Work(pdf, root / 'recheck' / '작업자료')
+            args = ['run', str(pdf), '--recheck-from', str(old.dir), '--work', str(work.dir)]
+            pending = OutputRun.capture(args)
+            assert pending.completed() is None
+            output = work.out_dir / 'book - 261118_122830.hwpx'
+            output.write_bytes(b'new')
+            selected = pending.completed()
+            assert selected.file('.hwpx') == output and selected.valid_source(pdf)
+            cfg = {}
+            remember(cfg, pdf, selected)
+            reopened = SimpleNamespace(cfg=json.loads(json.dumps(cfg)), pdf=lambda: str(pdf), work=lambda: old.dir)
+            assert ResultNavigation._result_file(reopened, '.hwpx') == output
+            assert ResultNavigation.selected_result_work(reopened) == work.dir
+            pdf.write_bytes(b'different source')
+            assert ResultNavigation._result_file(reopened, '.hwpx') is None
+        return {'dated_document': True, 'reopen': True, 'unchanged_run_not_selected': True}
+    check('book-result-selection', selected_output_probe)
 
     report["ok"] = all(item["ok"] for item in report["checks"])
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

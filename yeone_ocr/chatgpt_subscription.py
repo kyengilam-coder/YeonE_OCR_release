@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -213,6 +214,104 @@ def _query_status(runner) -> dict:
     else:
         result["reason"] = "Codex CLI에 로그인되어 있지 않습니다. " + LOGIN_HINT
     return result
+
+
+def _quota_available(result):
+    """Use Codex's reported windows. Unknown or malformed quota data cannot release a rest."""
+    limits = result.get("rateLimits")
+    if not isinstance(limits, dict):
+        return False
+    used = []
+    for key in ("primary", "secondary"):
+        window = limits.get(key)
+        if window is None:
+            continue
+        percent = window.get("usedPercent") if isinstance(window, dict) else None
+        if type(percent) not in (int, float) or not 0 <= percent <= 100:
+            return False
+        used.append(percent)
+    return bool(used) and max(used) < 100 and not limits.get("limitReachedType")
+
+
+def quota_available(*, stop: threading.Event) -> bool:
+    """Read the signed-in CLI's account and usage through its stdio App Server."""
+    cli = find_cli()
+    if not cli or stop.is_set():
+        return False
+    messages = queue.Queue()
+    try:
+        proc = subprocess.Popen(
+            [cli, "app-server"], cwd=_empty_dir(), env=cli_env(), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            errors="replace", start_new_session=sys.platform != "win32", **_NO_WINDOW,
+        )
+    except OSError:
+        return False
+
+    def read():
+        try:
+            with proc.stdout:
+                for line in proc.stdout:
+                    messages.put(line)
+        finally:
+            messages.put(None)
+
+    def send(method, request_id=None, params=None):
+        message = {"method": method}
+        if request_id is not None:
+            message["id"] = request_id
+        if params is not None:
+            message["params"] = params
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+
+    deadline = time.monotonic() + 12
+
+    def receive(request_id):
+        while not stop.is_set() and time.monotonic() < deadline:
+            try:
+                line = messages.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(message, dict) and message.get("id") == request_id:
+                result = message.get("result")
+                return result if isinstance(result, dict) else None
+        return None
+
+    threading.Thread(target=read, daemon=True, name="codex-quota-stdout").start()
+    try:
+        send("initialize", 1, {"clientInfo": {"name": "yeone_ocr", "version": "1"}})
+        if receive(1) is None:
+            return False
+        send("initialized")
+        send("account/read", 2, {"refreshToken": False})
+        account = (receive(2) or {}).get("account")
+        if not isinstance(account, dict) or account.get("type") not in ("chatgpt", "chatgptAuthTokens"):
+            return False
+        send("account/rateLimits/read", 3)
+        return _quota_available(receive(3) or {})
+    except OSError:
+        return False
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            from .subscriptions import _kill_tree
+            _kill_tree(proc)
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def _parse_events(stdout: str) -> list:

@@ -177,3 +177,13 @@ def test_unavailable_models_are_excluded_without_downloads():
 def test_no_available_engine_is_an_explicit_error(project):
     with patch.object(auto, "available_engines", return_value=([], {})), pytest.raises(ComparisonError):
         auto.run_automatic_page(project, 1)
+
+def test_recognition_activity_only_when_engines_actually_run(project):
+    started = []
+    texts = {'ppocrv6': '天地玄黃'}
+    first = execute(project, texts, on_recognition=lambda: started.append(True))
+    assert first['completed'] == ['ppocrv6']
+    assert len(started) == 1
+    second = execute(project, texts, on_recognition=lambda: started.append(True))
+    assert second['skipped'] == ['ppocrv6']
+    assert len(started) == 1

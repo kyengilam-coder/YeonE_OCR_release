@@ -438,6 +438,32 @@ def test_switch_stops_the_running_cli_and_sends_the_request_to_the_chosen_plan()
     assert subscriptions.switch() == "지금 구독 계정으로 연결된 실행이 없습니다."
 
 
+def test_stop_cancels_running_subscription_cli_and_does_not_fall_back():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    import time
+    from yeone_ocr.comparison_ai import AIReviewCancelled
+
+    stopped = Event()
+    with _with(_states(claude=True, chatgpt=True, gemini=True)):
+        session = subscriptions.Session("claude", should_stop=stopped.is_set, log=lambda _: None)
+        slow, fallback = _Slow(session), _Plan("chatgpt")
+        session._factory = {"claude": slow, "chatgpt": fallback}.__getitem__
+        with ThreadPoolExecutor() as worker:
+            answer = worker.submit(_ask, session)
+            try:
+                for _ in range(200):
+                    if session._procs:
+                        break
+                    time.sleep(.02)
+                assert session._procs, "the CLI never started"
+            finally:
+                stopped.set()
+            with pytest.raises(AIReviewCancelled):
+                answer.result(timeout=5)
+        assert not session._procs and not fallback.models and subscriptions.exhausted() == {}
+
+
 def test_switch_without_a_choice_follows_the_order_and_ends_at_the_api_key():
     api = mock.Mock(provider="openai", model="gpt-x", left=3, transport="openai-api-key")
     with _with(_states(claude=True, chatgpt=True, gemini=False)):
@@ -508,7 +534,7 @@ def test_window_label_is_short_and_the_details_stay_available():
     api.calls, api.left = 20, 0
     assert "호출 상한(20회)에 도달" in session.stop_reason() and "직접 고르면" in session.stop_reason()
     session.api = None
-    assert "API 키도 없음" in session.stop_reason()
+    assert "미완료 검증은 보존" in session.stop_reason() and "자동 전환하지 않습니다" in session.stop_reason()
 
 
 # ---- AI 작업자: 엔진은 기다리지 않고, 계정마다 여러 쪽을 함께 (--local-ai-split · --local-ai-pages) ----
@@ -516,8 +542,12 @@ def test_window_label_is_short_and_the_details_stay_available():
 def _workers(stage, plans=("claude", "chatgpt"), pages=1, available=None, **hooks):
     from yeone_ocr.local_first import _AiWorkers
     failed = []
-    crews = [{"plan": p, "session": SimpleNamespace(available=(available or {}).get(p, True), plan=p), "reader": None,
-              "pages": pages} for p in plans]
+    crews = []
+    for plan in plans:
+        ready = (available or {}).get(plan, True)
+        session = SimpleNamespace(available=ready, plan=plan, short=lambda plan=plan: subscriptions.NAMES[plan],
+                                  ready_for_page=lambda split, ready=ready: ready, prepare_page=lambda split: None)
+        crews.append({"plan": plan, "session": session, "reader": None, "pages": pages})
     return _AiWorkers(crews, stage, lambda number, exc: failed.append((number, str(exc))), lambda _m: None, **hooks), failed
 
 
@@ -804,7 +834,7 @@ def test_a_plan_that_keeps_failing_rests_and_is_used_again_after_the_rest():
         assert _ask(session)[-1] == "claude"                                          # still resting
         now[0] += 301
         assert _ask(session)[-1] == "chatgpt" and session.plan == "chatgpt"          # back on its own plan
-        assert "다시 씁니다(쉬는 시간이 지남)" in logs[-1] and subscriptions.resting() == []
+        assert "ChatGPT 구독을 다시 씁니다(구독 대기 해제)" in logs[-1] and subscriptions.resting() == []
 
 
 def test_a_request_that_fails_on_two_plans_is_the_requests_own_problem():
@@ -845,6 +875,44 @@ def test_the_last_plan_resting_makes_the_connection_available_again_later():
         assert not session.available
         now[0] = 601
         assert session.available and session.plan == "claude" and _ask(session)[-1] == "claude"
+
+
+def test_codex_quota_requires_every_reported_window_to_have_capacity():
+    from yeone_ocr.chatgpt_subscription import _quota_available
+
+    primary = {"usedPercent": 0}
+    assert _quota_available({"rateLimits": {"primary": primary}})
+    assert not _quota_available({"rateLimits": {"primary": primary, "secondary": {"usedPercent": 100}}})
+    assert not _quota_available({"rateLimits": {"primary": primary, "secondary": {"usedPercent": "0"}}})
+    assert not _quota_available({"rateLimits": {"primary": primary, "limitReachedType": "codex"}})
+    assert not _quota_available({"rateLimits": {}})
+
+
+def test_codex_quota_reply_cannot_undo_manual_switch(monkeypatch):
+    from threading import Event
+    from yeone_ocr import chatgpt_subscription
+
+    stopped = Event()
+    calls = []
+
+    def read_quota(*, stop):
+        calls.append(True)
+        subscriptions.mark_exhausted("chatgpt", "사용자가 넘김")
+        return True
+
+    def wait(_interval):
+        return bool(calls)
+
+    monkeypatch.setattr(stopped, "wait", wait)
+    monkeypatch.setattr(chatgpt_subscription, "quota_available", read_quota)
+    subscriptions.reset_exhausted()
+    try:
+        subscriptions.mark_exhausted("chatgpt", "한도", 2400, kind="limit")
+        subscriptions.watch_chatgpt_quota(stopped, lambda: pytest.fail("manual exclusion was cleared"), lambda: False)
+        assert calls == [True]
+        assert subscriptions.exhausted() == {"chatgpt": "사용자가 넘김"}
+    finally:
+        subscriptions.reset_exhausted()
 
 
 def test_the_users_own_switch_is_not_undone_by_a_rest_that_ends():

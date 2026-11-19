@@ -51,6 +51,14 @@ class InstalledLocalFirstTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "API"):
             inspect_outputs(self.work, self.app)
 
+    def test_dated_output_versions_are_all_verified(self):
+        prior=self.work/'out'/'synthetic_글자층.pdf'
+        new=self.work/'out'/'synthetic - 20261117_11 - v2.pdf'
+        new.write_bytes(prior.read_bytes())
+        result=inspect_outputs(self.work,self.app)
+        self.assertEqual(result['pdf_versions'],2)
+        self.assertTrue(result['pdf_text_matches'])
+
     def test_wrong_pipeline_or_external_engine_is_rejected(self):
         self.record["pipeline"] = "legacy-ai"
         self.write_json()

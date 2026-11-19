@@ -96,16 +96,17 @@ RETRY_WAITS = (3.0, 10.0)        # a temporary failure: the same plan again, aft
 REST_SECONDS = 600.0             # still failing: the plan rests this long (twice as long each further time)
 LIMIT_REST_SECONDS = 1800.0      # a limit whose program does not say when it resets: looked at again after this
 MAX_REST_SECONDS = 6 * 3600.0
+CHATGPT_QUOTA_INTERVAL = 60.0
 _exhausted: dict[str, dict] = {}
 _rests: dict[str, int] = {}      # how many times a plan has rested in this run
 _exhausted_lock = threading.Lock()
 _clock = time.monotonic
 
 
-def mark_exhausted(plan: str, reason: str, seconds: float | None = None) -> None:
+def mark_exhausted(plan: str, reason: str, seconds: float | None = None, *, kind=None) -> None:
     """Take a plan out of use: for `seconds`, or (None) for the rest of the run."""
     with _exhausted_lock:
-        _exhausted[plan] = {"reason": reason, "until": None if seconds is None else _clock() + seconds}
+        _exhausted[plan] = {"reason": reason, "until": None if seconds is None else _clock() + seconds, "kind": kind}
 
 
 def _current() -> dict:
@@ -139,6 +140,29 @@ def reset_exhausted() -> None:
     with _exhausted_lock:
         _exhausted.clear()
         _rests.clear()
+
+
+def _chatgpt_quota_rest():
+    with _exhausted_lock:
+        item = _current().get("chatgpt")
+        return item if item and item["kind"] == "limit" else None
+
+
+def watch_chatgpt_quota(stop, recovered, should_stop):
+    """Only a confirmed balance can end an active ChatGPT quota rest early."""
+    while not stop.wait(CHATGPT_QUOTA_INTERVAL) and not should_stop():
+        item = _chatgpt_quota_rest()
+        if item is None or not module("chatgpt").quota_available(stop=stop) or should_stop():
+            continue
+        with _exhausted_lock:
+            # A manual switch, a new error or a new run may have replaced it during the query.
+            if stop.is_set() or _current().get("chatgpt") is not item:
+                continue
+            del _exhausted["chatgpt"]
+            _rests.pop("chatgpt", None)
+        recovered()
+        if _active is not None:
+            _notify(_active)
 
 
 def _rest_seconds(plan: str, kind: str, retry_after) -> float | None:
@@ -255,7 +279,8 @@ class Session:
     subscription = True
 
     def __init__(self, plan, requested=None, *, api=None, log=print, factory=None, record_provider=None,
-                 should_stop=None, sleep=time.sleep):
+                 should_stop=None, sleep=time.sleep, gemini_model=None):
+        self.gemini_model = gemini_model
         self.first = self.plan = plan
         self.should_stop = should_stop or (lambda: False)
         self._stay = False
@@ -278,6 +303,15 @@ class Session:
         if self.plan is None:
             self._come_back()                       # a plan whose rest is over makes the connection usable again
         return self.plan is not None or self._api_left()
+
+    def ready_for_page(self, *, split):
+        if split and self.first == "chatgpt" and not self._stay and _chatgpt_quota_rest() is not None:
+            return False
+        return self.available
+
+    def prepare_page(self, *, split):
+        if self.first == "chatgpt" or not split:
+            self._come_back(prefer_chatgpt=not split)
 
     def _api_left(self) -> bool:
         return self.api is not None and self.api.left > 0
@@ -308,7 +342,7 @@ class Session:
     def stop_reason(self) -> str:
         """Why AI work stopped (available is False), in words a person can act on."""
         if self.api is None:
-            return "쓸 수 있는 구독 계정도 API 키도 없음 — 구독 계정에 다시 로그인하거나 API 키를 넣으세요"
+            return "사용 가능한 구독 계정 없음 — Gemini 모델·한도를 확인하거나 구독에 다시 로그인하세요. 미완료 검증은 보존하며 유료 API로 자동 전환하지 않습니다"
         return (f"구독 계정을 쓸 수 없어 넘어간 API 키의 이번 실행 호출 상한({self.api.calls}회)에 도달 — "
                 "[다음 구독으로 넘기기]에서 구독 계정을 직접 고르면 이어서 검증하고, "
                 "상한은 설정 「로컬 뒤 AI 검증」의 횟수로 늘립니다")
@@ -372,6 +406,9 @@ class Session:
                 if plan is not None and current is None:
                     try:
                         current = self._client = self._factory(plan)
+                        if getattr(current, 'automatic_gemini_models', False) is True:
+                            current.log = self.log
+                            current.should_stop = self.should_stop
                     except SubscriptionError as exc:
                         last_error = exc
                         self._fail(plan, exc)
@@ -387,6 +424,8 @@ class Session:
                 finally:
                     _notify(self)                         # the window shows the calls left
             name = model_name if plan == self.first and accepts_model(plan, model_name) else model(plan)
+            if plan == "gemini" and self.gemini_model:
+                name = self.gemini_model
             try:
                 return self._as_first(current.request(model_name=name, system=system, prompt=prompt,
                                                       images=images, schema=schema), plan)
@@ -434,7 +473,7 @@ class Session:
                 break
             self._sleep(min(0.5, left))
 
-    def _come_back(self, avoid=()):
+    def _come_back(self, avoid=(), *, prefer_chatgpt=False):
         """Back to the plan this connection started with once its rest is over (a limit that reset, a
         temporary failure), or from the API key to any plan that can be used again."""
         with self._lock:
@@ -444,6 +483,9 @@ class Session:
             target = None
             if self.first not in failed and self.first not in avoid and status(self.first)["usable"]:
                 target = self.first
+            elif (prefer_chatgpt and self.first == "gemini" and self.plan == "claude"
+                  and "chatgpt" not in failed and "chatgpt" not in avoid and status("chatgpt")["usable"]):
+                target = "chatgpt"
             elif self.plan is None:
                 target = next((plan for plan in order(self.requested)
                                if plan not in failed and plan not in avoid and status(plan)["usable"]), None)
@@ -451,8 +493,9 @@ class Session:
                 return                                # not to a plan that already timed out on this request
             before = self.describe()
             self.plan, self._client, self.reason = target, None, ""
-            self.switches.append({"from": before, "to": target, "reason": "쉬는 시간이 지남", "by": "rest"})
-            self.log(f"  {NAMES[target]} 구독을 다시 씁니다(쉬는 시간이 지남) — {before}에서 돌아옵니다.")
+            reason = "구독 대기 해제" if target == "chatgpt" else "쉬는 시간이 지남"
+            self.switches.append({"from": before, "to": target, "reason": reason, "by": "rest"})
+            self.log(f"  {NAMES[target]} 구독을 다시 씁니다({reason}) — {before}에서 돌아옵니다.")
         _notify(self)
 
     def _as_first(self, result, plan):
@@ -469,7 +512,7 @@ class Session:
     def _fail(self, plan, exc):
         kind = _kind(exc)
         seconds = _rest_seconds(plan, kind, getattr(exc, "retry_after", None))
-        mark_exhausted(plan, str(exc), seconds)
+        mark_exhausted(plan, str(exc), seconds, kind=kind)
         again = (f" {NAMES[plan]} 구독은 약 {_minutes(seconds)} 뒤 다시 씁니다." if seconds is not None
                  else f" {NAMES[plan]} 구독은 이번 실행에서 다시 쓰지 않습니다.")
         self._client = None
@@ -529,8 +572,9 @@ class Session:
         return message
 
     def _run(self, args, *, input=None, timeout=None, capture_output=True, **kwargs):
-        """subprocess.run that switch() can stop: the process (and its children) is killed and the
-        request is sent again to the new connection."""
+        """Run the CLI until it replies, is switched, or the OCR run is stopped."""
+        from .comparison_ai import _cancel
+        _cancel(self.should_stop)
         popen = dict(kwargs)
         if sys.platform != "win32":
             popen["start_new_session"] = True              # its own process group: killpg stops the CLI's children too
@@ -538,15 +582,32 @@ class Session:
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen)
         with self._lock:
             self._procs.add(proc)
+        done = threading.Event()
+        cancelled = threading.Event()
+
+        def cancel_on_stop():
+            while not done.wait(0.1):
+                if self.should_stop() and proc.poll() is None:
+                    cancelled.set()
+                    _kill_tree(proc)
+                    return
+
+        watcher = threading.Thread(target=cancel_on_stop, name="subscription-stop", daemon=True)
+        watcher.start()
         try:
             out, err = proc.communicate(input, timeout=timeout)
         except subprocess.TimeoutExpired:
+            done.set()
             _kill_tree(proc)
             out, err = proc.communicate()
+            _cancel(self.should_stop)
             raise subprocess.TimeoutExpired(args, timeout, out, err) from None
         finally:
+            done.set()
+            watcher.join()
             with self._lock:
                 self._procs.discard(proc)
+        _cancel(cancelled.is_set)
         return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
     def _stop_running(self):
@@ -634,7 +695,7 @@ def _notify(session) -> None:
         ON_CHANGE(state())
 
 
-def probe(plan: str, client_factory=None) -> dict:
+def probe(plan: str, client_factory=None, *, gemini_model=None) -> dict:
     """[연결 시험]: one small real request (a blank picture, a one-field answer) through the plan's own
     program, as a run sends it. Counts a little against the plan. {"ok", "seconds", "model", "error"}."""
     import base64
@@ -645,7 +706,7 @@ def probe(plan: str, client_factory=None) -> dict:
     try:
         client = (client_factory or (lambda name: module(name).SubscriptionClient()))(plan)
         text, complete, finish, _tokens, actual = client.request(
-            model_name=model(plan), system="This is a connection test. Answer with the requested JSON only.",
+            model_name=(gemini_model if plan == "gemini" and gemini_model else model(plan)), system="This is a connection test. Answer with the requested JSON only.",
             prompt='Connection test. Answer exactly {"ok": true}.', images=[picture], schema=schema)
     except (SubscriptionError, TimeoutError, OSError) as exc:
         return {"ok": False, "seconds": time.perf_counter() - started, "model": "", "error": str(exc)}

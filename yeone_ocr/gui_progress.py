@@ -275,9 +275,13 @@ def now_text(pages) -> str:
     return "·".join(map(str, ps[:4])) + ("…" if len(ps) > 4 else "")
 
 
+PAGE_ACTIVITIES = {'checking': '저장 기록 확인', 'ocr': '새 쪽 OCR',
+                   'reocr': '기존 쪽 OCR 보완', 'ai-review': 'AI 판독·미완료 검증'}
+
+
 def big_view(cmd: str, *, phase: str, stage: str = "", done: int = 0, total: int = 0, note: str = "", seen: dict | None = None,
              result: dict | None = None, counts: dict | None = None, screenshot: bool = False, label: str = "",
-             now_pages=()) -> list[tuple[str, str]]:
+             now_pages=(), page_activities=None) -> list[tuple[str, str]]:
     """큰 숫자 줄의 왼쪽 조각(§5.5). 꾸밈: 'm' 보조(MUTED) · 'big' 큰 숫자(바탕 24) · 'unit' 단위(맑은 고딕 12 MUTED) · 'body' · 'b' 굵게 · 'red_b'.
     now_pages 는 판독 중 쪽 알림이 '지금'이라 한 쪽들 — '· 지금 14~18쪽 판독 중 (동시 5쪽)'."""
     seen = seen or {}
@@ -308,6 +312,13 @@ def big_view(cmd: str, *, phase: str, stage: str = "", done: int = 0, total: int
         out = [(name, "m"), (f"{min(done, t):,}", "big"), (f"/ {t:,}{UNITS.get(stage, '쪽')}", "unit")]
         if note:
             out.append((" · " + note, "m"))
+        if stage == 'read' and page_activities:
+            out[0] = ('처리', 'm')
+            for activity, title in PAGE_ACTIVITIES.items():
+                active = [n for n in now_pages if page_activities.get(n) == activity]
+                if active:
+                    out.append((f' · {title} {now_text(active)}쪽', 'm'))
+            now_pages = [n for n in now_pages if page_activities.get(n) not in PAGE_ACTIVITIES]
         now = now_text(now_pages) if stage == "read" else ""
         if now:
             k = len(set(now_pages))
@@ -427,6 +438,9 @@ def cell_kind(states: list[str]) -> tuple[str, float]:
         return "remain", 0.0
     if "fail" in states:
         return "fail", 0.0
+    for warning in ('engine_and_review', 'engine_issue', 'review_pending'):
+        if warning in states:
+            return warning, 0.0
     n = len(states)
     if "now" in states:
         return "now", states.count("done") / n

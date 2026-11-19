@@ -54,7 +54,7 @@ DEFAULT_MODEL = ""                      # agy chooses for the signed-in account
 _STRIP_ENV = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_APPLICATION_CREDENTIALS",
               "AGY_ADC_AUTH", "GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "GEMINI_MODEL")
 # This run's settings: the Default mode and approval asked for edits and commands (see above).
-RUN_SETTINGS = {"agentMode": "", "toolPermission": "request-review"}
+RUN_SETTINGS = {"agentMode": "", "toolPermission": "request-review", "useG1Credits": False}
 _STATUS_TTL = 60.0
 _NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
 # Longest request text on the command line (Windows: 32,767 characters for all of it; elsewhere one
@@ -181,7 +181,11 @@ def _query_status(runner) -> dict:
         return result
     plan = "Google 계정 · Antigravity" + (f" {version}" if version else "")
     if proc.returncode == 0:
-        result.update(logged_in=True, billing="subscription", plan=plan, usable=True, reason=None)
+        from .gemini_quota import parse_quotas
+        quotas = parse_quotas(proc.stdout or "")
+        limits = " / ".join(f"{q['group']} · {q['window']}: {q['remaining']:g}% · 초기화 {q['reset_local']}" for q in quotas)
+        result.update(logged_in=True, billing="subscription", plan=plan, usable=True, reason=None,
+                      quotas=quotas, limits=limits or None)
         return result
     full, detail = program_error(proc.stderr, proc.stdout)
     low = full.lower()
@@ -214,7 +218,8 @@ def _classify(text: str) -> str | None:
     if _SIGN_IN.search(low):
         return problem("account", f"{PROGRAM} 로그인이 필요하거나 만료되었거나, 이 Google 계정을 쓸 수 없습니다. " + LOGIN_HINT)
     if _LIMIT.search(low):
-        return problem("limit", "Google 계정의 Antigravity 사용량 한도에 도달했습니다. 한도가 초기화되면 다시 씁니다.")
+        return problem("limit", "요청한 Gemini 모델의 Antigravity 한도에 도달했습니다. "
+                       "[Gemini 모델·한도]에서 다른 모델의 잔여 한도와 초기화 시간을 확인하세요. 유료 API로 자동 전환하지 않습니다.")
     if _MODEL.search(low):
         return problem("account", f"{PROGRAM}에 없는 모델입니다. YEONE_OCR_AGY_MODEL을 비우면 agy의 기본 선택을 씁니다"
                                   "(`agy models`로 목록 확인).")
@@ -301,6 +306,7 @@ class SubscriptionClient:
     plan = "gemini"
     provider = PROVIDER
     transport = TRANSPORT
+    automatic_gemini_models = True
 
     def __init__(self, cli=None, runner=None, timeout_seconds=None):
         self.cli = cli or find_cli()
@@ -308,6 +314,12 @@ class SubscriptionClient:
             raise SubscriptionError(INSTALL_HINT)
         self._run = runner or subprocess.run
         self.timeout = timeout_seconds or timeout()
+        self._routing_lock = threading.Lock()
+        self._active_model = None
+        self._failed_pools = {}
+        self.model_switches = []
+        self.log = print
+        self.should_stop = lambda: False
 
     def _call(self, args, root):
         try:
@@ -320,6 +332,69 @@ class SubscriptionClient:
             raise TimeoutError(f"{PROGRAM} 응답이 {self.timeout:.0f}초 안에 오지 않았습니다.") from exc
 
     def request(self, *, model_name, system, prompt, images, schema):
+        """Finish Gemini model fallback before Session can switch providers.
+
+        Only explicit quota failures are resent; successful responses and other
+        failures retain their original semantics. Requests already in flight may
+        finish using the previous model. Routing decisions are shared and locked.
+        """
+        attempted, last_error = set(), None
+        while True:
+            if last_error is not None and self.should_stop():
+                raise last_error
+            with self._routing_lock:
+                chosen = self._active_model or model_name
+            try:
+                return self._request_once(model_name=chosen, system=system, prompt=prompt, images=images, schema=schema)
+            except SubscriptionError as exc:
+                last_error = exc
+                if getattr(exc, 'kind', None) != 'limit' or self.should_stop():
+                    raise
+                attempted.add(chosen)
+                with self._routing_lock:
+                    if self.should_stop():
+                        raise
+                    if self._active_model and self._active_model != chosen:
+                        if self._active_model in attempted:
+                            raise
+                        continue  # Another caller has already selected the next model.
+                    from . import gemini_quota
+                    try:
+                        catalog = gemini_quota.inventory(runner=self._run)
+                    except Exception:
+                        raise exc  # A failed status query must never enable unknown/paid models.
+                    if self.should_stop():
+                        raise
+                    rows = catalog['models']
+                    failed_id = chosen if chosen and chosen != label('') else catalog.get('current')
+                    failed = next((row for row in rows if row['id'] == failed_id), None)
+                    now = time.monotonic()
+                    self._failed_pools = {key: until for key, until in self._failed_pools.items() if until > now}
+                    if failed is not None:
+                        key = gemini_quota.pool_key(failed)
+                        if key:
+                            # A server rejection applies to the actual model pool,
+                            # even when its balance display has not caught up.
+                            delay = max(exc.retry_after or 0, gemini_quota.reset_delay(failed)) or 1800
+                            self._failed_pools[key] = max(self._failed_pools.get(key, now), now + delay)
+                    candidates = [row for row in rows if row['id'] != failed_id and row['id'] not in attempted
+                                  and row['quotas'] and not row['blocked']
+                                  and gemini_quota.pool_key(row) not in self._failed_pools]
+                    if not candidates:
+                        waits = [max(gemini_quota.reset_delay(row),
+                                     self._failed_pools.get(gemini_quota.pool_key(row), now) - now)
+                                 for row in rows if row['quotas']]
+                        if waits and all(wait > 0 for wait in waits):
+                            exc.retry_after = min(waits)
+                            self.log(f'  Gemini: 모델별 한도 초기화를 확인합니다. 약 {max(1, round(exc.retry_after / 60))}분 뒤 다시 확인합니다.')
+                        self.log('  Gemini: 잔여 한도가 확인된 다른 모델이 없습니다. 다음 로그인 구독으로 넘깁니다.')
+                        raise
+                    next_model = min(candidates, key=gemini_quota.fallback_rank)['id']
+                    self._active_model = next_model
+                    self.model_switches.append({'from': failed_id or label(''), 'to': next_model, 'reason': 'limit'})
+                    self.log(f'  Gemini 모델 한도 소진: {failed_id or label("")} → {next_model} · 유료 API·AI 크레딧 사용 안 함')
+
+    def _request_once(self, *, model_name, system, prompt, images, schema):
         """-> (text, complete, finish_reason, usage dict, actual model). Images are PNG bytes."""
         with tempfile.TemporaryDirectory(prefix="yeone-ocr-agy-") as folder:
             root = Path(folder).resolve()
@@ -350,10 +425,7 @@ class SubscriptionClient:
                 args += ["--json-schema", str(root / "schema.json")]
             chosen = model_name if model_name and model_name != label("") else ""
             proc = self._call(args + (["--model", chosen] if chosen else []), root)
-            if chosen and proc.returncode != 0 and _MODEL.search(
-                    _error_text(proc.stdout, proc.stderr, _envelope(proc.stdout))[0].lower()):
-                # A model this account's agy does not have: its own choice instead of losing the plan.
-                proc, model_name = self._call(args, root), ""
+            # An explicit choice is never silently retried using the account default.
         data = _envelope(proc.stdout)
         state = str((data or {}).get("status") or "").upper()
         reply = (data or {}).get("response")

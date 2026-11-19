@@ -1,6 +1,6 @@
 """출력 문서 전용 정자·부호 정리. 판독 기록은 그대로 두고 Block 사본만 바꾼다.
 
-순서: OpenCC s2t → 사용자가 제공한 MSR의 AllReplace 순서 → 云/雲 문맥 판별.
+순서: OpenCC s2t → 한국 표준 자형 → MSR 부호·동일 자형 → 의미 치환·云/雲 문맥 판별.
 MSR은 실행하지 않고 정적 문자열/플래그만 추출한다. 모든 변경과 보류를 보고한다.
 표시 괄호 〔…〕, 작업 기록, 메모의 원문 증거는 정리 대상이 아니다.
 """
@@ -144,9 +144,14 @@ class NormalizationOptions:
     punctuation: bool = True
     # None=기본 부호 규칙, []=부호 치환 없음. 한자 MSR 후보는 traditional을 따른다.
     punctuation_rules: list[dict] | None = None
+    # None=builtin policy; []=no user Hanja rules. Complete replacement, not an
+    # overlay, so deleting a rule cannot silently re-enable a hidden default.
+    hanja_rules: list[dict] | None = None
     # 한국 표준 한자체(KS X 1001): 為→爲, 真→眞, 説→說 … 간체→번체 뒤에 적용(korean_forms.py).
     korean_forms: bool = True
+    yu_policy: str = 'classical'  # post1900/vernacular preserve 于 for this book.
     editorial_simplified: bool = False  # document editing: choose OpenCC's contextual form for simplified-only characters
+    mark_pending: bool = True  # output only: unresolved conversion targets are red in the document
 
     @property
     def enabled(self) -> bool:
@@ -156,7 +161,12 @@ class NormalizationOptions:
         bundled = rule_data()["rules"]
         punctuation = (validate_punctuation_rules(self.punctuation_rules)
                        if self.punctuation_rules is not None else [r for r in bundled if _punctuation_rule(r)])
-        return ([r for r in bundled if not _punctuation_rule(r)] if self.traditional else []) + (punctuation if self.punctuation else [])
+        if self.hanja_rules is None:
+            characters = [r for r in bundled if not _punctuation_rule(r)]
+        else:
+            from .hanja_rules import validate_hanja_rules
+            characters = [r for r in validate_hanja_rules(self.hanja_rules) if r['mode'] == 'review']
+        return (characters if self.traditional else []) + (punctuation if self.punctuation else [])
 
 
 def _opencc_converter() -> Callable[[str], str]:
@@ -268,12 +278,26 @@ def _punctuation_rule(rule: dict) -> bool:
                for ch in rule["find"] + rule["replace"])
 
 
-def _semantic_proposals(result: TextResult, original: str, start: int, converted: str, rules: list[dict], ambiguous: dict):
-    """MSR 한자 치환은 답이 아닌 후보. 겹치는 단자/어구 규칙은 넓은 문맥 한 건으로 묶는다."""
+# Explicit same-character preferences from the user's MSR that cannot be put in
+# the KS-only table (both forms are KS, or the requested target is outside KS).
+_MSR_GLYPH_VARIANTS = frozenset({("巔", "巓"), ("痺", "痹"), ("脅", "脇")})
+
+
+def _glyph_rule(rule: dict) -> bool:
+    from .korean_forms import KOREAN_FORMS
+    return (KOREAN_FORMS.get(rule["find"]) == rule["replace"]
+            or (rule["find"], rule["replace"]) in _MSR_GLYPH_VARIANTS)
+
+
+def _semantic_proposals(result: TextResult, original: str, start: int, converted: str, rules: list[dict], ambiguous: dict,
+                        *, custom_hanja=False, preserved_origins=()):
+    """의미가 달라지는 MSR 치환을 문맥 후보로 묶는다. 확정 자형 변환은 별도 처리한다."""
     pending = []
     baseline = list(result.text)
     for pos, source in enumerate(result.origins):
         old = original[source - start]
+        if source in preserved_origins:
+            continue
         if old in ambiguous and old not in "云雲" and result.text[pos] == old:
             choices = list(dict.fromkeys([old] + ambiguous[old]))
             # OpenCC 후보에 적용 가능한 매크로 이체자도 같은 문맥 판정에서 고르게 한다.
@@ -287,12 +311,17 @@ def _semantic_proposals(result: TextResult, original: str, start: int, converted
     baseline = "".join(baseline)
     for rule in rules:
         find, replace = rule["find"], rule["replace"]
-        if find == replace or _punctuation_rule(rule):
+        # Glyph preferences have their own deterministic stage/switch. Do not
+        # resurrect the pre-normalized form from OpenCC's baseline as a model
+        # question, or let a later resolver undo the selected Korean form.
+        if find == replace or _punctuation_rule(rule) or (not custom_hanja and _glyph_rule(rule)):
             continue
         seen = set()
         for source_text in (result.text, baseline):
             for match in re.finditer(re.escape(find), source_text, re.IGNORECASE):
                 begin, end = match.span()
+                if any(result.origins[i] in preserved_origins for i in range(begin,end)):
+                    continue
                 if (begin, end) in seen:
                     continue
                 seen.add((begin, end))
@@ -352,11 +381,35 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
     ambiguous = ambiguous_map() if options.traditional else {}
     result = TextResult(text, list(range(start, start + len(text))))
     converted = converter(text) if options.traditional else text
+    if options.hanja_rules is not None:
+        from .hanja_rules import validate_hanja_rules
+        active_hanja = validate_hanja_rules(options.hanja_rules)
+    else:
+        active_hanja = None
+    leaf_enabled = active_hanja is None or any(r['mode'] == 'leaf' for r in active_hanja)
+    from .sense_forms import PAIRS,sense_choice
+    sense_modes = [mode for mode in PAIRS if options.traditional and options.korean_forms
+                   and (active_hanja is None or any(r['mode']==mode for r in active_hanja))]
+
+    def preserve(old, new, position):
+        if old=='于' and options.yu_policy in ('post1900','vernacular'):
+            return True
+        if old in "云雲":
+            return True
+        if any(old==PAIRS[mode][0] for mode in sense_modes) or (old=='术' and 'atractylodes' in sense_modes):
+            return True
+        # 叶 is also an old character meaning 'harmonize', hence it appears in
+        # OpenCC's ambiguous list with itself. In edited Chinese prose use its
+        # contextual 葉 conversion (用叶, 枝叶, 叶酸, surnames), not an unresolved
+        # visual-OCR question. Preserve the scholarly 叶韻/叶韵 spelling.
+        if (leaf_enabled and options.editorial_simplified and old == "叶" and new == "葉"
+                and text[position + 1:position + 2] not in {"韻", "韵"}):
+            return False
+        return old in ambiguous and (not options.editorial_simplified or old in ambiguous[old])
     replacements = []
     # 1:多 글자와 云/雲은 원래 글자를 보존하고 아래에서 문맥 후보로 보낸다.
     if len(text) == len(converted):
-        after = "".join(old if old in "云雲" or (old in ambiguous and
-                       (not options.editorial_simplified or old in ambiguous[old])) else new for old,new in zip(text,converted))
+        after = "".join(old if preserve(old, new, i) else new for i, (old, new) in enumerate(zip(text, converted)))
         # 반복 글자도 같은 위치끼리 대응한다. SequenceMatcher는 雲云 같은 경우 글자를
         # 삽입/삭제로 정렬할 수 있어, 길이가 같은 정자 변환에는 쓰지 않는다.
         runs = re.finditer(r"1+", "".join("1" if a != b else "0" for a, b in zip(text, after)))
@@ -369,14 +422,18 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
             continue
         after = converted[c:d]
         if b - a == d - c:
-            after = "".join(old if old in "云雲" or (old in ambiguous and
-                           (not options.editorial_simplified or old in ambiguous[old])) else new for old,new in zip(text[a:b],after))
+            after = "".join(old if preserve(old, new, a + i) else new for i, (old, new) in enumerate(zip(text[a:b], after)))
         if a == b:
             # 중국어 정자 변환기는 보통 글을 삽입하지 않는다. 미지원 결과를 통째로 버리기보다 명시적으로 거부.
             raise ValueError("정자 변환기가 원문에 없는 삽입을 반환했습니다.")
         replacements.append((a, b, after, {}))
     _replace_spans(result, replacements, "opencc_s2t_editorial" if options.editorial_simplified else "opencc_s2t")
-    if options.korean_forms:
+    if options.korean_forms and active_hanja is None:
+        from .hanja_rules import DEFAULT_PHRASE_FORMS
+        for source, target in DEFAULT_PHRASE_FORMS.items():
+            matches = [(m.start(), m.end(), target, {}) for m in re.finditer(re.escape(source), result.text)]
+            if matches:
+                _replace_spans(result, matches, "phrase_forms")
         # OpenCC gives Chinese Traditional forms (为→為, 真 stays 真); a Korean book and its answer files
         # use the KS X 1001 forms (爲, 眞). One character for one, so positions do not move. Characters
         # with several Traditional forms (当 → 當/噹) are left to the context step above, as before.
@@ -385,23 +442,67 @@ def _normal_plain(text: str, start: int, converter: Callable[[str], str], rules:
                  "[" + "".join(re.escape(c) for c in KOREAN_FORMS if c not in ambiguous) + "]", result.text)]
         if forms:
             _replace_spans(result, forms, "korean_forms")
+    if options.korean_forms and active_hanja is not None:
+        for rule in active_hanja:
+            if rule['mode'] != 'auto' or rule['find'] == rule['replace']:
+                continue
+            if options.yu_policy in ('post1900','vernacular') and (rule['find'],rule['replace'])==('于','於'):
+                continue
+            matches = [(m.start(), m.end(), rule['replace'], {'rule_id': rule['id']})
+                       for m in re.finditer(re.escape(rule['find']), result.text)]
+            if matches:
+                _replace_spans(result, matches, 'user_hanja')
     for rule in rules:
         find, replace = rule["find"], rule["replace"]
-        if find == replace or not _punctuation_rule(rule):
+        glyph = active_hanja is None and options.korean_forms and _glyph_rule(rule)
+        if find == replace or (not _punctuation_rule(rule) and not glyph):
             continue
         matches = []
         for match in re.finditer(re.escape(find), result.text, re.IGNORECASE):
             matches.append((match.start(), match.end(), replace, {"rule_id": rule["id"]}))
         if matches:
-            _replace_spans(result, matches, "msr")
-    for match in re.finditer("[云雲]", result.text) if options.yun else ():
+            _replace_spans(result, matches, "msr_glyph" if glyph else "msr")
+    preserved_origins=set()
+    if options.yu_policy in ('post1900','vernacular'):
+        preserved_origins.update(result.origins[m.start()] for m in re.finditer('于',result.text))
+    for mode in sense_modes:
+        replacements=[]
+        pattern='[術术]' if mode=='atractylodes' else PAIRS[mode][0]
+        for match in re.finditer(pattern,result.text):
+            choice,reason=sense_choice(result.text,match.start(),mode)
+            preserved_origins.add(result.origins[match.start()])
+            if choice is None:
+                result.proposals.append(dict(begin=match.start(),end=match.end(),source=match.group(),
+                    candidates=list(PAIRS[mode]),stage=mode+'_context',rule_ids=[],reason=reason))
+            elif choice!=match.group():
+                replacements.append((match.start(),match.end(),choice,{'reason':reason}))
+        if replacements:_replace_spans(result,replacements,mode+'_context')
+    if options.yu_policy=='classical' and options.traditional and options.korean_forms and (active_hanja is None or any(r['mode']=='yu' for r in active_hanja)):
+        from .yu_forms import yu_usage
+        replacements=[]
+        for match in re.finditer('于',result.text):
+            usage=yu_usage(result.text,match.start())
+            if usage=='auto':replacements.append((match.start(),match.end(),'於',{'reason':'확인된 일반 문장의 문법 용례'}))
+            elif usage=='keep':preserved_origins.add(result.origins[match.start()])
+        if replacements:_replace_spans(result,replacements,'yu_context')
+    if options.traditional and options.korean_forms and (active_hanja is None or any(r['mode']=='xian' for r in active_hanja)):
+        from .xian_forms import xian_usage
+        replacements=[]
+        for match in re.finditer('咸',result.text):
+            usage=xian_usage(result.text,match.start())
+            if usage=='auto':replacements.append((match.start(),match.end(),'鹹',{'reason':'맛을 뜻하는 확실한 문맥'}))
+            elif usage=='keep':preserved_origins.add(result.origins[match.start()])
+        if replacements:_replace_spans(result,replacements,'xian_context')
+    yun_enabled=options.yun and (active_hanja is None or any(r['mode']=='yun' for r in active_hanja))
+    for match in re.finditer("[云雲]", result.text) if yun_enabled else ():
         choice, reason = _yun_choice(result.text, match.start())
         # 「陶雲中暑…」의 雲中은 인용 경계를 가로지를 수도 있다. 어구 목록은
         # 참고 근거로만 주며, 모든 云/雲은 전체 앞뒤 문맥을 보는 모델이 결정한다.
         result.proposals.append(dict(begin=match.start(), end=match.end(), source=match.group(),
                                      candidates=["云", "雲"], stage="yun_context", rule_ids=[],
                                      reason="어구 참고(확정 아님): " + reason))
-    _semantic_proposals(result, text, start, converted, rules, ambiguous)
+    _semantic_proposals(result, text, start, converted, rules, ambiguous, custom_hanja=active_hanja is not None,
+                        preserved_origins=preserved_origins)
     result.proposals.sort(key=lambda p: p["begin"])
     return result
 
@@ -518,10 +619,13 @@ def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | N
     report = {"schema_version": 1, "rule_version": RULE_VERSION,
               "msr_source": data["source_name"], "msr_sha256": data["sha256"],
               "rule_count": len(rules), "changes": [], "review": [], "blocks": [], "decisions": [],
-              "options": {"traditional": options.traditional, "yun": options.yun, "punctuation": options.punctuation,
+              "options": {"traditional": options.traditional, "yun": options.yun, "punctuation": options.punctuation, "yu_policy": options.yu_policy,
                           "korean_forms": options.korean_forms, "editorial_simplified": options.editorial_simplified},
               "punctuation_rules": [dict(r) for r in rules if _punctuation_rule(r)],
               "custom_punctuation": options.punctuation_rules is not None}
+    report['custom_hanja'] = options.hanja_rules is not None
+    if options.hanja_rules is not None:
+        report['hanja_rules'] = deepcopy(options.hanja_rules)
     prepared = []
     for index, block in enumerate(output):
         where = dict(block=index, page=block.page, type=block.type)
@@ -542,11 +646,18 @@ def normalize_blocks(blocks: list[Block], *, converter: Callable[[str], str] | N
             report["blocks"].append(dict(**location, before=original, after=result.text))
 
     for block, cell, result, old, where in prepared:
+        pending=[]
+        if options.mark_pending:
+            for item in result.review:
+                indices=[i for i,source in enumerate(result.origins) if item['start']<=source<item['end']]
+                if indices:pending.append((min(indices),max(indices)+1,'pending'))
         if cell is None:
             block.remap(result.text, result.origins)                   # 같은 원문 글자에서 나온 출력 범위를 모두 덮게 등급·메모·쓰임 범위·책갈피를 옮긴다
+            block.spans.extend(pending)
             record(result, old, where)
         else:
             block.rows[cell[0]][cell[1]] = result.text
+            if pending:block.cell_spans[cell]=pending
             record(result, old, where)
     report["summary"] = {
         "changed_blocks": sum(b["before"] != b["after"] for b in report["blocks"]),

@@ -16,7 +16,10 @@ def corrected_output_records(records, source):
     import copy
     from pathlib import Path
     from .comparison import ComparisonProject, ComparisonError
-    projects={};output=[]
+    from .punctuation_review import annotate_cosmetic_commas
+    from .ai_priority import cached_priority
+    from .ocr_disagreement import narrow_saved_grades
+    projects={};output=[];ai_inventory={}
     for record in records:
         reference=(record.get('local_first') or {}).get('project_path')
         if not reference:
@@ -25,15 +28,58 @@ def corrected_output_records(records, source):
         if key not in projects:
             projects[key]=ComparisonProject.load(key,source_path=source)
         project=projects[key];number=record['pdf_page'];page=project.page(number)
+        if project.source_sha256!=record['local_first'].get('source_sha256'):
+            raise ComparisonError('교정 프로젝트와 판독 기록의 원본을 확인하세요.')
+        recovered=_cached_catalog_output(record,page,Path(reference))
+        if recovered is not None:
+            output.append(recovered);continue
         if page.get('corrected_text') is None:
-            output.append(record);continue
+            preferred=cached_priority(narrow_saved_grades(record,page),page,Path(reference),ai_inventory)
+            output.append(annotate_cosmetic_commas(preferred,page));continue
         baseline=next((r for r in page['runs'] if r['id']==page['baseline_run_id']),None)
         if baseline is None or project.source_sha256!=record['local_first'].get('source_sha256'):
             raise ComparisonError('교정 프로젝트와 판독 기록의 원본·기준 판독을 확인하세요.')
         reading=reading_from_run(baseline['raw'],number,'horizontal' if record.get('mode')=='horizontal_zh' else 'vertical',text=project.text(number))
         current=copy.deepcopy(record);current['merged']['regions']=reading.model_dump()['regions']
-        output.append(current)
+        output.append(annotate_cosmetic_commas(current,page))
     return output
+
+
+def _cached_catalog_output(record,page,reference):
+    """Reuse only an image-keyed completed answer, never request a new one."""
+    import copy,json
+    from PIL import Image
+    from .catalog_recovery import catalog_entries,recover_catalog
+    from .ai_page import cached_page_path
+    first=record.get('local_first') or {};summary=first.get('ai_page') or {}
+    if summary.get('mode')!='prefer' or summary.get('used') or not summary.get('model'):return None
+    if page.get('corrected_text') is not None or any(page.get(k) for k in ('edits','decisions','ai_decisions')):return None
+    witnesses=[r['raw'] for r in page['runs'] if len(catalog_entries(r['raw']['text'])[1])>=15]
+    if not witnesses:return None
+    work=reference.parent.parent;number=record['pdf_page']
+    direction='horizontal' if record.get('mode')=='horizontal_zh' else 'vertical'
+    if direction!='horizontal':return None
+    try:
+        with Image.open(work/'pages'/f'p{number:03d}.png') as image:
+            cache=cached_page_path(image,direction=direction,profile=first.get('profile','traditional'),model=summary['model'],cache_dir=work/'ai-page')
+        answer=json.loads(cache.read_text(encoding='utf-8'))
+    except (OSError,ValueError):return None
+    if not isinstance(answer,dict):return None
+    recovery=recover_catalog(answer,[w['text'] for w in witnesses])
+    if recovery is None:return None
+    text,pending,evidence=recovery
+    raw=max(witnesses,key=lambda w:len(catalog_entries(w['text'])[1]))
+    reading=reading_from_run(raw,number,direction,text=text)
+    current=copy.deepcopy(record);current['merged']['regions']=reading.model_dump()['regions']
+    current['_output_catalog_recovery']={**evidence,'cached_file':cache.name,'new_calls':0}
+    grades=[];offset=0
+    for index,line in enumerate(text.split('\n'),1):
+        for a,b in pending:
+            if a<offset+len(line) and offset<b:
+                grades.append(dict(region_id=f'local-line-{index}',para=0,start=max(a-offset,0),end=min(b-offset,len(line)),grade='red'))
+        offset+=len(line)+1
+    current['local_grades']=grades
+    return current
 
 from .schema import Column, PageReading, Paragraph, Region, Uncertain
 

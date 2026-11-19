@@ -440,8 +440,22 @@ class BookmarkCursorTk(unittest.TestCase):
         self.assertGreater(self.editor._image_size[0], 300)
         self.assertLessEqual(abs(self.editor._editor_font.measure("漢") - self.editor._image_size[0] * .03), 1)
 
+    def hold_render_timer(self):
+        """Keep render completion explicit even when Windows mapping takes over 100ms.
+
+        These tests cancel the queued job and submit it manually. Leave layout and
+        polling timers untouched, and retain every scheduling/render assertion.
+        """
+        after = self.editor.after
+        def controlled(milliseconds, callback=None, *args):
+            if callback == self.editor._submit_render:
+                milliseconds = 60_000
+            return after(milliseconds, callback, *args)
+        self.stack.enter_context(patch.object(self.editor, "after", side_effect=controlled))
+
     def test_remap_reissues_first_render_skipped_after_geometry_was_initialized(self):
         self.ready()
+        self.hold_render_timer()
         self.editor.deiconify()
         self.root.update()
         self.assertTrue(self.editor._split_initialized)
@@ -468,6 +482,7 @@ class BookmarkCursorTk(unittest.TestCase):
 
     def test_remap_reissues_hidden_page_and_zoom_changes_at_unchanged_pane_width(self):
         self.ready()
+        self.hold_render_timer()
         self.editor.deiconify()
         self.root.update()
         self.editor._display_pdf(Image.new("RGB", (600, 800), "white"))

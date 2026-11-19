@@ -199,6 +199,18 @@ class Window(unittest.TestCase):
         return {"layout": app.layout_key(), "template": app.v_template.get(), "preset": app.preset_ref(), "bold_split": app.v_bold.get(),
                 "pages": app.v_pages.get(), "print_offset": app.v_off.get(), "mode": app.mode_key(app._active_input)}
 
+    def test_yu_policy_is_book_specific_and_does_not_leak_to_another_book(self):
+        gui=self.gui
+        save_book_settings(self.book_dir(self.a),dict(BOOK,yu_policy='post1900'),create=True)
+        app=self.app();app.v_yu_policy=Var(gui.YU_POLICY_LABELS['classical'])
+        app._use_pdf(self.a)
+        self.assertEqual(app.v_yu_policy.get(),gui.YU_POLICY_LABELS['post1900'])
+        app._use_pdf(self.b)
+        self.assertEqual(app.v_yu_policy.get(),gui.YU_POLICY_LABELS['classical'])
+        app._use_pdf(self.a)
+        self.assertEqual(app.v_yu_policy.get(),gui.YU_POLICY_LABELS['post1900'])
+        self.assertEqual(load_book_settings(self.book_dir(self.a))['yu_policy'],'post1900')
+
     def test_choosing_a_book_loads_its_settings_and_a_new_book_clears_pages_without_creating_folders(self):
         gui = self.gui
         save_book_settings(self.book_dir(self.a), BOOK, create=True)
@@ -423,8 +435,10 @@ class LastBuild(unittest.TestCase):
                 rc = cli.main(["run", str(src), "--work", str(w), "--reader", "mock", "--checkpoint", "0", "--mode", "horizontal_zh", "--no-normalize"])
             self.assertEqual(rc, 0, log.getvalue()[-600:])
             st = json.loads((w / "state.json").read_text(encoding="utf-8"))
-            self.assertEqual({k: st["last_build"][k] for k in ("layout", "template", "preset", "outputs")},
-                             {"layout": "page", "template": "", "preset": "", "outputs": ["책.hwpx"]})
+            self.assertEqual({k: st["last_build"][k] for k in ("layout", "template", "preset")},
+                             {"layout": "page", "template": "", "preset": ""})
+            self.assertEqual(len(st['last_build']['outputs']),1)
+            self.assertRegex(st['last_build']['outputs'][0],r'^책 - \d{6}_\d{6}\.hwpx$')
             with contextlib.redirect_stdout(log):
                 rc = cli.main(["build", str(src), "--work", str(w), "--layout", "flow", "--template", str(tpl), "--preset", "kaibao",
                                "--no-bold", "--no-normalize", "--out", "내용별"])

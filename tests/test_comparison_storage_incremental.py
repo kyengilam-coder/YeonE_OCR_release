@@ -20,6 +20,31 @@ from yeone_ocr import comparison as core, comparison_storage as storage
 
 
 class IncrementalStorageTests(unittest.TestCase):
+    def test_corrupt_snapshot_never_replaces_published_project(self):
+        self.project.save(self.target)
+        before = self.target.read_bytes()
+        self.project.set_text(1, 'pending correction')
+        original = storage._write_rows
+        def corrupt(connection, *args):
+            generation = original(connection, *args)
+            connection.execute('PRAGMA writable_schema=ON')
+            connection.execute("UPDATE sqlite_master SET rootpage=999999 WHERE name='pages'")
+            return generation
+        with patch.object(storage, '_write_rows', side_effect=corrupt):
+            with self.assertRaises(storage.ProjectStorageError):
+                self.project.save()
+        self.assertEqual(self.target.read_bytes(), before)
+        self.assertTrue(self.project.dirty)
+
+    def test_truncated_database_has_specific_diagnostic(self):
+        self.project.save(self.target)
+        data = self.target.read_bytes()
+        self.target.write_bytes(data[:-4096])
+        with self.assertRaises(storage.ProjectStorageError) as raised:
+            self.load()
+        self.assertEqual(raised.exception.storage_detail['missing_bytes'], 4096)
+        self.assertEqual(raised.exception.storage_detail['sqlite_errorname'], 'SQLITE_CORRUPT')
+
     def test_busy_commit_waits_for_reader_without_repeating_transaction(self):
         self.project.save(self.target)
         reader = sqlite3.connect(self.target, check_same_thread=False)
@@ -62,6 +87,56 @@ class IncrementalStorageTests(unittest.TestCase):
     def load(self, path=None, **kwargs):
         return core.ComparisonProject.load(path or self.target, **kwargs)
 
+    def test_paged_load_checkpoint_eviction_and_dirty_recovery(self):
+        self.project.save(self.target)
+        project = self.load(paged=True)
+        self.assertIsInstance(project._pages, storage.CheckpointPages)
+        self.assertEqual(project._pages.cached, {})
+        self.assertEqual(project.text(1), '人校正1')
+        project.set_text(2, 'new unsaved correction')
+        project._pages.trim()
+        self.assertEqual(set(project._pages.cached), {2})
+        recovery = self.root / 'paged-recovery.json'
+        project.save_recovery(recovery)
+        self.assertEqual(self.load(recovery).text(2), 'new unsaved correction')
+        self.assertEqual(self.load().text(2), '人校正2')
+        project.save()
+        self.assertEqual(project._pages.cached, {})
+        self.assertEqual(self.load(paged=True).to_dict(), self.load().to_dict())
+        self.assertEqual(project.text(2), 'new unsaved correction')
+
+    def test_paged_load_detects_corrupt_or_concurrently_replaced_pages(self):
+        self.project.save(self.target)
+        project = self.load(paged=True)
+        other = self.load()
+        other.set_text(2, 'other writer')
+        other.save()
+        with self.assertRaises(core.ComparisonError):
+            project.text(1)
+        with closing(sqlite3.connect(self.target)) as c, c:
+            c.execute("UPDATE pages SET digest='invalid' WHERE number=1")
+        with self.assertRaises(core.ComparisonError):
+            self.load(paged=True)
+
+    def test_lazy_resume_validates_accessed_page_and_preserves_untouched_rows(self):
+        self.project.save(self.target)
+        with patch.object(storage, "_decode_page", wraps=storage._decode_page) as decode:
+            project = self.load(paged=True, lazy_pages=True)
+            decode.assert_not_called()
+            self.assertEqual(project.text(2), "人校正2")
+            self.assertEqual(decode.call_count, 1)
+            project.set_text(2, "수정한 2쪽")
+            project.save()
+        reloaded = self.load()
+        self.assertEqual(reloaded.page(1), self.project.page(1))
+        self.assertEqual(reloaded.text(2), "수정한 2쪽")
+        with closing(sqlite3.connect(self.target)) as c, c:
+            c.execute("UPDATE pages SET digest='invalid' WHERE number=1")
+        lazy = self.load(paged=True, lazy_pages=True)
+        self.assertEqual(lazy.text(2), "수정한 2쪽")
+        with self.assertRaises(core.ComparisonError):
+            lazy.page(1)
+
     def test_long_book_roundtrip_changed_page_only_and_portable_copy(self):
         self.project.save(self.target)
         self.assertTrue(storage.is_database(self.target))
@@ -102,7 +177,7 @@ class IncrementalStorageTests(unittest.TestCase):
         before = self.target.read_bytes()
         project.set_text(1, "new")
         with patch.object(core, "_replace_file", side_effect=OSError("disk unavailable")):
-            with self.assertRaises(OSError):
+            with self.assertRaises(storage.ProjectStorageError):
                 project.save()
         self.assertEqual(self.target.read_bytes(), before)
         self.assertTrue(project.dirty)
@@ -181,11 +256,21 @@ os._exit(17)
         self.assertEqual(self.load().to_dict(), before)
         self.assertFalse(Path(str(self.target) + "-journal").exists())
 
+    def test_long_database_ignores_legacy_whole_json_ceiling_and_recovery_reopens(self):
+        self.project.save(self.target)
+        self.project.set_text(1, 'new human correction')
+        with patch.object(core, 'MAX_JSON_BYTES', 10), patch.object(core, 'MAX_BYTES', 100000):
+            self.project.save()
+            self.assertEqual(self.load().text(1), 'new human correction')
+            recovery = self.root / 'long.recovery.json'
+            self.project.save_recovery(recovery)
+            self.assertEqual(core.ComparisonProject.load(recovery).text(1), 'new human correction')
+
     def test_size_limit_and_untrusted_schema_do_not_modify_saved_work(self):
         self.project.save(self.target)
         before = self.project.to_dict()
         self.project.set_text(1, "pending")
-        with patch.object(core, "MAX_JSON_BYTES", 100):
+        with patch.object(storage, "MAX_DATABASE_RAW_BYTES", 100):
             with self.assertRaises(core.ComparisonError):
                 self.project.save()
         self.assertEqual(self.load().to_dict(), before)

@@ -78,6 +78,7 @@ class EnginePool:
         self._locks: dict[tuple, threading.Lock] = {}
         self._one_shot: set[str] = set()
         self._gpu_failed: dict[str, str] = {}
+        self._gpu_error_streak: dict[str, int] = {}
         self._gpu_threads: dict[str, object] = {}      # engine -> single-thread executor
         self._guard = threading.Lock()
 
@@ -173,15 +174,34 @@ class EnginePool:
             lock = self._locks[key]
         with lock:
             try:
-                return self._on_gpu_thread(engine, session.recognize_file, path, page_number=page_number, dpi=dpi, psm=psm)
+                result = self._on_gpu_thread(engine, session.recognize_file, path, page_number=page_number, dpi=dpi, psm=psm)
+                self._gpu_error_streak[engine] = 0
+                if session.cleanup_failures:
+                    self._retire_gpu(key, engine, session)
+                return result
             except ocr.OCRCancelled:
                 raise
             except (ocr.OCRError, OSError) as error:
-                if first:
+                self._gpu_error_streak[engine] = self._gpu_error_streak.get(engine, 0) + 1
+                self._retire_gpu(key, engine, session)
+                page_specific = 'token repeat limit reached' in str(getattr(error, 'diagnostics', {}).get('message', ''))
+                if not page_specific and (first or self._gpu_error_streak[engine] >= 2):
                     self._gpu_failed[engine] = type(error).__name__
                     if self.log:
                         self.log(f"  {engine}: GPU 실행을 시작하지 못해 이번 실행에서는 CPU 엔진만 씁니다({type(error).__name__}).")
                 raise
+
+    def _retire_gpu(self, key, engine, session):
+        # A failed batch must not leave a poisoned session that rejects every
+        # following page. Close the lease on its owning GPU thread only.
+        with self._guard:
+            if self._sessions.get(key) is session:
+                self._sessions.pop(key, None)
+                self._locks.pop(key, None)
+        try:
+            self._on_gpu_thread(engine, session.__exit__, RuntimeError, None, None)
+        except Exception:
+            pass  # Retain the original failure; a close failure must not replace it.
 
     def _retire(self, key, engine):
         with self._guard:

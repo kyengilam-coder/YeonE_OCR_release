@@ -112,6 +112,24 @@ class GLMWorkerTests(unittest.TestCase):
         self.assertEqual(payload["prompt"], "Text Recognition:")
         self.assertNotIn("reference", payload)
 
+    def test_token_repetition_recovers_once_and_records_changed_settings(self):
+        from PIL import Image
+        image = self.root / 'repeat.png'
+        Image.new('RGB', (20,20), 'white').save(image)
+        instance = worker.Worker(self.models)
+        failure = RuntimeError('Private GLM-OCR HTTP 500: prediction aborted, token repeat limit reached')
+        response = {'response':'原文不修改', 'done':True, 'done_reason':'stop'}
+        with patch.object(instance,'start'), patch.object(instance,'_request', side_effect=[
+                failure,response,{'models':[{'digest':'a'*64,'size_vram':100}]}]) as call:
+            result=instance.recognize(image,'chi_sim')
+        assert result['text']=='原文不修改'
+        assert result['engine_metadata']['repetition_recovery']['failed_attempts']==1
+        assert result['engine_metadata']['settings']['repeat_penalty']==1.1
+        assert call.call_count==3
+        with patch.object(instance,'start'), patch.object(instance,'_request',side_effect=failure) as call:
+            with self.assertRaises(RuntimeError): instance.recognize(image,'chi_sim')
+        assert call.call_count==2
+
     def test_truncated_generation_is_retained_as_incomplete(self):
         from PIL import Image
         image = self.root / "input.png"

@@ -149,7 +149,7 @@ def resume_probe(folder: Path):
         return {"cancelled": False, "completed": ["ppocrv6"] if added else [],
                 "skipped": [] if added else ["ppocrv6"], "selection": {"selected_engine": "ppocrv6"}}
 
-    def client(*_):
+    def client(*_args, **_kwargs):
         def create(**kwargs):
             calls.append(1)
             prompt = kwargs["input"][0]["content"][0]["text"]

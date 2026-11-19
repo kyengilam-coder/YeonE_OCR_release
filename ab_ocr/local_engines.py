@@ -598,7 +598,13 @@ class RecognitionSession:
             else:
                 failure = output.with_name(output.name + ".failure.json")
                 if self.engine != "surya" or not failure.is_file():
-                    raise response_error or OCRError("전용 OCR 요청이 실패했습니다. 자동 재시도하지 않습니다.")
+                    error = response_error or OCRError("전용 OCR 요청이 실패했습니다. 자동 재시도하지 않습니다.")
+                    if failure.is_file():
+                        error.diagnostics = _read_json(failure, MAX_WORKER_BYTES)
+                    elif not getattr(error, 'diagnostics', None):
+                        error.diagnostics = {"error_type": type(error).__name__, "message": str(error),
+                                             "worker_exit_code": self.worker.process.poll() if getattr(self.worker, 'process', None) else None}
+                    raise error
                 evidence = _read_json(failure, MAX_WORKER_BYTES)
                 payload = {"text": "", "words": [], "engine_version": str(self.info["installation"].get("engine_version", "surya")),
                     "engine_metadata": {"generation_complete": False, "raw_failure": evidence,

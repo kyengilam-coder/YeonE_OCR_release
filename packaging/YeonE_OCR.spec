@@ -40,7 +40,7 @@ for name in ("install_tesseract.py", "tesseract-lock.json", "install_rapidocr.py
              "install_surya.py", "install_surya_cuda.py", "surya-lock.json", "surya-requirements.txt"):
     datas.append((str(ROOT / "scripts" / name), "scripts"))
 for name in ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "CHINESE_OCR_TEST.md",
-             "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "PADDLE_SERVER.md",
+             "BOOK_RULES.md", "INTEGRATION.md", "HANDOFF.md", "AI_REVIEW.md", "PADDLE_SERVER.md",
              "GLM_OCR.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md", "release-notes.md", "AB_OCR_PROVENANCE.json"):
     datas.append((str(ROOT / "docs" / name), "docs"))
 for name in ("THIRD_PARTY_NOTICES.txt", "requirements-windows.lock.txt"):

@@ -31,7 +31,7 @@ class PdfOnlyRun(unittest.TestCase):
         self.work = self.root / "work"
         self.out = textlayer.out_path(self.work, self.source)
         self.argv = ["run", str(self.source), "--work", str(self.work), "--reader", "mock", "--mode", "vertical",
-                     "--workers", "1", "--checkpoint", "1", "--pdf-only"]
+                     "--workers", "1", "--checkpoint", "1", "--pdf-only", "--out", str(self.out)]
         cli.CANCEL.clear()
         self.addCleanup(cli.CANCEL.clear)
 
@@ -111,6 +111,7 @@ class PdfOnlyRun(unittest.TestCase):
             reader = MockReader({1: text_layer(doc, 1)})
         argv = self.argv.copy()
         argv[1] = str(image_source)
+        argv[argv.index('--out') + 1] = str(textlayer.out_path(self.work, image_source))
         with mock.patch.object(cli, "make_reader", return_value=reader):
             rc, log = self.run_cli(argv)
         self.assertEqual(rc, 0, log)

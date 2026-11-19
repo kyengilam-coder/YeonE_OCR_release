@@ -25,10 +25,11 @@ class Offsets(unittest.TestCase):
                   cstyles=[(3, 5, "bold"), (6, 8, "source")], spans=[(0, 2, "green")], memos=[(6, "m")])
         out, _ = normalize_blocks([b], resolver=lambda items: {})
         o = out[0]
-        self.assertEqual(o.text, "漢書, 云曰. 髒腑")
+        self.assertEqual(o.text, "漢書, 云曰. 臟腑")
         self.assertEqual((o.anchors, o.cstyles, o.spans, o.memos),
-                         ([(4, "PDF 2쪽"), (8, "PDF 3쪽")], [(4, 6, "bold"), (8, 10, "source")], [(0, 2, "green")], [(8, "m")]))
-        self.assertEqual((o.text[o.anchors[0][0]], o.text[4:6], o.text[8:10]), ("云", "云曰", "髒腑"))
+                         ([(4, "PDF 2쪽"), (8, "PDF 3쪽")], [(4, 6, "bold"), (8, 10, "source")],
+                          [(0, 2, "green"),(4,5,"pending")], [(8, "m")]))
+        self.assertEqual((o.text[o.anchors[0][0]], o.text[4:6], o.text[8:10]), ("云", "云曰", "臟腑"))
         self.assertEqual((b.text, b.anchors), ("汉书，云曰。髒腑", [(3, "PDF 2쪽"), (6, "PDF 3쪽")]))                  # 원본 블록은 그대로
 
 
@@ -95,7 +96,7 @@ class ContextNormalization(unittest.TestCase):
 
     def test_macro_hanzi_is_a_proposal_not_a_global_replacement(self):
         result = normalize_text("技術，白術；樹幹，干燥；贏得，羸弱；學校教育。", resolver=keep_valid)
-        self.assertEqual(result.text, "技術, 白術; 樹幹, 干燥; 贏得, 羸弱; 學校敎育. ")   # 敎: Korean standard form
+        self.assertEqual(result.text, "技術, 白術; 樹幹, 乾燥; 贏得, 羸弱; 學校敎育. ")   # 敎: Korean standard form; dry sense is now contextual.
         self.assertNotIn("朮", result.text)
         self.assertNotIn("樹乾", result.text)
         self.assertNotIn("羸得", result.text)
@@ -256,7 +257,7 @@ class SelectableCorrections(unittest.TestCase):
     def test_punctuation_only_does_not_need_opencc_or_ask_character_candidates(self):
         with patch("yeone_ocr.normalization._opencc_converter", side_effect=AssertionError("not needed")):
             out, report = normalize_blocks([Block(type="table", rows=[["髒，汉书。", "云雨；白术"]])],
-                                           options=NormalizationOptions(traditional=False, yun=False))
+                                           options=NormalizationOptions(traditional=False, yun=False,korean_forms=False))
         self.assertEqual(out[0].rows, [["髒, 汉书. ", "云雨; 白术"]])
         self.assertEqual(report["decisions"], [])
         self.assertTrue(report["complete"])
@@ -339,6 +340,44 @@ class KoreanStandardForms(unittest.TestCase):
 
     def test_switch_off_keeps_the_forms_read(self):
         self.assertEqual(self.run_text("為之真説", korean_forms=False).text, "為之真説")
+
+    def test_user_msr_glyphs_are_not_unresolved_model_questions(self):
+        def no_model(_items):
+            raise AssertionError("Glyph normalization must not call an AI resolver")
+        result = normalize_text("胎產，飲食，顏，脅，巔，痺。", resolver=no_model)
+        self.assertEqual(result.text, "胎産, 飮食, 顔, 脇, 巓, 痹. ")
+        self.assertFalse(result.proposals)
+        self.assertFalse(result.review)
+        self.assertEqual(normalize_text(result.text, resolver=no_model).text, result.text)
+
+    def test_leaf_context_and_source_fidelity_mode(self):
+        options = NormalizationOptions(editorial_simplified=True)
+        text = "牛膝春夏用叶，枝叶，叶酸，叶公，叶韵，叶韻。"
+        result = normalize_text(text, options=options)
+        self.assertEqual(result.text, "牛膝春夏用葉, 枝葉, 葉酸, 葉公, 叶韻, 叶韻. ")
+        self.assertEqual(normalize_text("用叶").text, "用叶")
+
+    def test_default_hwpx_output_converts_both_reported_sentences(self):
+        from yeone_ocr import cli
+        from yeone_ocr.hwpx_builder import build_hwpx
+        from lxml import etree
+        args = cli.build_parser().parse_args(["build", "x.pdf"])
+        source = Block(type="para", text="牛膝春夏用叶。經候胎產諸病。", spans=[(0, 2, "red")])
+        out, report = normalize_blocks([source], options=cli.normalization_options(args))
+        self.assertEqual(out[0].text, "牛膝春夏用葉. 經候胎産諸病. ")
+        self.assertEqual(source.text, "牛膝春夏用叶。經候胎產諸病。")
+        self.assertFalse(report["review"])
+        self.assertIn((0, 2, "red"), out[0].spans)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "user-example.hwpx"
+            build_hwpx(out, str(path), edited=True)
+            with ZipFile(path) as z:
+                xml = etree.fromstring(z.read("Contents/section0.xml"))
+                text = "".join(xml.itertext())
+                self.assertIn("牛膝春夏用葉", text)
+                self.assertIn("經候胎産諸病", text)
+                self.assertNotIn("用叶", text)
+                self.assertNotIn("胎產", text)
 
     def test_korean_forms_alone_and_characters_left_to_context(self):
         self.assertEqual(self.run_text("為之", traditional=False, punctuation=False, yun=False).text, "爲之")

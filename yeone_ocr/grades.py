@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import unicodedata
 from .marks import MARK_RE, NOTE_PREFIXES, split_marks, fold_map   # NOTE_PREFIXES·split_marks 는 예전 이름(grades.*)으로도 쓰인다(hwpx_builder·collate·시험)
 from .schema import PageReading, TEXT_KINDS
 from .adjudicate import SUSPECT_NOTE, suspect_uncertain
@@ -16,6 +17,7 @@ from .adjudicate import SUSPECT_NOTE, suspect_uncertain
 # ---------- 등급별 글자 모양(HWPX·DOCX·검수 화면 공용) ----------
 # 색만으로는 색각 이상·흑백 인쇄에서 구별되지 않으므로 밑줄 모양도 등급마다 다르게 둔다.
 GRADE_STYLE: dict[str, dict] = {
+    "pending": dict(color="#C00000", highlight=None, bold=False, underline=None, label="한자 선택 확인 필요(빨강)"),
     "green": dict(color="#0B7A3B", highlight=None, bold=False, underline="DOT", label="초록"),
     "blue": dict(color="#1F4FBF", highlight="#E1EBFF", bold=False, underline="DASH", label="파랑"),
     "red": dict(color="#C00000", highlight="#FFFF00", bold=True, underline=None, label="빨강"),
@@ -23,12 +25,16 @@ GRADE_STYLE: dict[str, dict] = {
 }
 # 단순 표시(--display simple): 밑줄·굵게 없이 형광 바탕 + 글자색 세 단계만. 메모도 괄호도 없이 색으로만 읽는다.
 SIMPLE_GRADE_STYLE: dict[str, dict] = {
+    "pending": dict(color="#C00000", highlight=None, bold=False, underline=None, label="한자 선택 확인 필요(빨강)"),
     "green": dict(color="#0B7A3B", highlight="#E2F5DC", bold=False, underline=None, label="초록"),
     "blue": dict(color="#1F4FBF", highlight="#E1EBFF", bold=False, underline=None, label="파랑"),
     "red": dict(color="#C00000", highlight="#FFFF00", bold=False, underline=None, label="빨강"),
     "red_ctx": dict(color="#C00000", highlight="#FFFF00", bold=False, underline=None, label="빨강"),
 }
 STYLE_ALIAS = {"mark": "red"}          # split_marks 의 mark(〔〕 표시) = 빨강
+for styles in (GRADE_STYLE,SIMPLE_GRADE_STYLE):
+    styles['punct_green']=dict(styles['green'],highlight=None,bold=False,underline=None,label='확정 부호(초록)')
+    styles['ai_supported']=dict(styles['blue'],highlight=None,bold=False,underline=None,label='AI 우선 확인(파랑)')
 
 # ---------- 글자 모양 나누기(문서 조립 공용) — 표시 나누기는 marks.split_marks ----------
 def styled_runs(text: str, spans=(), memos=()) -> list[tuple[str, str, list[str]]]:
@@ -43,6 +49,12 @@ def styled_runs(text: str, spans=(), memos=()) -> list[tuple[str, str, list[str]
         for i in range(max(0, a), min(len(text), b)):
             st[i] = k
     at: dict[int, list[str]] = {}
+    for i,char in enumerate(text):
+        kind=STYLE_ALIAS.get(st[i],st[i])
+        if kind in GRADE_STYLE:
+            if char.isspace():st[i]='body'
+            elif unicodedata.category(char).startswith('P'):
+                st[i]='punct_green' if kind in ('green','punct_green') else 'body'
     for off, msg in memos:
         k = min(max(0, off), len(text) - 1)
         if msg not in at.get(k, []):
@@ -321,9 +333,12 @@ def page_grades(rec: dict, ctx: dict | None = None, memo_mode: str = "notice", u
                                                          + (f" · 근거 {e.get('evidence', '')[:60]}" if e.get("evidence") else "")
                                                          + ("" if grade == "green" else " · 조각 위치를 확인하지 못함")))
     for s in rec.get("local_grades") or []:                              # 로컬 우선 인식(local_first._local_grades) — 줄 영역마다 글자 범위
-        if s.get("grade") in ("green", "blue", "red") and s.get("region_id") not in dup:
+        if s.get("grade") in ("green", "blue", "red", "ai_supported") and s.get("region_id") not in dup:
             spans.setdefault((s["region_id"], int(s.get("para", 0))), []).append((int(s["start"]), int(s["end"]), s["grade"]))
             stats[s["grade"]] = stats.get(s["grade"], 0) + 1
+    for s in rec.get('_cosmetic_punctuation',()):
+        if s.get('region_id') not in dup:
+            spans.setdefault((s['region_id'],int(s.get('para',0))),[]).append((s['start'],s['end'],'body'))
     for s in ctx_sites:
         if s.get("state") != "open" or s.get("verdict") != "suggest":
             continue

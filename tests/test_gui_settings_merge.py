@@ -46,6 +46,16 @@ class SettingsMerge(unittest.TestCase):
     def disk(self) -> dict:
         return json.loads(self.path.read_text(encoding="utf-8"))
 
+    def test_hanja_rule_selection_is_saved_without_overwriting_other_windows(self):
+        gui = self.gui
+        gui.save_config(dict(gui.DEFAULTS, hanja_rules='old.json'))
+        app = fake_app(gui, gui.load_config(), hanja_rules='my-hanja.json')
+        other = self.disk(); other['unrelated_preference'] = 'keep'
+        self.path.write_text(json.dumps(other), encoding='utf-8')
+        gui.App.save_settings(app, quiet=True)
+        self.assertEqual(self.disk()['hanja_rules'], 'my-hanja.json')
+        self.assertEqual(self.disk()['unrelated_preference'], 'keep')
+
     def test_merge_config_rules(self):
         disk = {"a": 1, "b": 2, "provider_settings": {"gemini": {"api_key": "g"}, "openai": {"api_key": "o2"}}}
         loaded = {"a": 1, "b": 1, "provider_settings": {"gemini": {"api_key": "g"}, "openai": {"api_key": "o1"}}}
@@ -382,6 +392,7 @@ class TemplateGuard(unittest.TestCase):
         good = self.td / "내책.json"; good.write_text('{"schema": 1, "label": "내 책"}', encoding="utf-8")
         bad = self.td / "틀림.json"; bad.write_text('{"schema": 1, "entry": {"opener": ["味"]}}', encoding="utf-8")
         app = types.SimpleNamespace(_preset_ref="kaibao", v_preset=Var(gui.preset_label("kaibao")), cb_preset=mock.Mock(),
+                                    v_layout=Var(gui.LAYOUT_LABELS['page']),v_template=Var(''),
                                     _layout_changed=mock.Mock(), _sync_settings_summary=mock.Mock())
         app._preset_values = gui.App._preset_values.__get__(app)
         pick = lambda: gui.App._preset_selected(app)

@@ -52,6 +52,12 @@ def serve_requests(worker, root, languages, write_result, *, failure_evidence=No
         except Exception as error:
             if failure_evidence is not None:
                 failure_evidence(worker, output, error)
+            else:
+                diagnostic = {"error_type": type(error).__name__, "message": str(error)[:2000]}
+                capture = getattr(worker, "failure_diagnostic", None)
+                if capture is not None:
+                    diagnostic.update(capture(error))
+                write_result(output.with_name(output.name + ".failure.json"), diagnostic)
             write_result(ack, {"id": token, "status": "failed", "ordinal": ordinal,
                                "error_type": type(error).__name__})
             return 1
@@ -64,22 +70,40 @@ class WorkerProcess:
         self.root, self.should_stop, self.timeout = Path(root), should_stop, timeout
         self.stack = ExitStack()
         self.process = None
+        self._stderr = None
         from .runtime import external_process_search, process_tree, subprocess_environment
         flags = (subprocess.CREATE_NO_WINDOW | 0x00000004) if os.name == "nt" else 0
         try:
+            self._stderr = (self.root / 'worker-stderr.log').open('w+b')
             with external_process_search():
                 self.process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, creationflags=flags, env=subprocess_environment())
+                    stderr=self._stderr, creationflags=flags, env=subprocess_environment())
             self.stack.enter_context(process_tree(self.process, suspended=os.name == "nt"))
-        except BaseException:
+        except BaseException as error:
+            self._capture_error(error)
             self.close()
             raise
+
+    def _capture_error(self, error):
+        try:
+            tail = ''
+            if self._stderr is not None:
+                self._stderr.seek(0, 2)
+                self._stderr.seek(max(0, self._stderr.tell()-8192))
+                tail = self._stderr.read().decode('utf-8',errors='replace')
+            error.diagnostics = {'error_type':type(error).__name__, 'message':str(error),
+                                 'worker_exit_code':self.process.poll() if self.process else None,
+                                 'stderr_tail':tail}
+        except OSError:
+            pass
 
     def request(self, request):
         from .ocr import OCRError, _cancelled
         _cancelled(self.should_stop)
         if self.process is None or self.process.poll() is not None:
-            raise OCRError("전용 OCR 작업자가 종료되었습니다. 자동 재시도하지 않습니다.")
+            error = OCRError("전용 OCR 작업자가 종료되었습니다. 자동 재시도하지 않습니다.")
+            self._capture_error(error)
+            raise error
         started = time.monotonic()
         try:
             self.process.stdin.write(json.dumps(request, ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n")
@@ -98,7 +122,8 @@ class WorkerProcess:
             if result.get("id") != request["id"] or result.get("status") not in ("ok", "failed"):
                 raise OCRError("전용 OCR 응답 ID가 일치하지 않습니다.")
             return result
-        except BaseException:
+        except BaseException as error:
+            self._capture_error(error)
             self.close()
             raise
 
@@ -122,3 +147,6 @@ class WorkerProcess:
                     process.stdin.close()
         finally:
             self.stack.close()
+            if self._stderr is not None:
+                self._stderr.close()
+                self._stderr = None

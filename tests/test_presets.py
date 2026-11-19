@@ -117,7 +117,7 @@ class Builtins(unittest.TestCase):
         self.assertEqual((b.id, b.ref, b.entry.when), ("kaibao", "bencao", "always"))  # 예전 bencao = 약재명 늘 떼기(kaibao 로 바꾸지 않는다)
         self.assertEqual((n.id, n.ref, n.entry), ("regions", "none", None))
         self.assertEqual(k.entry.when, "auto")                                       # 별칭이 내장 객체를 바꾸지 않는다
-        self.assertEqual(set(k.para_styles), set(ROLES))
+        self.assertEqual(set(k.para_styles), set(ROLES)-{'citation_source','quotation'})
         self.assertEqual(k.char_styles, {"small": ("소주",), "source": ("출처",), "bonjing": ("본경 조문",)})
         self.assertEqual({r_: k.para_styles[r_] for r_ in r.para_styles}, r.para_styles)   # regions 의 이름은 kaibao 와 같다
 

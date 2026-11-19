@@ -77,7 +77,18 @@ def verify_page(r: PageReading) -> list[dict]:
     return issues
 
 
-def check_hwpx_file(path: str) -> list[dict]:
+def numbered_paragraph_formats(header) -> dict[str, dict[str, str]]:
+    """Index numbering attributes by paragraph-format ID in a HWPX header."""
+    hh = "{http://www.hancom.co.kr/hwpml/2011/head}"
+    formats = {}
+    for prop in header.iter(hh + "paraPr"):
+        heading = prop.find(".//" + hh + "heading")
+        if heading is not None and heading.get("type", "").upper() in {"OUTLINE", "NUMBER", "BULLET"}:
+            formats[prop.get("id")] = dict(heading.attrib)
+    return formats
+
+
+def check_hwpx_file(path: str, *, template_numbering: dict[str, dict[str, str]] | None = None) -> list[dict]:
     """HWPX 파일 구조 검사: 확장자만 바꾼 파일이 아닌지(지침 23)."""
     import zipfile
     issues = []
@@ -107,12 +118,18 @@ def check_hwpx_file(path: str) -> list[dict]:
     # 그것을 본다 — 사용자 양식의 스타일(제목-장·본경 원문 …)은 번호가 없으면 써도 된다. XML 로 읽는다: 속성 차례(id 가 앞인지 뒤인지)에 매이지 않게.
     import xml.etree.ElementTree as ET
     HH = "{http://www.hancom.co.kr/hwpml/2011/head}"; HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
-    numbered = set()
+    numbered = {}
+    approved = {}
     try:
-        for ppr in ET.fromstring(read_member(z, "Contents/header.xml")).iter(f"{HH}paraPr"):
-            hd = ppr.find(f".//{HH}heading")
-            if hd is not None and (hd.get("type") or "NONE").upper() in ("OUTLINE", "NUMBER", "BULLET"):
-                numbered.add(ppr.get("id"))
+        header = ET.fromstring(read_member(z, "Contents/header.xml"))
+        numbered = numbered_paragraph_formats(header)
+        # A layout override may clone a paragraph format to center a title or
+        # keep lines together. Its numbering must still match the chosen
+        # template style in both the saved style definition and the paragraph.
+        for style in header.iter(HH + "style"):
+            expected = (template_numbering or {}).get(style.get("id"))
+            if expected and style.get("type") == "PARA" and numbered.get(style.get("paraPrIDRef")) == expected:
+                approved[style.get("id")] = expected
     except (KeyError, ET.ParseError):
         pass
     except ArchiveTooLarge as e:
@@ -125,7 +142,8 @@ def check_hwpx_file(path: str) -> list[dict]:
                 issues.append({"level": "error", "rule": "zip 크기", "where": n, "msg": str(e)}); continue
             except ET.ParseError as e:
                 issues.append({"level": "error", "rule": "XML 해석", "where": n, "msg": f"XML 로 읽을 수 없음: {e}"}); continue
-            bad = [p for p in root.iter(f"{HP}p") if p.get("paraPrIDRef") in numbered]
+            bad = [p for p in root.iter(f"{HP}p") if p.get("paraPrIDRef") in numbered
+                   and numbered[p.get("paraPrIDRef")] != approved.get(p.get("styleIDRef"))]
             if bad:
                 issues.append({"level": "error", "rule": "개요 문단", "where": n, "msg": f"개요·번호 문단 모양 문단 {len(bad)}개 — 자동 번호가 붙을 수 있음"})
     return issues

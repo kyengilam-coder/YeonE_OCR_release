@@ -126,6 +126,7 @@ def _child(module, result_path, child_temp):
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
     os.environ["DO_NOT_TRACK"] = "1"
+    os.environ['YEONE_OCR_RULES_DIR'] = str(child_temp / 'book-rules')
     _offline()
     # Import on the owning thread before tests exercise background GUI jobs.
     # Disable automatic cyclic collection so a worker cannot finalize Tcl objects.

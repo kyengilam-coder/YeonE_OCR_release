@@ -7,13 +7,45 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
 from yeone_ocr.comparison import ComparisonProject, SourceChangedError, ComparisonError
 from yeone_ocr.comparison_ai import (AIReviewError, AISettings, ReviewPolicy,
     prepare_plan, run_plan, _validate_response, _recover_anchors, _response_schema)
+
+
+def test_stop_cancels_in_flight_api_request_and_closes_connection():
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    import pytest
+    from yeone_ocr.comparison_ai import AIReviewCancelled, _CancellableApiClient
+
+    started, stopped, request_cancelled, connection_closed = (threading.Event() for _ in range(4))
+
+    async def send(**kwargs):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            request_cancelled.set()
+            raise
+
+    async def close():
+        connection_closed.set()
+
+    sdk = SimpleNamespace(responses=SimpleNamespace(create=send), close=close, subscription=False)
+    client = _CancellableApiClient("synthetic-key", stopped.is_set)
+    with patch("openai.AsyncOpenAI", return_value=sdk), ThreadPoolExecutor() as worker:
+        result = worker.submit(client.review, AISettings("openai", "model"), "test", [], response_schema=None)
+        try:
+            assert started.wait(5)
+        finally:
+            stopped.set()
+        with pytest.raises(AIReviewCancelled):
+            result.result(timeout=3)
+    assert request_cancelled.is_set() and connection_closed.is_set()
 
 
 class PipelineTests(unittest.TestCase):
@@ -489,6 +521,17 @@ class PipelineTests(unittest.TestCase):
             run_plan(self.project, plan, api_key="synthetic-key", client_factory=lambda *_: client, on_result=broken_checkpoint)
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(self.project.page(1)["ai_reviews"]), 1)
+
+    def test_parallel_checkpoint_failure_keeps_all_inflight_answers(self):
+        plan = self.plan(ReviewPolicy(punctuation=False, traditional=False, batch_size=1))
+        client, calls = self.client()
+        def broken_checkpoint(_):
+            raise OSError('synthetic disk failure')
+        with self.assertRaises(OSError):
+            run_plan(self.project, plan, api_key='synthetic-key', parallel=2,
+                     client_factory=lambda *_: client, on_result=broken_checkpoint)
+        self.assertEqual(len(calls), min(2, len(plan.batches)))
+        self.assertEqual(len(self.project.page(1)['ai_reviews']), len(calls))
 
     def test_budget_and_target_caps_reject_whole_plan_without_truncation(self):
         with self.assertRaises(AIReviewError):

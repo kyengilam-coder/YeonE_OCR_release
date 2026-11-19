@@ -15,7 +15,264 @@ from yeone_ocr.comparison import ComparisonProject
 from yeone_ocr.state import Work
 
 
+def test_automatic_split_uses_weighted_rotation_and_skips_unavailable_account():
+    from queue import Queue
+    from yeone_ocr.local_first import _AiWorkers
+
+    assigned = Queue()
+    sessions = {name: SimpleNamespace(available=True, short=lambda name=name: name)
+                for name in ('gemini', 'chatgpt', 'claude')}
+    for session in sessions.values():
+        session.ready_for_page = lambda split, session=session: session.available
+        session.prepare_page = lambda split: None
+    crews = [{'plan': name, 'session': session, 'reader': None, 'pages': 1}
+             for name, session in sessions.items()]
+    def stage(number, _started, _review, _extras, session, _reader, _saved):
+        assigned.put((number, session.short()))
+    def failed(_number, error):
+        assigned.put(error)
+    workers = _AiWorkers(crews, stage, failed, lambda _message: None)
+    names = []
+    try:
+        for number in range(1, 10):
+            if number == 7:
+                sessions['chatgpt'].available = False
+            workers.submit(number, 0, {}, {})
+            page, name = assigned.get(timeout=5)
+            assert page == number
+            names.append(name)
+    finally:
+        workers.finish()
+    assert names == ['gemini', 'chatgpt', 'claude', 'gemini', 'chatgpt', 'gemini',
+                     'gemini', 'claude', 'gemini']
+
+
+def test_chatgpt_returns_to_page_distribution_before_local_wait_expires(monkeypatch):
+    from queue import Queue
+    from threading import Event
+    from yeone_ocr import chatgpt_subscription, subscriptions
+    from yeone_ocr.local_first import _AiWorkers
+
+    assigned = Queue()
+    quota_checked, quota_restored, rejoined = Event(), Event(), Event()
+
+    def read_quota(*, stop):
+        available = quota_restored.is_set()
+        quota_checked.set()
+        return available
+
+    def log(message):
+        if "한도 회복 확인" in message:
+            rejoined.set()
+
+    monkeypatch.setattr(subscriptions, "_clock", lambda: 0.0)  # The 40-minute wait cannot expire.
+    monkeypatch.setattr(subscriptions, "CHATGPT_QUOTA_INTERVAL", 0.05)
+    monkeypatch.setattr(subscriptions, "status", lambda plan: {"usable": True})
+    monkeypatch.setattr(chatgpt_subscription, "quota_available", read_quota)
+    subscriptions.reset_exhausted()
+    sessions = {plan: subscriptions.Session(plan, log=log) for plan in subscriptions.PLANS}
+    sessions["chatgpt"].plan = "claude"
+    subscriptions.mark_exhausted("chatgpt", "limit", 2400, kind="limit")
+    workers = _AiWorkers(
+        [{"plan": plan, "session": session, "reader": None, "pages": 1} for plan, session in sessions.items()],
+        lambda page, _started, _review, _extras, session, _reader, _saved: assigned.put((page, session.plan)),
+        lambda _page, error: assigned.put(error), log, watch_chatgpt=True,
+    )
+    try:
+        assert quota_checked.wait(5)
+        for page, plan in enumerate(("gemini", "claude"), 1):
+            workers.submit(page, 0, {}, {})
+            assert assigned.get(timeout=5) == (page, plan)
+        assert subscriptions.resting()[0]["minutes"] == 40
+        assert not rejoined.is_set()
+        quota_restored.set()
+        assert rejoined.wait(5)
+        assert "chatgpt" not in subscriptions.exhausted()
+        for page, plan in enumerate(("gemini", "chatgpt"), 3):
+            workers.submit(page, 0, {}, {})
+            assert assigned.get(timeout=5) == (page, plan)
+        assert sessions["chatgpt"].plan == "chatgpt"
+    finally:
+        workers.finish()
+        subscriptions.reset_exhausted()
+
+
 class LocalFirstTests(unittest.TestCase):
+    def test_page_status_not_overwritten_by_individual_proposal_review(self):
+        from yeone_ocr.local_first import _record
+        import time
+        self.assertEqual(command(self.args()), 0)
+        rec = self.record()
+        project = ComparisonProject.load(rec['local_first']['project_path'])
+        project.page(1)['ai_reviews'].append({'id': 'individual', 'status': 'completed',
+                                            'request': {'snapshot_text': self.recognized_text}})
+        overall = {'status': 'needs-local-review', 'pending_proposals': 1}
+        with patch.object(project, 'ai_proposals', return_value=[{'review_id': 'individual', 'start': 0, 'end': 1}]), \
+                patch('yeone_ocr.local_first._review_summary', return_value=([], [])), \
+                patch('yeone_ocr.local_first._local_grades', return_value=[]):
+            result = _record(project, 1, self.args(), Work(str(self.source), str(self.work), initialize=False),
+                             time.perf_counter(), overall,
+                             extras={'ai_page': {'text': self.recognized_text, 'mode': 'prefer'}})
+        self.assertTrue(result['local_first']['ai_page']['used'])
+        self.assertEqual(result['local_first']['review'], overall)
+
+    def test_legacy_overwritten_status_replans_once_without_resending_completed_calls(self):
+        self.confidence = 20
+        self.assertEqual(command(self.args()), 0)
+        rec = self.record()
+        project = ComparisonProject.load(rec['local_first']['project_path'])
+        rec['local_first']['review'] = project.page(1)['ai_reviews'][0]
+        work = Work(str(self.source), str(self.work), initialize=False)
+        work.save_record(1, rec)
+        self.assertEqual(command(self.args()), 0)
+        self.assertEqual(len(self.calls), 1)
+        repaired = self.record()
+        self.assertNotEqual(repaired['local_first']['review']['status'], 'completed')
+        self.assertEqual(command(self.args()), 0)
+        self.assertEqual(self.record(), repaired)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_human_review_resume_preserves_record_and_skips_ai_planning(self):
+        self.assertEqual(command(self.args()), 0)
+        work = Work(str(self.source), str(self.work), initialize=False)
+        old = self.record()
+        old['local_first']['review'].update(status='needs-local-review', pending_proposals=2,
+                                           unlocalized_targets=1)
+        work.save_record(1, old)
+        events = []
+        with patch('yeone_ocr.comparison_ai.prepare_plan', side_effect=AssertionError('must not replan')), \
+                patch.object(cli, 'PAGE_EVENT', lambda n, state: events.append((n, state))):
+            self.assertEqual(command(self.args()), 4)
+        self.assertEqual(self.record(), old)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(events[-1], (1, 'review_pending'))
+        self.assertNotIn((1, 'ai-review'), events)
+        with patch('yeone_ocr.comparison_ai.prepare_plan', side_effect=AssertionError('human review is not an AI job')):
+            self.assertEqual(command(self.args('--local-review-only')), 4)
+        self.assertEqual(self.record(), old)
+
+    def test_human_review_all_mode_explicitly_rechecks(self):
+        self.assertEqual(command(self.args()), 0)
+        work = Work(str(self.source), str(self.work), initialize=False)
+        old = self.record()
+        old['local_first']['review'].update(status='needs-local-review', pending_proposals=2)
+        work.save_record(1, old)
+        from yeone_ocr.comparison_ai import prepare_plan
+        with patch('yeone_ocr.comparison_ai.prepare_plan', wraps=prepare_plan) as plan:
+            self.assertEqual(command(self.args('--local-resume', 'all')), 0)
+        plan.assert_called_once()
+
+    def test_human_review_classifier_excludes_unfinished_requests(self):
+        from yeone_ocr.local_first import _human_review_only
+        for status in ('pending', 'failed', 'cancelled', 'reviewing'):
+            self.assertFalse(_human_review_only({'status': status}))
+        for extra in ({'engine_errors': {'glmocr': 'failed'}}, {'deferred_calls': 1},
+                      {'outcome': {'failed': 1}}, {'outcome': {'cancelled': True}}):
+            self.assertFalse(_human_review_only({'status': 'needs-local-review', **extra}))
+
+    def test_subscription_default_continues_past_old_thousand_call_limit(self):
+        from yeone_ocr.local_first import _settings, _review_allowance
+        args = self.args('--local-ai-auth', 'subscription')
+        self.assertEqual(args.local_ai_subscription_calls, 0)
+        settings = _settings(args, args.local_ai_subscription_calls)
+        for used in (999, 1000, 1439, 10000):
+            with self.subTest(used=used):
+                self.assertEqual(_review_allowance(150, settings, 0, used, 80), 100)
+        self.assertEqual(_review_allowance(20, settings, 1000, 995, 3), 2)
+        self.assertEqual(_review_allowance(20, settings, 1000, 997, 3), 0)
+
+    def test_invalid_subscription_limit_stops_before_ocr(self):
+        self.assertEqual(command(self.args('--local-ai-auth', 'subscription',
+                                           '--local-ai-subscription-calls', '-1')), 2)
+        self.assertEqual(self.local_calls, [])
+
+    def test_subscription_explicit_cap_then_unlimited_resume_preserves_completed_calls(self):
+        import pymupdf
+        from yeone_ocr import claude_subscription
+        self.source = self.root / 'subscription-two.pdf'
+        with pymupdf.open() as doc:
+            doc.new_page(width=96, height=48)
+            doc.new_page(width=96, height=48)
+            doc.save(self.source)
+        self.confidence = 20
+        seen = []
+
+        class FakeCLI:
+            subscription = True
+
+            def request(self, *, model_name, system, prompt, images, schema):
+                data = json.loads(prompt.split('Source DATA (JSON):\n')[1].split('\nReturn JSON')[0])
+                seen.append(model_name)
+                return json.dumps({'items': [{'target_id': t['id'], 'uncertain': False,
+                                             'note': 'ok', 'proposals': []} for t in data['targets']]}), True, 'end_turn', {}, model_name
+
+        args = ('--local-ai-auth', 'subscription', '--local-ai-page', 'off', '--local-ai-detail-tile', '0')
+        with patch.object(claude_subscription, 'SubscriptionClient', return_value=FakeCLI()), \
+                patch.object(claude_subscription, 'status', return_value={'usable': True, 'plan': 'max', 'reason': None}):
+            self.assertEqual(command(self.args(*args, '--local-ai-subscription-calls', '1')), 4)
+            self.assertEqual(len(seen), 1)
+            first = self.record(1)
+            self.assertIn('상한 1회', self.record(2)['local_first']['review']['reason'])
+            self.assertEqual(command(self.args(*args)), 0)
+            self.assertEqual(len(seen), 2)
+            self.assertEqual(self.record(1), first)
+            self.assertEqual(command(self.args(*args)), 0)
+            self.assertEqual(len(seen), 2)
+
+    def test_memory_pressure_stops_before_new_ocr_or_ai(self):
+        with patch('yeone_ocr.automatic_ocr.memory_status', return_value={'available_commit_mb': 512, 'available_physical_mb': 2048}):
+            self.assertEqual(command(self.args()), 130)
+        self.assertEqual(self.local_calls, [])
+        self.assertEqual(self.calls, [])
+
+    def test_storage_diagnostic_survives_recovery_failure(self):
+        from yeone_ocr.local_first import _preserve_storage_failure
+        from yeone_ocr.comparison_storage import storage_failure
+        project = SimpleNamespace(project_path=self.root / 'project.json',
+                                  save_recovery=lambda p: (_ for _ in ()).throw(OSError('recovery unavailable')))
+        with patch.dict(os.environ, {'LOCALAPPDATA': str(self.root / 'local')}):
+            _preserve_storage_failure(SimpleNamespace(dir=self.work), project,
+                                      storage_failure(project.project_path, OSError('save failed')), lambda m: None)
+        detail = next((self.work / 'storage-diagnostics').glob('*.json'))
+        data = json.loads(detail.read_text('utf8'))
+        self.assertTrue(data['stopped_new_requests'])
+        self.assertEqual(data['recovery_error_type'], 'OSError')
+        self.assertIn('recovery unavailable', data['recovery_error'])
+
+    def test_storage_failure_stops_before_next_page_or_ai_and_saves_recovery(self):
+        import fitz
+        from yeone_ocr import comparison_storage as storage
+        self.source = self.root / 'two-pages.pdf'
+        with fitz.open() as doc:
+            doc.new_page(width=400, height=200)
+            doc.new_page(width=400, height=200)
+            doc.save(self.source)
+        original = ComparisonProject.save
+        def fail_after_recognition(project, *args, **kwargs):
+            if self.local_calls:
+                raise storage.storage_failure(project.project_path, OSError('disk full'))
+            return original(project, *args, **kwargs)
+        with patch.object(ComparisonProject, 'save', fail_after_recognition):
+            self.assertEqual(command(self.args()), 3)
+        self.assertEqual(self.local_calls, [1])
+        self.assertEqual(self.calls, [])
+        files = list((self.work / 'storage-diagnostics').glob('*.recovery.yeone-compare.json'))
+        self.assertEqual(len(files), 1)
+        recovery = ComparisonProject.load(files[0])
+        self.assertEqual(recovery.page(1)['runs'][0]['raw']['text'], self.recognized_text)
+
+    def test_unreadable_project_stops_before_recognition_and_records_sqlite_code(self):
+        import sqlite3
+        from yeone_ocr import comparison_storage as storage
+        error = sqlite3.DatabaseError('malformed')
+        error.sqlite_errorname = 'SQLITE_CORRUPT'
+        with patch('yeone_ocr.local_first._project', side_effect=storage.storage_failure('missing.sqlite', error)):
+            self.assertEqual(command(self.args()), 3)
+        self.assertEqual(self.local_calls, [])
+        self.assertEqual(self.calls, [])
+        report = next((self.work / 'storage-diagnostics').glob('*.json'))
+        self.assertEqual(json.loads(report.read_text(encoding='utf-8'))['detail']['sqlite_errorname'], 'SQLITE_CORRUPT')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -71,7 +328,7 @@ class LocalFirstTests(unittest.TestCase):
         return {"cancelled": False, "completed": ["ppocrv6"] if added else [], "skipped": [] if added else ["ppocrv6"],
                 "selection": {"selected_engine": "ppocrv6"}}
 
-    def client(self, *_args):
+    def client(self, *_args, **_kwargs):
         def create(**kwargs):
             self.calls.append(kwargs)
             if self.api_failure:
@@ -389,14 +646,14 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
 
-    def test_subscription_mode_without_any_signed_in_plan_goes_straight_to_the_api_key(self):
+    def test_subscription_mode_without_sign_in_never_uses_a_key_even_with_legacy_flag(self):
         from yeone_ocr import claude_subscription as subscription
         self.confidence = 20
-        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):  # OpenAI key present
-            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off")), 0)
-        self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0]["model"], "synthetic-vision")                   # the provider's API, not a CLI
-        self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
+        with patch.object(subscription, "status", return_value={"usable": False, "reason": "로그인 필요"}):
+            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off",
+                                               "--local-ai-api-fallback")), 4)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "pending")
 
     def _limited(self, seen):
         from yeone_ocr.claude_subscription import SubscriptionError
@@ -438,29 +695,17 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
         self.assertTrue(any("ChatGPT 구독으로 넘어갑니다" in line for line in logs))
 
-    def test_last_plan_at_its_limit_hands_over_to_the_api_key_and_without_a_key_stops(self):
+    def test_last_plan_at_limit_preserves_pending_review_and_never_uses_present_api_key(self):
         from yeone_ocr import claude_subscription
         self.confidence = 20
-        seen, logs = [], []
+        seen = []
         signed_in = {"usable": True, "plan": "max", "reason": None, "installed": True}
         with patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
-                patch.object(claude_subscription, "status", return_value=signed_in), \
-                patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
-            self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off",
-                                               "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 0)
-        self.assertEqual(seen, ["claude"])
-        self.assertEqual([call["model"] for call in self.calls], ["synthetic-vision"])   # OpenAI key, chosen model
-        self.assertTrue(any("API 키(openai" in line for line in logs))
-        self.assertTrue(any("쪽: AI 검증 끝 · 로컬 엔진 ppocrv6" in line for line in logs))      # 진행 기록은 한국어
-        self.assertFalse(any(": reviewed ·" in line for line in logs))
-        seen.clear(); self.calls.clear()
-        self.work = self.root / "work-without-key"                                     # a fresh project: nothing reviewed yet
-        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
-                patch.object(claude_subscription, "SubscriptionClient", return_value=self._limited(seen)), \
                 patch.object(claude_subscription, "status", return_value=signed_in):
             self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off",
-                                               "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 4)
+                                               "--local-ai-api-fallback", "--local-ai-batch", "1", "--local-ai-detail-tile", "0")), 4)
         self.assertEqual((seen, self.calls), (["claude"], []))
+        self.assertEqual(self.record()["local_first"]["review"]["status"], "failed")
 
     def test_ai_page_reading_goes_into_the_document_not_the_engine_reading(self):
         from yeone_ocr import ai_page, claude_subscription as subscription
@@ -479,7 +724,9 @@ class LocalFirstTests(unittest.TestCase):
             initial = self.record()
             self.assertEqual(initial["usage"], {"calls": 1, "prompt_tokens": 100, "output_tokens": 50, "thinking_tokens": 0})
             self.assertFalse(initial["local_first"]["ai_page"]["cached"])
+            self.assertEqual(cli.LOCAL_PAGE_CALLS, 1)
             self.assertEqual(command(self.args("--local-ai-page", "prefer", "--no-local-ai-review", "--local-resume", "all")), 0)
+            self.assertEqual(cli.LOCAL_PAGE_CALLS, 0)
         rec = self.record()
         self.assertEqual(rec["usage"], initial["usage"])   # cache reuse never adds another stored response
         self.assertTrue(rec["local_first"]["ai_page"]["cached"])
@@ -661,7 +908,8 @@ class LocalFirstTests(unittest.TestCase):
                 patch.object(chatgpt_subscription, "status", return_value=signed_in), \
                 patch.object(cli, "log", side_effect=lambda message, *a, **k: logs.append(str(message))):
             self.assertEqual(command(self.args("--local-ai-auth", "subscription", "--local-ai-page", "off", "--local-ai-split")), 0)
-        self.assertTrue(any("쪽 나눠 보내기: Claude · ChatGPT 구독이 쪽을 나눠 맡습니다" in line for line in logs))
+        self.assertTrue(any("쪽 나눠 보내기: Claude · ChatGPT 구독 · 빈자리 있는 계정끼리 우선순위 비중 2:1" in line for line in logs))
+        self.assertTrue(any("1쪽: AI 담당 계정 · Claude 구독" in line for line in logs))
         self.assertEqual(answered, [("claude", "opus")])                               # one page: the first free plan
         self.assertEqual(self.record()["local_first"]["review"]["status"], "reviewed")
 
@@ -727,7 +975,7 @@ class LocalFirstTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(waited and all(waited))                         # the engines did not wait for the first answer
         self.assertEqual([p for p in progress if p[0] == "read"], [("read", 1, 3), ("read", 2, 3), ("read", 3, 3)])
-        self.assertEqual([state for number, state in events if number == 3], ["now", "queued", "now", "done"])
+        self.assertEqual([state for number, state in events if number == 3], ["ocr", "queued", "ai-review", "done"])
         self.assertTrue(any("엔진은 AI의 답을 기다리지 않고" in line for line in logs))
         for number in (1, 2, 3):
             self.assertEqual(self.record(number)["local_first"]["review"]["status"], "reviewed")

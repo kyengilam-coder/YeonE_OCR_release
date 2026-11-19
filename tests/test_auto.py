@@ -9,6 +9,7 @@ import pymupdf
 from PIL import Image
 from yeone_ocr.schema import PageReading, Region, Paragraph, Column, RegionReread, Uncertain, region_text, bbox_frac
 from yeone_ocr.state import Work
+from yeone_ocr.output_names import latest_document_path
 
 
 def vertical_pdf(n: int = 5, label_from: int = 30):
@@ -1246,7 +1247,7 @@ class ImageInput(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 rc = cli.main(["run", d, "--work", os.path.join(td, "w"), "--reader", "mock", "--checkpoint", "0"])
             self.assertEqual(rc, 0, output.getvalue())
-            self.assertTrue(os.path.exists(os.path.join(td, "w", "out", "scans.hwpx")))
+            self.assertTrue(latest_document_path(Path(td, "w", "out"), d, ".hwpx").is_file())
             self.assertEqual(len(os.listdir(os.path.join(td, "w", "readings"))), 5)
 
     def test_16bit_grayscale_keeps_ink(self):
@@ -1668,7 +1669,10 @@ class FailedPages(unittest.TestCase):
                     rc = cli.main(["run", pdf, "--work", os.path.join(td, "w2"), "--reader", "mock", "--checkpoint", "0"])
                 _join_prepare_ahead()
                 self.assertEqual(rc, 3)                                                        # 문서·검수 화면·보고는 만들고
-                self.assertEqual([p.name for p in Path(td, "w2", "out").glob("*.hwpx")], ["v_p001-003.hwpx"]); self.assertTrue(os.path.exists(os.path.join(td, "w2", "review.html")))   # 기록 있는 쪽만 문서에
+                partial = Work(pdf, os.path.join(td, "w2"))
+                self.assertEqual(list(partial.out_dir.glob("*.hwpx")), [latest_document_path(partial.out_dir, pdf, ".hwpx")])
+                self.assertEqual([rec["pdf_page"] for rec in partial.records()], [1, 3])
+                self.assertTrue(Path(td, "w2", "review.html").is_file())
                 self.assertIn("오류: 판독에 실패한 쪽 1개: 2", buf.getvalue()); self.assertIn("실패한 쪽이 있습니다", buf.getvalue())
             with patched_mock_reader() as made:                                                # 다시 실행: 실패한 쪽만 다시 → 0
                 with contextlib.redirect_stdout(io.StringIO()):
@@ -1772,7 +1776,8 @@ class InterimCheckpoint(unittest.TestCase):
                 cli.build_outputs(work, doc, work.records([1]), args, interim=False)
             self.assertEqual(work.record_path(1).read_bytes(), before)  # 최종 출력도 원시 기록에 파생 도판 경로를 덮어쓰지 않는다
             from zipfile import ZipFile
-            with ZipFile(work.out_dir / "v_p001-001.hwpx") as archive:
+            final_hwpx, = work.load_state()["last_build"]["outputs"]
+            with ZipFile(work.out_dir / final_hwpx) as archive:
                 self.assertTrue(any(name.startswith('BinData/') and name.endswith('.jpg') for name in archive.namelist()))
             doc.close()
 

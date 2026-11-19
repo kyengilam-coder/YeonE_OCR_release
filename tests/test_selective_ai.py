@@ -41,6 +41,20 @@ class SelectiveReviewTests(unittest.TestCase):
         policy = kwargs.pop("policy", ReviewPolicy(selective=True))
         return prepare_plan(self.project, [1], policy, settings=self.settings, **kwargs)
 
+    def test_high_confidence_latin_in_han_page_routes_whole_row(self):
+        body = '天地玄黃宇宙洪荒' * 8
+        damaged = 'RE AN EN NARSN RATENE AN LE'
+        text = body + '\n' + damaged
+        self.add(text=text, confidence=99, words=[
+            {'text': body, 'bbox': [40, 20, 350, 45], 'confidence': 99},
+            {'text': damaged, 'bbox': [40, 70, 350, 95], 'confidence': 99}])
+        plan = self.plan()
+        self.assertEqual(plan.summary['difficulty_reasons'].get('unexpected-latin'), 1)
+        targets = [t for batch in plan.batches for t in batch['targets']
+                   if t.get('difficulty_reason') == 'unexpected-latin']
+        self.assertEqual([t['before'] for t in targets], [damaged])
+        self.assertEqual(self.project.text(1), text)
+
     def fake_run(self, plan, patches=()):
         calls = []
         def request(**kwargs):

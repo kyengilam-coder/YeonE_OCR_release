@@ -236,6 +236,16 @@ class WorkTabRealTk(unittest.TestCase):
             if getattr(self.app, "_cards_job", None):
                 self.app._sync_cards()
 
+    def test_book_rule_buttons_stay_next_to_pdf_and_wrap_on_narrow_cards(self):
+        app=self.app;w=app._book_cards[0]
+        self.assertEqual(w['rules'].cget('text'),'이 책 설정…')
+        self.assertNotIn('make_rules',w)
+        app._fit_rule_actions(w,1)
+        self.assertEqual((int(w['pick'].grid_info()['row']),int(w['rules'].grid_info()['row'])),(0,0))
+        self.assertEqual(int(w['source'].grid_info()['row']),1)
+        app._fit_rule_actions(w,10000)
+        self.assertEqual([int(w[k].grid_info()['column']) for k in ('pick','rules','source')],[0,1,2])
+
     def state(self, b):
         return str(b.cget("state"))
 

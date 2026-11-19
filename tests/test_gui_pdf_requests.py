@@ -38,7 +38,10 @@ class RequestGui(unittest.TestCase):
         self.assertEqual(argv[:2], ["run", str(self.root / "source.png")])
         for flag in ("--pdf-only", "--pages", "2-4", "--no-adjudicate", "--no-suspects", "horizontal_zh"):
             self.assertIn(flag, argv)
-        self.assertEqual(app.start.call_args.kwargs["open_after"], self.root / "work/out/source_글자층.pdf")
+        from yeone_ocr.output_names import next_document_path
+        expected=next_document_path(self.root/'work/out',self.root/'source.png','.pdf')
+        self.assertEqual(app.start.call_args.kwargs["open_after"], expected)
+        self.assertEqual(argv[argv.index('--out')+1],str(expected))
         app._save_book.assert_called_once_with(create=True)
         app._build_opts.assert_not_called()
 

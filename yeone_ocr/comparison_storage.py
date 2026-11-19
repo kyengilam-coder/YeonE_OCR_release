@@ -1,9 +1,9 @@
 """Single-file, transactional storage for long comparison projects.
 
 Each row contains one complete page (including all historical evidence). Only
-modified rows are encoded. DELETE journaling leaves a portable single file after
-commit and recovers an interrupted transaction on the next open. No WAL sidecar
-or permanent external page directory is required.
+modified rows are encoded in a consistent temporary snapshot. The verified,
+flushed snapshot replaces the published file only after all SQLite handles close.
+No WAL sidecar or permanent external page directory is required.
 """
 from contextlib import contextmanager
 import gzip
@@ -19,7 +19,34 @@ import zlib
 
 from . import comparison as core
 
+
+class ProjectStorageError(core.ComparisonError):
+    """A persistence failure is fatal to a run, not a page recognition error."""
+
+
+def storage_failure(path, exc):
+    detail={'path':str(path),'exception':type(exc).__name__,'sqlite_errorcode':getattr(exc,'sqlite_errorcode',None),
+            'sqlite_errorname':getattr(exc,'sqlite_errorname',None)}
+    try:
+        with Path(path).open('rb') as stream:header=stream.read(100)
+        actual=Path(path).stat().st_size;detail['actual_bytes']=actual
+        if header.startswith(MAGIC) and len(header)==100:
+            size=int.from_bytes(header[16:18],'big');size=65536 if size==1 else size
+            expected=size*int.from_bytes(header[28:32],'big');detail['declared_bytes']=expected
+            if actual<expected:detail['missing_bytes']=expected-actual
+    except OSError:pass
+    code=detail['sqlite_errorname'] or type(exc).__name__
+    suffix=f" · 파일 끝 {detail['missing_bytes']:,}바이트 부족" if detail.get('missing_bytes') else ''
+    error=ProjectStorageError(f'프로젝트 저장소 오류({code}{suffix}). 추가 판독·AI 호출을 중지합니다. 복구본을 확인하세요.')
+    error.storage_detail=detail
+    return error
+
 MAGIC = b"SQLite format 3\x00"
+# SQLite reads/writes one bounded page at a time; legacy whole-file JSON limits
+# must not impose a 1 GB aggregate ceiling on a long book's evidence history.
+MAX_DATABASE_BYTES = 2_000_000_000
+MAX_DATABASE_RAW_BYTES = 8_000_000_000
+MAX_PAGE_RAW_BYTES = 128_000_000
 APPLICATION_ID = 0x594F4352
 SCHEMA = {
     "metadata": "CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL, generation TEXT NOT NULL)",
@@ -85,9 +112,9 @@ def _connection(path, *, create=False):
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA cache_size=-2048")
         connection.execute("PRAGMA synchronous=FULL")
-        connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, core.MAX_BYTES)
+        connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_PAGE_RAW_BYTES * 2)
         if not create:
-            if Path(path).stat().st_size > core.MAX_BYTES:
+            if Path(path).stat().st_size > MAX_DATABASE_BYTES:
                 raise core.ComparisonError("프로젝트 파일이 허용 크기를 넘습니다.")
             if (connection.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
                     or connection.execute("PRAGMA user_version").fetchone()[0] != 1):
@@ -101,7 +128,7 @@ def _connection(path, *, create=False):
     except (sqlite3.Error, OSError, UnicodeError, ValueError, RecursionError) as exc:
         if isinstance(exc, core.ComparisonError):
             raise
-        raise core.ComparisonError("증분 프로젝트를 읽거나 저장할 수 없습니다. 정상 저장본이나 복구본을 확인하세요.") from exc
+        raise storage_failure(path,exc) from exc
     finally:
         if connection is not None:
             connection.close()  # uncommitted changes roll back, including failed saves
@@ -118,7 +145,7 @@ def _metadata(connection):
             or not isinstance(generation, str) or len(generation) != 32):
         raise core.ComparisonError("지원하지 않는 프로젝트 형식입니다.")
     total = value.get("storage_raw_bytes", 0)
-    if type(total) is not int or not 0 <= total <= core.MAX_JSON_BYTES:
+    if type(total) is not int or not 0 <= total <= MAX_DATABASE_RAW_BYTES:
         raise core.ComparisonError("프로젝트 파일이 허용 크기를 넘습니다.")
     return value, generation
 
@@ -138,6 +165,113 @@ def identity(path):
         return value.get("document_id"), _token(path, generation)
 
 
+def _decode_page(payload, size, digest):
+    if type(size) is not int or not 0 < size <= MAX_PAGE_RAW_BYTES:
+        raise core.ComparisonError("쪽별 저장 크기가 허용 범위를 넘습니다.")
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        content = inflater.decompress(payload, size + 1)
+    except (zlib.error, TypeError) as exc:
+        raise core.ComparisonError("쪽별 압축 기록이 손상되었습니다.") from exc
+    if len(content) != size or not inflater.eof or inflater.unused_data or hashlib.sha256(content).hexdigest() != digest:
+        raise core.ComparisonError("쪽별 저장 기록의 크기·해시가 일치하지 않습니다.")
+    return _json(content)
+
+
+class StreamPages(dict):
+    """Validated one-page-at-a-time input to ComparisonProject.load."""
+    def __init__(self, path, token, numbers):
+        self.path, self.token, self.numbers = path, token, numbers
+
+    def __len__(self):
+        return len(self.numbers)
+
+    def items(self):
+        with _connection(self.path) as connection:
+            connection.execute('BEGIN')
+            _, generation = _metadata(connection)
+            if _token(self.path, generation) != self.token:
+                raise core.ComparisonError('다른 창에서 프로젝트가 변경되었습니다.')
+            for n, payload, size, digest in connection.execute('SELECT number,payload,raw_size,digest FROM pages ORDER BY number'):
+                yield str(n), _decode_page(payload, size, digest)
+
+
+def paged_read(path):
+    with _connection(path) as connection:
+        connection.execute('BEGIN')
+        value, generation = _metadata(connection)
+        sizes = connection.execute('SELECT number,raw_size FROM pages ORDER BY number').fetchall()
+        total = 0
+        for n, size in sizes:
+            if type(size) is not int or not 0 < size <= MAX_PAGE_RAW_BYTES:
+                raise core.ComparisonError('쪽별 저장 크기가 허용 범위를 넘습니다.')
+            total += size
+        if total > MAX_DATABASE_RAW_BYTES or value.get('storage_raw_bytes', total) != total:
+            raise core.ComparisonError('쪽별 저장 기록의 전체 크기가 일치하지 않습니다.')
+        token = _token(path, generation)
+        value['pages'] = StreamPages(path, token, [n for n, _ in sizes])
+        return value, token
+
+
+from collections.abc import MutableMapping
+
+
+class CheckpointPages(MutableMapping):
+    """Keep unsaved pages in RAM; evict saved pages only at explicit checkpoints."""
+    def __init__(self, project, path, token, numbers, cached=None, *, validate_on_access=False):
+        self.project, self.path, self.token = project, path, token
+        self.numbers = set(numbers)
+        self.cached = dict(cached or {})
+        self.unvalidated = set(self.numbers) if validate_on_access else set()
+        self.validated_run_ids = set()
+
+    def __iter__(self):
+        return iter(sorted(self.numbers))
+
+    def __len__(self):
+        return len(self.numbers)
+
+    def __getitem__(self, number):
+        if number not in self.numbers:
+            raise KeyError(number)
+        if number not in self.cached:
+            with _connection(self.path) as connection:
+                connection.execute('BEGIN')
+                _, generation = _metadata(connection)
+                if _token(self.path, generation) != self.token:
+                    raise core.ComparisonError('다른 창에서 프로젝트가 변경되었습니다.')
+                row = connection.execute('SELECT payload,raw_size,digest FROM pages WHERE number=?',(number,)).fetchone()
+                if row is None:
+                    raise core.ComparisonError('저장된 쪽 기록이 없습니다.')
+                page = _decode_page(*row)
+                if number in self.unvalidated:
+                    if isinstance(page, dict):
+                        page.setdefault("ai_reviews", [])
+                        page.setdefault("ai_decisions", [])
+                    run_ids = set()
+                    self.project._validate_page(page, number, run_ids)
+                    if run_ids & self.validated_run_ids:
+                        raise core.ComparisonError("쪽 사이에 중복된 판독 실행 식별자가 있습니다.")
+                    self.validated_run_ids.update(run_ids)
+                    if page.get("baseline_run_id") is not None:
+                        self.project._preserve_baselines.add(number)
+                    self.unvalidated.remove(number)
+                self.cached[number] = page
+        return self.cached[number]
+
+    def __setitem__(self, number, value):
+        self.numbers.add(number)
+        self.cached[number] = value
+
+    def __delitem__(self, number):
+        raise core.ComparisonError('저장된 쪽 기록은 삭제할 수 없습니다.')
+
+    def trim(self):
+        for n in list(self.cached):
+            if self.project._page_versions.get(n,0) == self.project._saved_page_versions.get(n,0):
+                del self.cached[n]
+
+
 def read(path):
     with _connection(path) as connection:
         connection.execute("BEGIN")
@@ -146,7 +280,7 @@ def read(path):
         total = 0
         for number, payload, size, digest in connection.execute(
                 "SELECT number, payload, raw_size, digest FROM pages ORDER BY number"):
-            if type(size) is not int or not 0 < size <= core.MAX_JSON_BYTES - total:
+            if type(size) is not int or not 0 < size <= min(MAX_PAGE_RAW_BYTES, MAX_DATABASE_RAW_BYTES - total):
                 raise core.ComparisonError("프로젝트 파일이 허용 크기를 넘습니다.")
             total += size
             inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
@@ -198,11 +332,13 @@ def _write_rows(connection, project, numbers, recovery):
                              separators=(",", ":"), allow_nan=False).encode("utf-8")
         previous = connection.execute("SELECT raw_size FROM pages WHERE number=?", (number,)).fetchone()
         total += len(content) - (previous[0] if previous else 0)
-        if total > core.MAX_JSON_BYTES:
+        if len(content) > MAX_PAGE_RAW_BYTES or total > MAX_DATABASE_RAW_BYTES:
             raise core.ComparisonError("프로젝트가 허용 크기를 넘습니다.")
         packed = gzip.compress(content, compresslevel=1, mtime=0)
         connection.execute("INSERT OR REPLACE INTO pages VALUES (?, ?, ?, ?)",
                            (number, packed, len(content), hashlib.sha256(content).hexdigest()))
+        if isinstance(project._pages, CheckpointPages):
+            project._pages.trim()
     metadata = _project_metadata(project, recovery)
     metadata["storage_raw_bytes"] = total
     generation = uuid.uuid4().hex
@@ -219,62 +355,46 @@ def save(project, target, *, recovery=False):
     incremental = isinstance(known, str) and known.startswith("sqlite:") and target.exists()
     numbers = [n for n in sorted(project._pages)
                if not incremental or project._page_versions.get(n, 0) != saved.get(n, -1)]
-    if incremental:
-        writing = False
-        try:
-            with _connection(target) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                value, generation = _metadata(connection)
-                if value.get("document_id") != project._id or _token(target, generation) != known:
-                    raise core.ComparisonError("다른 창에서 프로젝트가 변경되었습니다. 다른 이름으로 저장하세요.")
-                before = target.stat()
-                if numbers or value.get("source") != _project_metadata(project, False)["source"]:
-                    page_size = connection.execute("PRAGMA page_size").fetchone()[0]
-                    connection.execute(f"PRAGMA max_page_count={max(1, core.MAX_BYTES // page_size)}")
-                    writing = True
-                    generation = _write_rows(connection, project, numbers, recovery)
-                _guard(project, target, recovery)
-                after = target.stat()
-                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-                    raise core.ComparisonError("저장 중 프로젝트 파일이 교체되었습니다.")
-                _commit(connection)
-                return _token(target, generation)
-        except BaseException:
-            # A rolled-back cache spill may change file timestamps even though
-            # SQLite restored every row. Retain our pending edits and allow a
-            # retry, but never adopt a different committed generation.
-            if writing:
-                try:
-                    identifier, current = identity(target)
-                    if identifier == project._id and current.split(":")[1] == known.split(":")[1]:
-                        if recovery:
-                            project._recovery_sha256[target] = current
-                        else:
-                            project._disk_sha256 = current
-                except (core.ComparisonError, OSError):
-                    pass
-            raise
-
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix="." + target.name + ".", suffix=".tmp", dir=target.parent)
     os.close(descriptor)
     temporary = Path(name)
     try:
         with _connection(temporary, create=True) as connection:
-            connection.execute("PRAGMA page_size=4096")
-            connection.execute("PRAGMA journal_mode=DELETE")
-            connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
-            connection.execute("PRAGMA user_version=1")
-            connection.execute(f"PRAGMA max_page_count={max(1, core.MAX_BYTES // 4096)}")
-            for sql in SCHEMA.values():
-                connection.execute(sql)
+            if incremental:
+                # Clone a consistent SQLite snapshot; never modify the published
+                # project in place. Only changed page rows are encoded below.
+                with _connection(target) as original:
+                    original.execute("BEGIN")
+                    value, generation = _metadata(original)
+                    if value.get("document_id") != project._id or _token(target, generation) != known:
+                        raise core.ComparisonError("다른 창에서 프로젝트가 변경되었습니다. 다른 이름으로 저장하세요.")
+                    if not numbers and value.get("source") == _project_metadata(project, False)["source"]:
+                        return known
+                    original.backup(connection)
+            else:
+                connection.execute("PRAGMA page_size=4096")
+                connection.execute("PRAGMA journal_mode=DELETE")
+                connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
+                connection.execute("PRAGMA user_version=1")
+                for sql in SCHEMA.values():
+                    connection.execute(sql)
+            page_size=connection.execute("PRAGMA page_size").fetchone()[0]
+            connection.execute(f"PRAGMA max_page_count={max(1, MAX_DATABASE_BYTES // page_size)}")
             connection.execute("BEGIN IMMEDIATE")
             generation = _write_rows(connection, project, numbers, recovery)
-            connection.commit()
-        if temporary.stat().st_size > core.MAX_BYTES:
+            _commit(connection)
+            if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise ProjectStorageError("저장본 무결성 검사 실패. 기존 프로젝트는 교체하지 않았습니다.")
+        if temporary.stat().st_size > MAX_DATABASE_BYTES:
             raise core.ComparisonError("프로젝트가 허용 크기를 넘습니다.")
         with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
+        # Reopen the bytes that will be published. The writer's schema cache
+        # cannot detect every form of on-disk corruption in its own connection.
+        with _connection(temporary) as verification:
+            if verification.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise ProjectStorageError("저장본 무결성 검사 실패. 기존 프로젝트는 교체하지 않았습니다.")
 
         def verify():
             _guard(project, target, recovery)

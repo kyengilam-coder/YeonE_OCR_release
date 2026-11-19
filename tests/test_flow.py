@@ -328,9 +328,12 @@ class Template(unittest.TestCase):
         marks = lambda q: [("bm", e.get("name")) if e.tag == f"{HP}bookmark" else ("t", e.text) for r in self.body_runs(q) for e in r.iter() if e.tag in (f"{HP}bookmark", f"{HP}t")]
         self.assertEqual(marks(body[0])[0], ("bm", "PDF 1쪽 · 인쇄 394쪽"))
         m3 = marks(body[2])
-        self.assertLess(m3.index(("bm", "PDF 2쪽")), m3.index(("t", "〔腹/腸〕")))       # 책갈피는 그 글자 자리(9번째) 앞에
-        ppr = body[3].get("paraPrIDRef")                                            # 주석(본문 바탕 KEEP_WORD) → 글자 단위 사본
-        self.assertRegex(head, rf'<hh:paraPr id="{ppr}"(?:(?!</hh:paraPr>).)*breakLatinWord="BREAK_WORD"(?:(?!</hh:paraPr>).)*breakNonLatinWord="BREAK_WORD"')   # 반각 ,. 이 든 한자 덩어리도 글자 단위로
+        first_mark_text=next(i for i,(kind,value) in enumerate(m3) if kind=='t' and '腹' in value)
+        self.assertLess(m3.index(("bm", "PDF 2쪽")),first_mark_text)       # 부호와 글자의 서식이 갈려도 책갈피는 같은 글자 앞에
+        ppr = body[3].get("paraPrIDRef")
+        header = ET.fromstring(head)
+        comment_style=next(s for s in header.iter('{http://www.hancom.co.kr/hwpml/2011/head}style') if s.get('name')=='주석')
+        self.assertEqual(ppr,comment_style.get('paraPrIDRef'))
         src_run = next(r for r in body[3].findall(f"{HP}run") if (r.findtext(f"{HP}t") or "") == "唐附")
         char_of_source = re.search(r'<hh:style id="\d+" type="CHAR" name="출처"[^>]*charPrIDRef="(\d+)"', head).group(1)
         self.assertEqual(src_run.get("charPrIDRef"), char_of_source)
@@ -342,6 +345,42 @@ class Template(unittest.TestCase):
             out = Path(td) / "outline.hwpx"
             doc = HwpxDocument.new(); doc.add_heading("제목", level=1); doc.save_to_path(str(out)); doc.close()
             self.assertTrue(any(i["rule"] == "개요 문단" for i in check_hwpx_file(str(out))))
+
+    def test_only_numbering_from_the_mapped_template_style_is_allowed(self):
+        from hwpx import HwpxDocument
+        from yeone_ocr.hwpx_template import build_hwpx_template
+        from yeone_ocr.verify import check_hwpx_file
+        with tempfile.TemporaryDirectory() as td:
+            template, out, damaged = (Path(td) / name for name in ("양식.hwpx", "문서.hwpx", "검사.hwpx"))
+            doc = HwpxDocument.new()
+            header = doc.oxml.headers[0]
+            numbered = header.ensure_paragraph_format(base_para_pr_id=0, heading={"type": "NUMBER", "idRef": "1", "level": "0"})
+            other = header.ensure_paragraph_format(base_para_pr_id=0, heading={"type": "NUMBER", "idRef": "1", "level": "1"})
+            header.ensure_style("제목-절", style_type="PARA", para_pr_id_ref=numbered, char_pr_id_ref=0)
+            doc.save_to_path(str(template)); doc.close()
+            blocks = [Block(type="heading", role="section", text="첫째 절", layout={"alignment": "CENTER"}),
+                      Block(type="para", role="body", text="본문")]
+            stats = build_hwpx_template(blocks, str(out), str(template))
+            numbering = stats["template_numbering"]
+            self.assertEqual(len(numbering), 1)
+            self.assertEqual(check_hwpx_file(str(out), template_numbering=numbering), [])
+            self.assertEqual([i["rule"] for i in check_hwpx_file(str(out))], ["개요 문단"])
+
+            with zipfile.ZipFile(out) as archive, zipfile.ZipFile(damaged, "w") as edited:
+                for part in archive.infolist():
+                    data = archive.read(part)
+                    if part.filename == "Contents/section0.xml":
+                        root = ET.fromstring(data)
+                        heading, body = root.findall(HP + "p")
+                        # Same style, wrong numbering level. Same numbering,
+                        # wrong style. Neither was requested by the template.
+                        body.set("paraPrIDRef", heading.get("paraPrIDRef"))
+                        heading.set("paraPrIDRef", str(other))
+                        data = ET.tostring(root, encoding="utf-8")
+                    edited.writestr(part, data)
+            issues = check_hwpx_file(str(damaged), template_numbering=numbering)
+            self.assertEqual([i["rule"] for i in issues], ["개요 문단"])
+            self.assertIn("2개", issues[0]["msg"])
 
     def test_numbered_paragraph_shape_with_id_written_last_is_flagged(self):
         from hwpx import HwpxDocument
@@ -449,9 +488,11 @@ class Template(unittest.TestCase):
         base_id = next(s for s in head.iter(f"{HW}style") if s.get("name") == "본경 원문").get("charPrIDRef")
         self.assertIsNotNone(chars[base_id].find(f"{HW}bold"))
         runs = {(r.findtext(f"{HP}t") or ""): r.get("charPrIDRef") for p in sec.findall(f"{HP}p") for r in self.body_runs(p)}
-        for piece in ("味苦", "寒有", "毒", "〔主/生〕", "大水"):
-            self.assertIsNotNone(chars[runs[piece]].find(f"{HW}bold"), piece)               # 초록·파랑 등급도 양식 글자 모양의 굵기를 잃지 않는다
-        self.assertNotEqual(runs["味苦"], base_id); self.assertEqual(runs["毒"], base_id)      # 색만 덧입힌 사본 / 본문은 양식 그대로
+        self.assertEqual(''.join(runs),'味苦寒有毒〔主/生〕大水')
+        for piece,shape in runs.items():
+            self.assertIsNotNone(chars[shape].find(f"{HW}bold"),piece)  # 부호를 나눠도 원본 양식의 굵기를 유지
+        char_shapes={char:shape for text,shape in runs.items() for char in text}
+        self.assertNotEqual(runs["味苦"], base_id); self.assertEqual(char_shapes["毒"], base_id)      # 색만 덧입힌 사본 / 본문은 양식 그대로
 
 
 class Command(unittest.TestCase):
@@ -537,7 +578,7 @@ class Command(unittest.TestCase):
         app.v_layout = V(gui.LAYOUT_LABELS["page"])
         o = gui.App._build_opts(app)
         self.assertEqual(o[:2], ["--layout", "page"]); self.assertNotIn("--preset", o); self.assertNotIn("--template", o)
-        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("page", "", True, "basic"))
+        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("flow", "", True, "basic"))
         self.assertNotIn("structure", gui.DEFAULTS)
 
     def test_window_greys_out_options_the_layout_does_not_use(self):

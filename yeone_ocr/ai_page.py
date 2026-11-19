@@ -112,7 +112,15 @@ def _png(picture):
     return stream.getvalue()
 
 
-def read_page(image, *, direction, profile, client, model, cache_dir: Path | None = None):
+def cached_page_path(image, *, direction, profile, model, cache_dir):
+    overview,pictures,_=strips(image,direction)
+    digest=hashlib.sha256(b''.join([overview,*pictures])).hexdigest()
+    key=hashlib.sha256(json.dumps([PROMPT_VERSION,model,direction,profile,digest]).encode()).hexdigest()[:32]
+    return Path(cache_dir)/f'{key}.json'
+
+
+def read_page(image, *, direction, profile, client, model, cache_dir: Path | None = None, on_request=None,
+              retry_invalid=None):
     """The AI's transcription of the page: {"text", "uncertain", "model", "strips", "cached"}."""
     overview, pictures, boxes = strips(image, direction)
     digest = hashlib.sha256(b"".join([overview, *pictures])).hexdigest()
@@ -125,20 +133,28 @@ def read_page(image, *, direction, profile, client, model, cache_dir: Path | Non
                 return {**cached, "cached": True}
         except (OSError, ValueError):
             pass                         # a damaged or foreign cache file is read again, not trusted
-    text, complete, reason, tokens, actual = client.request(
-        model_name=model, system=SYSTEM, prompt=_prompt(direction, profile, len(pictures)),
-        images=[overview, *pictures], schema=SCHEMA)
-    if not complete:
-        raise ValueError(f"AI 쪽 판독이 완료되지 않았습니다({reason}).")
-    data = json.loads(text)
-    # Any other shape is a failed reading (ValueError): the caller then keeps the engine reading
-    # instead of losing the whole page to an AttributeError.
-    if (not isinstance(data, dict) or not isinstance(data.get("lines", []), list)
-            or not isinstance(data.get("uncertain", []), list)):
-        raise ValueError("AI 쪽 판독 응답의 형식이 올바르지 않습니다.")
-    lines = [line for line in data.get("lines", []) if isinstance(line, str)]
-    result = {"text": "\n".join(lines), "uncertain": [u for u in data.get("uncertain", []) if isinstance(u, str)],
-              "model": actual, "strips": [list(b) for b in boxes], "usage": tokens, "prompt_version": PROMPT_VERSION}
+    usage = {}
+    for attempt in range(2):
+        if on_request is not None:
+            on_request()
+        text, complete, reason, tokens, actual = client.request(
+            model_name=model, system=SYSTEM, prompt=_prompt(direction, profile, len(pictures)),
+            images=[overview, *pictures], schema=SCHEMA)
+        for key, value in tokens.items():
+            usage[key] = usage.get(key, 0) + value
+        if complete:
+            try:
+                data = json.loads(text)
+            except (TypeError, ValueError):
+                data = None
+            if (isinstance(data, dict) and all(isinstance(data.get(key), list)
+                    and all(isinstance(value, str) for value in data[key]) for key in ("lines", "uncertain"))):
+                break
+            reason = "invalid_json"
+        if reason != "invalid_json" or attempt or retry_invalid is None or not retry_invalid():
+            raise ValueError(f"AI 쪽 판독이 완료되지 않았습니다({reason}).")
+    result = {"text": "\n".join(data["lines"]), "uncertain": data["uncertain"],
+              "model": actual, "strips": [list(b) for b in boxes], "usage": usage, "prompt_version": PROMPT_VERSION}
     if path:
         # The reading is already paid for: a cache that cannot be written (read-only folder, full
         # disk) must not throw it away, or the next run would ask again.

@@ -53,6 +53,9 @@ class Block:
     cstyles: list[tuple[int, int, str]] = field(default_factory=list) # 쓰임별 글자 범위: (시작, 끝, bold·source·bonjing·small) — structure 가 붙인다
     anchors: list[tuple[int, str]] = field(default_factory=list)       # 내용별 문서: 원본 쪽이 시작되는 글자 위치와 책갈피 이름
 
+    layout: dict = field(default_factory=dict)  # output-only paragraph alignment and pagination
+    cell_spans: dict = field(default_factory=dict)  # output-only text color ranges by (row, column)
+
     # ---- 글자 자리를 가진 네 목록(spans·memos·cstyles·anchors)을 글과 함께 옮기는 셈은 여기 한곳에서 ----
     def cut(self, cut: int, rest: int | None = None) -> tuple["Block", "Block"]:
         """[0, cut) 와 [rest, 끝)(rest 기본 cut) 둘로 — 사이 글자(빈칸)는 버린다. spans·cstyles 는 clip_ranges(strict), memos·anchors 는 cut 앞이면 앞,
@@ -309,7 +312,8 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 continue
             if reg.kind in TITLE_KINDS:
                 lvl = reg.title_level if reg.title_level in (1, 2, 3) else (2 if reg.kind == "제목" else 3)
-                hb = Block(type="heading", text=reg.title_text.strip(), level=lvl, kind=reg.kind, page=n)
+                hb = Block(type="heading", text=reg.title_text.strip(), level=lvl, kind=reg.kind, page=n,
+                           layout=dict(rec.get('_common_layout_regions',{}).get(reg.id,{})))
                 if flow and not hb.text:
                     continue                                    # 글 없는 제목 영역은 문단을 만들지 않는다(책갈피는 다음 글로)
                 if flow and reg.kind == "제목":
@@ -357,7 +361,10 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                                 place(prev, base)
                             first_text_done = True
                             continue
-                    pb = Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me, cstyles=bd)
+                    pb = Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me, cstyles=bd,
+                               layout=dict(rec.get('_common_layout_regions',{}).get(reg.id,{})))
+                    if pb.layout.get('kind') in ('book','volume','chapter','section','subsection','entry'):
+                        pb.type='heading';pb.kind='제목';pb.level=pb.layout.get('level',2)
                     if anchored:
                         place(pb, 0)
                     blocks.append(pb)

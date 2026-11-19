@@ -58,7 +58,7 @@ class ExportSourcePreservation(unittest.TestCase):
         for flags in (("--no-normalize",), ("--no-traditional", "--no-yun", "--no-punctuation", "--no-korean-forms")):
             with self.subTest(flags=flags):
                 args = cli.build_parser().parse_args(["build", str(self.pdf), "--work", str(self.work.dir),
-                    "--docx", "--no-context", "--no-highlight", *flags])
+                    "--out", "source", "--docx", "--no-context", "--no-highlight", *flags])
                 self.assertFalse(cli.normalization_options(args).enabled)
                 with fitz.open(self.pdf) as document, contextlib.redirect_stdout(io.StringIO()), \
                         patch.object(cli, "create_reader") as factory:

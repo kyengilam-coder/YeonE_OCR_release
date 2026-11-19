@@ -169,6 +169,8 @@ def _acknowledge_update_ready(path: str | None, token: str | None) -> bool:
 
 
 def _normal_gui(open_engine_manager: bool = False) -> int:
+    from . import process_diagnostics
+    process_diagnostics.start()
     stream = None
     original_streams = (sys.stdin, sys.stdout, sys.stderr)
     null_input = None
@@ -199,6 +201,7 @@ def _normal_gui(open_engine_manager: bool = False) -> int:
         app.mainloop()
         return 0
     except Exception:
+        process_diagnostics.record(traceback.format_exc())
         if sys.stderr is not None:
             traceback.print_exc()
         # GUI initialization errors must be visible in a windowed build.
@@ -209,6 +212,7 @@ def _normal_gui(open_engine_manager: bool = False) -> int:
                 "YeonE_OCR", 0x10)
         return 1
     finally:
+        process_diagnostics.finish()
         if stream is not None:
             sys.stdout, sys.stderr = original_streams[1:]
             stream.close()

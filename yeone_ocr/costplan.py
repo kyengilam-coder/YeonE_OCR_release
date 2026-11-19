@@ -45,6 +45,8 @@ class PlanInput:
     normalize_korean_forms: bool = True
     normalize_punctuation: bool = True
     punctuation_rules: str = ""
+    hanja_rules: str = ""
+    yu_policy: str = 'classical'
     layout: str = "page"
     preset: str = DEFAULT_PRESET
     join_pages: bool = True
@@ -320,10 +322,12 @@ def count_plan(inp: PlanInput, progress=None, should_stop=None) -> dict:
             def choice():                                                # (6) 문맥 교정(번체) — 문서 조립·규칙 변환까지 해 보므로 수백 쪽이면 몇 초
                 from . import cli
                 from .normalization import NormalizationOptions, load_punctuation_rules
+                from .hanja_rules import load_hanja_rules
                 from .readers import TEXT_CHOICE_SYSTEM
-                options = NormalizationOptions(traditional=inp.normalize_traditional, yun=inp.normalize_yun,
+                options = NormalizationOptions(traditional=inp.normalize_traditional, yun=inp.normalize_yun, yu_policy=inp.yu_policy,
                     punctuation=inp.normalize_punctuation, korean_forms=inp.normalize_korean_forms,
-                    punctuation_rules=load_punctuation_rules(inp.punctuation_rules) if inp.normalize_punctuation and inp.punctuation_rules else None)
+                    punctuation_rules=load_punctuation_rules(inp.punctuation_rules) if inp.normalize_punctuation and inp.punctuation_rules else None,
+                    hanja_rules=load_hanja_rules(inp.hanja_rules) if inp.hanja_rules and (inp.normalize_traditional or inp.normalize_korean_forms) else None)
                 base = have or recs
                 np_ = None
                 if base:

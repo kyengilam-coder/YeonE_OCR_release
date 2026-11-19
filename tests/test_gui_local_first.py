@@ -37,7 +37,8 @@ class LocalFirstGuiTests(unittest.TestCase):
                        v_local_ai_max_calls="7")
         flags = self.gui.App._strategy_opts(app)
         self.assertEqual(flags, ["--ocr-strategy", "local-first", "--local-profile", "mixed",
-            "--local-ai-max-calls", "7", "--no-local-ai-review", "--local-engine-root", "chosen-engines"])
+            "--local-ai-max-calls", "7", "--no-local-ai-review", "--local-ai-auth", "subscription",
+            "--no-local-ai-api-fallback", "--local-engine-root", "chosen-engines"])
         app.v_ocr_strategy.set(self.gui.OCR_STRATEGY_LABELS["ai-full"])
         self.assertEqual(self.gui.App._strategy_opts(app), ["--ocr-strategy", "ai-full"])
 
@@ -520,9 +521,9 @@ class LocalFirstGuiTests(unittest.TestCase):
 
     def test_call_count_includes_selective_transport_without_importing_reader(self):
         import sys
-        with mock.patch.dict(sys.modules, {"yeone_ocr.cli": SimpleNamespace(LOCAL_API_CALLS=3),
+        with mock.patch.dict(sys.modules, {"yeone_ocr.cli": SimpleNamespace(LOCAL_API_CALLS=3, LOCAL_PAGE_CALLS=2),
                                           "yeone_ocr.reader_gemini": None}):
-            self.assertEqual(self.gui.App._call_count(), 3)
+            self.assertEqual(self.gui.App._call_count(), 5)
 
     def test_editor_unlocalized_only_plan_reports_unresolved_instead_of_clean(self):
         import threading

@@ -58,6 +58,21 @@ def test_read_page_sends_overview_and_strips_and_caches(tmp_path):
     assert len(request["images"]) == len(first["strips"]) + 1 and "RIGHT side" in request["prompt"]
 
 
+def test_format_error_is_retried_once_and_usage_is_counted():
+    from unittest.mock import Mock
+    image = Image.new("RGB", (100, 100), "white")
+    client = Mock()
+    client.request.side_effect = [
+        ("{", False, "invalid_json", {"input_tokens": 5}, "model"),
+        ('{"lines":["本文"],"uncertain":[]}', True, "STOP", {"input_tokens": 7}, "model"),
+    ]
+    count = Mock()
+    result = ai_page.read_page(image, direction="horizontal", profile="traditional", client=client,
+                               model="model", on_request=count, retry_invalid=lambda: True)
+    assert result["text"] == "本文" and result["usage"] == {"input_tokens": 12}
+    assert client.request.call_count == count.call_count == 2
+
+
 def test_punctuation_and_uncertain_words_keep_the_engine_reading():
     base = "것이다.分合을 取하여 用穿하고"
     text, red, _blue, summary = ai_page.merge(base, "것이다·分合을 取하여 用夯하고", uncertain=["夯"])

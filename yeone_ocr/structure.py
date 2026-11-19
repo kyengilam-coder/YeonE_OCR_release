@@ -134,9 +134,11 @@ def apply_structure(blocks: list[Block], preset: Preset | str = DEFAULT_PRESET, 
     그런 문단(제목으로 읽힌 약재명 포함)이 min_hits 이상이고 문단의 min_ratio 이상일 때만."""
     p = preset if isinstance(preset, Preset) else resolve_preset(preset)
     bold_measured = bold_measured and p.emphasis is not None and any(k == "bold" for b in blocks for _, _, k in b.cstyles)
-    heads = {i: h for i in range(len(blocks)) if p.entry and (h := _heading_entry(blocks, i, p))}
-    n_para = sum(1 for b in blocks if b.type == "para")
-    hits = (sum(1 for b in blocks if b.type == "para" and _entry_cut(b, p)) + len(heads)) if p.entry else 0
+    heads = {i: h for i, b in enumerate(blocks) if p.entry and 'source_contents' not in b.layout
+             and (h := _heading_entry(blocks, i, p))}
+    paragraphs = [b for b in blocks if b.type == "para" and 'source_contents' not in b.layout]
+    n_para = len(paragraphs)
+    hits = (sum(1 for b in paragraphs if _entry_cut(b, p)) + len(heads)) if p.entry else 0
     entries = p.entry is not None and (p.entry.when == "always" or (hits >= p.entry.min_hits and hits >= p.entry.min_ratio * n_para))   # 우연한 꼴 몇 개로 다른 책에서 켜지지 않게
     out: list[Block] = []; stats: dict = {}
     tail: Block | None = None                                           # 제목에서 떼어 낸 조문 앞부분 — 다음 문단 앞에 잇는다
@@ -178,9 +180,19 @@ def apply_structure(blocks: list[Block], preset: Preset | str = DEFAULT_PRESET, 
         out.append(nb); count(nb.role)
 
     for i, b in enumerate(blocks):
+        if 'source_contents' in b.layout:
+            if tail is not None:
+                para(tail)
+                tail = None
+            out.append(b)
+            continue
         if tail is not None and not (b.type == "para" and b.kind != "소주" and not _comment(b.text, p) and not _entry_cut(b, p)):
             para(tail); tail = None                                     # 이어 붙일 조문 문단이 아니면 따로 둔다
         if b.type == "heading":
+            if b.layout.get('kind') == 'entry':
+                out.append(replace(b, role='entry', level=3, cstyles=[c for c in b.cstyles if c[2] != 'bold']))
+                count('entry')
+                continue
             h = heads.get(i) if entries else None
             if h and h[0] == "split":
                 head, rest = b.cut(h[1], h[2])
@@ -200,6 +212,12 @@ def apply_structure(blocks: list[Block], preset: Preset | str = DEFAULT_PRESET, 
             out.append(replace(b, role=b.role or "note") if b.type in ("note", "uncertain", "report", "meta") else b)
     if tail is not None:
         para(tail)
+    if p.citation is not None:
+        from .citation_layout import apply_citations
+        out = apply_citations(out, p.citation)
+        stats = {}
+        for block in out:
+            if block.role: stats[block.role] = stats.get(block.role, 0) + 1
     return out, stats
 
 

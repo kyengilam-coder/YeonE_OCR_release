@@ -21,6 +21,12 @@ def test_sample_errors_and_korean_characters():
     assert korean_forms(keep) == keep                       # forms a Korean book can carry are never touched
 
 
+def test_missing_user_msr_forms_and_meaning_changes():
+    assert korean_forms("胎產 飲食 顏面 彥 眾人 腳 沉 吞 尚") == "胎産 飮食 顔面 彦 衆人 脚 沈 呑 尙"
+    # Not being in KS does not make two different words interchangeable.
+    assert korean_forms("髒污 贏得 胺 鬥爭 醫術 樹幹") == "髒污 贏得 胺 鬥爭 醫術 樹幹"
+
+
 def test_reading_columns_are_rewritten_with_the_same_length():
     page = PageReading(pdf_page=1, regions=[Region(id="a", kind="본문", bbox=[0, 0, 10, 10],
         paragraphs=[Paragraph(columns=[Column(col_from_right=1, text="그 説明이 真實")])])])

@@ -70,7 +70,8 @@ class Tokens(unittest.TestCase):
         self.assertEqual(TL.tokens("甲〔판독불명〕乙〔원본 결락〕丙"), ["甲", None, "乙", "丙"])   # 판독불명은 먹이 있는 한 자리, 결락은 자리 없음
 
     def test_out_path_and_half_width_advance(self):
-        self.assertEqual(TL.out_path("w", "책.ocr.pdf"), Path("w") / "out" / "책.ocr_글자층.pdf")
+        from yeone_ocr.output_names import next_document_path
+        self.assertEqual(TL.out_path("w", "책.ocr.pdf"), next_document_path(Path('w')/'out','책.ocr.pdf','.pdf'))
         self.assertEqual((TL.adv("天"), TL.adv("，"), TL.adv("3"), TL.adv("a")), (1.0, 1.0, 0.5, 0.5))
 
 
@@ -403,9 +404,11 @@ class Command(unittest.TestCase):
             w = str(tmp / "w")
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.main(["textlayer", str(src), "--work", w]), 2)          # 판독 기록이 없으면 만들지 않는다
-                cli.main(["run", str(src), "--work", w, "--reader", "mock", "--checkpoint", "0", "--mode", "vertical", "--textlayer-pdf"])
-            out = tmp / "w" / "out" / "책.ocr_글자층.pdf"
+                self.assertEqual(cli.main(["run", str(src), "--work", w, "--reader", "mock", "--checkpoint", "0",
+                                           "--mode", "vertical", "--no-normalize", "--textlayer-pdf"]), 0)
+            out = TL.out_path(tmp/'w',src)
             self.assertTrue(out.exists())
+            self.assertTrue(out.with_suffix(".hwpx").is_file())
             with pymupdf.open(out) as d:
                 self.assertEqual([c["text"] for c in text_layer(d, 1, own=True).vertical_columns], VCOLS)
                 self.assertEqual(text_layer(d, 1).char_count, 0)                 # 옛 층은 지우고 자기 층은 증인에서 뺌
@@ -416,6 +419,11 @@ class Command(unittest.TestCase):
             self.assertEqual(rc, 0, log.getvalue())
             self.assertTrue((tmp / "다른.pdf").exists()); self.assertFalse(out.exists())
             self.assertIn("모든 쪽 같음", log.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["build", str(src), "--work", w, "--reuse-records",
+                                           "--no-normalize", "--textlayer-pdf", "--out", "지정한 이름"]), 0)
+            self.assertTrue((out.parent / "지정한 이름.hwpx").is_file())
+            self.assertTrue((out.parent / "지정한 이름.pdf").is_file())
 
     def test_build_option_and_progress_stage(self):
         from yeone_ocr.cli import build_parser
@@ -451,7 +459,7 @@ class Window(unittest.TestCase):
                               work=lambda: Path("C:/책_YeonE_OCR"), pdf=lambda: "C:/책.ocr.pdf", _pages=lambda: ["--pages", "1-3"], start=mock.Mock())
         gui.App.do_textlayer(app)
         argv, label = app.start.call_args.args
-        self.assertEqual(argv, ["textlayer", "C:/책.ocr.pdf", "--work", str(Path("C:/책_YeonE_OCR")), "--pages", "1-3"])
+        self.assertEqual(argv, ["textlayer", "C:/책.ocr.pdf", "--work", str(Path("C:/책_YeonE_OCR")), '--out', str(TL.out_path(Path('C:/책_YeonE_OCR'),'C:/책.ocr.pdf')), "--pages", "1-3"])
         self.assertEqual(app.start.call_args.kwargs["open_after"], TL.out_path(Path("C:/책_YeonE_OCR"), "C:/책.ocr.pdf"))
         build_parser().parse_args(argv)
         V = lambda v: SimpleNamespace(get=lambda: v)
