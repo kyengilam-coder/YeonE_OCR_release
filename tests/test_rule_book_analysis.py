@@ -7,7 +7,7 @@ import pytest
 
 from tests.test_rule_generation import pdf_file
 from yeone_ocr.rule_generation import generate_rule
-from yeone_ocr.rule_book_analysis import merge_findings
+from yeone_ocr.rule_book_analysis import _review_contents_type, merge_findings
 
 
 def page_client(stop=None, fail_page=None):
@@ -154,6 +154,15 @@ def test_invalid_json_retries_same_page_and_keeps_distinct_page_types(tmp_path):
     assert result['rule']['page_types']['pages'] == {kind: [n] for n, kind in enumerate(types, 1)}
     assert result['coverage']['new_requests'] == result['usage']['input'] == 5
     assert any('PDF 2쪽:' in warning and '스키마' in warning for warning in result['warnings'])
+
+
+def test_contents_with_footnotes_are_not_counted_as_body():
+    listing = '\n'.join(f'항목 ................. ({n})' for n in range(1, 10))
+    listing += '\n〔1］ 이 목록 항목의 원문 표기에 관한 주석입니다。'
+    for tail, expected in (('', ['목차', '각주']), ('\n여기부터 본문이 시작된다。', ['목차', '본문', '각주'])):
+        answer = {'types': ['목차', '본문', '각주'], 'warnings': []}
+        _review_contents_type(answer, {'pdf_text': listing + tail})
+        assert answer['types'] == expected
 
 
 def test_corrupt_cache_is_reanalyzed_without_losing_other_pages(tmp_path):

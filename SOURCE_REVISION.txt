@@ -1,3 +1,3 @@
 Version: 1.2.52
-Git commit: b960203db41a20594896a02579e64239ccdb77f9
+Git commit: 96440b87d9bda1cf01fcf4f9d519f2cc3c1e27f1
 Source: committed Git tree only.

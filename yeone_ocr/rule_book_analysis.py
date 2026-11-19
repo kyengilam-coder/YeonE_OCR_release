@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 
 from .presets import DATA, PAGE_TYPES as TYPES, _compile
 
@@ -17,7 +18,8 @@ def page_schema():
         'description': ('Use 차례 for a contents section explicitly titled 차례 and its identifiable continuation pages. '
                         'Use 목차 for other contents listings, including 目錄 and 總目. '
                         'Use 색인 for lookup entries pointing to locations, and 본문 for the main text. '
-                        'Use both types only when separate structures actually coexist on this page.'),
+                        'Contents entries, volume headings, running headers and footnotes do not count as main text. '
+                        'Use multiple types only when separate structures actually coexist on this page.'),
     }
     schema['required'].append('types')
     return schema
@@ -35,6 +37,26 @@ def validate_page(text, pdf, template):
         raise ValueError('쪽 유형을 확인하지 못했습니다.')
     rule, summary, warnings = validate_response(json.dumps(raw, ensure_ascii=False), pdf, template)
     return {'rule': rule, 'summary': summary, 'warnings': warnings, 'types': list(dict.fromkeys(kinds))}
+
+
+def _review_contents_type(answer, excerpt):
+    kinds = answer['types']
+    if '본문' not in kinds or not {'목차', '차례'}.intersection(kinds) or excerpt.get('pdf_text_truncated'):
+        return
+    from .contents_layout import ENTRY, cell_spans
+
+    entries = 0
+    for line in excerpt['pdf_text'].splitlines():
+        line = line.strip()
+        if ENTRY.search(line) or cell_spans(line):
+            entries += 1
+        elif not re.match(r'^[〔［\[\d]\d{0,2}[〕］\]]', line) and not re.search(r'\.{3,}|…{2,}', line):
+            # Keep mixed pages when the text layer contains a plausible prose line.
+            if sum(char.isalpha() for char in line) >= 20 or re.search(r'[。！？!?]$', line):
+                return
+    if entries >= 8:
+        kinds.remove('본문')
+        answer['warnings'].append('PDF 글자층에서 목록 항목을 확인해 이 쪽의 본문 분류를 제외했습니다.')
 
 
 def _merge_values(left, right):
@@ -183,6 +205,7 @@ def analyze_book(pdf, template, work_dir, client, model, inputs, *, stop, progre
                 write_atomic(path, json.dumps({'key': cache_key, 'text': text, 'model': actual}, ensure_ascii=False))
         _check_stop(stop)
         excerpt = evidence['pages'][0]
+        _review_contents_type(answer, excerpt)
         if excerpt.get('pdf_text_truncated') or excerpt.get('ocr_reference_truncated'):
             answer['warnings'].append('보조 텍스트가 길어 일부만 전달했습니다. 전체 쪽 이미지와 확대 이미지로 구조를 분석했습니다.')
         if excerpt.get('ocr_reference_unavailable'):
