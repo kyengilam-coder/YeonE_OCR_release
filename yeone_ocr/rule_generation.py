@@ -11,7 +11,8 @@ from .rule_request import sample_pages, template_summary
 SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'properties': {'rule_json': {'type': 'string', 'description': (
-                       'JSON-encoded book rule. In styles.paragraph, use only these keys: '
+                       'JSON-encoded book rule. Always include {"schema":1}, even if there are no other fields. '
+                       'In styles.paragraph, use only these keys: '
                        + ', '.join(ROLES) + '. Omit any unmatched paragraph style mapping.'
                    )}, 'summary': {'type': 'string'},
                    'warnings': {'type': 'array', 'items': {'type': 'string'}}},
@@ -140,6 +141,9 @@ def validate_response(text, pdf, template):
     data = json.loads(response['rule_json'])
     if isinstance(data, dict) and 'page_types' in data:
         raise ValueError('쪽 유형 목록은 프로그램이 쪽별 분석 결과로 작성합니다.')
+    if isinstance(data, dict) and 'schema' not in data:
+        data['schema'] = 1
+        response['warnings'].append('AI 응답에 빠진 규칙 스키마 번호를 1로 보완했습니다.')
     styles = data.get('styles') if isinstance(data, dict) else None
     paragraph = styles.get('paragraph') if isinstance(styles, dict) else None
     if isinstance(paragraph, dict) and 'other' in paragraph:

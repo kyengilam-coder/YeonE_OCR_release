@@ -30,6 +30,7 @@ SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".pdf", ".hwpx", ".hwp", "
 MODEL_SUFFIXES = {".onnx", ".ort", ".pth", ".pt", ".ckpt", ".safetensors", ".traineddata", ".tflite",
                   ".h5", ".hdf5", ".pkl", ".pickle", ".bin", ".model", ".pdmodel", ".pdiparams", ".gguf", ".ggml"}
 SOURCE_DATA = {"yeone_ocr/data/normalization_260929.json", "yeone_ocr/data/preset_basic.json",
+               "yeone_ocr/data/book_rule_kaibao.json", "yeone_ocr/data/book_rule_yaolun.json",
                "yeone_ocr/data/preset_kaibao.json", "yeone_ocr/data/preset_regions.json",
                "yeone_ocr/data/unihan_source_protection_17_0_0.json"}
 SOURCE_FONTS = {"yeone_ocr/assets/fonts/SourceHanSerifK-Medium.otf", "yeone_ocr/assets/fonts/LICENSE.txt",

@@ -2139,7 +2139,7 @@ def run(report_path: Path) -> int:
         from .state import Work
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory(prefix='result-selection-') as directory:
-            root = Path(directory); pdf = root / 'book.pdf'
+            root = Path(directory).resolve(); pdf = root / 'book.pdf'
             pdf.write_bytes(b'source fixture')
             old = Work(pdf, root / 'original' / '작업자료')
             (old.out_dir / 'book.hwpx').write_bytes(b'old')

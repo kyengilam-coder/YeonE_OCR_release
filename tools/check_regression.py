@@ -107,7 +107,12 @@ def _offline():
     def blocked(*_args, **_kwargs):
         raise OSError("External network is disabled by the regression runner.")
     class OfflineSocket(socket.socket):
-        connect = blocked
+        def connect(self, address):
+            # Windows implements the asyncio wakeup socketpair using local TCP.
+            if self.family in (socket.AF_INET, socket.AF_INET6) and address[0] in ("127.0.0.1", "::1"):
+                return super().connect(address)
+            return blocked()
+
         connect_ex = blocked
         sendto = blocked
     if hasattr(socket.socket, "sendmsg"):

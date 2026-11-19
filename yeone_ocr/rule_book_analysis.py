@@ -152,7 +152,9 @@ def analyze_book(pdf, template, work_dir, client, model, inputs, *, stop, progre
             except (OSError, ValueError, KeyError, TypeError):
                 answer = None
         if answer is None:
-            for request_system in (system, system + '\nReturn one valid JSON object with no text outside it.'):
+            request_system = system
+            validation_error = None
+            for attempt in range(2):
                 _check_stop(stop)
                 text, complete, reason, tokens, actual = client.request(
                     model_name=model, system=request_system,
@@ -161,15 +163,21 @@ def analyze_book(pdf, template, work_dir, client, model, inputs, *, stop, progre
                 for key, value in tokens.items():
                     if isinstance(value, (int, float)):
                         usage[key] = usage.get(key, 0) + value
-                if complete or reason != 'invalid_json' or request_system != system:
+                validation_error = None
+                if complete:
+                    try:
+                        answer = validate_page(text, pdf, template)
+                    except (ValueError, TypeError) as exc:
+                        validation_error = exc
+                if answer is not None or (not complete and reason != 'invalid_json') or attempt == 1:
                     break
-                progress(f'{number}/{count}쪽 JSON 응답 오류 · 한 번 다시 요청합니다.')
+                progress(f'{number}/{count}쪽 분석 형식 오류 · 한 번 다시 요청합니다.')
+                request_system += ('\nReturn one valid JSON object with no text outside it. '
+                                   'Use only supported fields and values. rule_json must contain schema 1.')
             if not complete:
                 raise ValueError(f'{number}/{count}쪽 AI 분석 미완료({reason}). 완료 쪽은 재사용하며 규칙은 적용하지 않았습니다.')
-            try:
-                answer = validate_page(text, pdf, template)
-            except (ValueError, TypeError) as exc:
-                raise ValueError(f'{number}/{count}쪽 분석 형식 오류: {exc}. 다시 실행하면 완료 쪽을 재사용합니다.') from exc
+            if validation_error is not None:
+                raise ValueError(f'{number}/{count}쪽 분석 형식 오류: {validation_error}. 다시 실행하면 완료 쪽을 재사용합니다.') from validation_error
             # Preserve a complete paid response even when cancellation arrives simultaneously.
             if path:
                 write_atomic(path, json.dumps({'key': cache_key, 'text': text, 'model': actual}, ensure_ascii=False))

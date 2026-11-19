@@ -145,7 +145,7 @@ def test_invalid_json_retries_same_page_and_keeps_distinct_page_types(tmp_path):
         seen.append(number)
         if seen == [1]:
             return '', False, 'invalid_json', {'input': 1}, 'fake'
-        payload = json.dumps({'rule_json': '{"schema":1}', 'summary': '', 'warnings': [],
+        payload = json.dumps({'rule_json': '{}' if number == 2 else '{"schema":1}', 'summary': '', 'warnings': [],
                               'types': [types[number - 1]]})
         return payload, True, 'stop', {'input': 1}, 'fake'
 
@@ -153,6 +153,7 @@ def test_invalid_json_retries_same_page_and_keeps_distinct_page_types(tmp_path):
     assert seen == [1, 1, 2, 3, 4]
     assert result['rule']['page_types']['pages'] == {kind: [n] for n, kind in enumerate(types, 1)}
     assert result['coverage']['new_requests'] == result['usage']['input'] == 5
+    assert any('PDF 2쪽:' in warning and '스키마' in warning for warning in result['warnings'])
 
 
 def test_corrupt_cache_is_reanalyzed_without_losing_other_pages(tmp_path):

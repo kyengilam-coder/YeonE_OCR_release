@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "id": "yaolun-book",
+  "label": "중의역대약론선",
+  "description": "문헌 출전은 별도 줄, 인용문은 들여쓰기. 원본 번호·서명·글자를 보존. 출전 약칭을 추측해 풀어쓰지 않음. 목차·서목은 인용문으로 분리하지 않음. 양식 HWPX 선택 시 해당 파일의 스타일을 재사용.",
+  "template": "",
+  "entry": null,
+  "commentary": null,
+  "source": null,
+  "emphasis": null,
+  "citation": {
+    "mode": "separate",
+    "max_title": 80,
+    "continuations": true
+  },
+  "styles": {
+    "paragraph": {
+      "chapter": [
+        "제목-장",
+        "대제목"
+      ],
+      "section": [
+        "제목-본초명",
+        "중제목"
+      ],
+      "subsection": [
+        "제목-본초명(소)",
+        "소제목"
+      ],
+      "entry": [
+        "제목-본초명",
+        "소제목"
+      ],
+      "body": [
+        "표-12(들쓰)",
+        "문단-1"
+      ],
+      "citation_source": [
+        "표-11(내쓰)",
+        "출전"
+      ],
+      "quotation": [
+        "표-20(_들쓰)",
+        "인용문"
+      ],
+      "small": [
+        "*문단",
+        "문단-3"
+      ],
+      "caption": [
+        "문단-4"
+      ],
+      "note": [
+        "문단-5"
+      ]
+    },
+    "character": {
+      "small": [
+        "소주"
+      ]
+    }
+  },
+  "headings": {
+    "chapter": [
+      "綜合論述",
+      "各論"
+    ],
+    "section": [
+      "前言",
+      "目錄",
+      "引用書目",
+      "索引"
+    ]
+  }
+}
