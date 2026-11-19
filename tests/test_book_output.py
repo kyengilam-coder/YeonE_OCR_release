@@ -61,6 +61,53 @@ def test_preview_uses_pdf_layer_or_explains_unread_scan(tmp_path):
     assert not (tmp_path / "empty").exists()
 
 
+def test_preview_matches_source_heading_geometry_and_chooses_closest_template_style(tmp_path):
+    from hwpx import HwpxDocument
+
+    source = tmp_path / 'layout.pdf'
+    with pymupdf.open() as pdf:
+        page = pdf.new_page(width=400, height=600)
+        page.insert_text((90, 125), 'Section title', fontsize=19)
+        for n in range(5):
+            page.insert_text((40, 170 + n * 14), 'Source body text fills most of the printable width here.', fontsize=10)
+        pdf.save(source)
+    template = tmp_path / 'layout.hwpx'
+    doc = HwpxDocument.new()
+    header = doc.oxml.headers[0]
+    for name, align, size in [('Centered title', 'CENTER', 24), ('Left title', 'LEFT', 18), ('Body', 'JUSTIFY', 12)]:
+        ppr = header.ensure_paragraph_format(base_para_pr_id=1, alignment=align)
+        cpr = doc.styles.ensure_run(size=size)
+        header.ensure_style(name, style_type='PARA', para_pr_id_ref=ppr, char_pr_id_ref=cpr)
+    doc.add_paragraph('template fixture')
+    doc.save_to_path(str(template))
+    doc.close()
+    rule = tmp_path / 'layout-rule.json'
+    rule.write_text(json.dumps({'schema': 1, 'headings': {'section': ['Section title']},
+                                'styles': {'paragraph': {'section': ['Centered title', 'Left title'], 'body': ['Body']}}}),
+                    encoding='utf-8')
+    output, _, _ = preview_document(source, tmp_path / 'empty', ['--layout', 'flow', '--template', str(template),
+                                                                 '--preset', str(rule), '--no-normalize'])
+    try:
+        with ZipFile(output) as archive:
+            header = ET.fromstring(archive.read('Contents/header.xml'))
+            section = ET.fromstring(archive.read('Contents/section0.xml'))
+        styles = {node.get('id'): node.get('name') for node in header.iter(HH + 'style')}
+        chars = {node.get('id'): node.get('height') for node in header.iter(HH + 'charPr')}
+        paras = {node.get('id'): node for node in header.iter(HH + 'paraPr')}
+        title = next(p for p in section.findall(HP + 'p') if 'Section title' in ''.join(p.itertext()))
+        body = next(p for p in section.findall(HP + 'p') if 'Source body text' in ''.join(p.itertext()))
+        assert styles[title.get('styleIDRef')] == 'Left title'
+        fmt = paras[title.get('paraPrIDRef')]
+        assert fmt.find(HH + 'align').get('horizontal') == 'LEFT'
+        assert any(node.tag.endswith('}left') and int(node.get('value', 0)) > 0 for node in fmt.iter())
+        for node, size in [(title, '1900'), (body, '1000')]:
+            runs = [run for run in node.findall(HP + 'run') if ''.join(run.itertext()).strip()]
+            assert runs and all(chars[run.get('charPrIDRef')] == size for run in runs)
+        assert styles[body.get('styleIDRef')] == 'Body'
+    finally:
+        output.unlink()
+
+
 def test_new_default_does_not_change_older_saved_layout(tmp_path):
     from yeone_ocr import gui
     config = tmp_path / "config.json"

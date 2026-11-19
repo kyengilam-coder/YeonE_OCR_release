@@ -113,22 +113,22 @@ class BookRuleDialog(tk.Toplevel):
         self.norm.pack(anchor='w', pady=(8, 0))
 
     def _analysis(self, frame):
-        ttk.Label(frame, text='전체 쪽에서 차례·목차·색인·본문·문헌을 찾아 쪽 유형을 규칙에 저장합니다. 출력할 때 목록의 행·열과 쪽번호를 원본에 맞춰 배치합니다. 쪽마다 구독 사용량이 듭니다.',
+        ttk.Label(frame, text='PDF에서 목차·본문·색인을 먼저 찾고, 대표 최대 8쪽을 한 번에 AI로 검토합니다. 확인한 목록 형식은 HWPX의 행·열과 쪽번호 배치에 사용합니다.',
                   wraplength=570).pack(anchor='w')
-        ttk.Label(frame, text='분석 범위 · 비우면 전체, 부분 시험은 최대 12쪽 (예 1-3, 20)').pack(anchor='w', pady=(8, 2))
+        ttk.Label(frame, text='대표 쪽 직접 지정 · 비우면 자동 선택 (최대 12쪽, 예 1-3, 20)').pack(anchor='w', pady=(8, 2))
         self.page_entry = ttk.Entry(frame, textvariable=self.pages)
         self.page_entry.pack(fill='x')
         row = ttk.Frame(frame)
         row.pack(fill='x', pady=6)
-        ttk.Label(row, text='구독 계정 우선순위').pack(side='left')
+        ttk.Label(row, text='대표 쪽 검토').pack(side='left')
         self.plan_box = ttk.Combobox(row, textvariable=self.plan, state='readonly', width=12,
-                                    values=('auto', 'chatgpt', 'gemini', 'claude'))
+                                    values=('auto', 'chatgpt', 'gemini', 'claude', '로컬만'))
         self.plan_box.pack(side='left', padx=6)
         self.manual = ttk.Button(row, text='수동 검토 자료…', command=lambda: self.app.make_book_rule_manual())
         self.manual.pack(side='right')
         row = ttk.Frame(frame)
         row.pack(fill='x')
-        self.generate = ttk.Button(row, text='AI로 책별 규칙 만들기', command=self.start)
+        self.generate = ttk.Button(row, text='빠른 구조 분석', command=self.start)
         self.generate.pack(side='left')
         self.cancel = ttk.Button(row, text='중지', state='disabled', command=self.cancel_generation)
         self.cancel.pack(side='left', padx=4)
@@ -323,7 +323,8 @@ class BookRuleDialog(tk.Toplevel):
                         continue
                     self.result = value
                     kinds = value.get('type_pages', {})
-                    self.preferred_pages = tuple(dict.fromkeys(kinds[role][0] for role in
+                    samples = set(value['coverage']['selected_pages'])
+                    self.preferred_pages = tuple(dict.fromkeys(next((n for n in kinds[role] if n in samples), kinds[role][0]) for role in
                         ('차례', '목차', '색인', '본문', '각주', '문헌 목록', '제목') if kinds.get(role)))
                     self.show_result()
                     self.status.set('생성 완료. 분석 범위·확인 항목·규칙을 검토한 뒤 저장·적용하십시오.')
@@ -339,14 +340,21 @@ class BookRuleDialog(tk.Toplevel):
         if self.result is not None:
             value = self.result
             coverage = value['coverage']
-            scope = '전체' if coverage.get('selection') == 'whole_book' else '부분 시험 · 전체'
-            text = [f"{scope} {coverage['page_count']}쪽 중 {len(coverage['selected_pages'])}쪽 분석",
+            if coverage.get('selection') == 'quick_layout':
+                analyzed = coverage['analyzed_pages']
+                scope = f"PDF {coverage['page_count']}쪽 로컬 검사 · AI 대표 {len(analyzed)}쪽 검토"
+                if analyzed:
+                    scope += '\nAI 검토 쪽 ' + ', '.join(map(str, analyzed))
+            else:
+                scope = f"PDF {coverage['page_count']}쪽 중 지정한 {len(coverage['selected_pages'])}쪽 검토"
+            text = [scope,
                     value['summary'], '출력에 적용할 규칙', ', '.join(
                         label for key, label in (('entry', '항목 제목'), ('commentary', '주석'),
                         ('source', '출전'), ('emphasis', '굵기'), ('styles', '스타일 연결'),
                         ('citation', '인용'), ('headings', '제목 단계'), ('page_types', '쪽 유형과 원본 목록 배치')) if value['rule'].get(key)
                     ) or '기본 문단 규칙', '확인할 항목', '\n'.join(value['warnings']) or '없음']
-            types = [f"{kind} · PDF {', '.join(map(str, numbers))}쪽"
+            types = [f"{kind} · {len(numbers)}쪽 · PDF {', '.join(map(str, numbers[:8]))}"
+                     + (' 외' if len(numbers) > 8 else '')
                      for kind, numbers in value.get('type_pages', {}).items() if numbers]
             if types:
                 text.extend(['발견한 쪽 유형', '\n'.join(types)])

@@ -50,13 +50,15 @@ def _source_rows(page, number, *, allow_plain=False):
     return rows, headings
 
 
-def prepare_list_pages(records, pdf, index_pages=()):
+def prepare_list_pages(records, pdf, index_pages=(), *, contents_pages=()):
     for record in records:
         reading = PageReading.model_validate(record['merged'])
         items = [(i, r, paragraph_text(r.paragraphs[0]).strip()) for i, r in enumerate(reading.regions)
                  if r.kind in TEXT_KINDS and len(r.paragraphs) == 1 and paragraph_text(r.paragraphs[0]).strip()]
         number = record['pdf_page']
         allow_plain = number in index_pages
+        if number in contents_pages and not allow_plain:
+            continue
         indexed = [(i, r, text, m) for i, r, text in items
                    if (m := index_entry(text, allow_plain=allow_plain)) is not None]
         if not 1 <= number <= len(pdf):

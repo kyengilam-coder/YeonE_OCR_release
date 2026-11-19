@@ -245,27 +245,34 @@ def shape_contents_blocks(blocks):
     return shaped
 
 
-def paragraph_format(doc, base, text, layout, width, cache):
+def paragraph_format(doc, base, text, layout, width, cache, source_shape=None):
     """Use real Hancom tab stops, with font size fitted to the available columns."""
     mode = layout['mode']
+    source_shape = source_shape or {}
     inset = round(width * .045) if mode == 'grid' else 0
     available = width - inset
     if mode == 'grid':
         positions = tuple(round(available * stop) for stop in layout['stops'])
         edges = (0, *positions, available)
-        size = min(10, *(max(7, (right - left - 380) // (100 * max(1, sum(
+        size = min(source_shape.get('size', 10), *(max(5, (right - left - 380) // (100 * max(1, sum(
             1 if east_asian_width(c) in 'WF' else .55 for c in cell))))
             for left, right, cell in zip(edges, edges[1:], text.split('\t'))))
         align, tab_type, after = 'LEFT', 'LEFT', 50
     elif mode == 'outline':
         positions = (available,)
         align, tab_type, size, after = 'LEFT', 'RIGHT', 11, 130
+        size = source_shape.get('size', size)
     else:
         positions = ()
         align = 'CENTER' if mode == 'title' and layout['center'] else 'LEFT'
         size = (12 if text.startswith(('[', '［', '〔')) else 16) if mode == 'title' else 10
+        size = source_shape.get('size', size)
         tab_type, after = 'LEFT', 650 if mode == 'title' else 100
-    key = (base, mode, inset, positions, align, layout['leader'], layout['before'])
+        if mode == 'title':
+            align = source_shape.get('alignment', align)
+            inset = min(source_shape.get('left', inset), width // 2)
+    before = source_shape.get('before', layout['before']) if mode == 'title' else layout['before']
+    key = (base, mode, inset, positions, align, layout['leader'], before)
     if key not in cache:
         header = doc.oxml.headers[0]
         tabs = header.ensure_tab_definition(tab_stops=[dict(pos=pos, type=tab_type, leader=layout['leader'])
@@ -273,7 +280,7 @@ def paragraph_format(doc, base, text, layout, width, cache):
         cache[key] = header.ensure_paragraph_format(
             base_para_pr_id=base, alignment=align, line_spacing_percent=133,
             heading={'type': 'NONE'}, tab_pr_id_ref=tabs,
-            margins=dict(intent=0, left=inset, right=0, prev=layout['before'], next=after),
+            margins=dict(intent=0, left=inset, right=0, prev=before, next=after),
             break_setting={'keep_lines': True, 'keep_with_next': mode == 'title', 'page_break_before': False})
     return cache[key], size
 

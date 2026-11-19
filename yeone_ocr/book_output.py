@@ -43,21 +43,34 @@ def _source_records(work, doc, preferred, limit=3):
 
     # A PDF with its own text can demonstrate the body style even before OCR.
     # Do not fabricate roles from guessed font sizes or substitute unrelated text.
+    import pymupdf
     from .schema import PageReading, Region, Paragraph, Column
+    flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
     selected = []
     for n in dict.fromkeys([*preferred, *range(1, len(doc) + 1)]):
         if not 1 <= n <= len(doc):
             continue
-        lines = doc[n - 1].get_text().splitlines()
-        paragraphs = [Paragraph(columns=[Column(text=line)]) for line in lines if line.strip()]
-        if paragraphs:
-            reading = PageReading(pdf_page=n, regions=[Region(id="pdf-text", kind="본문", paragraphs=paragraphs)])
+        page = doc[n - 1]
+        width, height = page.cropbox.width, page.cropbox.height
+        regions = []
+        for block in page.get_text('dict', flags=flags, sort=True)['blocks']:
+            for line in block.get('lines', []):
+                text = ''.join(span['text'] for span in line['spans']).strip()
+                if not text:
+                    continue
+                x0, y0, x1, y1 = line['bbox']
+                bbox = [max(0, min(1000, round(1000 * value / extent)))
+                        for value, extent in zip((y0, x0, y1, x1), (height, width, height, width))]
+                regions.append(Region(id=f'pdf-text-{len(regions)}', kind='본문', bbox=bbox,
+                                      paragraphs=[Paragraph(columns=[Column(text=text)])]))
+        if regions:
+            reading = PageReading(pdf_page=n, regions=regions)
             selected.append({"file": work.pdf_path.name, "pdf_page": n, "merged": reading.model_dump()})
             if len(selected) == limit:
                 break
     if not selected:
         raise ValueError("미리보기에 사용할 본문이 없습니다. PDF에서 대표 쪽을 먼저 판독한 뒤 다시 여십시오.")
-    return sorted(selected, key=lambda rec: rec["pdf_page"]), "PDF 글자층 (본문 스타일)"
+    return sorted(selected, key=lambda rec: rec["pdf_page"]), "PDF 글자층 (원본 줄 위치 포함)"
 
 
 def preview_document(pdf, work_dir, output_options, preferred=()):

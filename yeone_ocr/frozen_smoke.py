@@ -33,40 +33,42 @@ COMPARISON_DOCUMENTS = ("LOCAL_OCR.md", "LOCAL_FIRST.md", "AUTOMATIC_OCR.md", "C
                         "GLM_OCR.md", "SURYA_LOCAL.md", "LOCAL_ENGINE_COMPARISON.md", "release-notes.md", "AB_OCR_PROVENANCE.json")
 
 
-def whole_book_rules_probe(folder) -> dict:
+def quick_book_rules_probe(folder) -> dict:
     import pymupdf
     from types import SimpleNamespace
     from .rule_generation import generate_rule, save_generated
     from .gui_rule_generation import BookRuleDialog
     from .presets import load_preset
+
     assert callable(BookRuleDialog.apply_result)
-    source = folder / 'whole-book-rules.pdf'
+    source = folder / 'book-rules.pdf'
     with pymupdf.open() as document:
-        for _ in range(13):
+        for _ in range(30):
             document.new_page(width=150, height=200)
+        document.set_toc([[1, 'Index', 28]])
         document.save(source)
     seen = []
+
     def request(**kwargs):
-        number = json.loads(kwargs['prompt'])['evidence']['pages'][0]['pdf_page']
-        seen.append(number)
-        assert len(kwargs['images']) == 5
-        payload = {'rule_json': json.dumps({'schema': 1, 'headings': {'section': [f'Heading {number}']}}),
-                   'types': ['각주', '문헌 목록'] if number == 13 else ['본문'],
+        pages = [row['pdf_page'] for row in json.loads(kwargs['prompt'])['evidence']['pages']]
+        seen.append(pages)
+        assert len(kwargs['images']) == len(pages) <= 8
+        payload = {'rule_json': json.dumps({'schema': 1, 'headings': {'section': ['Example heading']}}),
+                   'sample_types': [{'pdf_page': n, 'types': ['색인' if n == 28 else '본문']} for n in pages],
                    'summary': 'Synthetic structure', 'warnings': []}
         return json.dumps(payload), True, 'stop', {}, 'offline-fixture'
+
     client = SimpleNamespace(request=request)
     result = generate_rule(source, client=client, cache_dir=folder / 'rule-cache')
-    assert seen == list(range(1, 14))
-    assert result['type_pages']['각주'] == [13]
-    assert result['type_pages']['문헌 목록'] == [13]
-    assert len(result['rule']['headings']['section']) == 13
-    seen.clear()
+    assert len(seen) == 1 and 28 in seen[0]
+    assert result['coverage']['local_scanned_pages'] == 30
+    assert result['type_pages']['색인'] == [28]
     resumed = generate_rule(source, client=client, cache_dir=folder / 'rule-cache')
-    assert not seen and resumed['coverage']['cached_pages'] == 13
+    assert len(seen) == 1 and result['type_pages'] == resumed['type_pages']
     saved = save_generated(result, folder / 'generated-rules')
-    assert len(load_preset(saved).headings['section']) == 13
-    return {'pages': 13, 'full_page_and_detail_images': True, 'rare_types_detected': True,
-            'cached_pages': 13, 'validated_rule_saved': True, 'network_calls': 0, 'ai_response': 'mock'}
+    assert list(load_preset(saved).headings['section']) == ['Example heading']
+    return {'local_pages': 30, 'sample_pages': seen[0], 'mock_requests': 1,
+            'validated_rule_saved': True, 'network_calls': 0}
 
 
 def comparison_resources_probe() -> dict:
@@ -1632,7 +1634,7 @@ def run(report_path: Path) -> int:
             assert hwpx.with_name(hwpx.stem+'_normalization.html').is_file()
             return {"pipeline": "mock PDF → OCR records → HWPX/DOCX → normalization/review", "network_calls": 0}
         check("offline-ocr-pipeline", pipeline_probe)
-        check("whole-book-rule-generation-and-resume", lambda: whole_book_rules_probe(folder))
+        check("quick-book-rule-generation-and-cache", lambda: quick_book_rules_probe(folder))
         check("source-preservation-and-exact-evaluation", lambda: source_preservation_probe(folder))
         check("bookmark-selection-and-body-boundaries", lambda: bookmark_section_probe(folder))
         check("bookmark-side-by-side-edit-and-save", lambda: bookmark_edit_probe(folder))

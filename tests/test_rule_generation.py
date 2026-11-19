@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pymupdf
 import pytest
 
-from yeone_ocr.rule_generation import (SCHEMA, choose_pages, collect_evidence,
+from yeone_ocr.rule_generation import (QUICK_SCHEMA, choose_pages, collect_evidence,
                                        generate_rule, save_generated, validate_response)
 from yeone_ocr.presets import load_preset
 from yeone_ocr.state import Work
@@ -34,6 +34,9 @@ def client_for(text=None):
         data = json.loads(text or response())
         if 'types' in kwargs['schema']['properties']:
             data['types'] = ['본문']
+        if 'sample_types' in kwargs['schema']['properties']:
+            pages = json.loads(kwargs['prompt'])['evidence']['pages']
+            data['sample_types'] = [{'pdf_page': page['pdf_page'], 'types': ['본문']} for page in pages]
         return json.dumps(data), True, 'stop', {'input': 10}, 'fake'
     return SimpleNamespace(request=Mock(side_effect=answer))
 
@@ -46,6 +49,43 @@ def test_sampling_covers_book_and_bookmarks_with_twelve_page_limit():
         pages = choose_pages(doc)
     assert len(pages) == 12
     assert {1, 2, 3, 10, 40, 70, 100} <= set(pages)
+
+
+def test_quick_analysis_scans_all_pages_and_only_requests_one_representative_batch(tmp_path):
+    pdf = tmp_path / 'formats.pdf'
+    with pymupdf.open() as doc:
+        for number in range(1, 49):
+            page = doc.new_page()
+            if number in (4, 5, 46):
+                if number != 5:
+                    page.insert_text((40, 40), 'Contents' if number == 4 else 'Index')
+                for n in range(9):
+                    page.insert_text((40, 70 + n * 20), f'Entry .............. ({n + 1})')
+            if 6 <= number <= 45:
+                for n in range(7):
+                    page.insert_text((40, 40 + n * 20), 'A long line of continuous main text in the book.')
+        doc.set_toc([[1, 'Contents', 4], [1, 'Chapter One', 6], [1, 'Index', 46]])
+        doc.save(pdf)
+    client = client_for()
+    result = generate_rule(pdf, client=client)
+    report = result['coverage']
+    client.request.assert_called_once()
+    assert report['local_scanned_pages'] == 48
+    assert report['analyzed_pages'] == [4, 5, 6, 26, 46]
+    assert len(client.request.call_args.kwargs['images']) == len(report['analyzed_pages'])
+    assert result['rule']['page_types']['pages']['목차'] == [4, 5]
+    assert result['rule']['page_types']['pages']['색인'] == [46]
+    assert not report['whole_book_visually_reviewed']
+
+
+def test_local_only_does_not_check_subscription_or_claim_unreadable_pages(tmp_path):
+    pdf = pdf_file(tmp_path, 20)
+    with patch('yeone_ocr.subscriptions.pick') as pick:
+        result = generate_rule(pdf, plan='로컬만')
+    pick.assert_not_called()
+    assert result['coverage']['local_scanned_pages'] == 20
+    assert result['coverage']['analyzed_pages'] == []
+    assert len(result['coverage']['unresolved_pages']) == 20
 
 
 def test_matching_ocr_is_read_without_changes_and_mismatched_ocr_is_excluded(tmp_path):
@@ -77,7 +117,7 @@ def test_generation_validates_and_preserves_original_and_existing_rule(tmp_path)
     assert result['coverage']['selected_pages'] == [1]
     assert not result['coverage']['whole_book_visually_reviewed']
     request = client.request.call_args.kwargs
-    assert request['schema'] == SCHEMA and len(request['images']) == 1
+    assert request['schema'] == QUICK_SCHEMA and len(request['images']) == 1
     assert 'untrusted evidence' in request['system']
     first = save_generated(result, tmp_path / 'rules')
     content = first.read_bytes()
@@ -141,7 +181,7 @@ def test_dialog_previews_without_applying_and_requires_current_book(tmp_path):
     try:
         result = generate_rule(pdf, client=client_for())
         dialog.events.put(('done', result)); dialog.poll()
-        assert '전체 2쪽' in dialog.preview.get('1.0', 'end')
+        assert 'PDF 2쪽 로컬 검사 · AI 대표 2쪽 검토' in dialog.preview.get('1.0', 'end')
         app.use_book_rule.assert_not_called()
         with patch('yeone_ocr.gui_rule_generation.rules_dir', return_value=tmp_path / 'rules'):
             dialog.apply_result()

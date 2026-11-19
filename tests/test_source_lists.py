@@ -102,6 +102,8 @@ def test_writer_uses_source_pdf_two_columns(tmp_path):
 def test_attached_index_numbers_are_isolated_reordered_and_tabbed_before_prose(tmp_path):
     from yeone_ocr.blocks import assemble_blocks
     from yeone_ocr.document_editing import prepare_records
+    from yeone_ocr.hwpx_writer import TemplateLook, write_hwpx
+    from yeone_ocr.presets import resolve_preset
 
     pdf = pymupdf.open()
     page = pdf.new_page(width=600, height=800)
@@ -120,8 +122,15 @@ def test_attached_index_numbers_are_isolated_reordered_and_tabbed_before_prose(t
     pdf.close()
     assert all(r['paragraphs'][0]['cont'] for r in regions)
     blocks = assemble_blocks(prepared, layout='flow', edit_paragraphs=True)
+    template = tmp_path / 'index-template.hwpx'
+    with HwpxDocument.new() as doc:
+        doc.oxml.headers[0].ensure_style('색인 항목', style_type='PARA', para_pr_id_ref=1,
+                                        char_pr_id_ref=doc.styles.ensure_run(size=13))
+        doc.add_paragraph('template fixture')
+        doc.save_to_path(str(template))
     output = tmp_path/'index.hwpx'
-    stats = build_hwpx(blocks, str(output), source_pdf=source)
+    stats = write_hwpx(blocks, str(output), TemplateLook(str(template), preset=resolve_preset('basic')),
+                       source_pdf=source)
     assert stats['source_index_pages'] == 1 and stats['toc_aligned'] == 8
     with HwpxDocument.open(output) as doc:
         rows = [p.element for p in doc.paragraphs if paragraph_text(p.element).startswith('Entry')]
@@ -129,7 +138,9 @@ def test_attached_index_numbers_are_isolated_reordered_and_tabbed_before_prose(t
         assert rows[0].find('.//'+HP+'colPr').get('colCount') == '2'
         assert rows[4].get('columnBreak') == '1'
         header = doc.oxml.headers[0].element
+        style = next(node.get('id') for node in header.iter(HH + 'style') if node.get('name') == '색인 항목')
         for p in rows:
+            assert p.get('styleIDRef') == style
             assert p.find('.//'+HP+'tab').get('leader') == '0'
             pr = header.find('.//'+HH+'paraPr[@id="'+p.get('paraPrIDRef')+'"]')
             tab = header.find('.//'+HH+'tabPr[@id="'+pr.get('tabPrIDRef')+'"]')

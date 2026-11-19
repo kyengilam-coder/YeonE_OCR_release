@@ -391,6 +391,10 @@ class TemplateLook:
         from .verify import numbered_paragraph_formats
         self._numbering = numbered_paragraph_formats(self.header.element)
         self.styles = _ensure_basic_styles(doc, self.preset, template=True) if self.preset.id == "basic" or self.preset.citation else template_styles(doc)
+        self._style_sizes = {node.get('id'): int(node.get('height', '0')) / 100
+                             for node in self.header.element.iter(HH + 'charPr') if node.get('height', '').isdigit()}
+        self._style_alignment = {node.get('id'): node.find(HH + 'align').get('horizontal')
+                                 for node in self.header.element.iter(HH + 'paraPr') if node.find(HH + 'align') is not None}
         self.base = self.styles.get("바탕글") or {"id": "0", "type": "PARA", "para": "0", "char": "0"}
         self.extra_stats = {"styles": {}, "missing": [], "template_numbering": {},
                             "template_dropped": dropped, "page_number_from_template": self.has_page_num}
@@ -400,11 +404,33 @@ class TemplateLook:
         self._author_char_ids = {style.get("id") for style in self.header.element.iter(HH + "charPr")}
         return doc
 
-    def para_style(self, role: str, *, marked_entry=False) -> dict:
+    def para_style(self, role: str, *, marked_entry=False, layout=None) -> dict:
         st_ = self.extra_stats
+        layout = layout or {}
         names = self.para_styles.get(role, ("바탕글",))
         if marked_entry and "제목-본초명" in names:
             names = ("제목-본초명", *(name for name in names if name != "제목-본초명"))
+        else:
+            contents = layout.get('source_contents')
+            aliases = ('목차', '차례', 'toc', 'contents') if contents else (
+                ('색인', 'index') if 'source_index' in layout or layout.get('source_index_title') else ())
+            if aliases:
+                is_title = role in HEADING_ROLES
+                list_styles = [name for name, st in self.styles.items() if st['type'] == 'PARA'
+                               and name.casefold().startswith(aliases)
+                               and (any(word in name.casefold() for word in ('제목', 'title', 'heading')) == is_title)]
+                if list_styles:
+                    names = list_styles
+            shape = layout.get('source_typography', {})
+            size = shape.get('size') or (layout.get('source_body_size') if role == 'body' else None)
+            if size or shape.get('alignment'):
+                choices = [name for name in names if name in self.styles and self.styles[name]['type'] == 'PARA']
+                def distance(name):
+                    st = self.styles[name]
+                    alignment = shape.get('alignment')
+                    delta = abs(self._style_sizes.get(st['char'], size or 0) - size) if size else 0
+                    return (bool(alignment and self._style_alignment.get(st['para']) != alignment), delta)
+                names = sorted(choices, key=distance) if choices else names
         for name in names:
             st = self.styles.get(name)
             if st and st["type"] == "PARA":
@@ -425,7 +451,7 @@ class TemplateLook:
         return None
 
     def _para(self, b: Block, role: str, *, spans=(), cstyles=()) -> Para:
-        st = self.para_style(role, marked_entry=role == 'entry' and b.layout.get('kind') == 'entry')
+        st = self.para_style(role, marked_entry=role == 'entry' and b.layout.get('kind') == 'entry', layout=b.layout)
         ppr = st["para"]
         return Para(text=b.text, key=role, base=st["char"], para_pr=ppr, style=st["id"], spans=list(spans), notes=list(b.memos), anchors=list(b.anchors),
                     cstyles=list(cstyles), cs_fill="small" if role == "small" else None, heading=role in HEADING_ROLES, skip_if_empty=role in HEADING_ROLES)
@@ -557,7 +583,7 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
     contents_rows = set()
     contents_width = round(_body_size_mm(doc)[0] * HWPUNIT_PER_MM)
     contents_formats = {}
-    contents_chars = {}
+    sized_chars = {}
 
     def bookmark(p, label: str, cpr) -> None:
         """원본 쪽 책갈피(내용별 문서). 같은 이름이 또 나오면 (2)·(3) 을 붙인다."""
@@ -568,6 +594,8 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
 
     def write(para: Para, layout=None) -> None:
         layout=layout or {}
+        source_shape = layout.get('source_typography', {})
+        source_size = source_shape.get('size') or (layout.get('source_body_size') if para.key == 'body' else None)
         if 'page_break_before' in layout:
             para=replace(para,page_break=bool(layout['page_break_before']))
         if layout.get('source_index_title'):
@@ -589,16 +617,19 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
             index_rows[p.element] = layout['source_index']
         if contents:
             contents_rows.add(p.element)
-            ref, size = paragraph_format(doc, para.para_pr, text, contents, contents_width, contents_formats)
+            ref, source_size = paragraph_format(doc, para.para_pr, text, contents, contents_width, contents_formats,
+                                                source_shape)
             p.element.set('paraPrIDRef', str(ref))
 
-        def add_run(value, cpr):
-            if not contents:
-                return p.add_run(value, char_pr_id_ref=cpr)
-            key = (cpr, size)
-            if key not in contents_chars:
-                contents_chars[key] = doc.oxml.ensure_run_style(base_char_pr_id=cpr, size=size)
-            return add_contents_run(p, value, contents_chars[key], contents)
+        def add_run(value, cpr, character_role=None):
+            if source_size and not character_role:
+                key = (cpr, source_size)
+                if key not in sized_chars:
+                    sized_chars[key] = doc.oxml.ensure_run_style(base_char_pr_id=cpr, size=source_size)
+                cpr = sized_chars[key]
+            if contents:
+                return add_contents_run(p, value, cpr, contents)
+            return p.add_run(value, char_pr_id_ref=cpr)
         if para.styled or para.spans or notes or para.anchors:
             stats["marks"] += sum(1 for _, k in split_marks(text) if k == "mark")
             segs = styled_runs(text, para.spans if highlight else (), notes)
@@ -618,10 +649,11 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                 cuts = sorted({pos, end} | {o for o in amap if pos < o < end}
                               | ({i for i in range(pos + 1, end) if cs[i] != cs[i - 1]} if cs is not None else set()))
                 for a, e in zip(cuts, cuts[1:]):                       # 책갈피 자리·글자 스타일이 바뀌는 자리에서 조각을 가른다
-                    cpr = look.char(para, kind, cs[a] if cs is not None and a < len(cs) else None)
+                    character_role = cs[a] if cs is not None and a < len(cs) else None
+                    cpr = look.char(para, kind, character_role)
                     for label in amap.pop(a, []):
                         bookmark(p, label, cpr)
-                    r = add_run(text[a:e], cpr)
+                    r = add_run(text[a:e], cpr, character_role)
                     if look.count_pieces and kind in GRADES and text[a:e].strip():
                         stats[kind] += 1
                     for m in (msgs if a == pos else []):
@@ -641,7 +673,7 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
         look.after_para(doc, para)
         if layout and not contents:
             flags={k:layout[k] for k in ('keep_with_next','keep_lines','widow_orphan') if k in layout}
-            alignment=layout.get('alignment')
+            alignment = source_shape.get('alignment', layout.get('alignment'))
             preserve=getattr(look,'preserve_template_styles',False) and not para.heading
             if preserve:
                 # Merely assigning styleIDRef while replacing its paragraph
@@ -650,11 +682,13 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                 flags={'keep_with_next':True} if para.key=='citation_source' and layout.get('keep_with_next') else {}
                 alignment=alignment if layout.get('kind')=='body' and layout.get('evidence') in (
                     'image-reviewed-layout','measured-isolated-centered-paragraph') else None
-            if not preserve or flags or alignment is not None:
+            margins = {name: source_shape[key] for name, key in (('left', 'left'), ('prev', 'before'), ('intent', 'indent'))
+                       if key in source_shape}
+            if not preserve or flags or alignment is not None or margins:
                 flags['page_break_before']=False  # the paragraph's pageBreak flag is the single break source
                 header=doc.oxml.headers[0]
                 ref=header.ensure_paragraph_format(base_para_pr_id=p.element.get('paraPrIDRef','0'),
-                                                   alignment=alignment,break_setting=flags)
+                                                   alignment=alignment, margins=margins, break_setting=flags)
                 p.element.set('paraPrIDRef',str(ref))
                 p.section.mark_dirty()
 

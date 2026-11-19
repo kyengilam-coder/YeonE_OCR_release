@@ -343,9 +343,12 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     sp, me = grade_of(reg.id, i, raw, t, len(prefix))
                     bd = bold_of(n, reg.id, i, raw, t, len(prefix))
                     t = prefix + t
+                    layout_hint = rec.get('_common_layout_regions', {}).get(reg.id, {})
+                    title = layout_hint.get('kind') in ('book','volume','chapter','section','subsection','entry')
+                    starts_paragraph = title or 'indent' in layout_hint.get('source_typography', {})
                     inferred = edit_paragraphs and reg.id in rec.get('_document_continuations', ())
                     joinable = ((i == 0 and not first_text_done) if not flow else True) or inferred
-                    if (join_pages or inferred) and joinable and p.continues_from_previous:
+                    if not starts_paragraph and (join_pages or inferred) and joinable and p.continues_from_previous:
                         if flow:                                # 바로 앞 글 블록(쪽 끝 확인 목록은 건너뜀)에, 소주는 소주끼리·본문은 본문끼리만 잇는다
                             last = next((b for b in reversed(blocks) if b.type != "uncertain"), None)
                             prev = last if last is not None and last.type == "para" and (last.kind == "소주") == (reg.kind == "소주") else None
@@ -362,9 +365,11 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                             first_text_done = True
                             continue
                     pb = Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me, cstyles=bd,
-                               layout=dict(rec.get('_common_layout_regions',{}).get(reg.id,{})))
-                    if pb.layout.get('kind') in ('book','volume','chapter','section','subsection','entry'):
+                               layout=dict(layout_hint))
+                    if title:
                         pb.type='heading';pb.kind='제목';pb.level=pb.layout.get('level',2)
+                    elif reg.kind != '소주' and rec.get('_source_body_size'):
+                        pb.layout['source_body_size'] = rec['_source_body_size']
                     if anchored:
                         place(pb, 0)
                     blocks.append(pb)

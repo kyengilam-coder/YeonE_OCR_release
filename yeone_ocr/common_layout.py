@@ -6,7 +6,7 @@ import re
 from .schema import PageReading, paragraph_text, TITLE_KINDS, TEXT_KINDS
 
 NUM=r'[0-9一二三四五六七八九十百千零〇壹貳參肆伍陸柒捌玖拾일이삼사오육칠팔구십백천IVXLCDM]+'
-MAJOR=re.compile(rf'^(?:[^。.!?？！,，:：]{{0,32}}卷\s*第?\s*{NUM}|第\s*{NUM}\s*[卷章編编篇部](?:[\s:：.-]*[^。.!?？！]{{1,32}})?|제\s*{NUM}\s*[권장편](?:[\s:：.-]*[^.!?]{{1,40}})?|(?:book|volume|part|chapter)\s+{NUM}(?:[\s:.-]+[^.!?]{{1,50}})?)$',re.I)
+MAJOR=re.compile(rf'^(?:[^。.!?？！,，:：]{{0,32}}卷\s*[第之]?\s*{NUM}|第\s*{NUM}\s*[卷章編编篇部](?:[\s:：.-]*[^。.!?？！]{{1,32}})?|제\s*{NUM}\s*[권장편](?:[\s:：.-]*[^.!?]{{1,40}})?|(?:book|volume|part|chapter)\s+{NUM}(?:[\s:.-]+[^.!?]{{1,50}})?)$',re.I)
 SECTION=re.compile(rf'^(?:第\s*{NUM}\s*[節节項项](?:[\s:：.-]*[^。.!?？！]{{1,32}})?|제\s*{NUM}\s*절(?:[\s:：.-]*[^.!?]{{1,40}})?|section\s+{NUM}(?:[\s:.-]+[^.!?]{{1,50}})?)$',re.I)
 FRONT={'序','序言','前言','凡例','目錄','目录','總目','总目','內容提要','内容提要','索引','後記','后记','跋','輯復本','辑复本','서문','목차','일러두기','후기','目次','序文','はじめに','あとがき','Contents','Preface','Introduction','Index'}
 SENTENCE=re.compile(r'[。.!?？！,，;；]')
@@ -95,13 +95,17 @@ def apply_common_layout(blocks):
     blocks=joined
     stats={'centered_headings':0,'centered_body':0,'chapter_page_breaks':0,'widow_orphan_protection':0}
     seen=False;heading_chain=False
+    previous_page = None
     for block in blocks:
         hint=block.layout
         if block.type=='heading':
             kind=hint.get('kind') or ('chapter' if block.level<=1 else 'section')
-            hint.update(alignment='CENTER',keep_with_next=True,widow_orphan=True,keep_lines=False)
-            hint['page_break_before']=bool(seen and kind in ('book','volume','chapter') and block.kind not in ('그림제목','표제목'))
-            stats['centered_headings']+=1;stats['chapter_page_breaks']+=int(hint['page_break_before'])
+            alignment = hint.get('source_typography', {}).get('alignment', 'CENTER')
+            hint.update(alignment=alignment,keep_with_next=True,widow_orphan=True,keep_lines=False)
+            already_on_source_page = bool(hint.get('source_typography') and block.page and block.page == previous_page)
+            hint['page_break_before']=bool(seen and not already_on_source_page and kind in ('book','volume','chapter')
+                                           and block.kind not in ('그림제목','표제목'))
+            stats['centered_headings']+=int(alignment == 'CENTER');stats['chapter_page_breaks']+=int(hint['page_break_before'])
             heading_chain=True
         elif block.type=='para':
             follows_title=block.role=='citation_source' or bool(heading_chain and hint.get('alignment')=='CENTER' and len(block.text)<=90)
@@ -110,5 +114,7 @@ def apply_common_layout(blocks):
             if hint.get('alignment')=='CENTER':stats['centered_body']+=1
             heading_chain=follows_title
         elif block.type=='spacer':hint.update(keep_with_next=heading_chain,widow_orphan=False,keep_lines=False)
-        if block.text.strip() or block.type in ('image','table'):seen=True
+        if block.text.strip() or block.type in ('image','table'):
+            seen = True
+            previous_page = block.page
     return blocks,stats

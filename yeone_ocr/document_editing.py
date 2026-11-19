@@ -338,9 +338,11 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
                     record.setdefault('_common_layout_regions',{})[region.id]={'kind':role,'level':{'chapter':1,'section':2,'subsection':3}[role],
                         'alignment':'CENTER','evidence':'template-member-and-source-citation' if member and template_role else 'template-catalog-and-source-layout' if catalog and template_role else 'template-title-style' if template_role else 'book-rule-exact-title'}
     if source_pdf is not None:
-        from .contents_layout import prepare_contents_pages
+        from .contents_layout import bookmark_contents, prepare_contents_pages
         from .index_layout import prepare_list_pages
-        prepare_list_pages(output, source_pdf, set((page_types or {}).get('색인', ())))
+        types = page_types or {}
+        contents_pages = bookmark_contents(source_pdf) | set(types.get('목차', ())) | set(types.get('차례', ()))
+        prepare_list_pages(output, source_pdf, set(types.get('색인', ())), contents_pages=contents_pages)
         prepare_contents_pages([r for r in output if not r.get('_source_index_page')], source_pdf, page_types)
     names = known_entries(output)
     from .citation_layout import heading_key
@@ -389,6 +391,9 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
             previous = not bool(centered or TOC.search(text) or META.search(text) or text.isdecimal())
         record['merged'] = reading.model_dump()
         record['_document_continuations'] = inferred
+    if source_pdf is not None:
+        from .source_typography import measure_source_typography
+        measure_source_typography(output, source_pdf, infer_titles=common_layout)
     return output, names
 
 

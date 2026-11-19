@@ -1,13 +1,16 @@
 import json
 import threading
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from tests.test_rule_generation import pdf_file
-from yeone_ocr.rule_generation import generate_rule
 from yeone_ocr.rule_book_analysis import _review_contents_type, merge_findings
+from yeone_ocr.rule_generation import generate_rule as _generate_rule
+
+generate_rule = partial(_generate_rule, deep_analysis=True)
 
 
 def page_client(stop=None, fail_page=None):
