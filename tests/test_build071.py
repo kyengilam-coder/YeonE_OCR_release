@@ -25,6 +25,17 @@ class BuildNormalization(unittest.TestCase):
         self.assertEqual(self.work.load_state()['last_build']['outputs'],[str(stem.with_suffix('.hwpx').resolve())])
         self.assertEqual(self.work.record_path(1).read_text(encoding='utf-8'),self.original)
 
+    def test_pdf_failure_reports_that_the_hwpx_was_saved(self):
+        stem = self.root / 'combined'
+        with patch.object(cli, 'make_textlayer', return_value=1), patch.object(cli, 'log') as log:
+            rc = self.run_build(self.args('--out', str(stem), '--reuse-records',
+                                          '--textlayer-pdf', '--no-normalize'))
+
+        self.assertEqual(rc, 1)
+        self.assertTrue(stem.with_suffix('.hwpx').is_file())
+        self.assertFalse(stem.with_suffix('.pdf').exists())
+        log.assert_any_call("주의: HWPX는 출력 폴더에 저장했습니다. 검색 가능한 PDF 만들기만 실패했습니다.")
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

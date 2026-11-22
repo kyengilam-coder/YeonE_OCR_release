@@ -38,6 +38,24 @@ class ClippingTests(unittest.TestCase):
         lines=[layer.Line('h',[('*',(i/n,0,(i+1)/n,1)) for i in range(n)],'uniform') for n in (3,2)]
         self.check_roundtrip(lines,'*****')
 
+    def test_wide_ink_gaps_do_not_split_latin_words_or_drop_spaces(self):
+        from yeone_ocr.schema import PageReading
+        from PIL import Image
+
+        text = 'Su LE ee'
+        chars = [(c, (.14 + i*.09, .72, .17 + i*.09, .74)) for i, c in enumerate(text)]
+        line = layer.Line('h', chars, 'ink/group')
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder) / 'result.pdf'
+            with pymupdf.open() as doc, Image.new('RGB', (480, 720)) as image:
+                doc.new_page(width=480, height=720)
+                with patch.object(layer, 'plan_page', return_value=[line]):
+                    layer.searchable_pdf(doc, [1], lambda n: (PageReading(pdf_page=n), image,
+                                                               (0, 0, 480, 720), False), out)
+            with pymupdf.open(out) as doc:
+                self.assertEqual(layer.own_text(doc, 1), [text])
+                self.assertTrue(doc[0].search_for(text))
+
     def test_dense_overlapping_boxes_do_not_force_text_outside_page(self):
         text=''.join(chr(0x4e00+i) for i in range(80))
         line=layer.Line('h',[(c,(.05+i*.006,.1,.10+i*.006,.13)) for i,c in enumerate(text)],'ink~')

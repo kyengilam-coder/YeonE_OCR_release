@@ -594,6 +594,13 @@ def _em(spans, chars) -> float:
     return float(np.median(d)) if d else size
 
 
+def _latin_phrases(text: str):
+    """Find Latin words joined by OCR spaces, without claiming nearby CJK text."""
+    letters = "".join("a" if c.isalpha() and "LATIN" in unicodedata.name(c, "") else
+                      " " if c == " " else "|" for c in text)
+    return re.finditer(r"a+(?: +a+)+", letters)
+
+
 def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
     """한 줄의 내용 연산. 틈(반 칸 넘게 빈 자리) 없이 이어진 글자 구간마다 Tm 으로 시작점에 서서 구간 길이에 꼭 맞게 Tz(가로 비율)를 정해
     한 번에 쓴다 — 글자 사이가 0.1칸만 벌어져도 추출기(poppler 등)가 빈칸을 넣는다. 구간 사이의 큰 틈은 추출기가 빈칸으로 읽는다.
@@ -639,9 +646,13 @@ def line_ops(ln: Line, frame, to_pdf: pymupdf.Matrix, cids: dict) -> str:
     scale = [w / (_pdf_advance(c) * fs) for w, c in zip(wid, cs)]
     starts = [m - w / 2 for m, w in zip(mids, wid)]
     ends = [m + w / 2 for m, w in zip(mids, wid)]
+    # Ink-derived boxes may put even consecutive Latin letters several ems
+    # apart. A single text run preserves the literal spaces and whole words.
+    joined = {i for phrase in _latin_phrases("".join(cs))
+              for i in range(phrase.start() + 1, phrase.end())} if " " in cs else set()
     runs, cur = [], [0]
     for i in range(1, len(cs)):
-        if starts[i] - ends[i - 1] > 0.5 * fs or scale[i] != scale[i - 1]:   # 틈, 또는 Tz 가 달라져야 하는 자리
+        if i not in joined and (starts[i] - ends[i - 1] > 0.5 * fs or scale[i] != scale[i - 1]):
             runs.append(cur); cur = []
         cur.append(i)
     runs.append(cur)
@@ -887,9 +898,10 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
                 normalized = re.sub(r"\s+", " ", extracted)
                 for line in lines:
                     text = "".join(c for c,_ in line.chars if c)
-                    for left,right in re.findall(r"\b([^\W\d_]+) +(?=([^\W\d_]+)\b)", text):
-                        if not re.search(re.escape(left)+r"\s+"+re.escape(right), normalized):
-                            bad = True
+                    if " " in text:
+                        for phrase in _latin_phrases(text):
+                            if re.sub(r" +", " ", text[phrase.start():phrase.end()]) not in normalized:
+                                bad = True
                 if bad:
                     stats["mismatch"].append(n)
         if stats['mismatch']:

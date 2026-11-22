@@ -1090,10 +1090,15 @@ class ComparisonProject:
         with self._lock:
             return sorted(n for n, page in self._pages.items() if page["runs"])
 
-    def page(self, number):
+    def page(self, number, *, discard_cached=False):
         self._check_page(number)
         with self._lock:
-            return copy.deepcopy(self._pages.get(number, _blank(number)))
+            snapshot = copy.deepcopy(self._pages.get(number, _blank(number)))
+            if discard_cached and self._paged_checkpoints:
+                from .comparison_storage import CheckpointPages
+                if isinstance(self._pages, CheckpointPages):
+                    self._pages.trim()
+            return snapshot
 
     def _touch(self, number):
         self._page_versions[number] = self._page_versions.get(number, 0) + 1

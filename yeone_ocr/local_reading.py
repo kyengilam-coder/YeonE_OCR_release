@@ -26,8 +26,8 @@ def corrected_output_records(records, source):
             output.append(record);continue
         key=str(Path(reference).resolve())
         if key not in projects:
-            projects[key]=ComparisonProject.load(key,source_path=source)
-        project=projects[key];number=record['pdf_page'];page=project.page(number)
+            projects[key]=ComparisonProject.load(key,source_path=source,paged=True,lazy_pages=True)
+        project=projects[key];number=record['pdf_page'];page=project.page(number,discard_cached=True)
         if project.source_sha256!=record['local_first'].get('source_sha256'):
             raise ComparisonError('교정 프로젝트와 판독 기록의 원본을 확인하세요.')
         recovered=_cached_catalog_output(record,page,Path(reference))
@@ -39,7 +39,7 @@ def corrected_output_records(records, source):
         baseline=next((r for r in page['runs'] if r['id']==page['baseline_run_id']),None)
         if baseline is None or project.source_sha256!=record['local_first'].get('source_sha256'):
             raise ComparisonError('교정 프로젝트와 판독 기록의 원본·기준 판독을 확인하세요.')
-        reading=reading_from_run(baseline['raw'],number,'horizontal' if record.get('mode')=='horizontal_zh' else 'vertical',text=project.text(number))
+        reading=reading_from_run(baseline['raw'],number,'horizontal' if record.get('mode')=='horizontal_zh' else 'vertical',text=page['corrected_text'])
         current=copy.deepcopy(record);current['merged']['regions']=reading.model_dump()['regions']
         output.append(annotate_cosmetic_commas(current,page))
     return output

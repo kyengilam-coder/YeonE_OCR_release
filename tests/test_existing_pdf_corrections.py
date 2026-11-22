@@ -46,9 +46,17 @@ class ExistingPDFTests(unittest.TestCase):
                     self.assertIn('校',json.dumps(reading.model_dump(),ensure_ascii=False))
                 finally:image.close()
                 return {'how':{},'chars':5,'pages':1,'stripped':0,'skipped':[],'mismatch':[]}
-            with patch.object(cli,'make_textlayer',side_effect=REAL_TEXTLAYER), \
+            from yeone_ocr.local_reading import corrected_output_records
+            with patch.object(ComparisonProject, 'load', wraps=ComparisonProject.load) as load, \
+                 patch.object(cli,'make_textlayer',side_effect=REAL_TEXTLAYER), \
                  patch('yeone_ocr.textlayer.searchable_pdf',side_effect=build):
                 self.assertEqual(cli.cmd_run(fixture.args()),0)
+                record = fixture.record()
+                view = corrected_output_records([record], str(project.source_path))
+                self.assertIn('校', json.dumps(view[0]['merged'], ensure_ascii=False))
+                output_loads = [call for call in load.call_args_list if call.kwargs.get('lazy_pages')]
+                self.assertEqual(len(output_loads), 2)
+                self.assertTrue(all(call.kwargs.get('paged') for call in output_loads))
             self.assertEqual(record_path.read_bytes(),before)
             self.assertEqual(len(fixture.local_calls),original_ocr_calls)
             self.assertEqual(fixture.calls,[])

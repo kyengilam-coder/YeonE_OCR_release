@@ -2248,11 +2248,14 @@ def cmd_build(args, work: Work | None = None, doc=None):
     if with_pdf:
         try:
             pdf_rc = make_textlayer(args, work, pages, out=work.out_dir / f"{document_stem}.pdf", report=False)
-            if pdf_rc == 130:
-                return 130
-            ok = ok and pdf_rc == 0
         except Exception as e:
-            log(f"오류: 검색 가능한 PDF 를 만들지 못했습니다({type(e).__name__}: {str(e)[:120]}). HWPX 는 그대로입니다."); ok = False
+            log(f"오류: 검색 가능한 PDF를 만들지 못했습니다({type(e).__name__}: {str(e)[:120]}).")
+            pdf_rc = 1
+        if pdf_rc == 130:
+            return 130
+        if pdf_rc and ok:
+            log("주의: HWPX는 출력 폴더에 저장했습니다. 검색 가능한 PDF 만들기만 실패했습니다.")
+        ok = ok and pdf_rc == 0
     return (5 if getattr(args, "_normalization_incomplete", False) else 0) if ok else 1
 
 
@@ -2269,6 +2272,9 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
     # Build a transient output view using its current corrections instead.
     projects = {}
     for number, record in records.items():
+        if CANCEL.is_set():
+            log("중지: 문자 PDF에 사용할 교정 기록 확인을 멈췄습니다. 기존 파일은 보존했습니다.")
+            return 130
         reference = (record.get('local_first') or {}).get('project_path')
         if not reference:
             continue
@@ -2276,16 +2282,16 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
         from .local_reading import reading_from_run
         key = str(Path(reference).resolve())
         if key not in projects:
-            projects[key] = ComparisonProject.load(key, source_path=args.pdf)
+            projects[key] = ComparisonProject.load(key, source_path=args.pdf, paged=True, lazy_pages=True)
         project = projects[key]
-        page = project.page(number)
+        page = project.page(number, discard_cached=True)
         if page.get('corrected_text') is None:
             continue
         baseline = next((r for r in page['runs'] if r['id'] == page['baseline_run_id']), None)
         if baseline is None or project.source_sha256 != record['local_first'].get('source_sha256'):
             raise ComparisonError('교정 프로젝트와 판독 기록의 원본·기준 판독을 확인하세요.')
         corrected = reading_from_run(baseline['raw'], number,
-                    'horizontal' if record.get('mode') == 'horizontal_zh' else 'vertical', text=project.text(number))
+                    'horizontal' if record.get('mode') == 'horizontal_zh' else 'vertical', text=page['corrected_text'])
         record = copy.deepcopy(record)
         record['merged']['regions'] = corrected.model_dump()['regions']
         records[number] = record
