@@ -1,5 +1,6 @@
 """Book output selection and representative HWPX preview."""
 from pathlib import Path
+import json
 import os
 import shutil
 import tempfile
@@ -16,7 +17,7 @@ def select_template(template, layout, path):
         template.set(path)
 
 
-def _source_records(work, doc, preferred, limit=3):
+def _source_records(work, doc, preferred, limit=3, *, adaptive=False):
     """Prefer analyzed types, then pages with a different mix of OCR regions."""
     if work.readings_dir.is_dir() and work.source_matches():
         chosen, fallbacks, known = [], [], set()
@@ -61,7 +62,9 @@ def _source_records(work, doc, preferred, limit=3):
                 x0, y0, x1, y1 = line['bbox']
                 bbox = [max(0, min(1000, round(1000 * value / extent)))
                         for value, extent in zip((y0, x0, y1, x1), (height, width, height, width))]
-                regions.append(Region(id=f'pdf-text-{len(regions)}', kind='본문', bbox=bbox,
+                prefix = 'local-line-pdf' if adaptive else 'pdf-text'
+                regions.append(Region(id=f'{prefix}-{len(regions)}', kind='본문', bbox=bbox,
+                                      reading_direction='세로' if line.get('wmode') else '가로',
                                       paragraphs=[Paragraph(columns=[Column(text=text)])]))
         if regions:
             reading = PageReading(pdf_page=n, regions=regions)
@@ -73,7 +76,7 @@ def _source_records(work, doc, preferred, limit=3):
     return sorted(selected, key=lambda rec: rec["pdf_page"]), "PDF 글자층 (원본 줄 위치 포함)"
 
 
-def preview_document(pdf, work_dir, output_options, preferred=()):
+def preview_document(pdf, work_dir, output_options, preferred=(), *, analysis=None):
     """Build selected pages with the normal writer in a disposable workspace."""
     from .cli import build_outputs, build_parser, preset_ref
     from .pdfio import open_pdf
@@ -83,6 +86,14 @@ def preview_document(pdf, work_dir, output_options, preferred=()):
     source = Work(pdf, work_dir, initialize=False)
     with open_pdf(pdf) as doc, tempfile.TemporaryDirectory(prefix="yeone-preview-") as temporary:
         args = build_parser().parse_args(["build", str(pdf), *output_options, "--no-context-model"])
+        if analysis:
+            from .rule_generation import verify_inputs
+            verify_inputs(analysis)
+            rule_path = Path(temporary) / 'preview-rule.json'
+            rule_path.write_text(json.dumps(analysis['rule'], ensure_ascii=False), encoding='utf-8')
+            args.layout = 'flow'
+            args.preset = str(rule_path)
+            args.template = analysis['rule']['template'] or None
         if not preferred and args.layout == "flow":
             profile = resolve_preset(preset_ref(args)).page_types
             if profile:
@@ -91,7 +102,9 @@ def preview_document(pdf, work_dir, output_options, preferred=()):
                     pages = profile['pages']
                     preferred = tuple(pages[kind][0] for kind in
                                       ('차례', '목차', '색인', '본문', '문헌 목록', '각주') if pages.get(kind))
-        records, origin = _source_records(source, doc, preferred, limit=max(3, min(5, len(set(preferred)))))
+        adaptive = args.layout == 'flow' and bool(resolve_preset(preset_ref(args)).source_sha256)
+        records, origin = _source_records(source, doc, preferred, limit=max(3, min(5, len(set(preferred)))),
+                                          adaptive=adaptive)
         args.docx = False
         args.out = "미리보기"
         staging = Work(pdf, Path(temporary) / "작업자료")

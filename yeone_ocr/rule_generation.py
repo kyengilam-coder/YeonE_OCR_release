@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import uuid
 
-from .presets import DATA, PAGE_TYPES, ROLES, _compile
+from .presets import PAGE_TYPES, ROLES, _compile, resolve_preset
 from .rule_request import sample_pages, template_summary
 
 SCHEMA = {
@@ -43,6 +43,51 @@ Unsupported features (e.g. footnote reconstruction) belong in warnings, not inve
 If no meaningful book rule is supported by these pages, return a conservative basic rule
 and explicitly say so. template must be empty; the application sets the user-selected path.
 """
+
+QUICK_EXAMPLE = {
+    'schema': 1,
+    'field_labels': ['실제로 확인한 항목명'],
+    'headings': {'chapter': ['실제로 확인한 장 제목']},
+    'styles': {'paragraph': {'chapter': ['양식에 있는 스타일 이름']}},
+    'entry': None, 'commentary': None, 'source': None, 'emphasis': None, 'citation': None,
+}
+
+
+def _match_template_styles(data, summary, warnings):
+    """Keep verified, role-compatible names and fill common named roles locally."""
+    if not summary:
+        data.pop('styles', None)
+        return
+    available = {kind: {style.get('name') for style in summary['styles'] if style.get('type') == kind}
+                 for kind in ('PARA', 'CHAR')}
+    defaults = resolve_preset('basic')
+    aliases = {'chapter': ('Heading 1', '제목 1', '장 제목'), 'section': ('Heading 2', '제목 2', '절 제목'),
+               'subsection': ('Heading 3', '제목 3'), 'entry': ('Heading 3', '제목 3'),
+               'body': ('Body Text', '바탕글', 'Normal'), 'small': ('각주', 'Footnote Text'),
+               'caption': ('Caption',), 'quotation': ('Quote', '인용문'), 'citation_source': ('출전',)}
+    proposed = data.get('styles') or {}
+    matched = {}
+    dropped = set()
+    for part, kind, fallback in (('paragraph', 'PARA', defaults.para_styles),
+                                 ('character', 'CHAR', defaults.char_styles)):
+        mapping = proposed.get(part) or {}
+        roles = {}
+        for role in dict.fromkeys((*mapping, *fallback, *(aliases if kind == 'PARA' else ()))):
+            candidates = mapping.get(role, ())
+            dropped.update(name for name in candidates if name not in available[kind])
+            names = [name for name in (*candidates, *fallback.get(role, ()),
+                                      *(aliases.get(role, ()) if kind == 'PARA' else ()))
+                     if name in available[kind]]
+            if names:
+                roles[role] = list(dict.fromkeys(names))
+        if roles:
+            matched[part] = roles
+    if matched:
+        data['styles'] = matched
+    else:
+        data.pop('styles', None)
+    if dropped:
+        warnings.append('양식에서 해당 종류의 스타일을 찾을 수 없어 제외했습니다. ' + ', '.join(sorted(dropped)))
 
 
 def _check_stop(stop):
@@ -148,8 +193,8 @@ def validate_response(text, pdf, template):
     if not isinstance(response['rule_json'], str):
         raise ValueError('AI 규칙 JSON이 없습니다.')
     data = json.loads(response['rule_json'])
-    if isinstance(data, dict) and 'page_types' in data:
-        raise ValueError('쪽 유형 목록은 프로그램이 쪽별 분석 결과로 작성합니다.')
+    if isinstance(data, dict) and {'page_types', 'paper', 'source_sha256'}.intersection(data):
+        raise ValueError('쪽 유형·용지·원본 지문은 프로그램이 원본에서 직접 작성합니다.')
     if isinstance(data, dict) and 'schema' not in data:
         data['schema'] = 1
         response['warnings'].append('AI 응답에 빠진 규칙 스키마 번호를 1로 보완했습니다.')
@@ -220,13 +265,14 @@ def _quick_rule(pdf, template, pages, work_dir, plan, gemini_model, stop, progre
     import pymupdf
     from . import subscriptions
     from .claude_subscription import SubscriptionError
-    from .rule_layout_scan import scan_layout
-    from .state import write_atomic
+    from .rule_layout_scan import saved_ocr_fields, scan_layout
+    from .state import Work, write_atomic
 
+    profile = {}
     with pymupdf.open(pdf) as doc:
         count = len(doc)
         manual = sample_pages(pages, count) if pages.strip() else None
-        types, uncertain, selected = scan_layout(doc, stop=stop, progress=progress)
+        types, uncertain, selected = scan_layout(doc, stop=stop, progress=progress, profile=profile)
     if manual:
         selected = manual
     warnings = []
@@ -236,6 +282,7 @@ def _quick_rule(pdf, template, pages, work_dir, plan, gemini_model, stop, progre
     aligned = []
     request_count = 0
     cache_hit = False
+    style_summary = None
     if client is None and plan != '로컬만':
         progress('대표 쪽 검토에 사용할 구독을 확인하고 있습니다…')
         selected_plan, reason = subscriptions.pick(plan)
@@ -252,14 +299,16 @@ def _quick_rule(pdf, template, pages, work_dir, plan, gemini_model, stop, progre
         progress(f'로컬 검사 {count}쪽 완료 · 대표 {len(selected)}쪽 준비 중')
         images, evidence = collect_evidence(pdf, template, ','.join(map(str, selected)), work_dir, stop,
                                            reference_ocr=reference_ocr)
+        style_summary = evidence['template']
         for page in evidence['pages']:
             page['local_types'] = [kind for kind, numbers in types.items() if page['pdf_page'] in numbers]
-        examples = {name: json.loads((DATA / name).read_text(encoding='utf-8'))
-                    for name in ('preset_basic.json', 'book_rule_kaibao.json', 'book_rule_yaolun.json')}
-        for example in examples.values():
-            example['template'] = ''
         system = SYSTEM + ('\nInfer reusable book format, not a transcription or a list of every heading. '
-                           'Prioritize contents, main text, and index formats. '
+                           'Inspect headings, ordinary paragraph starts, contents, indexes and footnotes. '
+                           'List literal field_labels only for visible recurring paragraph labels in this PDF, '
+                           'without brackets or colon. Ignore labels inside quotations or running prose. '
+                           'If a template is supplied, map roles to exact existing style names of the same type. '
+                           'Compare size, alignment, spacing and use in samples with the source, including '
+                           'styles whose names are unfamiliar. Omit mappings without a reasonable match. '
                            'For sample_types, classify the supplied PDF page numbers only. Distinguish prose body '
                            'from contents entries, page headers and notes. Use 차례 for a section titled 차례, '
                            '목차 for other contents, and 색인 for lookup entries. Describe how lists and body '
@@ -273,7 +322,8 @@ def _quick_rule(pdf, template, pages, work_dir, plan, gemini_model, stop, progre
                     excerpt[key + '_truncated'] = True
             prompt_pages.append(excerpt)
         prompt_evidence = {**evidence, 'pages': prompt_pages}
-        prompt = json.dumps({'format_examples_only': examples, 'evidence': prompt_evidence}, ensure_ascii=False)
+        prompt = json.dumps({'format_examples_only': QUICK_EXAMPLE, 'evidence': prompt_evidence,
+                             'local_layout': profile}, ensure_ascii=False)
         path = None
         raw = None
         decoded = None
@@ -339,6 +389,20 @@ def _quick_rule(pdf, template, pages, work_dir, plan, gemini_model, stop, progre
         if unaligned := [page['pdf_page'] for page in evidence['pages'] if page.get('reference_hwpx_status') == 'not_aligned']:
             warnings.append('참고 OCR HWPX와 대응 미확인: PDF ' + ', '.join(map(str, unaligned)) + '쪽')
 
+    if template and style_summary is None:
+        style_summary = template_summary(template)
+    _match_template_styles(data, style_summary, warnings)
+    ocr_fields = []
+    if work_dir:
+        work = Work(str(pdf), str(work_dir), initialize=False)
+        if work.readings_dir.is_dir() and work.source_matches():
+            ocr_fields = saved_ocr_fields(work.records(repair=False))
+    fields = list(dict.fromkeys([*data.get('field_labels', ()), *profile['field_labels'], *ocr_fields]))[:40]
+    if fields or 'field_labels' in data:
+        data['field_labels'] = fields
+    data['source_sha256'] = inputs['pdf_sha256']
+    if not template and 'paper' in profile:
+        data['paper'] = profile['paper']
     if 'id' not in data:
         data['id'] = 'generated-' + uuid.uuid4().hex[:12]
         data['label'] = Path(pdf).stem + ' · 구조 규칙'
@@ -360,6 +424,7 @@ def _quick_rule(pdf, template, pages, work_dir, plan, gemini_model, stop, progre
     result = {'rule': data, 'summary': summary, 'warnings': warnings, 'inputs': inputs,
               'coverage': coverage, 'type_pages': types, 'model': actual, 'usage': usage}
     verify_inputs(result)
+    _compile(data, '책 분석: ', 'generated.json', 'generated')
     return result
 
 

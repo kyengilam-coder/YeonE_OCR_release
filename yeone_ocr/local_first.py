@@ -523,8 +523,10 @@ def _resolve_ai_defaults(args, cli):
     from . import subscriptions
     from .claude_subscription import auth_mode
     plan = None
-    if getattr(args, "local_ai_page", "auto") in (None, "auto") or any(
-            getattr(args, name, None) is None for name in SUBSCRIPTION_DEFAULTS):
+    page_ai = getattr(args, 'local_ai_page', 'auto')
+    needs_ai = getattr(args, 'local_ai_review', True) or page_ai != 'off'
+    if needs_ai and (page_ai in (None, 'auto') or any(
+            getattr(args, name, None) is None for name in SUBSCRIPTION_DEFAULTS)):
         if auth_mode(getattr(args, "local_ai_auth", None)) != "api":
             plan = subscriptions.pick(getattr(args, "local_ai_plan", None))[0]
     use = plan is not None
@@ -1363,6 +1365,8 @@ def _command(args, *, work=None, doc=None, pool=None):
         elif getattr(args, 'defer_recheck_hwpx', False):
             rc = 0
         else:
+            if getattr(args, 'source_review', False) and pool is not None:
+                pool.close()
             rc = cli.cmd_build(build_args, work, doc)
         cli.cmd_review(build_args, work, doc)
         cli.cmd_report(build_args, work, doc)

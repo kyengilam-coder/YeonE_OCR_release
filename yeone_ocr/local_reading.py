@@ -11,7 +11,7 @@ import math
 import re
 
 
-def corrected_output_records(records, source):
+def corrected_output_records(records, source, *, protected_pages=None, comparison_runs=None):
     """Overlay current comparison edits on a transient output view only."""
     import copy
     from pathlib import Path
@@ -30,6 +30,10 @@ def corrected_output_records(records, source):
         project=projects[key];number=record['pdf_page'];page=project.page(number,discard_cached=True)
         if project.source_sha256!=record['local_first'].get('source_sha256'):
             raise ComparisonError('교정 프로젝트와 판독 기록의 원본을 확인하세요.')
+        if protected_pages is not None and (page.get('corrected_text') is not None or page.get('edits') or page.get('decisions')):
+            protected_pages.add(number)
+        if comparison_runs is not None and record.get('image_frame') == 'full-page':
+            comparison_runs[number] = page['runs']
         recovered=_cached_catalog_output(record,page,Path(reference))
         if recovered is not None:
             output.append(recovered);continue

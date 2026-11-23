@@ -18,11 +18,12 @@ DATA = Path(__file__).with_name("data")                               # data/pre
 _HAN = "㐀-䶿一-鿿豈-﫿\U00020000-\U0003134f"   # 한자(확장 A·통합·호환·확장 B~) — 이스케이프로 적는다(호환 한자 豈 가 NFC 로 바뀌면 한글까지 한자로 센다)
 _ALIAS_LABELS = {"none": "영역 종류만 (예전 설정 none)", "auto": "本草 조문 (예전 설정 auto)", "bencao": "本草 조문 · 약재명 늘 떼기(예전 설정 bencao)"}
 PAGE_TYPES = ('차례', '목차', '본문', '각주', '문헌 목록', '제목', '주석', '색인', '표', '도판', '표지', '빈 쪽', '기타', '판단 불가')
-_KEYS = {"": ("schema", "id", "label", "description", "entry", "commentary", "source", "emphasis", "styles", "citation", "template", "headings", "page_types"),
+_KEYS = {"": ("schema", "id", "label", "description", "entry", "commentary", "source", "emphasis", "styles", "citation", "template", "headings", "page_types", "field_labels", "source_sha256", "paper"),
          "entry": ("when", "min_hits", "min_ratio", "max_name", "openers", "heading_openers", "name_end_not", "name_start_not"),
          "commentary": ("open", "close", "max_label", "markers"), "source": ("after", "tags"), "emphasis": ("bold", "plain"),
          "styles": ("paragraph", "character"), "citation": ("mode", "max_title", "continuations"),
-         "headings": ("chapter", "section", "subsection"), "page_types": ("source_sha256", "pages")}
+         "headings": ("chapter", "section", "subsection"), "page_types": ("source_sha256", "pages"),
+         "paper": ("width", "height", "left", "right", "top", "bottom")}
 
 
 class PresetError(ValueError):
@@ -68,6 +69,9 @@ class Preset:
     template: str = ""
     headings: dict = field(default_factory=dict)
     page_types: dict = field(default_factory=dict)
+    field_labels: tuple[str, ...] | None = None  # None preserves the legacy field list; () disables it.
+    source_sha256: str = ''
+    paper: dict = field(default_factory=dict)
 
 
 def _cls(chars: str) -> str:
@@ -193,10 +197,25 @@ def _compile(data, where: str, ref: str, stem: str) -> Preset:
         if not isinstance(pages, dict) or any(kind not in PAGE_TYPES or not isinstance(numbers, list)
                 or any(type(n) is not int or n < 1 for n in numbers) for kind, numbers in pages.items()):
             raise bad('page_types.pages는 쪽 유형별 양의 정수 목록이어야 합니다')
+    fields = None
+    if 'field_labels' in data:
+        fields = words(data, 'field_labels', '', 'field_labels는 항목 이름 목록이어야 합니다', allow_empty=True)
+        if len(fields) > 40 or any(not re.fullmatch(r'[^\W_][\w \-·]{0,23}', name) for name in fields):
+            raise bad('field_labels는 24자 이내의 항목 이름을 최대 40개까지 지원합니다')
+    digest = text(data, 'source_sha256', '', '')
+    if digest and not re.fullmatch(r'[a-f0-9]{64}', digest):
+        raise bad('source_sha256는 분석한 PDF의 SHA-256이어야 합니다')
+    paper = obj(data.get('paper'), 'paper') or {}
+    if paper:
+        paper = {key: num(paper, key, None, 50 if key in ('width', 'height') else 0,
+                          600 if key in ('width', 'height') else 100,
+                          f'paper.{key}의 mm 값이 올바르지 않습니다', integer=False) for key in _KEYS['paper']}
+        if paper['left'] + paper['right'] > paper['width'] * .55 or paper['top'] + paper['bottom'] > paper['height'] * .55:
+            raise bad('paper의 여백이 용지 크기에 비해 너무 큽니다')
     return Preset(ref=ref, id=pid, label=label, description=desc, entry=entry, entry_re=entry_re, entry_start_re=entry_start_re,
                   heading_next_re=heading_next_re, name_re=name_re, comment_re=comment_re, source_re=source_re, emphasis=emphasis,
                   para_styles=maps["paragraph"], char_styles=maps["character"], citation=citation, template=template,
-                  headings=headings, page_types=page_types)
+                  headings=headings, page_types=page_types, field_labels=fields, source_sha256=digest, paper=paper)
 
 
 def load_preset(path, *, ref: str | None = None) -> Preset:

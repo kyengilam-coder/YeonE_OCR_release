@@ -9,7 +9,7 @@ import time
 
 STAGE_NAMES = {"prepare": "준비", "read": "판독", "adjudicate": "3차 판별", "build": "문서 만들기", "review": "검수 화면",
                "report": "보고", "collate": "구획 대조", "remerge": "다시 계산", "textlayer": "글자층 넣기",
-               "resolve": "패키지 확인", "download": "내려받기", "setup": "설치"}
+               "resolve": "패키지 확인", "download": "내려받기", "setup": "설치", "source-review": "원본 대조"}
 UNITS = {"collate": "구획", "resolve": "개", "download": "개"}            # 나머지는 '쪽'
 # 남은 시간을 어림하지 않는 명령: pip 은 큰 파일(opencv·pymupdf 등)을 먼저 내려받아 개수로 어림하면 크게 빗나간다.
 NO_ETA = {"install"}
@@ -54,9 +54,13 @@ def fmt_elapsed(sec: float) -> str:
 class Tracker:
     """한 작업의 진행률. update() 로 알림을 넣고 frac(0~1)·text() 로 읽는다."""
 
-    def __init__(self, command: str = "", now: float | None = None):
+    def __init__(self, command: str = "", now: float | None = None, *, source_review=False):
         self.command = command
         self.plan = PLANS.get(command, ())
+        if source_review and command in ('run', 'build'):
+            plan = [(stage, weight * .75) for stage, weight in self.plan]
+            plan.insert(next(i for i, (stage, _) in enumerate(plan) if stage == 'build'), ('source-review', .25))
+            self.plan = tuple(plan)
         self.nested = NESTED.get(command, {})
         self.frac = 0.0
         self.stage = ""; self.done = 0; self.total = 0; self.sub = 0.0

@@ -169,6 +169,8 @@ def prepare_contents_pages(records, pdf, page_types=None):
         reading = PageReading.model_validate(record['merged'])
         items = {}
         for i, region in enumerate(reading.regions):
+            if region.kind == '소주':
+                continue
             if region.kind in TEXT_KINDS and len(region.paragraphs) == 1:
                 text = paragraph_text(region.paragraphs[0]).strip()
             elif region.kind in TITLE_KINDS:

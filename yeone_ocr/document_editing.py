@@ -17,6 +17,47 @@ BAD_START = '凡又其此是以故若則则乃每諸诸'
 TOC = re.compile(r'[.·…．]{2,}.*\d+[）)]?\s*$')
 META = re.compile(r'ISBN|出版社|出版发行|出版發行|邮政|郵政|责任编辑|責任編輯|开本|開本|印刷|定价|定價')
 ENTRY_FIELD = re.compile(r'[\[［〔【]\s*(?:[氣气]\s*味|主\s*治|修\s*治|附\s*方|愚\s*按|禁\s*忌|炮\s*製|炮\s*制)\s*[\]］〕】]')
+
+
+def field_pattern(labels, *, line_start=False):
+    if labels is None:
+        return ENTRY_FIELD
+    if not labels:
+        return re.compile(r'(?!)')
+    names = '|'.join(r'\s+'.join(map(re.escape, label.split())) for label in labels)
+    wrapped = '|'.join(fr'{re.escape(left)}\s*(?:{names})\s*{re.escape(right)}'
+                       for left, right in ('[]', '［］', '〔〕', '【】'))
+    if line_start:
+        wrapped += fr'|(?:{names})\s*[:：]'
+    return re.compile(wrapped)
+
+
+def _geometric_paragraph_starts(regions):
+    """Infer new paragraphs only from horizontal, consistently measured source rows."""
+    from statistics import median
+    from .schema import bbox_frac
+
+    rows = [(r.id, bbox_frac(r.bbox)) for r in regions
+            if r.id.startswith('local-line-') and r.kind == '본문' and '세로' not in r.reading_direction]
+    rows = [(ident, box) for ident, box in rows if .003 <= box[3] - box[1] <= .08]
+    if len(rows) < 5:
+        return set()
+    height = median(box[3] - box[1] for _, box in rows)
+    pairs = list(zip(rows, rows[1:]))
+    pitches = [current[1] - prior[1] for (_, prior), (_, current) in pairs
+               if abs(current[0] - prior[0]) < .04 and height * .8 <= current[1] - prior[1] <= height * 2.5]
+    if len(pitches) < 3:
+        return set()
+    pitch = median(pitches)
+    starts = set()
+    for (_, prior), (ident, row) in pairs:
+        gap = row[1] - prior[1]
+        indent = row[0] - prior[0]
+        if (gap <= 0 or abs(indent) >= .16
+                or (gap > pitch * 1.6 and abs(indent) <= .12)
+                or (max(.015, height * .8) <= indent <= .10 and row[2] - row[0] >= .30)):
+            starts.add(ident)
+    return starts
 NUMBERED_SOURCE_TITLE=re.compile(r'^\s*(?:[一二三四五六七八九十百千〇○零O0-9０-９]\s*){1,8}[·・.．、,，]\s*'
     r'[^。!?？！;；()（）\n]{4,85}[（(]\s*(?:『[^『』\n]{1,35}』|《[^《》\n]{1,35}》)\s*[）)]')
 
@@ -125,7 +166,7 @@ def _trim_header_prefix(record,region,cut):
         if field in record:record[field]=grades
 
 
-def exclude_marginalia(records, *, source_pdf=None):
+def exclude_marginalia(records, *, source_pdf=None, use_scan_rules=False):
     """Exclude identified running matter in the output view, never raw OCR.
 
     Repetition is counted per page. A line of body text containing the book
@@ -155,14 +196,29 @@ def exclude_marginalia(records, *, source_pdf=None):
         contents=is_contents_page(reading)
         edges={r.id for r,_ in _edge_rows(reading)}
         removed=[];keep=[]
+        top_rule = None
+        if (use_scan_rules and source_pdf is not None and reading.pdf_page >= 5 and not contents
+                and any(r.kind == '본문' and 0 < r.bbox[0] < r.bbox[2] <= 90 for r in reading.regions)):
+            from .source_typography import ruling_y
+            page = source_pdf[reading.pdf_page - 1]
+            if page.get_images():
+                top_rule = ruling_y(page, .068, .098, .04, .96, .58)
         for region in reading.regions:
             text=paragraph_text(region.paragraphs[0]).strip() if len(region.paragraphs)==1 else ''
             reason=''
+            y0,x0,y1,x1=region.bbox
+            folio = re.fullmatch(r'[\s·•・.。]*(\d{1,4})[\s·•・.。]*', text)
             side_bbox = side_titles.get(reading.pdf_page, {}).get(region.id)
-            if region.kind in SKIP_KINDS:
+            if folio and (region.kind == '쪽번호' or y0 >= 920 and x1-x0 <= 145 and not contents):
+                reason='여백의 쪽번호'
+                if not reading.print_page:
+                    reading.print_page = folio[1]
+            elif region.kind in SKIP_KINDS:
                 reason='판독에서 분류한 머리말/쪽번호'
             elif side_bbox is not None:
                 reason='원본 PDF 좌우 여백에서 반복 확인된 세로 제목'
+            elif top_rule is not None and text and region.kind == '본문' and 0 < y0 < y1 <= top_rule+1:
+                reason='원본 상단 구분선 위의 머리말'
             elif text and region.id in edges and region.kind not in TITLE_KINDS:
                 y0,x0,y1,x1=region.bbox
                 margin=y1<=100 or y0>=900 or x1<=60 or x0>=940
@@ -288,7 +344,8 @@ def _marked_entry_hints(reading, pdf, chapter_keys, seen_chapters):
 
 
 def prepare_records(records, *, common_layout=False, citation=None, headings=None, template_headings=None,
-                    source_pdf=None, page_types=None, infer_entries=False, output_rules=HwpxOutputRules()):
+                    source_pdf=None, page_types=None, infer_entries=False, output_rules=HwpxOutputRules(),
+                    field_labels=None, adaptive=False):
     """Restore paragraphs in local line records using explicit separators.
 
     Proper structured OCR paragraphs keep their existing boundaries. Local
@@ -296,6 +353,7 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
     remain separate. All changes are confined to an in-memory output view.
     """
     output = deepcopy(records)
+    entry_field = field_pattern(field_labels, line_start=True)
     if common_layout:
         for record in output:
             reading=PageReading.model_validate(record['merged'])
@@ -306,7 +364,7 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
                 if isinstance(item,dict) and item.get('verified') is True and item.get('text')==text.strip() and item.get('kind') in ('header','footer','page_number','decoration'):
                     region.kind='쪽번호' if item['kind']=='page_number' else '머리말'
             record['merged']=reading.model_dump()
-    exclude_marginalia(output, source_pdf=source_pdf)
+    exclude_marginalia(output, source_pdf=source_pdf, use_scan_rules=adaptive)
     if common_layout:
         from .common_layout import infer_record_layout
         infer_record_layout(output)
@@ -318,6 +376,7 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
         for record in output:
             reading=PageReading.model_validate(record['merged'])
             contents=is_contents_page(reading)
+            title_levels_changed = False
             for index,region in enumerate(reading.regions):
                 text=(region.title_text or ''.join(paragraph_text(p) for p in region.paragraphs)).strip()
                 key=heading_key(text) if len(text)<=120 else ''
@@ -337,8 +396,14 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
                 if role:
                     if role=='chapter' and contents: role='section'
                     if not contents and role in ('chapter','section'): parent=key
-                    record.setdefault('_common_layout_regions',{})[region.id]={'kind':role,'level':{'chapter':1,'section':2,'subsection':3}[role],
+                    level = {'chapter': 1, 'section': 2, 'subsection': 3}[role]
+                    record.setdefault('_common_layout_regions',{})[region.id]={'kind':role,'level':level,
                         'alignment':'CENTER','evidence':'template-member-and-source-citation' if member and template_role else 'template-catalog-and-source-layout' if catalog and template_role else 'template-title-style' if template_role else 'book-rule-exact-title'}
+                    if adaptive and region.kind == '제목' and region.title_level != level:
+                        region.title_level = level
+                        title_levels_changed = True
+            if title_levels_changed:
+                record['merged'] = reading.model_dump()
     entry_catalogue = None
     contents_pages = set()
     if source_pdf is not None:
@@ -368,6 +433,7 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
                                         'evidence':'explicit-herb-title-marker', 'entry_marker_repair':repair}
         previous = False
         inferred = []
+        geometry_starts = _geometric_paragraph_starts(reading.regions) if adaptive else set()
         list_regions = set(record.get('_source_list_regions', ()))
         for region in reading.regions:
             if not region.id.startswith('local-line-') or region.kind not in TEXT_KINDS or len(region.paragraphs) != 1:
@@ -390,10 +456,10 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
             if citation_start: paragraph.continues_from_previous=False
             prefix_title=numbered_source_title(text,template_headings or {})
             if prefix_title:paragraph.continues_from_previous=False
-            entry_field_start = output_rules.entry_paragraphs and ENTRY_FIELD.match(text)
-            boundary = bool(prefix_title or citation_start or centered or entry_field_start
+            entry_field_start = output_rules.entry_paragraphs and entry_field.match(text)
+            boundary = bool(prefix_title or citation_start or centered or entry_field_start or region.id in geometry_starts
                             or entry_name(text, names) or TOC.search(text) or META.search(text) or text.isdecimal()
-                            or re.match(r'^[\[［【〔](?:唐|陶|今|本|別|别|新)', text))
+                            or (not adaptive and re.match(r'^[\[［【〔](?:唐|陶|今|本|別|别|新)', text)))
             if boundary:
                 paragraph.continues_from_previous = False
             elif previous:
@@ -405,17 +471,19 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
     if source_pdf is not None:
         from .source_typography import measure_source_typography
         measure_source_typography(output, source_pdf, infer_titles=common_layout, output_rules=output_rules,
-                                  entry_catalogue=entry_catalogue, contents_pages=contents_pages)
+                                  entry_catalogue=entry_catalogue, contents_pages=contents_pages,
+                                  adaptive=adaptive, footnote_pages=set((page_types or {}).get('각주', ())))
     return output, names
 
 
-def clean_output_blocks(blocks):
+def clean_output_blocks(blocks, *, keep_anchors=False):
     """Remove application navigation/metadata; keep textual uncertainty marks."""
     output=[]
     for block in deepcopy(blocks):
         if block.type in ('meta','note','uncertain','report'):
             continue
-        block.anchors=[]
+        if not keep_anchors:
+            block.anchors=[]
         if block.type in ('para','heading'):
             _replace(block,r'〔→PDF[^〕]*〕',lambda m,t:'')
         output.append(block)
@@ -476,11 +544,11 @@ def _separate_editorial_notes(block):
     return result
 
 
-def _separate_entry_fields(block):
+def _separate_entry_fields(block, entry_field):
     """Split explicit entry labels in records that already contain fused text."""
     if block.type != 'para' or block.kind == '소주' or block.layout.keys() & {'source_contents', 'source_index', 'front_row'}:
         return [block]
-    positions = [match.start() for match in ENTRY_FIELD.finditer(block.text) if match.start()]
+    positions = [match.start() for match in entry_field.finditer(block.text) if match.start()]
     result, tail, offset = [], block, 0
     for position in positions:
         cut = position - offset
@@ -495,7 +563,7 @@ def _separate_entry_fields(block):
     return [*result, tail]
 
 
-def format_blocks(blocks, names=(), *, punctuation=True, titles=None, output_rules=HwpxOutputRules()):
+def format_blocks(blocks, names=(), *, punctuation=True, titles=None, output_rules=HwpxOutputRules(), field_labels=None):
     """Inline herb headings, keep one blank paragraph, and remap all evidence."""
     blocks=deepcopy(blocks); separated=[]
     for block in blocks:
@@ -521,7 +589,8 @@ def format_blocks(blocks, names=(), *, punctuation=True, titles=None, output_rul
             b=Block.joined(head,body);b.type='para';b.role='entry';i+=1
         joined.append(b);i+=1
     if output_rules.entry_paragraphs:
-        joined = [part for block in joined for part in _separate_entry_fields(block)]
+        entry_field = field_pattern(field_labels)
+        joined = [part for block in joined for part in _separate_entry_fields(block, entry_field)]
     output=[]; stats={'entries':0,'removed_line_breaks':0,'blank_paragraphs':0,'removed_character_spaces':0}
     for b in (part for block in joined for part in ([block] if 'source_contents' in block.layout else _separate_editorial_notes(block))):
         if 'source_contents' in b.layout:

@@ -815,11 +815,11 @@ def own_text(doc: pymupdf.Document, pno: int) -> list[str]:
 
 
 def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str | Path, strip_old: bool = True, log=print, step=None,
-                   should_stop=None) -> dict:
+                   should_stop=None, *, save_already_searchable=False) -> dict:
     """pages 의 쪽에 글자층을 넣어 out 에 저장한다(doc 을 바꾼다 — 버릴 사본을 넘길 것). page_data(쪽) → (PageReading, 쪽 이미지, 이미지 틀, 세로쓰기인가).
     쪽 이미지는 쪽마다 불러 자리만 잡고 버린다(700쪽 책도 메모리에 이미지를 쌓지 않게). step(끝난 수, 전체 수) 를 주면 쪽마다 부른다.
     should_stop() 이 참이면 쪽 사이·저장 전후에 TextlayerCancelled 를 낸다. 검증까지 임시 파일에서 마쳐 기존 출력은 보존한다.
-    이전에 넣은 이 글자층은 strip_old 와 상관없이 지운다(두 번 넣을 까닭이 없고, 글꼴 이름이 겹치면 옛 글자가 깨진다). 넣은 쪽이 없으면 저장하지 않는다.
+    이전에 넣은 이 글자층은 strip_old 와 상관없이 지운다. save_already_searchable이면 대상 모두에 보이는 글자가 있는 PDF도 사본을 저장한다.
     돌려주는 값: {"pages": 넣은 쪽 수, "chars": 글자 수, "how": {방법: 줄 수}, "skipped": {쪽: 까닭}, "stripped": 옛 글자층을 지운 쪽 수,
     "own_stripped": 이전의 이 글자층만 지운 쪽 수, "links_kept": 지우면서 다시 넣은 링크 수, "bad_chars": 글꼴에 못 넣어 뺀 글자 수(깨진 대리 코드),
     "mismatch": [다시 읽은 글이 넣은 글과 다른 쪽]}."""
@@ -830,11 +830,13 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
     check_stop()
     plans: dict[int, list[Line]] = {}; frames: dict[int, tuple] = {}
     stats = {"pages": 0, "chars": 0, "how": {}, "skipped": {}, "stripped": 0, "own_stripped": 0, "links_kept": 0, "bad_chars": 0, "mismatch": []}
+    visible = []
     total = len(pages) * 2
     for i, n in enumerate(sorted(pages)):
         check_stop()
         state = text_state(doc[n - 1])
         if state == "visible":
+            visible.append(n)
             stats["skipped"][n] = "보이는 글자가 있는 쪽(스캔이 아님)"
         else:
             pr, img, frame, vertical = page_data(n)
@@ -872,7 +874,8 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
             stats["how"][ln.how] = stats["how"].get(ln.how, 0) + 1
         if step: step(len(pages) + i + 1, total)
     check_stop()
-    if not stats["pages"]:                                              # 넣은 쪽이 없으면 사본을 만들지 않는다(cli 가 '넣은 쪽 없음'으로 알린다)
+    already_searchable = save_already_searchable and bool(pages) and len(visible) == len(pages)
+    if not stats["pages"] and not already_searchable:
         if step: step(total, total)
         return stats
     from .state import write_atomic_with
@@ -909,5 +912,7 @@ def searchable_pdf(doc: pymupdf.Document, pages: list[int], page_data, out: str 
         check_stop()
 
     write_atomic_with(out, save_and_check)
+    if already_searchable:
+        stats['already_searchable'] = len(visible)
     if step: step(total, total)
     return stats

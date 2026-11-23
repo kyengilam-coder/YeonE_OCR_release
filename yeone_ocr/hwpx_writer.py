@@ -199,6 +199,11 @@ class DefaultLook:
             doc.set_page_setup(paper_size="A4", margin_left_mm=25, margin_right_mm=25, margin_top_mm=22, margin_bottom_mm=20)
         except Exception:
             pass
+        if paper := getattr(self, 'paper', None):
+            doc.page.setup(width_mm=paper['width'], height_mm=paper['height'],
+                           orientation='landscape' if paper['width'] > paper['height'] else 'portrait',
+                           margins_mm={key: paper[key] for key in ('left', 'right', 'top', 'bottom')},
+                           header_margin_mm=0, footer_margin_mm=0)
         rs = self._rs
         if getattr(self, 'body_font', None):
             rs = lambda **kw: self._rs(**{**kw, 'font': self.body_font})
@@ -347,6 +352,8 @@ class TemplateLook:
         """preset: 쓰임 → 스타일 이름을 줄 짜임 규칙. None 이면 kaibao(본초학 양식 이름 — 예전 PARA_STYLES·CHAR_STYLES 그대로).
         규칙에 없는 쓰임은 regions 의 이름으로(그것도 양식에 없으면 바탕글)."""
         preset = preset or resolve_preset("kaibao")
+        if preset.source_sha256:
+            preset = replace(preset, para_styles={**resolve_preset('basic').para_styles, **preset.para_styles})
         base = resolve_preset("regions")
         self.preset = preset
         self.template, self.author = template, author
@@ -390,7 +397,9 @@ class TemplateLook:
         self.doc, self.sec0, self.header = doc, sec0, doc.oxml.headers[0]
         from .verify import numbered_paragraph_formats
         self._numbering = numbered_paragraph_formats(self.header.element)
-        self.styles = _ensure_basic_styles(doc, self.preset, template=True) if self.preset.id == "basic" or self.preset.citation else template_styles(doc)
+        create_named_styles = self.preset.id == 'basic' or self.preset.citation or self.preset.source_sha256
+        self.styles = (_ensure_basic_styles(doc, self.preset, template=True)
+                       if create_named_styles else template_styles(doc))
         self._style_sizes = {node.get('id'): int(node.get('height', '0')) / 100
                              for node in self.header.element.iter(HH + 'charPr') if node.get('height', '').isdigit()}
         self._style_alignment = {node.get('id'): node.find(HH + 'align').get('horizontal')
@@ -565,7 +574,7 @@ class TemplateLook:
 
 def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, large_min_mm: float = 120,
                highlight: bool = True, memos: bool = True, simple: bool = False,
-               source_pdf=None, source_records=None) -> dict:
+               source_pdf=None, source_records=None, bookmark_policy='legacy', review_letters=False) -> dict:
     """blocks 를 look 의 모양으로 out_path 에 쓴다. highlight=False 면 등급 색·형광펜·밑줄 없이 글자만(〔〕 표기는 그대로).
     memos=False 면 고지를 메모 대신 회색 〔고지: …〕 로 글 속에. 돌려주는 값: 문단·제목·그림·표·의심 표시·등급·메모·책갈피 수와
     다시 열어 센 그림(images_in_file)·python-hwpx 검사(validate_issues·validate_messages), 그리고 look 의 통계(양식: styles·missing·template_dropped …)."""
@@ -574,7 +583,18 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
     from .contents_layout import shape_contents_blocks, paragraph_format, add_contents_run
     if simple:
         look.grade_style = SIMPLE_GRADE_STYLE                          # 밑줄·굵게 없이 형광 바탕 + 글자색
+    if review_letters:
+        look.grade_style = {key: dict(style, highlight=None) for key, style in look.grade_style.items()}
     doc = look.open(highlight)
+    if bookmark_policy != 'legacy':
+        for section in doc.sections:
+            for name in ('bookmark', 'bookmarkBegin', 'bookmarkEnd'):
+                for node in list(section.element.iter(HP + name)):
+                    parent = node.getparent()
+                    parent.remove(node)
+                    if parent.tag == HP + 'ctrl' and not len(parent):
+                        parent.getparent().remove(parent)
+                    section.mark_dirty()
     mw = MemoWriter(doc, look.author)
     stats = {"paragraphs": 0, "headings": 0, "images": 0, "tables": 0, "uncertain_items": 0, "marks": 0, "page_breaks": 0,
              "green": 0, "blue": 0, "red_ctx": 0, "memos": 0, "bookmarks": 0}
@@ -584,7 +604,10 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
     contents_width = round(_body_size_mm(doc)[0] * HWPUNIT_PER_MM)
     contents_formats = {}
     sized_chars = {}
+    source_wraps = {}
+    adaptive_basic = isinstance(look, BasicLook) and bool(look.preset.source_sha256)
     note_border = None
+    transition_border = None
     page_pr = doc.sections[0].element.find(f".//{HP}pagePr")
     page_margin = page_pr.find(f"{HP}margin") if page_pr is not None else None
 
@@ -596,7 +619,7 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
         names.add(name); p.add_bookmark(name, char_pr_id_ref=cpr); stats["bookmarks"] += 1
 
     def write(para: Para, layout=None) -> None:
-        nonlocal note_border
+        nonlocal note_border, transition_border
         layout=layout or {}
         source_shape = layout.get('source_typography', {})
         source_size = source_shape.get('size') or (layout.get('source_body_size') if para.key == 'body' else None)
@@ -623,6 +646,15 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
         amap = anchor_map(para.anchors, len(text))
         if para.skip_if_empty and not text and not amap:
             return
+        source_lines = layout.get('source_lines', ())
+        if (not adaptive_basic or para.key != 'body' or notes or amap or ''.join(source_lines) != text):
+            source_lines = ()
+        source_breaks = []
+        source_position = 0
+        if source_lines:
+            source_size = round(min(source_size or 11, contents_width / (100 * (max(map(len, source_lines)) + .6))), 1)
+            for line in source_lines[:-1]:
+                source_breaks.append((source_breaks[-1] if source_breaks else 0) + len(line))
         p = doc.add_paragraph("", para_pr_id_ref=para.para_pr, style_id_ref=para.style, char_pr_id_ref=para.base, include_run=False, inherit_style=False,
                               **({"pageBreak": "1"} if para.page_break else {}))
         if 'source_index' in layout:
@@ -634,6 +666,13 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
             p.element.set('paraPrIDRef', str(ref))
 
         def add_run(value, cpr, character_role=None):
+            nonlocal source_position
+            if layout.get('source_page_transition'):
+                key = (cpr, 'source_page_transition')
+                if key not in sized_chars:
+                    sized_chars[key] = doc.oxml.ensure_run_style(base_char_pr_id=cpr, size=10, bold=True, color='#444444')
+                cpr = sized_chars[key]
+                return p.add_run(value, char_pr_id_ref=cpr)
             if source_size and not character_role:
                 key = (cpr, source_size)
                 if key not in sized_chars:
@@ -641,7 +680,19 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                 cpr = sized_chars[key]
             if contents:
                 return add_contents_run(p, value, cpr, contents)
-            return p.add_run(value, char_pr_id_ref=cpr)
+            run = p.add_run(value, char_pr_id_ref=cpr)
+            if source_breaks:
+                end = source_position + len(value)
+                cuts = [at - source_position for at in source_breaks if source_position <= at < end]
+                source_position = end
+                if cuts:
+                    node = run.element.find(HP + 't')
+                    node.text = value[:cuts[0]]
+                    for start, stop in zip(cuts, cuts[1:] + [len(value)]):
+                        atom = node.makeelement(HP + 'lineBreak', {})
+                        node.append(atom)
+                        atom.tail = value[start:stop]
+            return run
         if para.styled or para.spans or notes or para.anchors:
             stats["marks"] += sum(1 for _, k in split_marks(text) if k == "mark")
             segs = styled_runs(text, para.spans if highlight else (), notes)
@@ -686,7 +737,8 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
         if layout and not contents:
             flags={k:layout[k] for k in ('keep_with_next','keep_lines','widow_orphan') if k in layout}
             alignment = source_shape.get('alignment', layout.get('alignment'))
-            preserve=getattr(look,'preserve_template_styles',False) and not para.heading
+            preserve=(getattr(look,'preserve_template_styles',False) and not para.heading
+                      and not layout.get('source_page_transition'))
             if preserve:
                 # Merely assigning styleIDRef while replacing its paragraph
                 # format makes reapplying the same style visibly reflow text.
@@ -701,6 +753,13 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                 alignment = source_shape.get('alignment', 'LEFT')
                 margins.update(intent=0, right=0, next=0)
                 paragraph_options.update(line_spacing_percent=105, heading={'type': 'NONE'})
+            elif layout.get('source_page_transition'):
+                if transition_border is None:
+                    transition_border = doc.oxml.headers[0].ensure_border_fill(
+                        fill_color='#F1F1F1', active_borders=())
+                margins.update(intent=0, next=600)
+                paragraph_options.update(border=dict(border_fill_id_ref=transition_border, offset_top=0, offset_bottom=60),
+                                         heading={'type': 'NONE'})
             elif layout.get('source_layout_para'):
                 alignment = source_shape.get('alignment', 'LEFT')
                 margins['next'] = 0
@@ -715,11 +774,16 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                         paragraph_options['border'] = dict(border_fill_id_ref=note_border, offset_top=320)
             elif para.key == 'body' and layout.get('source_body_spacing'):
                 paragraph_options.update(line_spacing_percent=layout['source_body_spacing'])
+            wrap_source_body = adaptive_basic and para.key == 'body' and bool(re.search(r'[\u3400-\u9fff]{4}', text))
+            if wrap_source_body and alignment is None:
+                alignment = 'LEFT'
             if not preserve or flags or alignment is not None or margins or paragraph_options:
                 flags['page_break_before']=False  # the paragraph's pageBreak flag is the single break source
                 header=doc.oxml.headers[0]
                 ref=header.ensure_paragraph_format(base_para_pr_id=p.element.get('paraPrIDRef','0'),
                                                    alignment=alignment, margins=margins, break_setting=flags, **paragraph_options)
+                if wrap_source_body:
+                    ref = _break_word_para(header, str(ref), source_wraps)
                 p.element.set('paraPrIDRef',str(ref))
                 p.section.mark_dirty()
 
@@ -750,6 +814,10 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
             stats["tables"] += 1
         else:
             for para in look.paras(b):
+                if bookmark_policy != 'legacy':
+                    contents_entry = b.layout.get('source_contents') and not b.layout.get('front_section')
+                    name = ' '.join(para.text.split()) if b.type == 'heading' and not contents_entry else ''
+                    para = replace(para, anchors=[(0, name)] if name and bookmark_policy == 'headings' else [])
                 write(para,b.layout)
             if b.type == "uncertain":
                 stats["uncertain_items"] += len(b.items)

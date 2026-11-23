@@ -30,8 +30,8 @@ def engine_parallelism(engines, requested=0, *, resident=(), memory=None, cpu_co
 
     ``requested`` > 0 is an explicit choice (capped at the engine count).
     Otherwise YEONE_OCR_ENGINE_PARALLEL, then one engine per CORES_PER_ENGINE
-    cores, reduced until the heaviest engines' memory budgets fit in the free
-    memory (resident workers already hold theirs).
+    cores. The result is reduced until the heaviest engines' budgets fit in
+    free memory (resident workers already hold theirs).
     """
     from .automatic_ocr import MEMORY_BUDGET_MB
     engines = list(engines)
@@ -43,13 +43,11 @@ def engine_parallelism(engines, requested=0, *, resident=(), memory=None, cpu_co
             requested = int(os.environ.get(PARALLEL_ENV, "0") or 0)
         except ValueError:
             requested = 0
-    if requested > 0:
-        return max(1, min(requested, len(engines)))
     cores = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
     # GPU engines need no CPU slot (one GPU lease at a time serializes them on the GPU).
     cpu_engines = len(engines) - len(gpu)
     count = max(1, min(cpu_engines, cores // CORES_PER_ENGINE) + len(gpu)) if cpu_engines else max(1, len(gpu))
-    count = min(count, len(engines))
+    count = min(requested if requested > 0 else count, len(engines))
     if memory:
         free = min(memory["available_commit_mb"], memory["available_physical_mb"]) * MEMORY_HEADROOM
         budgets = sorted((MEMORY_BUDGET_MB.get(e, 1024) for e in engines if e not in resident), reverse=True)

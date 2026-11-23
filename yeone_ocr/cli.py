@@ -1819,26 +1819,43 @@ def _normalization_resolver(work: Work, args):
     return resolve, meta
 
 
-def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False, *, document_stem: str | None = None) -> bool:
+def _output_records(work, records, source, **review):
+    from copy import deepcopy
+    from .local_reading import corrected_output_records
+
+    records = deepcopy(corrected_output_records(records, source, **review))
+    repair_path = work.dir / 'output_repairs.json'
+    if repair_path.is_file():
+        from .output_recovery import apply_repairs
+        from ab_ocr.ocr import file_sha256
+        manifest = json.loads(repair_path.read_text(encoding='utf-8-sig'))
+        records = apply_repairs(records, manifest, file_sha256(source))
+    return records
+
+
+def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False, *, document_stem: str | None = None,
+                  note_evidence: list | None = None) -> bool:
     """판독 기록들로 HWPX(+DOCX)를 만든다. interim=True 면 '<이름>_진행중.hwpx' 한 파일만 조용히 만든다(중간 저장)."""
     from .hwpx_builder import build_hwpx
     from .hwpx_output_rules import HwpxOutputRules
     output_rules = HwpxOutputRules.from_args(args)
+    if not output_rules.review_colors and not interim:
+        args.no_highlight = True
     if not interim and (error := _check_document(args)):
         log(error + ' — 문서를 만들지 않았습니다(판독 기록은 그대로)'); return False
     import copy
-    from .local_reading import corrected_output_records
-    records=copy.deepcopy(records) if interim else copy.deepcopy(corrected_output_records(records,args.pdf))
-    if not interim and (work.dir/'output_repairs.json').is_file():
-        from .output_recovery import apply_repairs
-        from ab_ocr.ocr import file_sha256
-        try:
-            manifest=json.loads((work.dir/'output_repairs.json').read_text(encoding='utf-8-sig'))
-            records=apply_repairs(records,manifest,file_sha256(args.pdf))
-        except (OSError,ValueError,KeyError,TypeError,IndexError) as exc:
-            log(f'오류: 원본 대조 복원을 적용하지 못했습니다: {exc} — 문서를 만들지 않았습니다.');return False
+    try:
+        records = copy.deepcopy(records) if interim or note_evidence is not None else _output_records(work, records, args.pdf)
+    except (OSError,ValueError,KeyError,TypeError,IndexError) as exc:
+        log(f'오류: 교정 기록을 적용하지 못했습니다: {exc} — 문서를 만들지 않았습니다.');return False
+    bookmark_policy = 'legacy' if interim else getattr(args, 'hwpx_bookmarks', 'legacy')
     edit_document=not interim and not getattr(args,'no_document_editing',False)
+    if edit_document and output_rules.source_typography:
+        for record in records:
+            if record.get('_output_repairs') or record.get('source_row_layout') == 'measured':
+                record['_preserve_repaired_lines'] = True
     entry_names=set()
+    effective_fields = None
     if edit_document:
         from .document_editing import prepare_records
         if not getattr(args,'no_common_layout',False):
@@ -1872,10 +1889,19 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 page_types = book_rule.page_types['pages']
             else:
                 log('책별 규칙의 쪽 유형은 분석한 PDF의 배열을 사용합니다. 현재 PDF에서 배치를 다시 판별합니다.')
+        if book_rule:
+            effective_fields = book_rule.field_labels
+            if book_rule.source_sha256 and effective_fields is None:
+                from .rule_layout_scan import saved_ocr_fields
+                effective_fields = saved_ocr_fields(records)
+                if effective_fields:
+                    log('이 PDF의 판독에서 반복된 문단 표지: ' + ', '.join(effective_fields))
         records,entry_names=prepare_records(records,common_layout=not getattr(args,'no_common_layout',False),
                                           citation=book_rule.citation if book_rule else None, headings=book_rule.headings if book_rule else None,
                                           template_headings=template_titles, source_pdf=doc, page_types=page_types,
-                                          infer_entries=bool(book_rule and book_rule.entry), output_rules=output_rules)
+                                          infer_entries=bool(book_rule and book_rule.entry), output_rules=output_rules,
+                                          field_labels=effective_fields,
+                                          adaptive=bool(book_rule and book_rule.source_sha256))
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
         progress("build", 0, steps)
@@ -2022,13 +2048,24 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             names=entry_names | {_cc('s2t').convert(n) for n in entry_names}
             if norm_options and norm_options.korean_forms:
                 names |= {korean_forms(n) for n in names}
+            fields = effective_fields
+            if fields and normalize:
+                variants = set(fields)
+                if norm_options.traditional:
+                    variants.update(_cc('s2t').convert(label) for label in fields)
+                if norm_options.korean_forms:
+                    variants.update(korean_forms(label) for label in list(variants))
+                fields = sorted(variants, key=lambda label: (-len(label), label))
             blocks,edit_stats=format_blocks(blocks,names,punctuation=bool(norm_options and norm_options.punctuation),
-                                            titles=template_titles, output_rules=output_rules)
-            blocks=clean_output_blocks(blocks)
+                                            titles=template_titles, output_rules=output_rules, field_labels=fields)
+            blocks=clean_output_blocks(blocks, keep_anchors=bool(preset and preset.source_sha256))
             if not getattr(args,'no_common_layout',False):
                 from .common_layout import apply_common_layout
                 front_pages = {r['pdf_page'] for r in chunk if r.get('_source_front_page')}
-                blocks,layout_stats=apply_common_layout(blocks, front_pages=front_pages, break_front_pages=output_rules.front_pages)
+                blocks,layout_stats=apply_common_layout(
+                    blocks, front_pages=front_pages, break_front_pages=output_rules.front_pages,
+                    mark_note_transitions=bool(output_rules.footnote_groups and
+                                               (note_evidence is not None or preset and preset.source_sha256)))
                 edit_stats['common_layout']=layout_stats
                 edit_stats['common_layout_review']=[dict(page=r['pdf_page'],**item) for r in chunk for item in r.get('_common_layout_review',())]
                 log(f"공통 편집: 제목 가운데 {layout_stats['centered_headings']}개 · 책/권/장 새 쪽 {layout_stats['chapter_page_breaks']}개"
@@ -2040,11 +2077,18 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             edit_stats['narrowed_local_disagreements'] = narrowed
             if narrowed:
                 log(f"검수 표시 정리: 엔진의 대응이 어긋난 넓은 표시 {sum(narrowed.values())}자 · {len(narrowed)}쪽")
-            edit_stats['navigation_bookmarks']=0
+            edit_stats['navigation_bookmarks'] = (sum(b.type == 'heading' and bool(b.text.strip()) for b in blocks)
+                                                  if bookmark_policy == 'headings' else 0)
             if norm_report is not None:
                 norm_report['document_editing']=edit_stats
             log(f"문단·공백 정리: 약재 {edit_stats['entries']}개 · 빈 줄 {edit_stats['blank_paragraphs']}개 · 문단 안 줄바꿈 {edit_stats['removed_line_breaks']}개 제거")
         if not interim:
+            chunk_evidence = None
+            if note_evidence is not None:
+                from .common_layout import note_transition_evidence
+                chunk_evidence = note_transition_evidence(blocks, chunk,
+                                                          set((page_types or {}).get('각주', ())) if edit_document else ())
+                note_evidence.extend(chunk_evidence)
             from .output_recovery import quality_report
             quality=quality_report(blocks,chunk)
             review_counts['findings'] += len(quality['findings'])
@@ -2060,7 +2104,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 st = build_hwpx_template(blocks, str(out_h), template, min_mm=args.figure_min_mm, large_min_mm=args.figure_large_min_mm,
                                          highlight=not args.no_highlight, memos=getattr(args, "memo", "none") != "inline", preset=preset,
                                          simple=simple_display,edited=edit_document,
-                                         source_pdf=args.pdf if edit_document else None,source_records=chunk)
+                                         source_pdf=args.pdf if edit_document else None,source_records=chunk,
+                                         bookmark_policy=bookmark_policy, review_letters=output_rules.review_letters)
             except Exception as e:
                 log(f"오류: 선택한 양식을 적용하지 못했습니다. {Path(template).name} · {type(e).__name__}: {str(e)[:160]}")
                 return False
@@ -2076,7 +2121,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                             highlight=not args.no_highlight, page_breaks=not args.no_page_breaks and not simple_display,
                             memos=getattr(args, "memo", "none") != "inline",
                             preset=preset if layout == "flow" else None, simple=simple_display,edited=edit_document,
-                            source_pdf=args.pdf if edit_document else None,source_records=chunk)
+                            source_pdf=args.pdf if edit_document else None,source_records=chunk,
+                            bookmark_policy=bookmark_policy, review_letters=output_rules.review_letters and not interim)
         if st.get('source_list_columns'):
             log(f"원본 목록 배치: {st['source_list_columns']}구간의 단 구성 적용 · 문헌·저자 {st.get('source_bibliography_rows',0)}항목을 원본의 채움선 모양에 따라 정렬")
         if st.get('source_contents_rows'):
@@ -2096,6 +2142,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                             "msg": f"{vi}건: " + " / ".join(st.get("validate_messages") or [])[:300]})
         want_imgs = sum(1 for b in blocks if b.type == "image")
         this_ok = not fissues and st.get("images_in_file") == want_imgs
+        if this_ok and not interim and chunk_evidence is not None:
+            from .common_layout import verify_written_note_cues
+            verify_written_note_cues(out_h, chunk_evidence)
         ok = ok and this_ok
         size_mb = out_h.stat().st_size / 1e6
         if interim:
@@ -2157,7 +2206,7 @@ def preset_ref(args) -> str:
 def normalization_options(args):
     """CLI·창에서 고른 자동 교정 항목. 사용하지 않는 규칙 파일은 읽지 않는다."""
     from .normalization import NormalizationOptions, load_punctuation_rules
-    enabled = not getattr(args, "no_normalize", False)
+    enabled = not (getattr(args, "no_normalize", False) or getattr(args, "hwpx_original_text", False))
     punctuation = enabled and not getattr(args, "no_punctuation", False)
     path = getattr(args, "punctuation_rules", None)
     rules = load_punctuation_rules(path) if punctuation and path else None
@@ -2205,8 +2254,12 @@ def _check_document(args) -> str | None:
     if flow:
         try:
             selected_rule=resolve_preset(preset_ref(args))
+            if selected_rule.source_sha256:
+                from ab_ocr.ocr import stable_file_sha256
+                if selected_rule.source_sha256 != stable_file_sha256(args.pdf):
+                    return '오류: 분석 규칙의 원본과 현재 PDF가 다릅니다. 이 책 설정에서 현재 PDF를 분석하십시오.'
             template = template or selected_rule.template
-        except PresetError as e:
+        except (OSError, PresetError) as e:
             return f"오류: {e}"
     if template:
         error = _template_error(template)
@@ -2240,11 +2293,35 @@ def cmd_build(args, work: Work | None = None, doc=None):
     if not records:
         log("build: 판독 기록이 없습니다. 먼저 read 를 실행하십시오."); return 2
     with_pdf = getattr(args, "textlayer_pdf", False)
+    source_review = getattr(args, 'source_review', False)
     document_stem = None
-    if with_pdf:
+    if with_pdf or source_review:
         from .output_names import next_document_path
         document_stem = args.out or next_document_path(work.out_dir, args.pdf, ".hwpx").stem
-    ok = build_outputs(work, doc, records, args, document_stem=document_stem)
+    reviewed, note_evidence = None, None
+    if source_review:
+        from ab_ocr.ocr import OCRCancelled
+        from .source_review import review_records
+        protected, saved = set(), {}
+        try:
+            current = _output_records(work, records, args.pdf, protected_pages=protected, comparison_runs=saved)
+            protected.update(r['pdf_page'] for r in current if r.get('_output_repairs'))
+            records, reviewed = review_records(work, doc, current, args, saved=saved, protected=protected,
+                                               should_stop=CANCEL.is_set, log=log,
+                                               step=lambda done, total: progress('source-review', done, total))
+        except OCRCancelled:
+            log('원본 대조를 중지했습니다. 저장된 판독과 이전 출력은 그대로입니다.')
+            return 130
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log(f'오류: 원본 대조를 완료하지 못했습니다({type(exc).__name__}: {str(exc)[:180]}).')
+            return 2
+        if CANCEL.is_set():
+            return 130
+        if not work.source_matches():
+            log('원본 PDF가 바뀌어 두 문서의 생성을 중단했습니다. 저장된 판독은 보존했습니다.')
+            return 2
+        note_evidence = []
+    ok = build_outputs(work, doc, records, args, document_stem=document_stem, note_evidence=note_evidence)
     interim = work.out_dir / f"{Path(args.pdf).stem}_진행중.hwpx"
     if not reuse and ok and interim.exists():
         try: interim.unlink(); log("  진행중 파일을 지움(최종 문서가 만들어짐)")
@@ -2253,7 +2330,8 @@ def cmd_build(args, work: Work | None = None, doc=None):
         return 130
     if with_pdf:
         try:
-            pdf_rc = make_textlayer(args, work, pages, out=work.out_dir / f"{document_stem}.pdf", report=False)
+            pdf_rc = make_textlayer(args, work, pages, out=work.out_dir / f"{document_stem}.pdf", report=False,
+                                    output_records=records if source_review else None)
         except Exception as e:
             log(f"오류: 검색 가능한 PDF를 만들지 못했습니다({type(e).__name__}: {str(e)[:120]}).")
             pdf_rc = 1
@@ -2262,22 +2340,30 @@ def cmd_build(args, work: Work | None = None, doc=None):
         if pdf_rc and ok:
             log("주의: HWPX는 출력 폴더에 저장했습니다. 검색 가능한 PDF 만들기만 실패했습니다.")
         ok = ok and pdf_rc == 0
+    if reviewed is not None:
+        from .common_layout import audit_note_transitions
+        from .source_review import write_report
+        missing = sorted(set(pages) - {r['pdf_page'] for r in records})
+        boundaries = audit_note_transitions(note_evidence)
+        path = work.out_dir / f'{document_stem}_원본대조.html'
+        write_report(path, reviewed, boundaries, missing, ok=ok)
+        log(f'원본 대조·각주 경계 검수 보고서: {path}')
     return (5 if getattr(args, "_normalization_incomplete", False) else 0) if ok else 1
 
 
 # ---------- textlayer ----------
-def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = None, report: bool = True) -> int:
+def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = None, report: bool = True, *, output_records=None) -> int:
     """검색 가능한 PDF: 판독 기록(merged)의 글을 원본 PDF 쪽 위에 보이지 않는 글자층으로 넣어 새 PDF 로 저장한다(원본은 그대로, 모델 호출 없음).
     글자 자리는 판독에 쓴 쪽 이미지에서 잰다(textlayer.plan_page). 판독 기록이 있는 쪽만 넣고, 그 쪽에 있던 다른 OCR 의 숨은 글자층은
     지운다(--keep-old-layer 면 둠). report=False 면 진행 막대에 알리지 않는다(문서 만들기에 붙어 돌 때)."""
     from .textlayer import searchable_pdf, TextlayerCancelled, TextlayerVerificationError
     import copy
     from .pdfio import page_frame
-    records = {r["pdf_page"]: r for r in work.records(pages, repair=False)}
+    records = {r["pdf_page"]: r for r in (work.records(pages, repair=False) if output_records is None else output_records)}
     # Editing a comparison project does not rewrite immutable OCR records.
     # Build a transient output view using its current corrections instead.
     projects = {}
-    for number, record in records.items():
+    for number, record in (records.items() if output_records is None else ()):
         if CANCEL.is_set():
             log("중지: 문자 PDF에 사용할 교정 기록 확인을 멈췄습니다. 기존 파일은 보존했습니다.")
             return 130
@@ -2328,7 +2414,8 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
         log(f"▶ 검색 가능한 PDF: 판독 기록이 있는 {len(todo)}쪽에 보이지 않는 글자층을 넣습니다 → {out}")
         try:
             st = searchable_pdf(doc, todo, page_data, out, strip_old=not getattr(args, "keep_old_layer", False), log=log,
-                                step=lambda d, t: progress('textlayer', d, t), should_stop=CANCEL.is_set)
+                                step=lambda d, t: progress('textlayer', d, t), should_stop=CANCEL.is_set,
+                                save_already_searchable=not report and getattr(args, 'textlayer_pdf', False))
         except TextlayerCancelled:
             log("중지: 검색 가능한 PDF 만들기를 멈췄습니다. 판독 기록은 보존되어 다시 실행할 수 있습니다."); return 130
         except TextlayerVerificationError as exc:
@@ -2348,7 +2435,10 @@ def make_textlayer(args, work: Work, pages: list[int], out: str | Path | None = 
         log(f"  주의: 글꼴에 넣을 수 없는 글자(깨진 유니코드 대리 코드) {st['bad_chars']}자는 자리만 두고 글은 넣지 않았습니다 — 판독 기록을 확인하십시오.")
     if st["skipped"]:
         log(f"  건너뛴 쪽: {', '.join(f'{n}쪽({why})' for n, why in sorted(st['skipped'].items()))}")
-    if not st["pages"]:                                       # 넣은 쪽이 없으면 searchable_pdf 가 저장하지 않는다 — 파일이 생긴 듯 적지 않는다
+    if st.get('already_searchable'):
+        log(f"  기존 검색 글자가 있는 {st['already_searchable']}쪽을 유지한 문자 PDF: {out}")
+        return 0
+    if not st["pages"]:
         log(("끝. " if report else "  ") + "검색 가능한 PDF: 글자층을 넣은 쪽이 없어 만들지 않았습니다.")
         return 2
     if st["mismatch"]:
@@ -2955,6 +3045,9 @@ def build_parser():
         p.add_argument("--no-bold", action="store_true", help="내용별 문서에서 쪽 이미지의 획 굵기를 재지 않음 — 굵은 글씨·보통 글씨(本草: 本經·別錄) 가르기와 판독이 빠뜨린 약재명 뒤 빈칸 찾기를 하지 않음(양식 HWPX 가 있고 짜임 규칙에 약재명 떼기(entry)가 있을 때만 잼)")
         p.add_argument("--textlayer-pdf", action="store_true",
                        help="HWPX와 같은 기본 이름·시각으로 검색 가능한 PDF도 만듦")
+        p.add_argument('--source-review', action='store_true', help='원본 이미지 교차 판독 후 오독 후보와 각주 뒤 경계를 검수')
+        p.add_argument('--hwpx-bookmarks', choices=('headings', 'none'), default='legacy',
+                       help='HWPX 책갈피를 제목마다 하나씩 달거나 모두 뺌')
 
     p = sub.add_parser("inspect"); common(p, pages=False); p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("plans", help="구독 계정(Claude Code·Codex CLI·Gemini CLI)의 설치·로그인 상태(모델 호출 없음)")

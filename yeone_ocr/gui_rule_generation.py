@@ -1,4 +1,4 @@
-"""Book-rule generation UI: analyze, review, then explicitly apply."""
+"""Analyze the selected PDF, preview its layout, and build both outputs."""
 import json
 from pathlib import Path
 import queue
@@ -8,7 +8,10 @@ from tkinter import filedialog, messagebox, ttk
 
 from .rule_library import rules_dir
 from .book_output import LAYOUT_LABELS, select_template
-from .hwpx_output_rules import DEFAULTS as HWPX_DEFAULTS, RULES as HWPX_OUTPUT_RULES, cli_flags
+from .hwpx_output_rules import (CONVERSION_LABELS, CONVERSION_RULES, DEFAULTS as HWPX_DEFAULTS,
+                                RULES as HWPX_OUTPUT_RULES, cli_flags, conversion_flags)
+
+BOOKMARK_LABELS = {'headings': '제목마다 하나', 'none': '모두 빼기'}
 
 
 class BookRuleDialog(tk.Toplevel):
@@ -26,10 +29,23 @@ class BookRuleDialog(tk.Toplevel):
         self.plan = tk.StringVar(master=self, value=plan if plan in ('auto', 'chatgpt', 'gemini', 'claude') else 'auto')
         self.status = tk.StringVar(master=self)
         self.include_json = tk.BooleanVar(master=self)
+        self.build_after_analysis = False
+        from .gui import App
+        self.companion = tk.BooleanVar(master=self, value=App._companion_pdf(app))
+        review = vars(app).get('_book_source_review')
+        self.source_review = tk.BooleanVar(master=self, value=True if review is None else review)
+        self.bookmarks = tk.StringVar(master=self, value=BOOKMARK_LABELS.get(
+            vars(app).get('_book_hwpx_bookmarks'), BOOKMARK_LABELS['headings']))
         self.preferred_pages = ()
-        values = getattr(app, '_hwpx_output_rules', {})
+        values = dict(getattr(app, '_hwpx_output_rules', {}))
+        values.setdefault('hwpx_review_letters', True)
+        if hasattr(app, 'v_hl'):
+            values.setdefault('hwpx_review_colors', bool(app.v_hl.get()))
         self.hwpx_rules = {key: tk.BooleanVar(master=self, value=values.get(key, default))
                            for key, default in HWPX_DEFAULTS.items()}
+        conversions = vars(app).get('_book_conversion_rules', {})
+        self.conversion_rules = {key: tk.StringVar(master=self, value=CONVERSION_LABELS[conversions.get(key, 'default')])
+                                 for key in CONVERSION_RULES}
         self.title('이 책 설정')
         self.transient(app)
         from .gui import work_area
@@ -48,14 +64,15 @@ class BookRuleDialog(tk.Toplevel):
         output = ttk.Frame(tabs, padding=12)
         hwpx_rules = ttk.Frame(tabs, padding=12)
         analysis = ttk.Frame(tabs, padding=12)
+        tabs.add(analysis, text='원본 분석·만들기')
         tabs.add(materials, text='책 자료')
-        tabs.add(output, text='출력 모양')
-        tabs.add(hwpx_rules, text='HWPX 규칙')
-        tabs.add(analysis, text='구조 분석')
+        tabs.add(output, text='양식·출력')
+        tabs.add(hwpx_rules, text='고급 편집')
         self._materials(materials)
         self._output(output)
         self._hwpx_rules(hwpx_rules)
         self._analysis(analysis)
+        ttk.Button(analysis, text='출력 양식 고르기…', command=lambda: tabs.select(output)).pack(anchor='w', pady=(5, 0))
         ttk.Label(frame, textvariable=self.status, wraplength=600).grid(row=2, column=0, sticky='w', pady=4)
         footer = ttk.Frame(frame)
         footer.grid(row=3, column=0, sticky='ew')
@@ -65,7 +82,7 @@ class BookRuleDialog(tk.Toplevel):
         self.settings.pack(side='left')
 
         self.traces = [(variable, variable.trace_add('write', self.invalidate_result))
-                       for variable in (self.template, self.reference, self.pages)]
+                       for variable in (self.template, self.reference, self.pages, self.plan)]
         pdf_variable = app._input_vars[0]['pdf']
         self.traces.append((pdf_variable, pdf_variable.trace_add('write', self.book_changed)))
         self.poll_id = self.after(100, self.poll)
@@ -105,12 +122,33 @@ class BookRuleDialog(tk.Toplevel):
         self.template_entry.pack(side='left', fill='x', expand=True)
         self.pick = ttk.Button(row, text='고르기…', command=self.pick_template)
         self.pick.pack(side='right', padx=(6, 0))
-        self.norm = ttk.Button(frame, text='원문 표기·자동 교정 설정…', command=self.open_normalization)
+        ttk.Label(frame, text='양식을 비우면 원본 용지와 문단 구조로 기본 HWPX를 구성합니다.',
+                  wraplength=560).pack(anchor='w', pady=(6, 0))
+        self.companion_check = ttk.Checkbutton(frame, text='이 책은 HWPX와 문자 PDF를 함께 만들기',
+                                               variable=self.companion)
+        self.companion_check.pack(anchor='w', pady=(8, 0))
+        row = ttk.Frame(frame)
+        row.pack(fill='x', pady=(8, 0))
+        ttk.Label(row, text='HWPX 책갈피').pack(side='left')
+        self.bookmark_box = ttk.Combobox(row, textvariable=self.bookmarks, values=list(BOOKMARK_LABELS.values()),
+                                        state='readonly', width=18)
+        self.bookmark_box.pack(side='left', padx=8)
+        conversion = ttk.LabelFrame(frame, text='HWPX 글자 변환', padding=6)
+        conversion.pack(anchor='w', fill='x', pady=(10, 0))
+        self.conversion_controls = []
+        for index, (key, (label, _, _)) in enumerate(CONVERSION_RULES.items()):
+            row, column = divmod(index, 2)
+            ttk.Label(conversion, text=label).grid(row=row, column=column * 2, sticky='w', padx=(3, 5), pady=3)
+            control = ttk.Combobox(conversion, textvariable=self.conversion_rules[key],
+                                   values=tuple(CONVERSION_LABELS.values()), state='readonly', width=15)
+            control.grid(row=row, column=column * 2 + 1, sticky='w', padx=(0, 9), pady=3)
+            self.conversion_controls.append(control)
+        self.norm = ttk.Button(frame, text='공통 자동 교정 규칙 열기…', command=self.open_normalization)
         self.norm.pack(anchor='w', pady=(8, 0))
 
     def _hwpx_rules(self, frame):
-        ttk.Label(frame, text='저장된 선택을 불러옵니다. 처음 설정하는 책에는 추천값을 미리 선택합니다.\n'
-                              '원본에서 확인한 위치와 문단 경계를 바탕으로 적용합니다.',
+        ttk.Label(frame, text='자동 분석 결과의 HWPX 적용 범위를 조정합니다. '
+                              '항목 나누기는 이 PDF에서 확인한 표지를 사용합니다.',
                   wraplength=560).pack(anchor='w', pady=(0, 10))
         self.hwpx_controls = []
         for key, (label, _) in HWPX_OUTPUT_RULES.items():
@@ -137,25 +175,50 @@ class BookRuleDialog(tk.Toplevel):
 
     def _select_hwpx_recommendation(self):
         for key, default in HWPX_DEFAULTS.items():
-            self.hwpx_rules[key].set(default)
+            self.hwpx_rules[key].set(default or key == 'hwpx_review_letters')
         self.status.set('추천 규칙을 선택했습니다. 미리보기로 확인하고 이 책 설정을 저장할 수 있습니다.')
 
     def _hwpx_values(self):
         return {key: variable.get() for key, variable in self.hwpx_rules.items()}
 
+    def _conversion_values(self):
+        choices = {label: key for key, label in CONVERSION_LABELS.items()}
+        return {key: choices[variable.get()] for key, variable in self.conversion_rules.items()}
+
     def _preview_options(self):
         rule_flags = {flag for _, flag in HWPX_OUTPUT_RULES.values()}
-        return [opt for opt in self.app._build_opts() if opt not in rule_flags] + cli_flags(self._hwpx_values())
+        rule_flags.update(flag for _, _, flag in CONVERSION_RULES.values())
+        opts = [opt for opt in self.app._build_opts() if opt not in rule_flags and opt not in ('--source-review', '--no-highlight')]
+        if '--hwpx-bookmarks' in opts:
+            index = opts.index('--hwpx-bookmarks')
+            del opts[index:index + 2]
+        return (opts + cli_flags(self._hwpx_values()) + conversion_flags(self.app, self._conversion_values())
+                + ['--hwpx-bookmarks', self._bookmark_policy()])
+
+    def _bookmark_policy(self):
+        return next((key for key, label in BOOKMARK_LABELS.items() if label == self.bookmarks.get()), 'headings')
 
     def _analysis(self, frame):
-        ttk.Label(frame, text='PDF에서 목차·본문·색인을 먼저 찾고, 대표 최대 8쪽을 한 번에 AI로 검토합니다. 확인한 목록 형식은 HWPX의 행·열과 쪽번호 배치에 사용합니다.',
+        ttk.Label(frame, text='PDF 전체의 배치를 훑고 대표 쪽을 AI로 검토합니다. '
+                              '제목, 문단 경계, 목록, 주석을 파악하고 선택한 양식에서 맞는 스타일을 찾습니다.',
                   wraplength=570).pack(anchor='w')
+        row = ttk.Frame(frame)
+        row.pack(fill='x', pady=(8, 4))
+        self.build_both = ttk.Button(row, text='분석하고 HWPX·문자 PDF 만들기', command=self.analyze_and_build)
+        self.build_both.pack(side='left')
+        self.analysis_sample = ttk.Button(row, text='HWPX 미리보기', command=self.build_preview)
+        self.analysis_sample.pack(side='left', padx=6)
+        self.review_check = ttk.Checkbutton(frame, text='원본 대조 · OCR 오독 교정 · 각주 뒤 쪽 경계 검수',
+                                            variable=self.source_review)
+        self.review_check.pack(anchor='w', pady=(4, 0))
+        ttk.Label(frame, text='설치된 OCR로 원본과 대조합니다. 확정하기 어려운 글자와 쪽 경계는 보고서에 남깁니다.',
+                  wraplength=560).pack(anchor='w')
         ttk.Label(frame, text='대표 쪽 직접 지정 · 비우면 자동 선택 (최대 12쪽, 예 1-3, 20)').pack(anchor='w', pady=(8, 2))
         self.page_entry = ttk.Entry(frame, textvariable=self.pages)
         self.page_entry.pack(fill='x')
         row = ttk.Frame(frame)
         row.pack(fill='x', pady=6)
-        ttk.Label(row, text='대표 쪽 검토').pack(side='left')
+        ttk.Label(row, text='대표 쪽 분석 · 선택한 AI에 이미지 전송').pack(side='left')
         self.plan_box = ttk.Combobox(row, textvariable=self.plan, state='readonly', width=12,
                                     values=('auto', 'chatgpt', 'gemini', 'claude', '로컬만'))
         self.plan_box.pack(side='left', padx=6)
@@ -163,11 +226,11 @@ class BookRuleDialog(tk.Toplevel):
         self.manual.pack(side='right')
         row = ttk.Frame(frame)
         row.pack(fill='x')
-        self.generate = ttk.Button(row, text='빠른 구조 분석', command=self.start)
+        self.generate = ttk.Button(row, text='먼저 분석 결과 보기', command=self.start)
         self.generate.pack(side='left')
         self.cancel = ttk.Button(row, text='중지', state='disabled', command=self.cancel_generation)
         self.cancel.pack(side='left', padx=4)
-        self.apply = ttk.Button(row, text='확인한 규칙 저장·적용', state='disabled', command=self.apply_result)
+        self.apply = ttk.Button(row, text='이 책에 분석 결과 적용', state='disabled', command=self.apply_result)
         self.apply.pack(side='left')
         ttk.Checkbutton(frame, text='규칙 JSON 보기', variable=self.include_json,
                         command=self.show_result).pack(anchor='w', pady=4)
@@ -204,6 +267,7 @@ class BookRuleDialog(tk.Toplevel):
     def invalidate_result(self, *_):
         if self.result is not None and not self.busy:
             self.result = None
+            self.preferred_pages = ()
             self.show_result()
             self.apply.configure(state='disabled')
             self.status.set('자료 선택이 변경되었습니다. 현재 자료로 규칙을 다시 생성하십시오.')
@@ -212,7 +276,6 @@ class BookRuleDialog(tk.Toplevel):
         path = filedialog.askopenfilename(parent=self, title='출력 양식 HWPX', filetypes=[('HWPX', '*.hwpx')])
         if path:
             select_template(self.template, self.layout, path)
-            self.app._suggest_preset(path)
 
     def pick_reference(self):
         path = filedialog.askopenfilename(parent=self, title='같은 책의 참고 OCR HWPX', filetypes=[('HWPX', '*.hwpx')])
@@ -240,9 +303,21 @@ class BookRuleDialog(tk.Toplevel):
         if reference_variable is not None and reference_variable.get() != reference:
             reference_variable.set(reference)
         previous_rules = getattr(self.app, '_hwpx_output_rules', {})
+        previous_conversion = vars(self.app).get('_book_conversion_rules', {})
+        previous_pdf = vars(self.app).get('_book_textlayer_pdf')
+        previous_review = vars(self.app).get('_book_source_review')
+        previous_bookmarks = vars(self.app).get('_book_hwpx_bookmarks')
         self.app._hwpx_output_rules = self._hwpx_values()
+        self.app._book_conversion_rules = self._conversion_values()
+        self.app._book_textlayer_pdf = self.companion.get()
+        self.app._book_source_review = self.source_review.get()
+        self.app._book_hwpx_bookmarks = self._bookmark_policy()
         if self.app._save_book(create=True) is False:
             self.app._hwpx_output_rules = previous_rules
+            self.app._book_conversion_rules = previous_conversion
+            self.app._book_textlayer_pdf = previous_pdf
+            self.app._book_source_review = previous_review
+            self.app._book_hwpx_bookmarks = previous_bookmarks
             self.status.set('책 설정을 저장하지 못했습니다. 진행 기록의 저장 경로·오류를 확인하십시오.')
             return False
         self.status.set('이 책의 자료와 출력 설정을 저장했습니다.')
@@ -269,13 +344,16 @@ class BookRuleDialog(tk.Toplevel):
 
     def set_busy(self, busy):
         self.busy = busy
-        for button in (self.generate, self.pick, self.manual, self.page_entry, self.template_entry,
+        for button in (self.generate, self.build_both, self.analysis_sample, self.pick, self.manual, self.page_entry, self.template_entry,
                        self.reference_entry, self.reference_pick, self.save, self.rules, self.styles,
                        self.change_pdf, self.settings, self.recheck, self.sample, self.norm,
-                       self.recommend_hwpx, *self.hwpx_controls):
+                       self.recommend_hwpx, self.companion_check, self.review_check, *self.hwpx_controls):
             button.configure(state='disabled' if busy else 'normal')
         self.plan_box.configure(state='disabled' if busy else 'readonly')
+        for control in self.conversion_controls:
+            control.configure(state='disabled' if busy else 'readonly')
         self.layout_box.configure(state='disabled' if busy else 'readonly')
+        self.bookmark_box.configure(state='disabled' if busy else 'readonly')
         self.cancel.configure(state='normal' if busy else 'disabled')
         self.apply.configure(state='normal' if not busy and self.result else 'disabled')
 
@@ -284,13 +362,15 @@ class BookRuleDialog(tk.Toplevel):
             return
         from .book_output import preview_document
         options = self._preview_options()
+        draft = self.result
         self.stop.clear()
         self.set_busy(True)
         self.cancel.configure(state='disabled')
         self.status.set('대표 쪽으로 HWPX 미리보기를 만드는 중입니다.')
         def worker():
             try:
-                path, origin, numbers = preview_document(self.pdf, self.work_dir, options, self.preferred_pages)
+                path, origin, numbers = preview_document(self.pdf, self.work_dir, options, self.preferred_pages,
+                                                         analysis=draft)
                 if self.stop.is_set():
                     path.unlink(missing_ok=True)
                 else:
@@ -299,13 +379,22 @@ class BookRuleDialog(tk.Toplevel):
                 self.events.put(('error', str(exc)))
         threading.Thread(target=worker, name='book-output-preview', daemon=True).start()
 
-    def start(self):
+    def analyze_and_build(self):
+        if self.busy:
+            return
+        if self.result:
+            self.apply_result(build=True)
+        else:
+            self.start(build=True)
+
+    def start(self, *, build=False):
         if self.busy:
             return
         if self.app.running or self.app._input_vars[0]['pdf'].get().strip() != self.pdf:
             messagebox.showinfo(self.title(), '원래 PDF를 선택하고 진행 중인 작업이 끝난 뒤 규칙을 생성하십시오.', parent=self)
             return
         from .rule_generation import generate_rule
+        self.build_after_analysis = build
         self.result = None
         self.show_result()
         self.stop.clear()
@@ -334,6 +423,7 @@ class BookRuleDialog(tk.Toplevel):
                 if kind == 'status':
                     self.status.set(value)
                 elif kind == 'error':
+                    self.build_after_analysis = False
                     self.set_busy(False)
                     self.status.set('생성 중단: ' + value)
                 elif kind == 'sample':
@@ -353,10 +443,12 @@ class BookRuleDialog(tk.Toplevel):
                     if getattr(self, 'analysis_selection', None) not in (None, (
                             self.template.get().strip(), self.reference.get().strip(), self.pages.get())):
                         self.result = None
+                        self.build_after_analysis = False
                         self.set_busy(False)
                         self.status.set('분석 도중 책 자료가 변경되었습니다. 현재 자료로 다시 생성하십시오.')
                         continue
                     if self.stop.is_set():
+                        self.build_after_analysis = False
                         self.set_busy(False)
                         self.status.set('생성을 중지했습니다. 규칙은 적용하지 않았습니다.')
                         continue
@@ -366,8 +458,12 @@ class BookRuleDialog(tk.Toplevel):
                     self.preferred_pages = tuple(dict.fromkeys(next((n for n in kinds[role] if n in samples), kinds[role][0]) for role in
                         ('차례', '목차', '색인', '본문', '각주', '문헌 목록', '제목') if kinds.get(role)))
                     self.show_result()
-                    self.status.set('생성 완료. 분석 범위·확인 항목·규칙을 검토한 뒤 저장·적용하십시오.')
+                    self.status.set('분석 완료. 결과를 미리 보거나 이 책에 적용할 수 있습니다.')
                     self.set_busy(False)
+                    if self.build_after_analysis:
+                        self.build_after_analysis = False
+                        if self.apply_result(build=True):
+                            return
         except queue.Empty:
             pass
         if self.winfo_exists():
@@ -397,6 +493,14 @@ class BookRuleDialog(tk.Toplevel):
                      for kind, numbers in value.get('type_pages', {}).items() if numbers]
             if types:
                 text.extend(['발견한 쪽 유형', '\n'.join(types)])
+            rule = value['rule']
+            if 'field_labels' in rule:
+                text.extend(['문단을 나눌 항목 표지', ', '.join(rule['field_labels']) or '확인된 항목 표지 없음'])
+            if paper := rule.get('paper'):
+                text.append(f"원본 기준 용지 {paper['width']:g} × {paper['height']:g} mm")
+            if styles := (rule.get('styles') or {}).get('paragraph'):
+                text.extend(['양식 스타일 연결', '\n'.join(
+                    f'{role} → {names[0]}' for role, names in styles.items())])
             if self.include_json.get():
                 text.extend(['규칙 JSON', json.dumps(value['rule'], ensure_ascii=False, indent=2)])
             self.preview.insert('1.0', '\n\n'.join(text))
@@ -407,7 +511,7 @@ class BookRuleDialog(tk.Toplevel):
         self.status.set('중지 요청 중… 완료 전까지 규칙을 적용하지 않습니다.')
         self.cancel.configure(state='disabled')
 
-    def apply_result(self):
+    def apply_result(self, *, build=False):
         if self.busy or not self.result:
             return
         if self.app.running or self.app._input_vars[0]['pdf'].get().strip() != self.pdf:
@@ -421,11 +525,24 @@ class BookRuleDialog(tk.Toplevel):
         from .rule_generation import save_generated
         try:
             path = save_generated(result, rules_dir())
-            self.app.use_book_rule(str(path))
+            if build:
+                from .gui import MODE_LABELS
+                if self.app.use_book_rule(str(path), save=False) is False:
+                    return False
+                self.app._mode_vars[0].set(MODE_LABELS['auto'])
+                self.app._book_textlayer_pdf = True
+                self.app.v_bold.set(False)
+            elif self.app.use_book_rule(str(path)) is False:
+                return False
+            self.app._hwpx_output_rules = self._hwpx_values()
+            self.app._book_conversion_rules = self._conversion_values()
+            self.app._book_source_review = self.source_review.get()
+            self.app._book_hwpx_bookmarks = self._bookmark_policy()
             reference_variable = getattr(self.app, 'v_reference_hwpx', None)
             if reference_variable is not None:
                 reference_variable.set(result['inputs'].get('reference_hwpx', ''))
-                self.app._save_book(create=True)
+            if (reference_variable is not None or build) and self.app._save_book(create=True) is False:
+                raise OSError('이 책의 결과 폴더에 설정을 저장할 수 없습니다.')
             self.reload_selection()
         except (OSError, ValueError) as exc:
             messagebox.showerror(self.title(), '규칙 저장 실패: ' + str(exc), parent=self)
@@ -433,6 +550,12 @@ class BookRuleDialog(tk.Toplevel):
         self.status.set('새 규칙을 저장하고 이 책에 적용했습니다: ' + path.name)
         self.result = None
         self.apply.configure(state='disabled')
+        if build:
+            if not result['coverage']['analyzed_pages']:
+                self.app._append('책 형식은 로컬 분석 결과를 적용했습니다. AI 대표 쪽 확인은 분석 보고서를 참조하십시오.\n')
+            self.close()
+            self.app.do_run()
+        return True
 
     def close(self):
         self.stop.set()

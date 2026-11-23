@@ -37,6 +37,7 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "ocr_strategy": "local-first", "local_profile": "traditional", "local_ai_review": True, "local_ai_max_calls": 20,
             "simple_display": False, "local_columns": True, "local_line_verification": False, "local_easyocr": False,
             "local_gpu_engines": None,                              # None: YEONE_OCR_GPU_ENGINES 를 따름(기본 켬)
+            "local_engine_parallel": 0,
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": False, "gemini_subscription_model": "", "local_resume": "unfinished",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
@@ -76,11 +77,11 @@ STATUSES = ["원본 대조 완료(사람)", "판독 확인 필요", "이미지 �
 
 HELP = f"""{APP_NAME} · 연어OCR {__version__}
 
-PDF에서 편집용 HWPX 만들기
+PDF에서 편집용 HWPX와 문자 PDF 만들기
 1. [일반 OCR]에서 [PDF 고르기…]로 책을 엽니다. 쪽 범위를 비우면 책 전체를 판독합니다.
-2. [이 책 설정]에서 참고 OCR, 양식 HWPX와 책별 규칙을 고릅니다. [출력 모양]에서 제목·본문 스타일을 연결하고 대표 쪽의 HWPX를 미리 볼 수 있습니다.
-3. [OCR 시작] 또는 [남은 쪽 OCR 이어서 하기]를 누릅니다. 이미 읽은 쪽만 출력하려면 [저장된 판독 내보내기]를 사용합니다.
-4. [HWPX 열기]로 문서를 확인합니다. [검수·편집]에서 원본과 결과를 나란히 대조합니다.
+2. [이 책 설정]에서 [분석하고 HWPX·문자 PDF 만들기]를 누릅니다. 출력 양식 HWPX가 있다면 [양식·출력]에서 선택합니다.
+3. 먼저 확인하려면 [먼저 분석 결과 보기]와 [HWPX 미리보기]를 사용합니다. 이미 읽은 쪽만 출력하려면 [저장된 판독 내보내기]를 사용합니다.
+4. [HWPX 열기]와 [문자 PDF 열기]로 결과를 확인합니다. [검수·편집]에서 원본과 결과를 나란히 대조합니다.
 
 기존 OCR과 재판독
 원본 이름만 바뀌었거나 예전 작업을 다른 폴더에 보관했다면 [내보내기] → [다른 OCR 작업 폴더 사용]에서 HWPX 또는 문자 PDF를 고릅니다. 원본을 확인한 뒤 선택한 폴더의 out에 새 문서를 저장합니다.
@@ -2107,7 +2108,7 @@ class App(ResultNavigation, tk.Tk):
 
     def _sync_settings_summary(self, *_):
         document = "HWPX + DOCX" if self.v_docx.get() else "HWPX"
-        if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get():
+        if App._companion_pdf(self):
             document += " + 검색 PDF"
         if getattr(self, "v_layout", None) is not None and self.layout_key() == "flow":
             tpl = self.v_template.get().strip()
@@ -2232,6 +2233,7 @@ class App(ResultNavigation, tk.Tk):
         self.v_local_line_verification = tk.BooleanVar(value=bool(self.cfg.get("local_line_verification", False)))
         self.v_local_easyocr = tk.BooleanVar(value=bool(self.cfg.get("local_easyocr", False)))
         self.v_local_gpu_engines = tk.BooleanVar(value=App._gpu_engines_choice(self.cfg))
+        self.v_local_engine_parallel = tk.StringVar(value=str(self.cfg.get('local_engine_parallel') or 0))
         self.v_local_ai_subscription = tk.BooleanVar(value=bool(self.cfg.get("local_ai_subscription", True)))
         self.v_local_ai_plan = tk.StringVar(value=AI_PLAN_LABELS.get(self.cfg.get("local_ai_plan"), AI_PLAN_LABELS["auto"]))
         self.v_local_ai_api_fallback = tk.BooleanVar(value=False)
@@ -2406,13 +2408,13 @@ class App(ResultNavigation, tk.Tk):
         R["local_easyocr"] = row(b, "EasyOCR", "가로쓰기에서 함께 읽기(기본 끔 · 한자 우선)", local_easyocr)
 
         def local_gpu_engines(parent):
-            cb = ttk.Checkbutton(parent, text="GPU 엔진도 함께 읽기 (느림)", variable=self.v_local_gpu_engines)
-            Tip(cb, "엔진 관리로 CUDA 엔진(GLM-OCR · Surya · PaddleOCR server)을 설치했으면 그중 하나를 쪽마다 더 돌립니다"
-                    "(번체·간체는 GLM-OCR, 한글·한자 혼용은 Surya). 생성형 모델이라 쪽당 시간이 크게 늘어납니다. "
-                    "켜 두면 그 엔진 결과가 없는 이미 읽은 쪽도 이어서 할 때 다시 처리합니다 — 기존 엔진으로 읽던 책을 빨리 "
-                    "마치려면 끄십시오. GPU 엔진이 설치되어 있지 않으면 켜도 달라지는 것이 없습니다.", self)
+            cb = ttk.Checkbutton(parent, text="GPU 엔진도 함께 읽기", variable=self.v_local_gpu_engines)
+            Tip(cb, "사용 가능한 CUDA 엔진 하나와 CPU 엔진을 같은 쪽에서 함께 실행합니다. "
+                    "엔진과 메모리에 따라 소요 시간이 달라집니다. 이어서 읽을 때는 필요한 엔진의 판독을 채웁니다.", self)
             return cb
-        R["local_gpu_engines"] = row(b, "GPU 엔진", "설치된 GLM-OCR·Surya 중 하나를 쪽마다 더 읽기(느림)", local_gpu_engines)
+        R["local_gpu_engines"] = row(b, "GPU 엔진", "설치된 CUDA 엔진 하나를 CPU 엔진과 함께 사용", local_gpu_engines)
+        R['local_engine_parallel'] = row(b, '동시 OCR 엔진', '0은 CPU·메모리에 맞춰 자동 선택, 1은 순서대로 실행',
+            lambda p: ttk.Spinbox(p, from_=0, to=8, width=3, textvariable=self.v_local_engine_parallel, state='readonly'))
 
         def engines(parent):
             return self._btn(parent, "엔진 관리…", lambda: App.open_engine_manager(self),
@@ -2665,7 +2667,7 @@ class App(ResultNavigation, tk.Tk):
         bk["title_tip"] = Tip(bk["title"], "", self)
         b = boxed(card); b.pack(fill="x")
         S["book"] = {"card": card, "head": head, "body": b}
-        self._btn(b, "이 책 설정… · 자료 선택·규칙 자동 생성", self.make_book_rule,
+        self._btn(b, "이 책 설정… · 원본 분석·출력", self.make_book_rule,
                   tip="원본 PDF·참고 OCR·양식·규칙을 함께 관리합니다. 아래 설정과 같은 책별 값을 사용합니다.").pack(anchor="w", pady=(0, P(8)))
         self._btn(b, "기존 OCR 재검수·재판독…", self.do_recheck).pack(anchor="w", pady=(0, P(8)))
 
@@ -3245,12 +3247,8 @@ class App(ResultNavigation, tk.Tk):
         return True
 
     def _normalization_opts(self):
-        options = []
-        for name, flag in (("v_traditional", "--no-traditional"), ("v_yun", "--no-yun"), ("v_punctuation", "--no-punctuation"),
-                           ("v_korean_forms", "--no-korean-forms")):
-            variable = vars(self).get(name)
-            if variable is not None and not variable.get():
-                options.append(flag)
+        from .hwpx_output_rules import conversion_flags
+        options = conversion_flags(self)
         variable = vars(self).get("v_punctuation_rules")
         if variable is not None and variable.get().strip():
             options += ["--punctuation-rules", variable.get().strip()]
@@ -3263,10 +3261,11 @@ class App(ResultNavigation, tk.Tk):
         return options
 
     def _context_model_enabled(self):
-        def enabled(name):
-            variable = vars(self).get(name)
-            return variable is None or bool(variable.get())
-        return enabled("v_ctxmodel") and (enabled("v_traditional") or enabled("v_yun"))
+        from .hwpx_output_rules import conversion_enabled
+        if vars(self).get('_hwpx_output_rules', {}).get('hwpx_original_text'):
+            return False
+        return conversion_enabled(self, 'v_ctxmodel') and (conversion_enabled(self, 'v_traditional') or
+                                                            conversion_enabled(self, 'v_yun'))
 
     # ---------- 작업 탭: 책 카드 · 이 책의 설정 · 실행 카드 · 장부(디자인 명세 §6.1·§6.5·§5.6·§5.7) ----------
     def _lab(self, parent, text: str = "", font: str = "BODY", fg: str = "INK", bg: str = "PANEL", wrap: bool = False, **kw) -> tk.Label:
@@ -3633,7 +3632,7 @@ class App(ResultNavigation, tk.Tk):
         on = [n for n, v in (("간체→번체", self.v_traditional), ("한국 표준 한자체", vars(self).get("v_korean_forms")),
                              ("云/雲", self.v_yun), ("중문부호", self.v_punctuation)) if v is not None and v.get()]
         fix = "자동 교정 4가지" if len(on) == 4 else ("자동 교정: " + " · ".join(on) if on else "자동 교정 끔")
-        also = [n for n, v in (("DOCX", self.v_docx), ("검색 가능한 PDF", self.v_tlpdf)) if v.get()]
+        also = (["DOCX"] if self.v_docx.get() else []) + (["검색 가능한 PDF"] if App._companion_pdf(self) else [])
         return (f"모든 책 공통: {self.v_provider.get()} {self.v_model.get().strip()} · {fix}"
                 + (" · HWPX와 함께 " + " · ".join(also) if also else ""))
 
@@ -6677,6 +6676,10 @@ class App(ResultNavigation, tk.Tk):
         from .automatic_ocr import gpu_engines_enabled
         if gpu != gpu_engines_enabled():                              # 환경 변수와 같으면 넘기지 않음(명령 그대로)
             options.append("--local-gpu-engines" if gpu else "--no-local-gpu-engines")
+        variable = vars(self).get('v_local_engine_parallel')
+        workers = max_calls_value(variable.get() if variable is not None else cfg.get('local_engine_parallel', 0))
+        if workers and workers <= 8:
+            options += ['--local-engine-parallel', str(workers)]
         variable = vars(self).get("v_local_ai_parallel")
         try:
             parallel = int(variable.get() if variable is not None else cfg.get("local_ai_parallel", 3))
@@ -6751,11 +6754,22 @@ class App(ResultNavigation, tk.Tk):
         v = getattr(self, "v_suspects", None)
         return (["--adjudicate-blind"] if self.v_blind.get() else []) + (["--no-suspects"] if suspects and v is not None and not v.get() else [])
 
+    def _companion_pdf(self) -> bool:
+        book_pdf = vars(self).get('_book_textlayer_pdf')
+        if book_pdf is not None:
+            return book_pdf
+        variable = vars(self).get('v_tlpdf')
+        return bool(variable is not None and variable.get())
+
     def _build_opts(self) -> list[str]:
         from .hwpx_output_rules import cli_flags
         o = []
         if self.v_docx.get(): o.append("--docx")
-        if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get(): o.append("--textlayer-pdf")
+        if App._companion_pdf(self):
+            o.append("--textlayer-pdf")
+        if vars(self).get('_book_source_review'):
+            o.append('--source-review')
+        o += ['--hwpx-bookmarks', vars(self).get('_book_hwpx_bookmarks') or 'headings']
         if getattr(self, "v_layout", None) is not None:
             o += ["--layout", self.layout_key()]                         # 늘 넘긴다(명령 쪽 기본값이 바뀌어도 창의 선택 그대로)
             if self.layout_key() == "flow":
@@ -6766,7 +6780,8 @@ class App(ResultNavigation, tk.Tk):
                 if getattr(self, "v_bold", None) is not None and not self.v_bold.get():
                     o.append("--no-bold")
         if not self.v_join.get(): o.append("--no-join-pages")
-        if not self.v_hl.get(): o.append("--no-highlight")
+        if not vars(self).get('_hwpx_output_rules', {}).get('hwpx_review_colors', self.v_hl.get()):
+            o.append("--no-highlight")
         if getattr(self, "v_simple_display", None) is not None and self.v_simple_display.get(): o += ["--display", "simple"]
         if not self.v_ctx.get(): o.append("--no-context")
         if not self.v_pb.get(): o.append("--no-page-breaks")
@@ -6789,20 +6804,25 @@ class App(ResultNavigation, tk.Tk):
     def _preset_values(self) -> list[str]:
         return [lab for _, lab in library_choices(self._preset_ref)] + [PRESET_PICK, PRESET_EXPORT]
 
-    def use_book_rule(self, ref):
+    def use_book_rule(self, ref, *, save=True):
         try:
             rule = resolve_preset(ref)
+            if rule.source_sha256:
+                from ab_ocr.ocr import stable_file_sha256
+                if not self.pdf() or stable_file_sha256(self.pdf()) != rule.source_sha256:
+                    raise PresetError('현재 PDF에 맞는 분석 규칙을 이 책 설정에서 생성하십시오.')
             if rule.template and not Path(rule.template).is_file():
                 raise PresetError(f'양식 HWPX가 없습니다: {rule.template}')
         except (PresetError, OSError) as exc:
-            messagebox.showerror(APP_NAME, str(exc)); return
+            messagebox.showerror(APP_NAME, str(exc)); return False
         self._preset_ref = ref
         self.v_layout.set(LAYOUT_LABELS['flow'])
         if ref not in BUILTIN or rule.template: self.v_template.set(rule.template)
         self.v_preset.set(preset_label(ref))
         self.cb_preset.configure(values=self._preset_values())
         self._layout_changed(); self._sync_settings_summary()
-        if vars(self).get('_book'): self._save_book()
+        if save and vars(self).get('_book'): self._save_book()
+        return True
 
     def save_book_rule(self):
         directory = ensure_examples()
@@ -7082,7 +7102,7 @@ class App(ResultNavigation, tk.Tk):
         if lines:
             App._notice(self, lines[-1])                                # 설정 탭이 보이면 바닥 알림 줄에도
 
-    def _set_running(self, on: bool, command: str = ""):
+    def _set_running(self, on: bool, command: str = "", *, source_review=False):
         """작업 중에는 단추를 잠그고, 진행 막대를 0 에서 새로 시작한다(좌우로 오가는 막대 대신 끝까지 차는 막대).
         실행 카드: 도는 실행의 자리만 잠긴 모양, [■ 중지]는 살리고, 이 책의 설정 판의 쪽 범위 칸도 잠근다. 끝나면 원본이 없을 때 꺼 두는 단추를 다시 끈다."""
         self.running = on
@@ -7119,7 +7139,7 @@ class App(ResultNavigation, tk.Tk):
         for e in d.get("_lock_entries", ()):
             e.state(["disabled"] if on else ["!disabled"])
         if on:
-            self.tracker = Tracker(command)
+            self.tracker = Tracker(command, source_review=source_review)
             self.progress.configure(value=0); self._prog_shown = 0.0
             self.v_prog.set("0%" if self.tracker.plan else "")
         else:
@@ -7186,7 +7206,11 @@ class App(ResultNavigation, tk.Tk):
                                  and argv[argv.index("--ocr-strategy") + 1] == "local-first"
                                  and ("--reader" not in argv or argv[argv.index("--reader") + 1] != "mock"))
         self._run_label = label                                         # 한 번에 인식이 아닌 명령은 실행 단추 자리에 '{label} 중'
-        self._set_running(True, cmd); self.v_status.set(label + " 중…")
+        if '--source-review' in argv:
+            self._set_running(True, cmd, source_review=True)
+        else:
+            self._set_running(True, cmd)
+        self.v_status.set(label + " 중…")
         self._calls_live = True                                         # 이 명령(cli.main)이 CALL_CAP 을 센다 — 장부의 이번 실행 호출
         pages = cmd in PAGE_CMDS                                        # 이 탭 원본의 쪽을 판독하는 명령만 쪽 띠를 움직인다(책갈피 교정의 판독은 다른 PDF)
         self.q.put(("log", f"\n▶ {label}\n   yeone-ocr {' '.join(argv)}\n"))
@@ -7489,6 +7513,10 @@ class App(ResultNavigation, tk.Tk):
                 **({"reference_hwpx": self.v_reference_hwpx.get().strip()} if vars(self).get("v_reference_hwpx") is not None else {}),
                 **({'yu_policy':_label_key(YU_POLICY_LABELS,self.v_yu_policy.get()) or 'classical'} if vars(self).get('v_yu_policy') is not None else {}),
                 **vars(self).get('_hwpx_output_rules', {}),
+                **vars(self).get('_book_conversion_rules', {}),
+                **({'textlayer_pdf': self._book_textlayer_pdf} if vars(self).get('_book_textlayer_pdf') is not None else {}),
+                **({'source_review': self._book_source_review} if vars(self).get('_book_source_review') is not None else {}),
+                **({'hwpx_bookmarks': self._book_hwpx_bookmarks} if vars(self).get('_book_hwpx_bookmarks') else {}),
                 "bold_split": bool(self.v_bold.get()), "pages": self.v_pages.get().strip(), "print_offset": self.v_off.get().strip(),
                 "mode": self.mode_key(self._active_input)}
 
@@ -7496,10 +7524,19 @@ class App(ResultNavigation, tk.Tk):
         """책별 설정의 있는 열쇠만 칸에 넣는다. 짜임 규칙을 짜임(v_layout)보다 먼저 — v_layout 을 쓰면 불리는 _layout_changed 가 새 규칙으로 획 굵기 칸을 켜고 끄게.
         넣은 문서 설정·읽기 방향은 전체 설정의 '읽어 둔 값'(_cfg_loaded)에도 적는다 — 책을 보여 주기만 한 창이 닫힐 때 그 책의 값을 다른 창이 저장한
         새 책 기본값 위에 덮어쓰지 않게(write_config 는 읽어 둔 값과 다른 것만 이 창이 바꾼 것으로 본다). 그 뒤 사용자가 고친 것만 이 창의 변경이다."""
-        from .hwpx_output_rules import RULES
+        from .hwpx_output_rules import CONVERSION_RULES, RULES
         rules = {key:d[key] for key in RULES if key in d}
         if rules:
             self._hwpx_output_rules = {**vars(self).get('_hwpx_output_rules', {}), **rules}
+        conversion = {key: d[key] for key in CONVERSION_RULES if key in d}
+        if conversion:
+            self._book_conversion_rules = {**vars(self).get('_book_conversion_rules', {}), **conversion}
+        if 'textlayer_pdf' in d:
+            self._book_textlayer_pdf = d['textlayer_pdf']
+        if 'source_review' in d:
+            self._book_source_review = d['source_review']
+        if 'hwpx_bookmarks' in d:
+            self._book_hwpx_bookmarks = d['hwpx_bookmarks']
         loaded = vars(self).get("_cfg_loaded")
         for k in ("layout", "template", "preset", "bold_split", "mode"):
             if k in d:
@@ -7566,6 +7603,17 @@ class App(ResultNavigation, tk.Tk):
                 pend = clean_book_values(pending.get(str(d)) or pending.get(str(public_root(d))) or {})
         if not unread or d != self._book["dir"]:
             self._hwpx_output_rules = {}
+            self._book_conversion_rules = {}
+            self._book_textlayer_pdf = None
+            self._book_source_review = None
+            self._book_hwpx_bookmarks = None
+        if clear_if_missing and not unread and 'preset' not in (data or pend) and d is not None:
+            try:
+                previous_rule = resolve_preset(self._preset_ref)
+            except (AttributeError, PresetError):
+                previous_rule = None
+            if previous_rule and previous_rule.source_sha256:
+                self._apply_book({'preset': DEFAULT_PRESET, 'template': ''})
         forced = clear_if_missing and bool(self.v_force.get())
         if forced:
             self.v_force.set(False)                                      # 다른 책을 '다시 판독' 으로 시작하지 않는다(기록 있는 쪽을 모두 다시 산다)
@@ -7826,6 +7874,9 @@ class App(ResultNavigation, tk.Tk):
                 from .automatic_ocr import gpu_engines_enabled
                 if self.cfg.get("local_gpu_engines") is not None or chosen != gpu_engines_enabled():
                     self.cfg["local_gpu_engines"] = chosen           # 바꾼 적이 없으면 계속 환경 변수를 따름
+            if vars(self).get('v_local_engine_parallel') is not None:
+                workers = max_calls_value(self.v_local_engine_parallel.get())
+                self.cfg['local_engine_parallel'] = workers if workers is not None and 0 <= workers <= 8 else 0
             if vars(self).get("v_local_ai_subscription") is not None:
                 self.cfg["local_ai_subscription"] = bool(self.v_local_ai_subscription.get())
             if vars(self).get("v_local_ai_plan") is not None:
@@ -8160,8 +8211,10 @@ class App(ResultNavigation, tk.Tk):
                 self._save_book(create=True)                               # 실행 직전(비용 확인을 받은 뒤): 이 책의 설정을 결과 폴더에
                 App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
                 pages = self.v_pages.get().strip()
+                opts = self._build_opts()
+                output = 'HWPX·문자 PDF' if '--textlayer-pdf' in opts else 'HWPX'
                 self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True)
-                           + self._answered_opts() + extra + self._build_opts() + App._strategy_opts(self), "한 번에 인식 (전체 → HWPX)" if not pages else f"한 번에 인식 ({pages}쪽 → HWPX)")
+                           + self._answered_opts() + extra + opts + App._strategy_opts(self), f"한 번에 인식 ({pages + '쪽' if pages else '전체'} → {output})")
             self._with_plan("run", go)
 
     def do_run_pdf(self, *, review_only=False):

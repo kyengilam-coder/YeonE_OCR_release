@@ -25,6 +25,7 @@ class Parallelism(unittest.TestCase):
             self.assertEqual(engine_parallelism(engines, cpu_count=4), 1)
             tight = {"available_commit_mb": 3000, "available_physical_mb": 3000}
             self.assertEqual(engine_parallelism(engines, cpu_count=20, memory=tight), 1)   # easyocr 2048 + 640 > 2400
+            self.assertEqual(engine_parallelism(engines, 4, cpu_count=20, memory=tight), 1)
             self.assertEqual(engine_parallelism(engines, cpu_count=20, memory=tight, resident={"easyocr"}), 4)
             self.assertEqual(engine_parallelism(engines, 3, cpu_count=2), 3)
             self.assertEqual(engine_parallelism(engines, 9, cpu_count=2), 4)

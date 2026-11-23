@@ -20,7 +20,8 @@ __all__ = ["BODY_WIDTH_MM", "HP", "MEMO_AUTHOR", "FONT_BODY", "FONT_HEAD", "HEAD
 
 def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min_mm: float = 120,
                highlight: bool = True, page_breaks: bool = True, memos: bool = True, preset: Preset | str | None = None,
-               simple: bool = False, edited: bool = False, source_pdf=None, source_records=None) -> dict:
+               simple: bool = False, edited: bool = False, source_pdf=None, source_records=None, bookmark_policy='legacy',
+               review_letters=False) -> dict:
     """highlight=False 면 등급 색·형광펜·밑줄 없이 글자만(〔〕 표기는 그대로). memos=False 면 고지를 메모 대신 회색 〔고지: …〕 로 글 속에.
     preset=basic 은 대제목·중제목·소제목·문단-1~5 한글 스타일을 만든다. None 은 예전 기본 모양을 그대로 쓴다."""
     if simple and preset is None:
@@ -30,5 +31,7 @@ def build_hwpx(blocks: list[Block], out_path: str, min_mm: float = 70, large_min
     look = BasicLook(preset, page_breaks=page_breaks) if named_styles else DefaultLook(page_breaks=page_breaks)
     if edited:
         look.body_font = "Source Han Serif K Medium"
+        if preset:
+            look.paper = preset.paper
     return write_hwpx(blocks, out_path, look, min_mm=min_mm, large_min_mm=large_min_mm, highlight=highlight, memos=memos, simple=simple,
-                      source_pdf=source_pdf, source_records=source_records)
+                      source_pdf=source_pdf, source_records=source_records, bookmark_policy=bookmark_policy, review_letters=review_letters)

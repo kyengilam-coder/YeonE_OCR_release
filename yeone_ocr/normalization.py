@@ -517,7 +517,7 @@ def _prepare_text(text: str, converter: Callable[[str], str], rules: list[dict] 
     pos = 0
     # 닫지 않은 의심 괄호도 끝까지 보존한다.
     protected = list(MARK_RE.finditer(text))
-    last_close = max((m.end() for m in protected), default=0)
+    last_close = text.rfind('〕') + 1
     unclosed = text.find("〔", last_close)
     segments = [(m.start(), m.end()) for m in protected]
     if unclosed >= 0:

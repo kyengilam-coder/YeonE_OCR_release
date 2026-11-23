@@ -103,7 +103,7 @@ def apply_repairs(records, manifest, source_sha256):
 def quality_report(blocks, records):
     pages = {}
     for b in blocks:
-        if b.text:
+        if b.text and not b.layout.get('source_page_transition'):
             pages.setdefault(b.page, []).append(b)
     findings = []
     for page, rows in pages.items():

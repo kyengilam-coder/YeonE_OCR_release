@@ -5,7 +5,7 @@ import re
 from statistics import median
 
 from .citation_layout import heading_key
-from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, paragraph_text
+from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, bbox_frac, paragraph_text
 from .hwpx_output_rules import HwpxOutputRules
 from .source_entry_headings import GENERAL_SECTION_LABELS, source_entry_rows, source_line
 
@@ -14,9 +14,157 @@ _NUMBERED_SECTION = re.compile(r'(?:[一二三四五六七八九十]+[、．.]|[
 _DEPARTMENT = re.compile(r'[\u3400-\u9fff]{1,7}部')
 _ENTRY = re.compile(r'[\u3400-\u9fff]{2,8}')
 _CREDIT = re.compile(r'[^。；;：:]{3,24}(?:原著|先生著|校訂|校订|校注|編校|编校)')
-_NOTE = re.compile(r'[〔\[［]\s*\d{1,2}\s*[〕\]］]')
+_NOTE = re.compile(r'(?:[〔\[［【(（]\s*\d{1,2}\s*[〕\]］】)）]|[①-⑳])')
 _FOLIO = re.compile(r'[•·・]\s*(\d{1,4})\s*[•·・]')
 _ATTRIBUTION = re.compile(r'[\u3400-\u9fff]{2,8}(?:曰|云|謂)\s*[:：]')
+
+
+def ruling_y(page, top, bottom, left, right, width_fraction):
+    """Locate a printed horizontal rule from a small grayscale page strip."""
+    import numpy as np
+    import pymupdf
+
+    r = page.rect
+    rect = pymupdf.Rect(r.x0 + left*r.width, r.y0 + top*r.height,
+                       r.x0 + right*r.width, r.y0 + bottom*r.height)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), clip=rect, colorspace=pymupdf.csGRAY,
+                          alpha=False, annots=False)
+    if not pix.width or not pix.height:
+        return None
+    pixels = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    longest = r.width * 2 * width_fraction
+    found = None
+    for y, row in enumerate(pixels):
+        changes = np.flatnonzero(np.diff(np.r_[False, row < 185, False]))
+        run = max(changes[1::2] - changes[::2], default=0)
+        if run >= longest:
+            longest = run
+            found = round(((pix.y + y)/2 - r.y0) * 1000 / r.height)
+    return found
+
+
+def _scanned_notes(regions, hints, height, reviewed, rule=None):
+    """Use the OCR rectangle only when a numbered note sits in the bottom band."""
+    numbered = []
+    for region in regions:
+        if region.kind not in ('본문', '소주') or not region.paragraphs or 'kind' in hints.get(region.id, {}):
+            continue
+        x0, y0, x1, y1 = bbox_frac(region.bbox)
+        after_rule = rule is not None and region.bbox[0] >= rule - 1
+        min_width = .024 if reviewed and after_rule else .06
+        if y0 < (.55 if region.kind == '소주' else .76) or y1 > .98 or x1 - x0 < min_width:
+            continue
+        text = paragraph_text(region.paragraphs[0]).strip()
+        below_rule = (after_rule and text and not text.isdecimal()
+                      and not re.fullmatch(r'[·.•・。\s]*\d{1,4}[·.•・。\s]*', text))
+        if _NOTE.match(text) or reviewed and region.kind == '소주' or below_rule:
+            numbered.append((region, y1 - y0))
+    if len(numbered) < 2 and not reviewed and not any(region.kind == '소주' for region, _ in numbered):
+        return
+    supported = []
+    for region, fraction in numbered:
+        lines = sum(max(1, len(p.columns)) for p in region.paragraphs)
+        typical = round(fraction * height / lines * .8, 1)
+        if region.kind != '소주' and typical > 13 and not reviewed:
+            continue
+        supported.append((region, typical))
+    if not supported:
+        return
+    size = min(11, max(9, median(typical for _, typical in supported)))
+    hanging = round(size * 100)
+    for region, _ in supported:
+        hints.setdefault(region.id, {}).update(
+            source_layout_para='footnote',
+            source_typography={'size': size, 'alignment': 'LEFT', 'left': hanging, 'indent': -hanging})
+
+    # A wrapped note often has no number on its second line. Require it to
+    # continue the compact, aligned rows below a recognized note.
+    marked = {region.id for region, _ in supported}
+    first = supported[0][0]
+    baseline = median(r.bbox[2] - r.bbox[0] for r, _ in supported)
+    prior = None
+    for region in regions:
+        top, left, bottom, right = region.bbox
+        if region.id in marked:
+            prior = region
+        elif prior is not None:
+            text = paragraph_text(region.paragraphs[0]).strip() if region.paragraphs else ''
+            wraps = (0 <= top - prior.bbox[2] <= baseline * .75
+                     and first.bbox[1] - 60 <= left <= first.bbox[1] + 100)
+            same_line = abs(top - prior.bbox[0]) <= baseline * .5 and abs(left - prior.bbox[3]) <= 25
+            if (region.kind in ('본문', '소주') and text and not (text.isdecimal() or _FOLIO.fullmatch(text))
+                    and region.id not in hints and (wraps or same_line)
+                    and bottom - top <= baseline * 1.25 and right - left >= (24 if reviewed else 120)):
+                hints[region.id] = dict(source_layout_para='footnote',
+                                        source_typography={'size': size, 'alignment': 'LEFT', 'left': hanging})
+                prior = region
+            else:
+                prior = None
+
+
+def _scanned_titles(regions, hints):
+    from .common_layout import MAJOR
+
+    for region in regions:
+        if region.kind != '설명문' or len(region.paragraphs) != 1:
+            continue
+        text = paragraph_text(region.paragraphs[0]).strip()
+        top, left, bottom, right = region.bbox
+        colophon = re.fullmatch(r'《[^》]{2,15}》\s*卷[之第]?[一二三四五六七八九十百上下]+[终終]', text)
+        if left >= 560 and bottom - top <= 50 and (top < 350 and _CREDIT.fullmatch(text) or colophon):
+            hints.setdefault(region.id, {}).update(source_layout_para='credit',
+                                                    source_typography={'alignment': 'RIGHT'})
+
+    rows = [(r, paragraph_text(r.paragraphs[0]).strip()) for r in regions
+            if r.kind == '본문' and len(r.paragraphs) == 1 and '세로' not in r.reading_direction
+            and 90 <= r.bbox[0] < r.bbox[2] <= 855]
+    prose = [r.bbox for r, text in rows if text and r.bbox[3] - r.bbox[1] >= 470]
+    if len(prose) >= 4:
+        body_height = median(box[2] - box[0] for box in prose)
+        body_left = min(median(box[1] for box in prose), min(box[1] for box in prose) + 10)
+        for i, (region, text) in enumerate(rows[:-1]):
+            existing = hints.get(region.id, {})
+            if existing.get('kind') not in (None, 'body') or existing.get('source_layout_para'):
+                continue
+            top, left, bottom, right = region.bbox
+            gap_before = top - rows[i - 1][0].bbox[2] if i else top - 90
+            following_region, following_text = rows[i + 1]
+            following = following_region.bbox
+            gap_after = following[0] - bottom
+            larger = bottom - top >= body_height * 1.14
+            if top < 310 and larger and MAJOR.fullmatch(text):
+                kind, level, alignment = 'volume', 1, 'LEFT' if left < 220 else 'CENTER'
+            elif (_DEPARTMENT.fullmatch(text) and larger and abs((left + right) / 2 - 500) <= 45
+                  and min(gap_before, gap_after) >= body_height):
+                kind, level, alignment = 'section', 2, 'CENTER'
+            elif (re.fullmatch(r'(?:[\u3400-\u9fff]\s*){2,12}(?:[（(][^）)\n]{1,24}[）)])?', text)
+                  and 20 <= right - left <= 310 and body_left + 15 <= left <= body_left + 100
+                  and (larger or bottom - top >= body_height * .92 and following_text.startswith(('[', '［', '【')))
+                  and gap_before >= body_height * 1.05 and -body_height * .25 <= gap_after <= body_height * .82
+                  and body_left - 10 <= following[1] <= body_left + 100
+                  and following[3] - following[1] >= 140):
+                kind, level, alignment = 'entry', 3, 'LEFT'
+            else:
+                continue
+            hints[region.id] = dict(kind=kind, level=level, alignment=alignment, evidence='measured-scan-heading',
+                                    source_typography={'alignment': alignment})
+    for region in regions:
+        hint = hints.get(region.id, {})
+        if ('세로' in region.reading_direction or 'source_typography' in hint
+                or (region.kind != '제목' and hint.get('kind') not in ('book', 'volume', 'chapter', 'section', 'subsection', 'entry'))):
+            continue
+        x0, y0, x1, y1 = bbox_frac(region.bbox)
+        if not (.02 <= x1 - x0 <= .72 and .005 <= y1 - y0 <= .09):
+            continue
+        if abs((x0 + x1) / 2 - .5) <= .045:
+            alignment = 'CENTER'
+        elif x0 >= .46 and x1 >= .75:
+            alignment = 'RIGHT'
+        elif x0 <= .17 and x1 < .70:
+            alignment = 'LEFT'
+        else:
+            continue
+        hints.setdefault(region.id, {})['source_typography'] = {'alignment': alignment}
 
 
 def _match_nearby(key, matches, accepts):
@@ -100,7 +248,7 @@ def _printed_title_size(page, box):
 
 
 def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=HwpxOutputRules(),
-                              entry_catalogue=None, contents_pages=()):
+                              entry_catalogue=None, contents_pages=(), adaptive=False, footnote_pages=()):
     import pymupdf
     from .common_layout import MAJOR, SECTION
 
@@ -145,7 +293,14 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
                     if 'front_row' in hint:
                         hint.pop('front_row')
                         hint.pop('source_typography', None)
+        if adaptive and infer_titles and output_rules.footnote_groups:
+            note_regions = [r for r in regions if r.kind == '소주'] if list_page else regions
+            reviewed = number in footnote_pages
+            rule = ruling_y(page, .68, .94, .06, .51, .17) if reviewed and not lines and not list_page else None
+            _scanned_notes(note_regions, hints, height, reviewed, rule=rule)
         if not lines:
+            if adaptive and infer_titles and output_rules.source_typography and not list_page:
+                _scanned_titles(regions, hints)
             continue
         prose = [row for row in lines if row[0][2] - row[0][0] > width * .48]
         body_height = None

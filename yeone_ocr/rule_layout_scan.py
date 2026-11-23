@@ -1,6 +1,7 @@
 """Local evidence for selecting book-format samples without OCR or network calls."""
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
+from statistics import median
 
 from .contents_layout import CONTENTS
 from .index_layout import index_entry
@@ -11,6 +12,44 @@ INDEX = re.compile(r'(?:索[引隐隱]|檢索|检索|색인|index)', re.I)
 BIBLIOGRAPHY = re.compile(r'(?:參考文獻|参考文献|참고문헌|문헌목록|bibliography|references)', re.I)
 MAX_AUTO_SAMPLES = 8
 PRIMARY_TYPES = ('목차', '본문', '색인')
+FIELD_PREFIX = re.compile(
+    r'^(?:\[([^\]]+)\]|［([^］]+)］|〔([^〕]+)〕|【([^】]+)】|([^:：]+)[:：])\s*(?=\S)')
+OCR_FIELD = re.compile(r'^(?:\[([^\]]+)\]|［([^］]+)］|〔([^〕]+)〕|【([^】]+)】)(?:\s|(?=\S)|$)')
+
+
+def saved_ocr_fields(records):
+    """Repeat bracketed labels at real paragraph starts on separate pages."""
+    from .schema import PageReading, paragraph_text
+
+    labels = defaultdict(set)
+    for record in records:
+        reading = PageReading.model_validate(record['merged'])
+        for region in reading.regions:
+            if region.kind not in ('본문', '설명문') or region.bbox[0] >= 740:
+                continue
+            for para in region.paragraphs:
+                if not (match := OCR_FIELD.match(paragraph_text(para).strip())):
+                    continue
+                name = next(value for value in match.groups() if value is not None).strip()
+                if re.fullmatch(r'[^\W_][\w \-·]{0,23}', name) and any(c.isalpha() for c in name):
+                    labels[name].add(record['pdf_page'])
+    return [name for name, pages in sorted(labels.items(), key=lambda pair: (-len(pair[1]), pair[0]))
+            if len(pages) >= 2][:40]
+
+
+def _layout_profile(rects, body_margins, labels):
+    fields = [name for name, count in labels.most_common(40) if count >= 2]
+    if not rects:
+        return {'field_labels': fields}
+    width, height = rects.most_common(1)[0][0]
+    rows = body_margins[(width, height)]
+    page = {'width': width, 'height': height,
+            'left': round(width * .12, 1), 'right': round(width * .12, 1),
+            'top': round(height * .09, 1), 'bottom': round(height * .08, 1)}
+    if rows:
+        page['left'] = round(max(width * .04, min(width * .25, median(left for left, _ in rows))), 1)
+        page['right'] = round(max(width * .04, min(width * .25, median(right for _, right in rows))), 1)
+    return {'field_labels': fields, 'paper': page}
 
 
 def _heading_type(text):
@@ -24,7 +63,7 @@ def _heading_type(text):
     return None
 
 
-def scan_layout(doc, *, stop=None, progress=lambda message: None):
+def scan_layout(doc, *, stop=None, progress=lambda message: None, profile=None):
     from .rule_generation import _check_stop
 
     count = len(doc)
@@ -38,6 +77,9 @@ def scan_layout(doc, *, stop=None, progress=lambda message: None):
     types, layouts = defaultdict(list), defaultdict(list)
     uncertain = []
     list_kind = None
+    rects, labels = Counter(), Counter()
+    body_margins = defaultdict(list)
+    pt_to_mm = 25.4 / 72
     for number, page in enumerate(doc, 1):
         _check_stop(stop)
         if number == 1 or number % 50 == 0:
@@ -68,6 +110,24 @@ def scan_layout(doc, *, stop=None, progress=lambda message: None):
         list_kind = kind if kind in ('차례', '목차', '색인') else None
 
         rect = page.rect
+        if profile is not None:
+            size = tuple(round(v * pt_to_mm, 1) for v in (rect.width, rect.height))
+            if all(50 <= v <= 600 for v in size):
+                rects[size] += 1
+                if kind == '본문' and not page.rotation:
+                    wide = [b for b in page.get_text('blocks', flags=0)
+                            if b[2] - b[0] >= rect.width * .50 and b[6] == 0]
+                    if wide:
+                        body_margins[size].append((
+                            min(b[0] - rect.x0 for b in wide) * pt_to_mm,
+                            min(rect.x1 - b[2] for b in wide) * pt_to_mm))
+            if kind not in ('차례', '목차', '색인', '문헌 목록'):
+                for line in lines:
+                    match = FIELD_PREFIX.match(line)
+                    if match:
+                        name = next(part for part in match.groups() if part is not None).strip()
+                        if re.fullmatch(r'[^\W_][\w \-·]{0,23}', name) and any(c.isalpha() for c in name):
+                            labels[name] += 1
         shape = (round(rect.width / max(rect.height, 1), 1), page.rotation)
         if len(''.join(lines)) < 30:
             import pymupdf
@@ -107,6 +167,8 @@ def scan_layout(doc, *, stop=None, progress=lambda message: None):
         numbers = types.get(kind, [])
         if len(numbers) > 1:
             add(numbers[len(numbers) // 2])
+    if profile is not None:
+        profile.update(_layout_profile(rects, body_margins, labels))
     if all(types.get(kind) for kind in PRIMARY_TYPES) or len(selected) >= 6:
         return dict(types), uncertain, sorted(selected)
     for group in sorted(layouts.values(), key=len):

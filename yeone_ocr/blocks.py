@@ -84,6 +84,15 @@ class Block:
     def remap(self, text: str, origins: list[int]) -> None:
         """글이 바뀐 뒤(문맥·부호 정리) 글을 text 로 바꾸고 범위·메모·책갈피를 새 글 자리로(origins[새 자리] = 옛 자리).
         범위는 같은 옛 글자에서 나온 새 글자를 모두 덮고, 메모는 그 글자의 첫 새 자리(없으면 글 안으로 자름), 책갈피는 그 글자(없으면 뒤 글자, 끝이면 끝)."""
+        lines = self.layout.get('source_lines', ())
+        if lines and ''.join(lines) == self.text:
+            boundaries = [0]
+            old_offset = 0
+            for line in lines[:-1]:
+                old_offset += len(line)
+                boundaries.append(next((i for i, origin in enumerate(origins) if origin >= old_offset), len(text)))
+            boundaries.append(len(text))
+            self.layout = {**self.layout, 'source_lines': tuple(text[a:b] for a, b in zip(boundaries, boundaries[1:]) if a < b)}
         self.text = text
         mapped: dict[int, list[int]] = {}
         for new, source in enumerate(origins):
@@ -161,7 +170,7 @@ LAYOUTS = ("page", "flow")   # page = 원본 쪽마다 기록 줄·쪽 나누기
 
 _VOLUME = re.compile(r"卷\s*第?\s*([一二三四五六七八九十百千〇零\d]+)")
 # 제목에서 뜻을 가르는 토막: 권 번호, 품급(上品·中品·下品·之上·之下), 부 이름(木部·草部 — 部 앞 한 글자). 하나라도 다르면 다른 장이다.
-_GRADE = re.compile(r"卷\s*第?\s*[一二三四五六七八九十百千〇零\d]+|第\s*[一二三四五六七八九十百千〇零\d]+|[上中下]品|之[上中下]|[上中下]$|[㐀-䶿一-鿿]部")   # 장을 가르는 표지: 권·第N·품급·之上下·끝의 上中下(…并治上/中/下)·部
+_GRADE = re.compile(r"卷\s*[第之]?\s*[一二三四五六七八九十百千〇零\d]+|第\s*[一二三四五六七八九十百千〇零\d]+|[上中下]品|之[上中下]|[上中下]$|[㐀-䶿一-鿿]部")   # 장을 가르는 표지: 권·第N·품급·之上下·끝의 上中下(…并治上/中/下)·部
 RUNNING_TOP = 0.15        # 쪽 위 이 비율 안에서 시작하는 제목만 머리말 후보
 RUNNING_SIMILAR = 0.6     # 앞서 남긴 쪽머리 제목과 이만큼 비슷하면 머리말(잘못 읽은 변형 포함)
 
@@ -181,6 +190,8 @@ def is_running_head(text: str, kept: list[str]) -> bool:
     marks = _GRADE.findall(key)
     for old in kept:
         if _GRADE.findall(old) != marks:
+            continue
+        if key.endswith('序') and old.endswith('序') and key.endswith('原序') != old.endswith('原序'):
             continue
         if SequenceMatcher(None, key, old).ratio() >= RUNNING_SIMILAR:
             return True
@@ -369,8 +380,13 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                             continue
                     pb = Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me, cstyles=bd,
                                layout=dict(layout_hint))
+                    if (rec.get('_preserve_repaired_lines') and reg.kind == '본문' and len(p.columns) > 1
+                            and re.search(r'〔\d+〕', t)):
+                        pb.layout['source_lines'] = tuple(c.text for c in sorted(p.columns, key=lambda c: c.col_from_right))
                     if layout_hint.get('source_layout_para') == 'footnote':
                         pb.kind = '소주'
+                    elif not first_text_done and p.continues_from_previous and not title and reg.kind == '본문':
+                        pb.layout['source_continues'] = True
                     body = pb
                     if title:
                         body = None

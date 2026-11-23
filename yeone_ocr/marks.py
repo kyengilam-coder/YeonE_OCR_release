@@ -5,8 +5,9 @@ inner_pos(표시에서 나온 글자의 원글 자리). 안 글의 앞뒤 빈칸
 from __future__ import annotations
 import re
 
-MARK_RE = re.compile(r"〔[^〔〕]*〕")                                 # 표시 하나(괄호째)
-SPLIT_RE = re.compile(r"(〔[^〔〕]*〕)")                              # re.split 용(표시도 조각으로 남김)
+# Standalone bracketed digits are printed note numbers, not OCR markup.
+MARK_RE = re.compile(r"〔(?!\s*\d+\s*〕)[^〔〕]*〕")
+SPLIT_RE = re.compile(f'({MARK_RE.pattern})')                         # re.split 용(표시도 조각으로 남김)
 MARK_AB = re.compile(r"〔([^〔〕/]{1,2})/([^〔〕]{1,2})〕")           # 3차가 묻는 한두 글자 갈림 〔a/b〕
 UNKNOWN = "판독불명"
 NOTE_PREFIXES = ("〔→", "〔소주〕", "〔작업 메모〕", "〔판독 메모〕", "〔도판 미삽입", "〔이어짐〕", "〔고지: ")   # 작업 표시(회색) — 〔고지/구자〕 같은 두 글자 후보 표시와 겹치지 않게 쌍점까지
@@ -60,7 +61,7 @@ def split_marks(text: str) -> list[tuple[str, str]]:
     for seg in SPLIT_RE.split(text):
         if not seg:
             continue
-        if seg.startswith("〔") and seg.endswith("〕"):
+        if MARK_RE.fullmatch(seg):
             out.append((seg, "note" if seg.startswith(NOTE_PREFIXES) else "mark"))
         else:
             out.append((seg, "body"))

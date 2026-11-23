@@ -97,7 +97,7 @@ def infer_record_layout(records):
     return records
 
 
-def apply_common_layout(blocks, *, front_pages=(), break_front_pages=True):
+def apply_common_layout(blocks, *, front_pages=(), break_front_pages=True, mark_note_transitions=False):
     """Center headings and preserve independent front-matter starts."""
     joined=[]
     for block in deepcopy(blocks):
@@ -170,4 +170,115 @@ def apply_common_layout(blocks, *, front_pages=(), break_front_pages=True):
             seen = True
             previous_page = block.page
             previous_block = block
+    if mark_note_transitions:
+        from .blocks import Block
+        marked = []
+        previous = None
+        for block in blocks:
+            starts_body = block.type == 'para' or block.type == 'heading' and block.level >= 3
+            boundary = (previous and previous.layout.get('source_layout_para') == 'footnote'
+                        and starts_body and block.kind != '소주' and block.page == previous.page + 1
+                        and block.layout.get('source_layout_para') != 'footnote')
+            if boundary and block.layout.get('source_contents', {}).get('start'):
+                block.layout['page_break_before'] = True
+            elif boundary:
+                anchor = next((name for offset, name in block.anchors if offset == 0), '')
+                printed = re.search(r'인쇄 ([^·]+쪽)', anchor)
+                label = printed[1] if printed else f'PDF {block.page}쪽'
+                status = '계속' if block.layout.get('source_continues') else '시작'
+                marker_anchors = [(offset, name) for offset, name in block.anchors if offset == 0]
+                block.anchors = [(offset, name) for offset, name in block.anchors if offset != 0]
+                marked.append(Block(type='note', text=f'원본 {label} · 본문 {status}', page=block.page,
+                                    anchors=marker_anchors,
+                                    layout={'source_page_transition': True, 'keep_with_next': True,
+                                            'page_break_before': block.layout.pop('page_break_before', False),
+                                            'source_typography': {'size': 10, 'before': 1100, 'alignment': 'LEFT'}}))
+            marked.append(block)
+            if block.type in ('para', 'heading', 'image', 'table') and (block.text.strip() or block.type in ('image', 'table')):
+                previous = block
+        blocks = marked
     return blocks,stats
+
+
+def note_transition_evidence(blocks, records, expected_notes=()):
+    """Inspect assembled HWPX blocks in output reading order."""
+    pages = {r['pdf_page']: dict(page=r['pdf_page'], notes=0, first='', last='', cue='',
+                                leading_note=False, note_ends_page=False, expected=r['pdf_page'] in expected_notes)
+             for r in records}
+    for block in blocks:
+        page = pages.get(block.page)
+        if page is None:
+            continue
+        if block.layout.get('source_page_transition'):
+            page['cue'] = block.text
+            continue
+        if block.type not in ('heading', 'para', 'image', 'table') or (not block.text.strip() and block.type in ('heading', 'para')):
+            continue
+        note = block.layout.get('source_layout_para') == 'footnote'
+        page['notes'] += int(note)
+        if not page['first']:
+            page['first'] = block.text[:60] or block.type
+            page['leading_note'] = note
+            page['starts_distinctly'] = block.type == 'heading' or bool(block.layout.get('page_break_before'))
+        page['last'] = block.text[-60:] or block.type
+        page['note_ends_page'] = note
+    return list(pages.values())
+
+
+def verify_written_note_cues(path, evidence):
+    """Check that the saved note, cue and resumed text remain adjacent."""
+    from collections import defaultdict
+    from xml.etree import ElementTree
+    from zipfile import ZipFile
+    from .hwpx_writer import HP
+
+    cues = [item for item in evidence if item['cue']]
+    if not cues:
+        return
+    locations = defaultdict(list)
+    paragraphs = []
+    with ZipFile(path) as archive:
+        sections = sorted((name for name in archive.namelist() if re.fullmatch(r'Contents/section\d+\.xml', name)),
+                          key=lambda name: int(re.search(r'\d+', name)[0]))
+        for name in sections:
+            section = ElementTree.fromstring(archive.read(name))
+            for para in section.findall(HP + 'p'):
+                text = ''.join(''.join(''.join(t.itertext()) for t in para.iter(HP + 't')).split())
+                if text:
+                    locations[text].append(len(paragraphs))
+                    paragraphs.append(text)
+    by_page = {item['page']: item for item in evidence}
+    for current in cues:
+        prior = by_page.get(current['page'] - 1)
+        if prior is None:
+            continue
+        tail = ''.join(prior['last'].split())
+        head = ''.join(current['first'].split())
+        current['cue_verified'] = any(
+            bool(tail and head) and 0 < i < len(paragraphs) - 1
+            and paragraphs[i - 1].endswith(tail) and paragraphs[i + 1].startswith(head)
+            for i in locations[''.join(current['cue'].split())])
+
+
+def audit_note_transitions(evidence):
+    by_page = {item['page']: item for item in evidence}
+    result = []
+    for number, current in sorted(by_page.items()):
+        if not (current['notes'] or current['expected']):
+            continue
+        following = by_page.get(number + 1)
+        if not current['notes'] or not current['note_ends_page']:
+            status = '각주 끝 확인 필요'
+        elif not following or not following['first']:
+            status = '다음 쪽 본문 없음'
+        elif following['leading_note']:
+            status = '이어지는 각주 확인 필요'
+        elif following['cue']:
+            status = '회색 쪽 안내' if following.get('cue_verified', True) else '저장된 HWPX에서 쪽 안내 위치 확인 필요'
+        elif following.get('starts_distinctly'):
+            status = '제목 또는 쪽 나눔'
+        else:
+            status = '쪽 경계 확인 필요'
+        result.append(dict(page=number, next_page=number + 1 if following else None, status=status,
+                           tail=current['last'], head=following['first'] if following else ''))
+    return result
