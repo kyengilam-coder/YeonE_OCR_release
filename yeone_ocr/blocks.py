@@ -371,16 +371,24 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                                layout=dict(layout_hint))
                     if layout_hint.get('source_layout_para') == 'footnote':
                         pb.kind = '소주'
+                    body = pb
                     if title:
+                        body = None
+                        if end := layout_hint.get('source_entry_end'):
+                            rest = end + len(t[end:]) - len(t[end:].lstrip())
+                            pb, body = pb.cut(end, rest)
+                            body.layout = {}
                         pb.type='heading';pb.kind='제목';pb.level=pb.layout.get('level',2)
-                    elif reg.kind != '소주' and rec.get('_source_body_size'):
-                        pb.layout['source_body_size'] = rec['_source_body_size']
+                    if body is not None and reg.kind != '소주' and rec.get('_source_body_size'):
+                        body.layout['source_body_size'] = rec['_source_body_size']
                         if rec.get('_source_body_spacing'):
-                            pb.layout['source_body_spacing'] = rec['_source_body_spacing']
-                            pb.layout['source_body_width'] = rec['_source_body_width']
+                            body.layout['source_body_spacing'] = rec['_source_body_spacing']
+                            body.layout['source_body_width'] = rec['_source_body_width']
                     if anchored:
                         place(pb, 0)
                     blocks.append(pb)
+                    if title and body is not None:
+                        blocks.append(body)
                     first_text_done = True
             elif reg.kind in IMAGE_KINDS:
                 info = (rec.get("crops") or {}).get(reg.id)

@@ -1875,7 +1875,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         records,entry_names=prepare_records(records,common_layout=not getattr(args,'no_common_layout',False),
                                           citation=book_rule.citation if book_rule else None, headings=book_rule.headings if book_rule else None,
                                           template_headings=template_titles, source_pdf=doc, page_types=page_types,
-                                          output_rules=output_rules)
+                                          infer_entries=bool(book_rule and book_rule.entry), output_rules=output_rules)
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
         progress("build", 0, steps)

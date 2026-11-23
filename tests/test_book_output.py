@@ -8,7 +8,7 @@ import pytest
 
 from yeone_ocr.book_output import preview_document
 from yeone_ocr.state import Work
-from tests._hwpx_fixtures import HH, HP, make_template, rec, text_region
+from tests._hwpx_fixtures import HH, HP, make_template, make_template3, rec, text_region
 
 
 def test_preview_applies_chosen_style_to_actual_book_content_without_touching_source(tmp_path):
@@ -168,5 +168,61 @@ def test_preview_applies_each_book_hwpx_rule(tmp_path, disabled_rule):
         formats = {p.get("id"): p for p in header.iter(HH + "paraPr")}
         fmt = formats[paragraphs[notes[0]].get("paraPrIDRef")]
         assert (fmt.find(HH + "breakSetting").get("keepWithNext") == "1") == (disabled_rule != "footnote-groups")
+    finally:
+        output.unlink()
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_preview_restores_scanned_herb_title_with_a_wrong_pdf_text_layer(tmp_path, fused):
+    source = tmp_path / "book.pdf"
+    title, stale_title = "肉蓯蓉", "肉或蓉"
+    body = "寇宗奭曰牛膝同蓯蓉浸酒服益腎。"
+    prose = "本草正文皆應保留此行只用作確認正文實際的字形及行距。"
+    recipe = "久嗽氣急"
+    overview = "總論"
+    rows = [(90, title), (105, body), (120, prose), (135, prose), (150, "[氣味] 甘，微溫。"),
+            (165, prose), (225, recipe), (240, prose), (255, prose), (270, "[主治] 此處為正文。"),
+            (330, overview), (345, prose), (360, "[氣味] 此處為正文。")]
+    with pymupdf.open() as doc, pymupdf.open() as painted:
+        toc = doc.new_page(width=400, height=600)
+        toc.insert_text((45, 80), "肉芨蓉…… (108)", fontname="china-t")
+        toc.insert_text((45, 95), "總論…… (108)", fontname="china-t")
+        page = doc.new_page(width=400, height=600)
+        scan = painted.new_page(width=400, height=600)
+        for y, line in rows:
+            scan.insert_text((58, y), line, fontsize=10, fontname="china-t",
+                             render_mode=2 if line in (title, overview) else 0, border_width=.5)
+        page.insert_image(page.rect, pixmap=scan.get_pixmap(matrix=pymupdf.Matrix(3, 3)))
+        for y, line in rows:
+            page.insert_text((58, y), stale_title if line == title else line, fontsize=10,
+                             fontname="china-t", render_mode=3)
+        page.insert_text((40, 570), "· 108 ·", fontsize=10)
+        doc.set_toc([[1, "목차", 1], [1, "본문", 2]])
+        doc.save(source)
+
+    work = Work(source, tmp_path / "작업자료")
+    ocr_lines = [title + body] if fused else [title, body]
+    ocr_lines.extend(line for _, line in rows[2:])
+    work.save_record(2, rec(2, [text_region(f"local-line-{i}", [line], box=(0, 0, 1, 1))
+                                for i, line in enumerate(ocr_lines)]))
+    original = work.record_path(2).read_bytes()
+    template = tmp_path / "herb-styles.hwpx"
+    make_template3(template)
+    output, _, pages = preview_document(source, work.dir, ["--layout", "flow", "--template", str(template),
+                                                            "--preset", "kaibao", "--no-bold", "--no-normalize"])
+    try:
+        assert pages == [2]
+        with ZipFile(output) as archive:
+            header = ET.fromstring(archive.read("Contents/header.xml"))
+            section = ET.fromstring(archive.read("Contents/section0.xml"))
+        styles = {s.get("id"): s.get("name") for s in header.iter(HH + "style")}
+        body_rows = [("".join(t.text or "" for t in p.iter(HP + "t")), styles[p.get("styleIDRef")])
+                     for p in section.findall(HP + "p")]
+        position = body_rows.index((title, "제목-본초명+생약명"))
+        assert body_rows[position+1][0].startswith(body)
+        assert any(recipe in text for text, _ in body_rows)
+        assert any(overview in text for text, _ in body_rows)
+        assert all(style != "제목-본초명+생약명" for text, style in body_rows if recipe in text or overview in text)
+        assert work.record_path(2).read_bytes() == original
     finally:
         output.unlink()

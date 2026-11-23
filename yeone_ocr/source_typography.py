@@ -7,6 +7,7 @@ from statistics import median
 from .citation_layout import heading_key
 from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, paragraph_text
 from .hwpx_output_rules import HwpxOutputRules
+from .source_entry_headings import source_entry_rows, source_line
 
 _IMPRINT = re.compile(r'ISBN|CIP|版权|版權|판권|原著|资助出版|資助出版', re.I)
 _NUMBERED_SECTION = re.compile(r'(?:[一二三四五六七八九十]+[、．.]|[0-9]{1,2}[．.])\s*[^。？！,，.;；]{2,42}')
@@ -98,7 +99,8 @@ def _printed_title_size(page, box):
     return None
 
 
-def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=HwpxOutputRules()):
+def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=HwpxOutputRules(),
+                              entry_catalogue=None, contents_pages=()):
     import pymupdf
     from .common_layout import MAJOR, SECTION
 
@@ -111,7 +113,7 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
         width, height = page.cropbox.width, page.cropbox.height
         if page.rotation or not width or not height:
             continue
-        lines, matches, folios = [], defaultdict(list), set()
+        lines, matches, folios, printed = [], defaultdict(list), set(), []
         for block in page.get_text('dict', flags=flags)['blocks']:
             for line in block.get('lines', []):
                 if line.get('wmode') or tuple(line.get('dir', ())) != (1, 0):
@@ -128,11 +130,14 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
                     continue
                 row = (line['bbox'], size if main.get('alpha', 255) else None)
                 lines.append(row)
+                if entry_catalogue is not None:
+                    printed.append(source_line(text, spans, row))
                 if len(text) <= 200 and (key := heading_key(text)):
                     matches[key].append(row)
         list_page = record.get('_source_contents_page') or record.get('_source_index_page')
         hints = record.setdefault('_common_layout_regions', {})
-        regions = PageReading.model_validate(record['merged']).regions
+        reading = PageReading.model_validate(record['merged'])
+        regions = reading.regions
         if infer_titles and not list_page and number <= 16:
             _front_rows(record, regions, page, lines, matches, hints)
             if not output_rules.source_typography:
@@ -168,11 +173,22 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
         has_numbered_notes = output_rules.footnote_groups and infer_titles and not list_page and sum(
             bool(_NOTE.match(paragraph_text(p).strip())) for region in regions for p in region.paragraphs
         ) >= 2
+        entries = {}
+        if entry_catalogue is not None and not list_page and number not in contents_pages and body_height is not None:
+            if not folios and re.fullmatch(r'[0-9]{1,4}', reading.print_page):
+                folios.add(reading.print_page)
+            names = entry_catalogue.get(int(next(iter(folios)), 10), set()) if len(folios) == 1 else set()
+            entries = source_entry_rows(page, regions, hints, printed, names, left, body_height, prose)
         department_seen = False
         for region in regions:
             hint = hints.get(region.id, {})
             if 'front_row' in hint:
                 continue
+            source_entry = entries.get(region.id)
+            if source_entry:
+                entry_box, entry_size, cut, evidence = source_entry
+                hint = hints.setdefault(region.id, {})
+                hint.update(kind='entry', level=3, alignment='LEFT', evidence=evidence, source_entry_end=cut)
             contents = hint.get('source_contents')
             index = hint.get('source_index')
             title = (region.kind in TITLE_KINDS or hint.get('kind') in
@@ -188,7 +204,7 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
                 numbered = infer_titles and bool(_NUMBERED_SECTION.fullmatch(text.strip()))
                 possible_title = major or numbered or (infer_titles and bool(SECTION.fullmatch(text.strip())))
             key = heading_key(text.strip()) if 0 < len(text) <= 200 else ''
-            found = matches.get(key, ())
+            found = [(entry_box, entry_size)] if source_entry else matches.get(key, ())
             credit = opens_volume and not department_seen and _CREDIT.fullmatch(text.strip())
             note = has_numbered_notes and _NOTE.match(text.strip())
             if not found and credit:

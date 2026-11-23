@@ -139,7 +139,7 @@ def apply_common_layout(blocks, *, front_pages=(), break_front_pages=True):
             previous_row = (block.page, row)
         if block.type=='heading':
             kind=hint.get('kind') or ('chapter' if block.level<=1 else 'section')
-            alignment = hint.get('source_typography', {}).get('alignment', 'CENTER')
+            alignment = hint.get('source_typography', {}).get('alignment', hint.get('alignment', 'CENTER'))
             hint.update(alignment=alignment,keep_with_next=True,widow_orphan=True,keep_lines=False)
             already_on_source_page = bool(hint.get('source_typography') and block.page and block.page == previous_page)
             hint['page_break_before']=bool(seen and not already_on_source_page and kind in ('book','volume','chapter')

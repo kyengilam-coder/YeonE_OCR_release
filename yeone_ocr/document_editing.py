@@ -288,7 +288,7 @@ def _marked_entry_hints(reading, pdf, chapter_keys, seen_chapters):
 
 
 def prepare_records(records, *, common_layout=False, citation=None, headings=None, template_headings=None,
-                    source_pdf=None, page_types=None, output_rules=HwpxOutputRules()):
+                    source_pdf=None, page_types=None, infer_entries=False, output_rules=HwpxOutputRules()):
     """Restore paragraphs in local line records using explicit separators.
 
     Proper structured OCR paragraphs keep their existing boundaries. Local
@@ -339,6 +339,8 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
                     if not contents and role in ('chapter','section'): parent=key
                     record.setdefault('_common_layout_regions',{})[region.id]={'kind':role,'level':{'chapter':1,'section':2,'subsection':3}[role],
                         'alignment':'CENTER','evidence':'template-member-and-source-citation' if member and template_role else 'template-catalog-and-source-layout' if catalog and template_role else 'template-title-style' if template_role else 'book-rule-exact-title'}
+    entry_catalogue = None
+    contents_pages = set()
     if source_pdf is not None:
         from .contents_layout import bookmark_contents, prepare_contents_pages
         from .index_layout import prepare_list_pages
@@ -346,6 +348,9 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
         contents_pages = bookmark_contents(source_pdf) | set(types.get('목차', ())) | set(types.get('차례', ()))
         prepare_list_pages(output, source_pdf, set(types.get('색인', ())), contents_pages=contents_pages)
         prepare_contents_pages([r for r in output if not r.get('_source_index_page')], source_pdf, page_types)
+        if common_layout and infer_entries:
+            from .source_entry_headings import catalogue_names
+            entry_catalogue = catalogue_names(source_pdf, output, contents_pages)
     names = known_entries(output)
     from .citation_layout import heading_key
     from .common_layout import is_contents_page
@@ -399,7 +404,8 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
         record['_document_continuations'] = inferred
     if source_pdf is not None:
         from .source_typography import measure_source_typography
-        measure_source_typography(output, source_pdf, infer_titles=common_layout, output_rules=output_rules)
+        measure_source_typography(output, source_pdf, infer_titles=common_layout, output_rules=output_rules,
+                                  entry_catalogue=entry_catalogue, contents_pages=contents_pages)
     return output, names
 
 
