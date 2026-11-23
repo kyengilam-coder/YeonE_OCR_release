@@ -79,7 +79,8 @@ def test_book_setup_saves_reference_and_template_together_and_rejects_switched_b
         assert dialog.reference.get() == str(ref.path)
         assert dialog.template is app.v_template
         assert dialog.reference is app.v_reference_hwpx
-        assert dialog._hwpx_values() == DEFAULTS
+        assert dialog._hwpx_values() == {**DEFAULTS, 'hwpx_review_letters': True}
+        assert '--hwpx-review-letters' in dialog._preview_options()
         dialog.hwpx_rules['hwpx_entry_paragraphs'].set(False)
         assert '--hwpx-no-entry-paragraphs' in dialog._preview_options()
         assert '--hwpx-no-entry-paragraphs' not in app._build_opts()
@@ -92,7 +93,7 @@ def test_book_setup_saves_reference_and_template_together_and_rejects_switched_b
         app._save_book.assert_called_once_with(create=True)
         app._save_book.return_value = False
         dialog.recommend_hwpx.invoke()
-        assert dialog._preview_options() == ['--layout', 'flow']
+        assert dialog._preview_options() == ['--layout', 'flow', '--hwpx-review-letters', '--hwpx-bookmarks', 'headings']
         with patch('yeone_ocr.rule_request.template_summary', return_value={}):
             assert not dialog.save_selection()
         assert '--hwpx-no-entry-paragraphs' in app._build_opts()
