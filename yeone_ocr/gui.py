@@ -6767,9 +6767,6 @@ class App(ResultNavigation, tk.Tk):
         if self.v_docx.get(): o.append("--docx")
         if App._companion_pdf(self):
             o.append("--textlayer-pdf")
-        if vars(self).get('_book_source_review'):
-            o.append('--source-review')
-        o += ['--hwpx-bookmarks', vars(self).get('_book_hwpx_bookmarks') or 'headings']
         if getattr(self, "v_layout", None) is not None:
             o += ["--layout", self.layout_key()]                         # 늘 넘긴다(명령 쪽 기본값이 바뀌어도 창의 선택 그대로)
             if self.layout_key() == "flow":
@@ -6779,6 +6776,9 @@ class App(ResultNavigation, tk.Tk):
                     o += ["--template", tpl]
                 if getattr(self, "v_bold", None) is not None and not self.v_bold.get():
                     o.append("--no-bold")
+        if vars(self).get('_book_source_review'):
+            o.append('--source-review')
+        o += ['--hwpx-bookmarks', vars(self).get('_book_hwpx_bookmarks') or 'headings']
         if not self.v_join.get(): o.append("--no-join-pages")
         if not vars(self).get('_hwpx_output_rules', {}).get('hwpx_review_colors', self.v_hl.get()):
             o.append("--no-highlight")
