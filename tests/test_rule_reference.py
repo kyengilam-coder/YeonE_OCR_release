@@ -65,6 +65,7 @@ def test_missing_reference_fails_before_ai_call(tmp_path):
 def test_book_setup_saves_reference_and_template_together_and_rejects_switched_book(tmp_path):
     import tkinter as tk
     from yeone_ocr.gui_rule_generation import BookRuleDialog
+    from yeone_ocr.hwpx_output_rules import DEFAULTS, cli_flags
     pdf, ref = fixture(tmp_path)
     app = tk.Tk(); app.withdraw()
     app.cfg = {}; app.running = False
@@ -72,20 +73,29 @@ def test_book_setup_saves_reference_and_template_together_and_rejects_switched_b
     app.v_reference_hwpx = tk.StringVar(master=app, value=str(ref.path))
     app._input_vars = {0: {'pdf': tk.StringVar(master=app, value=str(pdf))}}
     app._save_book = Mock(); app.use_book_rule = Mock(); app.make_book_rule_manual = Mock()
+    app._build_opts = lambda: ['--layout', 'flow', *cli_flags(getattr(app, '_hwpx_output_rules', {}))]
     dialog = BookRuleDialog(app, str(pdf), tmp_path / 'work')
     try:
         assert dialog.reference.get() == str(ref.path)
         assert dialog.template is app.v_template
         assert dialog.reference is app.v_reference_hwpx
+        assert dialog._hwpx_values() == DEFAULTS
+        dialog.hwpx_rules['hwpx_entry_paragraphs'].set(False)
+        assert '--hwpx-no-entry-paragraphs' in dialog._preview_options()
+        assert '--hwpx-no-entry-paragraphs' not in app._build_opts()
         dialog.template.set('output-template.hwpx')
         with patch('yeone_ocr.rule_request.template_summary', return_value={}):
             assert dialog.save_selection()
         assert app.v_template.get() == 'output-template.hwpx'
         assert app.v_reference_hwpx.get() == str(ref.path)
+        assert '--hwpx-no-entry-paragraphs' in app._build_opts()
         app._save_book.assert_called_once_with(create=True)
         app._save_book.return_value = False
+        dialog.recommend_hwpx.invoke()
+        assert dialog._preview_options() == ['--layout', 'flow']
         with patch('yeone_ocr.rule_request.template_summary', return_value={}):
             assert not dialog.save_selection()
+        assert '--hwpx-no-entry-paragraphs' in app._build_opts()
         app._save_book.return_value = True
         dialog.result = {'preview': 'old'}
         app.v_reference_hwpx.set('')
@@ -103,6 +113,7 @@ def test_book_setup_saves_reference_and_template_together_and_rejects_switched_b
         app._input_vars[0]['pdf'].set(str(pdf))
         app.open_book_settings = Mock()
         dialog = BookRuleDialog(app, str(pdf), tmp_path / 'work')
+        assert not dialog.hwpx_rules['hwpx_entry_paragraphs'].get()
         with patch('yeone_ocr.rule_request.template_summary', return_value={}):
             dialog.open_settings()
         app.open_book_settings.assert_called_once()

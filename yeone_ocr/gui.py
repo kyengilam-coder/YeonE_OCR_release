@@ -6752,6 +6752,7 @@ class App(ResultNavigation, tk.Tk):
         return (["--adjudicate-blind"] if self.v_blind.get() else []) + (["--no-suspects"] if suspects and v is not None and not v.get() else [])
 
     def _build_opts(self) -> list[str]:
+        from .hwpx_output_rules import cli_flags
         o = []
         if self.v_docx.get(): o.append("--docx")
         if getattr(self, "v_tlpdf", None) is not None and self.v_tlpdf.get(): o.append("--textlayer-pdf")
@@ -6771,6 +6772,7 @@ class App(ResultNavigation, tk.Tk):
         if not self.v_pb.get(): o.append("--no-page-breaks")
         if not App._context_model_enabled(self): o.append("--no-context-model")
         o += App._normalization_opts(self)
+        o += cli_flags(vars(self).get('_hwpx_output_rules', {}))
         o += ["--check-list", self.check_list_mode(), "--memo", self.memo_mode()]
         return o
 
@@ -7486,6 +7488,7 @@ class App(ResultNavigation, tk.Tk):
         return {"layout": self.layout_key(), "template": self.v_template.get().strip(), "preset": self.preset_ref(),
                 **({"reference_hwpx": self.v_reference_hwpx.get().strip()} if vars(self).get("v_reference_hwpx") is not None else {}),
                 **({'yu_policy':_label_key(YU_POLICY_LABELS,self.v_yu_policy.get()) or 'classical'} if vars(self).get('v_yu_policy') is not None else {}),
+                **vars(self).get('_hwpx_output_rules', {}),
                 "bold_split": bool(self.v_bold.get()), "pages": self.v_pages.get().strip(), "print_offset": self.v_off.get().strip(),
                 "mode": self.mode_key(self._active_input)}
 
@@ -7493,6 +7496,10 @@ class App(ResultNavigation, tk.Tk):
         """책별 설정의 있는 열쇠만 칸에 넣는다. 짜임 규칙을 짜임(v_layout)보다 먼저 — v_layout 을 쓰면 불리는 _layout_changed 가 새 규칙으로 획 굵기 칸을 켜고 끄게.
         넣은 문서 설정·읽기 방향은 전체 설정의 '읽어 둔 값'(_cfg_loaded)에도 적는다 — 책을 보여 주기만 한 창이 닫힐 때 그 책의 값을 다른 창이 저장한
         새 책 기본값 위에 덮어쓰지 않게(write_config 는 읽어 둔 값과 다른 것만 이 창이 바꾼 것으로 본다). 그 뒤 사용자가 고친 것만 이 창의 변경이다."""
+        from .hwpx_output_rules import RULES
+        rules = {key:d[key] for key in RULES if key in d}
+        if rules:
+            self._hwpx_output_rules = {**vars(self).get('_hwpx_output_rules', {}), **rules}
         loaded = vars(self).get("_cfg_loaded")
         for k in ("layout", "template", "preset", "bold_split", "mode"):
             if k in d:
@@ -7557,6 +7564,8 @@ class App(ResultNavigation, tk.Tk):
             elif not unread:
                 pending = App._pending(self)                              # 이전 판은 결과 폴더 이름으로 기억했다 — 아직 실행하지 않은 책의 설정을 잃지 않게
                 pend = clean_book_values(pending.get(str(d)) or pending.get(str(public_root(d))) or {})
+        if not unread or d != self._book["dir"]:
+            self._hwpx_output_rules = {}
         forced = clear_if_missing and bool(self.v_force.get())
         if forced:
             self.v_force.set(False)                                      # 다른 책을 '다시 판독' 으로 시작하지 않는다(기록 있는 쪽을 모두 다시 산다)

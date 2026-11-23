@@ -117,3 +117,56 @@ def test_new_default_does_not_change_older_saved_layout(tmp_path):
                                ({"reader": "mock"}, "page")]:
             config.write_text(json.dumps(data), encoding="utf-8")
             assert gui.load_config()["layout"] == expected
+
+
+@pytest.mark.parametrize("disabled_rule", [
+    None, "front-pages", "source-typography", "entry-paragraphs", "footnote-groups",
+])
+def test_preview_applies_each_book_hwpx_rule(tmp_path, disabled_rule):
+    source = tmp_path / "book.pdf"
+    body = "This line fills most of the printable width in the original book."
+    entry = "露水[氣味] 甘, 平, 無毒. [主治] 未晞[1]時以盤收取。"
+    notes = ["[1] First note.", "[2] Second note."]
+    with pymupdf.open() as doc:
+        doc.new_page(width=400, height=600).insert_text((40, 120), "Publication information")
+        page = doc.new_page(width=400, height=600)
+        page.insert_text((183, 115), "前言", fontsize=17, fontname="china-t")
+        for n in range(4):
+            page.insert_text((40, 150 + n * 15), body, fontsize=10)
+        for n, note in enumerate(notes):
+            page.insert_text((45, 520 + n * 14), note, fontsize=8)
+        doc.save(source)
+
+    work = Work(source, tmp_path / "작업자료")
+    work.save_record(1, rec(1, [text_region("p", ["Publication information"])]))
+    work.save_record(2, rec(2, [text_region("heading", ["前言"]), text_region("body", [body]),
+                                text_region("entry", [entry]),
+                                *(text_region(f"note-{n}", [note]) for n, note in enumerate(notes))]))
+    template = tmp_path / "styles.hwpx"
+    make_template(template)
+    flags = [f"--hwpx-no-{disabled_rule}"] if disabled_rule else []
+    output, _, _ = preview_document(source, work.dir, ["--layout", "flow", "--template", str(template),
+                                                        "--preset", "regions", "--no-normalize", *flags])
+    try:
+        with ZipFile(output) as archive:
+            header = ET.fromstring(archive.read("Contents/header.xml"))
+            section = ET.fromstring(archive.read("Contents/section0.xml"))
+        paragraphs = {"".join(t.text or "" for t in p.iter(HP + "t")): p for p in section.findall(HP + "p")}
+        title = paragraphs["前言"]
+        styles = {s.get("id"): s.get("name") for s in header.iter(HH + "style")}
+        chars = {c.get("id"): c.get("height") for c in header.iter(HH + "charPr")}
+        assert styles[title.get("styleIDRef")] == "제목-절"
+        assert (title.get("pageBreak") == "1") == (disabled_rule != "front-pages")
+        run = next(run for run in title.findall(HP + "run") if run.find(HP + "t") is not None)
+        assert chars[run.get("charPrIDRef")] == ("1600" if disabled_rule == "source-typography" else "1700")
+        if disabled_rule == "entry-paragraphs":
+            assert entry in paragraphs
+        else:
+            assert "露水" in paragraphs
+            assert "[氣味] 甘, 平, 無毒." in paragraphs
+            assert "[主治] 未晞[1]時以盤收取。" in paragraphs
+        formats = {p.get("id"): p for p in header.iter(HH + "paraPr")}
+        fmt = formats[paragraphs[notes[0]].get("paraPrIDRef")]
+        assert (fmt.find(HH + "breakSetting").get("keepWithNext") == "1") == (disabled_rule != "footnote-groups")
+    finally:
+        output.unlink()

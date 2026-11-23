@@ -292,6 +292,22 @@ class Window(unittest.TestCase):
         self.assertEqual(self.values(app), dict(BOOK, pages="5-9"))
         self.assertEqual(sorted(p.name for p in self.td.iterdir()), sorted([self.book_dir(self.a).parent.name, self.book_dir(self.img).parent.name]))
 
+    def test_hwpx_rules_stay_with_the_book_through_tab_switches_and_saves(self):
+        a, b = self.book_dir(self.a), self.book_dir(self.img)
+        save_book_settings(a, dict(BOOK, hwpx_front_pages=False), create=True)
+        save_book_settings(b, dict(BOOK, hwpx_footnote_groups=False), create=True)
+        app = self.app((self.a, "", ""), (self.img, "", ""))
+        self.assertEqual(app._hwpx_output_rules, {"hwpx_front_pages": False})
+        app.select_tab(2)
+        self.assertEqual(app._hwpx_output_rules, {"hwpx_footnote_groups": False})
+        app._hwpx_output_rules["hwpx_entry_paragraphs"] = False
+        app.select_tab(0)
+        self.assertEqual(app._hwpx_output_rules, {"hwpx_front_pages": False})
+        self.assertFalse(load_book_settings(b)["hwpx_entry_paragraphs"])
+        self.assertNotIn("hwpx_entry_paragraphs", load_book_settings(a))
+        app._use_pdf(self.b)
+        self.assertEqual(app._hwpx_output_rules, {})
+
     def test_startup_without_book_file_keeps_remembered_pages(self):
         app = self.app((self.a, "10-20", "29"))
         self.assertEqual((app.v_pages.get(), app.v_off.get()), ("10-20", "29"))         # 옮겨 온 ocr_inputs 의 쪽 범위를 비우지 않는다

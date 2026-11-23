@@ -7,6 +7,7 @@ from collections import Counter
 from .blocks import Block
 from .schema import PageReading, paragraph_text, TEXT_KINDS, SKIP_KINDS, TITLE_KINDS
 from .marks import MARK_RE
+from .hwpx_output_rules import HwpxOutputRules
 
 HAN = r'\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff'
 ENTRY = re.compile(rf'^([{HAN}]{{1,6}})[ \t\u3000]+(?=(?:味|一名|性|氣|气)[{HAN}])')
@@ -15,6 +16,7 @@ MARKED_ENTRY = re.compile(rf'◎{HERB_NAME}')
 BAD_START = '凡又其此是以故若則则乃每諸诸'
 TOC = re.compile(r'[.·…．]{2,}.*\d+[）)]?\s*$')
 META = re.compile(r'ISBN|出版社|出版发行|出版發行|邮政|郵政|责任编辑|責任編輯|开本|開本|印刷|定价|定價')
+ENTRY_FIELD = re.compile(r'[\[［〔【]\s*(?:[氣气]\s*味|主\s*治|修\s*治|附\s*方|愚\s*按|禁\s*忌|炮\s*製|炮\s*制)\s*[\]］〕】]')
 NUMBERED_SOURCE_TITLE=re.compile(r'^\s*(?:[一二三四五六七八九十百千〇○零O0-9０-９]\s*){1,8}[·・.．、,，]\s*'
     r'[^。!?？！;；()（）\n]{4,85}[（(]\s*(?:『[^『』\n]{1,35}』|《[^《》\n]{1,35}》)\s*[）)]')
 
@@ -286,7 +288,7 @@ def _marked_entry_hints(reading, pdf, chapter_keys, seen_chapters):
 
 
 def prepare_records(records, *, common_layout=False, citation=None, headings=None, template_headings=None,
-                    source_pdf=None, page_types=None):
+                    source_pdf=None, page_types=None, output_rules=HwpxOutputRules()):
     """Restore paragraphs in local line records using explicit separators.
 
     Proper structured OCR paragraphs keep their existing boundaries. Local
@@ -383,9 +385,13 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
             if citation_start: paragraph.continues_from_previous=False
             prefix_title=numbered_source_title(text,template_headings or {})
             if prefix_title:paragraph.continues_from_previous=False
-            boundary = bool(prefix_title or citation_start or centered or entry_name(text, names) or TOC.search(text) or META.search(text) or text.isdecimal()
+            entry_field_start = output_rules.entry_paragraphs and ENTRY_FIELD.match(text)
+            boundary = bool(prefix_title or citation_start or centered or entry_field_start
+                            or entry_name(text, names) or TOC.search(text) or META.search(text) or text.isdecimal()
                             or re.match(r'^[\[［【〔](?:唐|陶|今|本|別|别|新)', text))
-            if previous and not boundary:
+            if boundary:
+                paragraph.continues_from_previous = False
+            elif previous:
                 paragraph.continues_from_previous = True
                 inferred.append(region.id)
             previous = not bool(centered or TOC.search(text) or META.search(text) or text.isdecimal())
@@ -393,7 +399,7 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
         record['_document_continuations'] = inferred
     if source_pdf is not None:
         from .source_typography import measure_source_typography
-        measure_source_typography(output, source_pdf, infer_titles=common_layout)
+        measure_source_typography(output, source_pdf, infer_titles=common_layout, output_rules=output_rules)
     return output, names
 
 
@@ -464,11 +470,30 @@ def _separate_editorial_notes(block):
     return result
 
 
-def format_blocks(blocks, names=(), *, punctuation=True, titles=None):
+def _separate_entry_fields(block):
+    """Split explicit entry labels in records that already contain fused text."""
+    if block.type != 'para' or block.kind == '소주' or block.layout.keys() & {'source_contents', 'source_index', 'front_row'}:
+        return [block]
+    positions = [match.start() for match in ENTRY_FIELD.finditer(block.text) if match.start()]
+    result, tail, offset = [], block, 0
+    for position in positions:
+        cut = position - offset
+        head, tail = tail.cut(len(tail.text[:cut].rstrip()), cut)
+        result.append(head)
+        shape = dict(tail.layout.get('source_typography', {}))
+        shape.pop('before', None)
+        tail.layout = dict(tail.layout, page_break_before=False, source_typography=shape)
+        if tail.role in ('entry', 'citation_source'):
+            tail.role = 'body'
+        offset = position
+    return [*result, tail]
+
+
+def format_blocks(blocks, names=(), *, punctuation=True, titles=None, output_rules=HwpxOutputRules()):
     """Inline herb headings, keep one blank paragraph, and remap all evidence."""
     blocks=deepcopy(blocks); separated=[]
     for block in blocks:
-        title=(numbered_source_title(block.text,titles) or fused_entry_title(block.text,titles)) if block.type=='para' and 'source_contents' not in block.layout else None
+        title=(numbered_source_title(block.text,titles) or fused_entry_title(block.text,titles)) if block.type=='para' and not (block.layout.keys() & {'source_contents','front_row'}) else None
         if title:
             end,role=title;head,tail=block.cut(end)
             head.type='heading';head.role=role;head.level={'chapter':1,'section':2,'subsection':3}[role]
@@ -489,13 +514,16 @@ def format_blocks(blocks, names=(), *, punctuation=True, titles=None):
             head=deepcopy(b);head.extend(' ')
             b=Block.joined(head,body);b.type='para';b.role='entry';i+=1
         joined.append(b);i+=1
+    if output_rules.entry_paragraphs:
+        joined = [part for block in joined for part in _separate_entry_fields(block)]
     output=[]; stats={'entries':0,'removed_line_breaks':0,'blank_paragraphs':0,'removed_character_spaces':0}
-    for b in (part for block in joined for part in
-              ([block] if 'source_contents' in block.layout else _separate_editorial_notes(block))):
+    for b in (part for block in joined for part in ([block] if 'source_contents' in block.layout else _separate_editorial_notes(block))):
         if 'source_contents' in b.layout:
             output.append(b)
             continue
         if b.type in ('para','heading'):
+            if suffix := b.layout.get('printed_folio_suffix'):
+                _replace(b, re.escape(suffix) + r'\s*$', lambda m,t: '')
             if b.type == 'heading' and b.layout.get('kind') == 'entry':
                 repair = b.layout.get('entry_marker_repair')
                 if repair == 'strip-prefix':

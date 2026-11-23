@@ -272,6 +272,7 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
         """문단 글(raw) 기준 굵기 범위를 잘라 낸 글(t) 기준으로(앞 공백 lead 를 빼고 shift 를 더함). 틈(넓이 없는 자리)은 글 끝 자리까지 받는다."""
         lead = len(raw) - len(raw.lstrip())
         return shift_ranges(clip_ranges((bold or {}).get((n, reg_id, pi), []), lead, lead + len(t), points="inclusive"), shift)
+    source_front_pages = {rec['pdf_page'] for rec in records if rec.get('_source_front_page')}
     for rec in records:
         pr = PageReading.model_validate(rec["merged"])
         n = pr.pdf_page
@@ -314,6 +315,8 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                 lvl = reg.title_level if reg.title_level in (1, 2, 3) else (2 if reg.kind == "제목" else 3)
                 hb = Block(type="heading", text=reg.title_text.strip(), level=lvl, kind=reg.kind, page=n,
                            layout=dict(rec.get('_common_layout_regions',{}).get(reg.id,{})))
+                if hb.layout.get('front_section'):
+                    hb.level = hb.layout.get('level', 2)
                 if flow and not hb.text:
                     continue                                    # 글 없는 제목 영역은 문단을 만들지 않는다(책갈피는 다음 글로)
                 if flow and reg.kind == "제목":
@@ -345,16 +348,16 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                     t = prefix + t
                     layout_hint = rec.get('_common_layout_regions', {}).get(reg.id, {})
                     title = layout_hint.get('kind') in ('book','volume','chapter','section','subsection','entry')
-                    starts_paragraph = title or 'indent' in layout_hint.get('source_typography', {})
+                    starts_paragraph = title or 'indent' in layout_hint.get('source_typography', {}) or layout_hint.get('source_layout_para')
                     inferred = edit_paragraphs and reg.id in rec.get('_document_continuations', ())
                     joinable = ((i == 0 and not first_text_done) if not flow else True) or inferred
-                    if not starts_paragraph and (join_pages or inferred) and joinable and p.continues_from_previous:
+                    if n not in source_front_pages and not starts_paragraph and (join_pages or inferred) and joinable and p.continues_from_previous:
                         if flow:                                # 바로 앞 글 블록(쪽 끝 확인 목록은 건너뜀)에, 소주는 소주끼리·본문은 본문끼리만 잇는다
                             last = next((b for b in reversed(blocks) if b.type != "uncertain"), None)
                             prev = last if last is not None and last.type == "para" and (last.kind == "소주") == (reg.kind == "소주") else None
                         else:
                             prev = next((b for b in reversed(blocks) if b.type == "para"), None)
-                        if prev is not None:
+                        if prev is not None and prev.page not in source_front_pages:
                             if inferred and prev.text and t and prev.text[-1].isascii() and t[0].isascii() and prev.text[-1].isalnum() and t[0].isalnum():
                                 prev.extend(' ')
                             if not inferred:
@@ -366,10 +369,15 @@ def assemble_blocks(records: list[dict], join_pages: bool = True, whole_offset: 
                             continue
                     pb = Block(type="para", text=t, kind=reg.kind, page=n, spans=sp, memos=me, cstyles=bd,
                                layout=dict(layout_hint))
+                    if layout_hint.get('source_layout_para') == 'footnote':
+                        pb.kind = '소주'
                     if title:
                         pb.type='heading';pb.kind='제목';pb.level=pb.layout.get('level',2)
                     elif reg.kind != '소주' and rec.get('_source_body_size'):
                         pb.layout['source_body_size'] = rec['_source_body_size']
+                        if rec.get('_source_body_spacing'):
+                            pb.layout['source_body_spacing'] = rec['_source_body_spacing']
+                            pb.layout['source_body_width'] = rec['_source_body_width']
                     if anchored:
                         place(pb, 0)
                     blocks.append(pb)

@@ -13,18 +13,19 @@ from .state import write_atomic
 from .ziplimits import check_archive, read_member
 
 HH='{http://www.hancom.co.kr/hwpml/2011/head}'
-LABELS={'chapter':'책·권·장 제목','section':'약재·절 제목','subsection':'소분류 제목',
+LABELS={'chapter':'책·권·장 제목','section':'서문·절·목차 제목','subsection':'소분류 제목',
         'entry':'조문 약재명','body':'본문','citation_source':'인용 출전','quotation':'인용문','small':'소주'}
 
 
 class BookStylesDialog(tk.Toplevel):
     def __init__(self,app):
         self.rule=resolve_preset(app.preset_ref())
+        self.paragraph_styles={**resolve_preset('regions').para_styles, **self.rule.para_styles}
         super().__init__(app);self.app=app
         self.title('이 책 · 양식 스타일 설정');self.transient(app)
         P=app.px;self.geometry(f'{P(780)}x{P(680)}')
         frame=ttk.Frame(self,padding=P(16));frame.pack(fill='both',expand=True)
-        ttk.Label(frame,text='양식 HWPX의 글꼴·크기·색상을 그대로 사용합니다.',font=app.fonts['BODY_B']).pack(anchor='w')
+        ttk.Label(frame,text='책의 제목과 문단에 적용할 양식 스타일을 고릅니다.',font=app.fonts['BODY_B']).pack(anchor='w')
         ttk.Label(frame,text='약재 제목 아래의 소분류 제목도 별도 스타일로 연결합니다.\n'
                   '원본에 없는 제목은 만들지 않으며, 원본 양식과 OCR·교정 기록은 바꾸지 않습니다.',wraplength=P(720)).pack(anchor='w',pady=P(8))
         self.path=tk.StringVar(value=app.v_template.get().strip() or self.rule.template)
@@ -39,7 +40,7 @@ class BookStylesDialog(tk.Toplevel):
             combo.grid(row=2*i,column=1,sticky='ew');combo.bind('<<ComboboxSelected>>',lambda e:self.describe())
             detail=self.details[role]=tk.StringVar()
             ttk.Label(table,textvariable=detail,wraplength=P(540)).grid(row=2*i+1,column=1,sticky='w',pady=(0,P(5)))
-        ttk.Label(frame,text='검수 색상은 기존 설정대로 덧입힙니다. 책·권·장만 새 쪽에서 시작하고 소분류 제목은 이어 씁니다.',wraplength=P(720)).pack(anchor='w')
+        ttk.Label(frame,text='원본에 맞춘 위치·크기·쪽 나눔은 ‘이 책 설정’의 HWPX 규칙을 따릅니다.',wraplength=P(720)).pack(anchor='w')
         buttons=ttk.Frame(frame);buttons.pack(fill='x',pady=(P(12),0))
         ttk.Button(buttons,text='책별 규칙으로 저장하고 적용…',command=self.save).pack(side='right')
         ttk.Button(buttons,text='취소',command=self.destroy).pack(side='right',padx=P(8))
@@ -68,7 +69,7 @@ class BookStylesDialog(tk.Toplevel):
                 self.styles[s.get('name')]=detail
             for role,combo in self.combos.items():
                 combo.configure(values=list(self.styles))
-                selected=next((n for n in self.rule.para_styles.get(role,()) if n in self.styles),'바탕글')
+                selected=next((n for n in self.paragraph_styles.get(role,()) if n in self.styles),'바탕글')
                 self.variables[role].set(selected if selected in self.styles else next(iter(self.styles),''))
             self.describe()
             self.loaded_path=self.path.get()

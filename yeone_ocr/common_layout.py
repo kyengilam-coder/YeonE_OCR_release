@@ -8,8 +8,15 @@ from .schema import PageReading, paragraph_text, TITLE_KINDS, TEXT_KINDS
 NUM=r'[0-9一二三四五六七八九十百千零〇壹貳參肆伍陸柒捌玖拾일이삼사오육칠팔구십백천IVXLCDM]+'
 MAJOR=re.compile(rf'^(?:[^。.!?？！,，:：]{{0,32}}卷\s*[第之]?\s*{NUM}|第\s*{NUM}\s*[卷章編编篇部](?:[\s:：.-]*[^。.!?？！]{{1,32}})?|제\s*{NUM}\s*[권장편](?:[\s:：.-]*[^.!?]{{1,40}})?|(?:book|volume|part|chapter)\s+{NUM}(?:[\s:.-]+[^.!?]{{1,50}})?)$',re.I)
 SECTION=re.compile(rf'^(?:第\s*{NUM}\s*[節节項项](?:[\s:：.-]*[^。.!?？！]{{1,32}})?|제\s*{NUM}\s*절(?:[\s:：.-]*[^.!?]{{1,40}})?|section\s+{NUM}(?:[\s:.-]+[^.!?]{{1,50}})?)$',re.I)
-FRONT={'序','序言','前言','凡例','目錄','目录','總目','总目','內容提要','内容提要','索引','後記','后记','跋','輯復本','辑复本','서문','목차','일러두기','후기','目次','序文','はじめに','あとがき','Contents','Preface','Introduction','Index'}
+FRONT={'序','序言','前言','凡例','目錄','目录','總目','总目','內容提要','内容提要','索引','後記','后记','跋','輯復本','辑复本',
+       '내지','표제지','판권지','서문','머리말','전언','목차','차례','색인','일러두기','후기','目次','序文','はじめに','あとがき',
+       'Contents','Preface','Foreword','Introduction','Index'}
+_FRONT_KEYS={re.sub(r'\s','',title).casefold() for title in FRONT}
 SENTENCE=re.compile(r'[。.!?？！,，;；]')
+
+
+def is_front_heading(text):
+    return re.sub(r'\s','',text).casefold() in _FRONT_KEYS
 
 
 def is_contents_page(reading):
@@ -54,8 +61,11 @@ def infer_record_layout(records):
                 hints[region.id]={'kind':kind,'level':1 if kind in ('book','volume','chapter') else 3 if kind=='subsection' else 2,'alignment':alignment,'evidence':'image-reviewed-layout'}
             if region.id in hints:continue
             if region.kind in TITLE_KINDS:
-                section=region.title_text.strip() in FRONT or bool(SECTION.fullmatch(region.title_text.strip()))
+                front=is_front_heading(region.title_text)
+                section=front or bool(SECTION.fullmatch(region.title_text.strip()))
                 hints[region.id]={'kind':'chapter' if region.title_level==1 and not section else 'section','alignment':'CENTER','evidence':'structured-title'}
+                if front:
+                    hints[region.id].update(front_section=True, level=2)
                 continue
             if region.kind not in TEXT_KINDS or len(region.paragraphs)!=1:continue
             text=paragraph_text(region.paragraphs[0]).strip()
@@ -68,10 +78,13 @@ def infer_record_layout(records):
             if text in book_titles and (before or after) and (cover or region.bbox!=[0,0,1000,1000] and y0>=100 and y1<=900):kind='book'
             elif not contents and not re.match(r'^\d{1,4}\s*\D',text) and (before or after) and occurrences[text]<=2 and MAJOR.fullmatch(text):
                 kind='volume' if '卷' in text or re.match(r'volume\b',text,re.I) else 'chapter'
-            elif before and after and (re.sub(r'\s','',text) in FRONT or SECTION.fullmatch(text) or any(name in text and re.search(r'序$|目錄|目录|考订$|考訂$',text) for name in book_titles)):
+            elif (is_front_heading(text) and (before or after)
+                  or before and after and (SECTION.fullmatch(text) or any(name in text and re.search(r'序$|目錄|目录|考订$|考訂$',text) for name in book_titles))):
                 kind='section'
             if kind:
                 hints[region.id]={'kind':kind,'level':1 if kind in ('book','volume','chapter') else 2,'alignment':'CENTER','evidence':'cover-context' if kind=='book' else 'explicit-heading-and-paragraph-boundary'}
+                if kind=='section' and is_front_heading(text):
+                    hints[region.id]['front_section']=True
                 continue
             y0,x0,y1,x1=region.bbox
             if before and after and 30<x1-x0<650 and y0>=100 and y1<=900 and abs((x0+x1)/2-500)<=35:
@@ -84,37 +97,77 @@ def infer_record_layout(records):
     return records
 
 
-def apply_common_layout(blocks):
-    """Center headings; page-start books/volumes/chapters, never sections."""
+def apply_common_layout(blocks, *, front_pages=(), break_front_pages=True):
+    """Center headings and preserve independent front-matter starts."""
     joined=[]
     for block in deepcopy(blocks):
         if joined and block.layout.get('group') and block.layout.get('group')==joined[-1].layout.get('group'):
             left=joined.pop();left.extend(' ')
             block=type(block).joined(left,block)
+        elif joined and block.page == joined[-1].page and block.type == joined[-1].type == 'para':
+            row, prior = block.layout.get('front_row'), joined[-1].layout.get('front_row')
+            if row and prior and prior[0] < row[0] and min(prior[3], row[3])-max(prior[1],row[1]) >= .6*min(prior[3]-prior[1],row[3]-row[1]):
+                left = joined.pop()
+                size = left.layout['source_typography']['size']
+                left.extend('\u3000' * min(8, max(1, round((row[0]-prior[2])/size))))
+                left.extend(block.text, spans=block.spans, memos=block.memos, cstyles=block.cstyles, anchors=block.anchors)
+                left.layout['front_row'] = (prior[0], min(prior[1], row[1]), max(prior[2], row[2]), max(prior[3], row[3]))
+                block = left
         joined.append(block)
     blocks=joined
-    stats={'centered_headings':0,'centered_body':0,'chapter_page_breaks':0,'widow_orphan_protection':0}
+    stats={'centered_headings':0,'centered_body':0,'chapter_page_breaks':0,'front_page_breaks':0,'widow_orphan_protection':0}
     seen=False;heading_chain=False
     previous_page = None
+    front_headings = set()
+    previous_block = None
+    previous_row = None
     for block in blocks:
         hint=block.layout
+        if not break_front_pages and 'source_contents' in hint:
+            hint['continue_contents'] = True
+        has_content = bool(block.text.strip()) or block.type in ('image','table')
+        front_heading = hint.get('front_section') and block.type=='heading' and has_content
+        key = re.sub(r'\s','',block.text).casefold() if front_heading else None
+        front_break = bool(break_front_pages and seen and block.page != previous_page and block.page in front_pages)
+        if break_front_pages and front_heading:
+            front_break |= seen and key not in front_headings
+            front_headings.add(key)
+        row = hint.get('front_row')
+        if row:
+            above = previous_row[1][3] if previous_row and previous_row[0] == block.page else hint['front_top_margin']
+            hint['source_typography']['before'] = round(max(0, row[1]-above)*100)
+            previous_row = (block.page, row)
         if block.type=='heading':
             kind=hint.get('kind') or ('chapter' if block.level<=1 else 'section')
             alignment = hint.get('source_typography', {}).get('alignment', 'CENTER')
             hint.update(alignment=alignment,keep_with_next=True,widow_orphan=True,keep_lines=False)
             already_on_source_page = bool(hint.get('source_typography') and block.page and block.page == previous_page)
             hint['page_break_before']=bool(seen and not already_on_source_page and kind in ('book','volume','chapter')
+                                           and (break_front_pages or block.page not in front_pages)
                                            and block.kind not in ('그림제목','표제목'))
             stats['centered_headings']+=int(alignment == 'CENTER');stats['chapter_page_breaks']+=int(hint['page_break_before'])
             heading_chain=True
         elif block.type=='para':
-            follows_title=block.role=='citation_source' or bool(heading_chain and hint.get('alignment')=='CENTER' and len(block.text)<=90)
+            follows_title=not row and (block.role=='citation_source' or bool(heading_chain and hint.get('alignment')=='CENTER' and len(block.text)<=90))
             hint.update(keep_with_next=follows_title,widow_orphan=True,keep_lines=False,page_break_before=False)
             stats['widow_orphan_protection']+=1
             if hint.get('alignment')=='CENTER':stats['centered_body']+=1
             heading_chain=follows_title
         elif block.type=='spacer':hint.update(keep_with_next=heading_chain,widow_orphan=False,keep_lines=False)
-        if block.text.strip() or block.type in ('image','table'):
+        if front_break and block.type in ('heading','para'):
+            hint['page_break_before'] = True
+            stats['front_page_breaks'] += 1
+            if previous_block is not None:
+                previous_block.layout['keep_with_next'] = False
+        if hint.get('source_layout_para') == 'footnote':
+            previous_note = (previous_block is not None and previous_page == block.page
+                             and previous_block.layout.get('source_layout_para') == 'footnote')
+            if previous_note:
+                previous_block.layout['keep_with_next'] = True
+            else:
+                hint['footnote_separator'] = True
+        if has_content:
             seen = True
             previous_page = block.page
+            previous_block = block
     return blocks,stats

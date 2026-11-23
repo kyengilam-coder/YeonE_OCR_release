@@ -12,6 +12,39 @@ from yeone_ocr.hwpx_builder import build_hwpx
 from yeone_ocr.citation_layout import heading_key
 
 
+def test_entry_fields_split_without_splitting_inline_note_references():
+    text = '露水[氣味] 甘, 平, 無毒. [主治] 百草頭上露, 未晞[1]時以盤收取。'
+    pos = text.index('百')
+    original = Block(type='para', text=text, spans=[(pos, pos+1, 'green')])
+    output, _ = format_blocks([original], punctuation=False)
+    assert [b.text for b in output] == ['露水', '[氣味] 甘, 平, 無毒.', '[主治] 百草頭上露, 未晞[1]時以盤收取。']
+    assert output[-1].spans == [(5, 6, 'green')]
+    assert original.text == text
+
+
+def test_footnote_group_has_one_top_separator_and_keeps_notes_together(tmp_path):
+    from yeone_ocr.common_layout import apply_common_layout
+    from yeone_ocr.hwpx_writer import HH, HP
+
+    body = Block(type='para', page=1, text='正文[1]。')
+    notes = [Block(type='para', kind='소주', role='small', page=1, text=f'[{n}] 附注。',
+                   layout={'source_layout_para': 'footnote', 'source_typography': {'size': 8}})
+             for n in range(1, 4)]
+    blocks, _ = apply_common_layout([body, *notes])
+    output = tmp_path/'notes.hwpx'
+    build_hwpx(blocks, str(output), edited=True)
+    with ZipFile(output) as z:
+        header = ET.fromstring(z.read('Contents/header.xml'))
+        section = ET.fromstring(z.read('Contents/section0.xml'))
+    formats = {p.get('id'): p for p in header.iter(HH+'paraPr')}
+    borders = {p.get('id'): p for p in header.iter(HH+'borderFill')}
+    formats_used = [formats[p.get('paraPrIDRef')] for p in section.findall(HP+'p')[-3:]]
+    rules = [p.find(HH+'border').get('borderFillIDRef') for p in formats_used]
+    assert borders[rules[0]].find(HH+'topBorder').get('type') == 'SOLID'
+    assert rules[0] not in rules[1:]
+    assert [p.find(HH+'breakSetting').get('keepWithNext') for p in formats_used] == ['1','1','0']
+
+
 def test_marked_and_recovered_herb_titles_use_named_template_style(tmp_path):
     from hwpx import HwpxDocument
     import pymupdf

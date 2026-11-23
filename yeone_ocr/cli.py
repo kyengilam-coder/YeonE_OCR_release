@@ -1822,6 +1822,8 @@ def _normalization_resolver(work: Work, args):
 def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False, *, document_stem: str | None = None) -> bool:
     """판독 기록들로 HWPX(+DOCX)를 만든다. interim=True 면 '<이름>_진행중.hwpx' 한 파일만 조용히 만든다(중간 저장)."""
     from .hwpx_builder import build_hwpx
+    from .hwpx_output_rules import HwpxOutputRules
+    output_rules = HwpxOutputRules.from_args(args)
     if not interim and (error := _check_document(args)):
         log(error + ' — 문서를 만들지 않았습니다(판독 기록은 그대로)'); return False
     import copy
@@ -1872,7 +1874,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 log('책별 규칙의 쪽 유형은 분석한 PDF의 배열을 사용합니다. 현재 PDF에서 배치를 다시 판별합니다.')
         records,entry_names=prepare_records(records,common_layout=not getattr(args,'no_common_layout',False),
                                           citation=book_rule.citation if book_rule else None, headings=book_rule.headings if book_rule else None,
-                                          template_headings=template_titles, source_pdf=doc, page_types=page_types)
+                                          template_headings=template_titles, source_pdf=doc, page_types=page_types,
+                                          output_rules=output_rules)
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
         progress("build", 0, steps)
@@ -2019,14 +2022,17 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
             names=entry_names | {_cc('s2t').convert(n) for n in entry_names}
             if norm_options and norm_options.korean_forms:
                 names |= {korean_forms(n) for n in names}
-            blocks,edit_stats=format_blocks(blocks,names,punctuation=bool(norm_options and norm_options.punctuation),titles=template_titles)
+            blocks,edit_stats=format_blocks(blocks,names,punctuation=bool(norm_options and norm_options.punctuation),
+                                            titles=template_titles, output_rules=output_rules)
             blocks=clean_output_blocks(blocks)
             if not getattr(args,'no_common_layout',False):
                 from .common_layout import apply_common_layout
-                blocks,layout_stats=apply_common_layout(blocks)
+                front_pages = {r['pdf_page'] for r in chunk if r.get('_source_front_page')}
+                blocks,layout_stats=apply_common_layout(blocks, front_pages=front_pages, break_front_pages=output_rules.front_pages)
                 edit_stats['common_layout']=layout_stats
                 edit_stats['common_layout_review']=[dict(page=r['pdf_page'],**item) for r in chunk for item in r.get('_common_layout_review',())]
-                log(f"공통 편집: 제목 가운데 {layout_stats['centered_headings']}개 · 책/권/장 새 쪽 {layout_stats['chapter_page_breaks']}개 · 절 제목은 이어 쓰기")
+                log(f"공통 편집: 제목 가운데 {layout_stats['centered_headings']}개 · 책/권/장 새 쪽 {layout_stats['chapter_page_breaks']}개"
+                    f" · 내지·서문 등 새 쪽 {layout_stats['front_page_breaks']}개")
             excluded=[dict(page=r['pdf_page'],**item) for r in chunk for item in r.get('_document_excluded',())]
             edit_stats['excluded_marginalia']=excluded
             narrowed = {str(r['pdf_page']): r['_narrowed_local_disagreements']
@@ -2926,6 +2932,8 @@ def build_parser():
         p.add_argument("--split", type=int, default=0, help="N쪽씩 여러 HWPX 로 나눔(0=한 파일). 700쪽짜리를 권별로 나눌 때")
         p.add_argument("--no-document-editing", action="store_true", help="기본 HWPX의 문단 이음·약재 사이 빈 줄·약재명과 쉼표 뒤 공백 정리를 끔")
         p.add_argument("--no-common-layout", action="store_true", help="공통 편집의 제목 가운데 맞춤·책/권/장 새 쪽 시작·외톨이줄 보호를 끔")
+        from .hwpx_output_rules import add_arguments
+        add_arguments(p)
         p.add_argument("--no-normalize", action="store_true", help="최종 문서의 간체→번체·MSR 부호·한자 문맥 교정을 생략(기본은 적용)")
         p.add_argument("--no-traditional", action="store_true", help="간체→번체 변환과 한자 치환 문맥 후보를 끔(云/雲·부호는 별도)")
         p.add_argument("--no-yun", action="store_true", help="云/雲 문맥 교정을 끔(원래 글자 보존)")

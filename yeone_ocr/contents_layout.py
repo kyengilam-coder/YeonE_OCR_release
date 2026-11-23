@@ -162,6 +162,7 @@ def _classify_rows(items, page, suggested):
 def prepare_contents_pages(records, pdf, page_types=None):
     """Tag an output view. Every confirmed list page retains its OCR row breaks."""
     page_types = page_types or {}
+    from .common_layout import is_front_heading
     candidates = bookmark_contents(pdf) | set(page_types.get('목차', ())) | set(page_types.get('차례', ()))
     for record in records:
         number = record['pdf_page']
@@ -189,6 +190,8 @@ def prepare_contents_pages(records, pdf, page_types=None):
                 region = reading.regions[i]
                 hints[region.id] = {'source_contents': dict(layout, row=(number, row),
                                                           start=row == 0, slot=slot)}
+                if row == 0 and layout['mode'] == 'title' and is_front_heading(items[i][0]):
+                    hints[region.id].update(kind='section', level=2, front_section=True)
         for region in reading.regions:
             for para in region.paragraphs:
                 para.continues_from_previous = False
@@ -228,7 +231,7 @@ def shape_contents_blocks(blocks):
                 shaped[i] = replace(block, layout=dict(block.layout, page_break_before=True))
                 previous_page = None
             continue
-        previous_page = block.page
+        previous_page = None if block.layout.get('continue_contents') else block.page
         mode = layout['mode']
         if mode == 'grid' and not layout['columns']:
             cells = cell_spans(block.text)

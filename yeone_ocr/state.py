@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib, json, os, shutil, time, threading
 from pathlib import Path, PureWindowsPath
+from .hwpx_output_rules import RULES as HWPX_OUTPUT_RULES
 
 STATUSES = ["미처리", "영역 분류 완료", "1차 OCR 완료", "2차 독립 판독 비교 완료", "판독 확인 필요",
             "이미지 보존 확인 완료", "문서 반영 완료", "파일 구조 검사 완료", "원본 대조 완료(사람)"]
@@ -12,6 +13,7 @@ WARN = lambda msg: print(msg, flush=True)      # 깨진 파일을 치웠을 때�
 BOOK_SETTINGS = "book_settings.json"           # 결과 폴더의 책별 설정(창이 읽고 쓴다 — 명령줄은 읽지 않고 창이 늘 선택지로 넘긴다). 원본이 바뀌어 보관할 때도 그대로 둔다
 BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "reference_hwpx": str, "yu_policy": ('classical','post1900','vernacular'), "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
              "mode": ("auto", "vertical", "horizontal_zh")}           # 값의 꼴(tuple = 허용 값). '다시 판독'(force)은 넣지 않는다 — 책마다 남으면 모르는 새 다시 산다
+BOOK_KEYS.update(dict.fromkeys(HWPX_OUTPUT_RULES, bool))
 LAST_COST = "last_cost.json"                   # 결과 폴더의 마지막 실행 전 비용 어림(창의 장부 — 실행을 고른 뒤에만 쓴다). 결과물이 아니라 원본이 바뀌어 보관할 때도 그대로 둔다
 
 

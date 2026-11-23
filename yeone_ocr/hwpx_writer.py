@@ -414,7 +414,7 @@ class TemplateLook:
             contents = layout.get('source_contents')
             aliases = ('목차', '차례', 'toc', 'contents') if contents else (
                 ('색인', 'index') if 'source_index' in layout or layout.get('source_index_title') else ())
-            if aliases:
+            if aliases and not layout.get('front_section'):
                 is_title = role in HEADING_ROLES
                 list_styles = [name for name, st in self.styles.items() if st['type'] == 'PARA'
                                and name.casefold().startswith(aliases)
@@ -584,6 +584,9 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
     contents_width = round(_body_size_mm(doc)[0] * HWPUNIT_PER_MM)
     contents_formats = {}
     sized_chars = {}
+    note_border = None
+    page_pr = doc.sections[0].element.find(f".//{HP}pagePr")
+    page_margin = page_pr.find(f"{HP}margin") if page_pr is not None else None
 
     def bookmark(p, label: str, cpr) -> None:
         """원본 쪽 책갈피(내용별 문서). 같은 이름이 또 나오면 (2)·(3) 을 붙인다."""
@@ -593,17 +596,26 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
         names.add(name); p.add_bookmark(name, char_pr_id_ref=cpr); stats["bookmarks"] += 1
 
     def write(para: Para, layout=None) -> None:
+        nonlocal note_border
         layout=layout or {}
         source_shape = layout.get('source_typography', {})
         source_size = source_shape.get('size') or (layout.get('source_body_size') if para.key == 'body' else None)
+        if source_size and not source_shape.get('size') and para.key == 'body' and layout.get('source_body_width'):
+            source_size = round(source_size * min(1, contents_width / (100 * layout['source_body_width'])), 1)
         if 'page_break_before' in layout:
             para=replace(para,page_break=bool(layout['page_break_before']))
         if layout.get('source_index_title'):
             para=replace(para,page_break=True)
         text, notes = para.text, list(para.notes)
         contents = layout.get('source_contents')
-        if contents and contents['start'] and (stats['paragraphs'] or stats['images'] or stats['tables']):
+        if contents and contents['start'] and not layout.get('continue_contents') and (stats['paragraphs'] or stats['images'] or stats['tables']):
             para = replace(para, page_break=True)
+        if ('top_fraction' in source_shape and page_margin is not None
+                and (para.page_break or not (stats['paragraphs'] or stats['images'] or stats['tables']))):
+            top = int(page_margin.get('top', 0)) + int(page_margin.get('header', 0))
+            before = max(0, round(float(page_pr.get('height', 0)) * source_shape['top_fraction']) - top)
+            source_shape = dict(source_shape, before=before)
+            layout = dict(layout, source_typography=source_shape)
         if simple:
             notes = []                                                 # 단순 표시: 메모도 글 속 고지도 넣지 않는다(보고·검수 화면에 있음)
         elif not memos and notes:                                      # 메모를 쓰지 않으면 고지를 글 끝에 회색으로
@@ -684,11 +696,30 @@ def write_hwpx(blocks: list[Block], out_path: str, look, *, min_mm: float = 70, 
                     'image-reviewed-layout','measured-isolated-centered-paragraph') else None
             margins = {name: source_shape[key] for name, key in (('left', 'left'), ('prev', 'before'), ('intent', 'indent'))
                        if key in source_shape}
-            if not preserve or flags or alignment is not None or margins:
+            paragraph_options = {}
+            if 'front_row' in layout:
+                alignment = source_shape.get('alignment', 'LEFT')
+                margins.update(intent=0, right=0, next=0)
+                paragraph_options.update(line_spacing_percent=105, heading={'type': 'NONE'})
+            elif layout.get('source_layout_para'):
+                alignment = source_shape.get('alignment', 'LEFT')
+                margins['next'] = 0
+                paragraph_options['line_spacing_percent'] = 125
+                if layout['source_layout_para'] == 'footnote':
+                    flags.update(keep_lines=True, keep_with_next=bool(layout.get('keep_with_next')))
+                    if layout.get('footnote_separator'):
+                        margins['prev'] = max(700, margins.get('prev', 0))
+                        if note_border is None:
+                            note_border = doc.oxml.headers[0].ensure_border_fill(
+                                border_color='#000000', active_borders=('top',))
+                        paragraph_options['border'] = dict(border_fill_id_ref=note_border, offset_top=320)
+            elif para.key == 'body' and layout.get('source_body_spacing'):
+                paragraph_options.update(line_spacing_percent=layout['source_body_spacing'])
+            if not preserve or flags or alignment is not None or margins or paragraph_options:
                 flags['page_break_before']=False  # the paragraph's pageBreak flag is the single break source
                 header=doc.oxml.headers[0]
                 ref=header.ensure_paragraph_format(base_para_pr_id=p.element.get('paraPrIDRef','0'),
-                                                   alignment=alignment, margins=margins, break_setting=flags)
+                                                   alignment=alignment, margins=margins, break_setting=flags, **paragraph_options)
                 p.element.set('paraPrIDRef',str(ref))
                 p.section.mark_dirty()
 

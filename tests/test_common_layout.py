@@ -109,3 +109,95 @@ def test_common_properties_written_to_default_and_template(tmp_path):
                 style=next(s for s in header.iter(HH+'style') if s.get('id')==p.get('styleIDRef'))
                 assert p.get('paraPrIDRef')==style.get('paraPrIDRef')
             assert not sec.findall('.//'+HP+'lineBreak')
+
+
+def test_front_matter_keeps_source_rows_page_starts_and_heading_styles(tmp_path):
+    import pymupdf
+    from yeone_ocr.hwpx_template import build_hwpx_template
+    from yeone_ocr.structure import apply_structure
+
+    def reading(page, *lines):
+        return rec(page, [text_region(f'local-line-{i}', [text], box=(0,0,1,1))
+                          for i, text in enumerate(lines)])
+
+    records = [reading(1, 'Publication supported', 'ISBN 123'),
+               reading(2, 'Book title', 'ISBN 123'),
+               reading(3, '前 言', 'Introduction to the source text.'),
+               reading(4, '第一節', '', 'Body continues here.'),
+               reading(5, '目 次', 'Contents entry')]
+    before = copy.deepcopy(records)
+    with pymupdf.open() as source:
+        for n, rows in enumerate((
+            [('Publication supported', 150, 190, 18), ('ISBN 123', 210, 220, 18)],
+            [('Book title', 155, 175, 45), ('ISBN 123', 100, 640, 12)],
+            [('前 言', 239, 110, 18), ('Introduction to the source text.', 80, 163, 11)],
+            [('第一節', 239, 110, 18), ('Body continues here.', 80, 163, 11)],
+            [('目 次', 239, 110, 18), ('Contents entry', 80, 163, 11)],
+        ), 1):
+            page = source.new_page(width=510, height=730)
+            for text, x, y, size in rows:
+                page.insert_text((x, y), text, fontsize=size,
+                                 fontname='china-s' if n >= 3 and not text.isascii() else 'helv')
+        prepared, names = prepare_records(records, common_layout=True, source_pdf=source)
+    assert records == before
+    front_pages = {r['pdf_page'] for r in prepared if r.get('_source_front_page')}
+    assert front_pages == {1, 2}
+    blocks = assemble_blocks(prepared, layout='flow', edit_paragraphs=True, grades=False)
+    blocks, _ = apply_structure(blocks)
+    blocks, _ = format_blocks(blocks, names)
+    blocks, _ = apply_common_layout(clean_output_blocks(blocks), front_pages=front_pages)
+
+    template = tmp_path/'template.hwpx'
+    out = tmp_path/'front.hwpx'
+    make_template2(template, page_number=False)
+    build_hwpx_template(blocks, str(out), str(template), edited=True)
+    with ZipFile(out) as z:
+        section = ET.fromstring(z.read('Contents/section0.xml'))
+        header = ET.fromstring(z.read('Contents/header.xml'))
+    by_text = {''.join(t.text or '' for t in p.iter(HP+'t')).replace(' ', ''): p
+               for p in section.findall(HP+'p')}
+    styles = {s.get('id'): s.get('name') for s in header.iter(HH+'style')}
+    for title, new_page in [('Booktitle', True), ('前言', True), ('第一節', False), ('目次', True)]:
+        assert (by_text[title].get('pageBreak') == '1') == new_page
+    assert styles[by_text['前言'].get('styleIDRef')] == styles[by_text['目次'].get('styleIDRef')] == '제목-절'
+    formats = {p.get('id'): p for p in header.iter(HH+'paraPr')}
+    imprint = formats[by_text['ISBN123'].get('paraPrIDRef')]
+    assert int(next(imprint.iter('{http://www.hancom.co.kr/hwpml/2011/core}prev')).get('value')) > 30000
+
+
+def test_volume_department_and_entry_use_source_alignment_and_roles():
+    import pymupdf
+    from yeone_ocr.structure import apply_structure
+
+    rows = [
+        ('《本草述》卷之一', 52, 103, 22),
+        ('潛江劉若金先生著', 328, 143, 10),
+        ('武進薛俭秉之氏校訂', 328, 160, 10),
+        ('水部', 245, 190, 12),
+        ('雨水', 74, 235, 10),
+        ('春季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 74, 251, 10),
+        ('夏季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 52, 267, 10),
+        ('露水', 74, 307, 10),
+        ('秋季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 74, 323, 10),
+        ('冬季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 52, 339, 10),
+    ]
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=510, height=730)
+        for text, x, y, size in rows:
+            page.insert_text((x, y), text, fontsize=size, fontname='china-s')
+        reading = rec(1, [text_region(f'local-line-{i}', [text], box=(0,0,1,1))
+                          for i, (text, *_) in enumerate(rows)])
+        prepared, names = prepare_records([reading], common_layout=True, source_pdf=doc)
+    blocks = assemble_blocks(prepared, layout='flow', edit_paragraphs=True, grades=False)
+    blocks, _ = apply_structure(blocks)
+    blocks, _ = format_blocks(blocks, names)
+    blocks, _ = apply_common_layout(clean_output_blocks(blocks))
+    by_text = {b.text: b for b in blocks}
+    volume = by_text[rows[0][0]]
+    department = by_text['水部']
+    assert (volume.role, volume.layout['alignment']) == ('chapter', 'LEFT')
+    assert (department.role, department.layout['alignment']) == ('section', 'CENTER')
+    assert not department.layout['page_break_before']
+    assert by_text['雨水'].layout['alignment'] == by_text['露水'].layout['alignment'] == 'LEFT'
+    assert by_text['雨水'].role == by_text['露水'].role == 'entry'
+    assert all(by_text[row[0]].layout['source_typography']['left'] > 20000 for row in rows[1:3])
