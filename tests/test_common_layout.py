@@ -174,12 +174,13 @@ def test_volume_department_and_entry_use_source_alignment_and_roles():
         ('潛江劉若金先生著', 328, 143, 10),
         ('武進薛俭秉之氏校訂', 328, 160, 10),
         ('水部', 245, 190, 12),
-        ('雨水', 74, 235, 10),
-        ('春季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 74, 251, 10),
-        ('夏季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 52, 267, 10),
-        ('露水', 74, 307, 10),
-        ('秋季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 74, 323, 10),
-        ('冬季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 52, 339, 10),
+        ('總論', 74, 223, 10),
+        ('雨水', 74, 255, 10),
+        ('春季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 74, 271, 10),
+        ('夏季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 52, 287, 10),
+        ('露水', 74, 327, 10),
+        ('秋季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 74, 343, 10),
+        ('冬季雨水主治諸症甲乙丙丁戊己庚辛壬癸天下草木江河物產皆有各自的用處', 52, 359, 10),
     ]
     with pymupdf.open() as doc:
         page = doc.new_page(width=510, height=730)
@@ -198,6 +199,7 @@ def test_volume_department_and_entry_use_source_alignment_and_roles():
     assert (volume.role, volume.layout['alignment']) == ('chapter', 'LEFT')
     assert (department.role, department.layout['alignment']) == ('section', 'CENTER')
     assert not department.layout['page_break_before']
+    assert (by_text['總論'].role, by_text['總論'].layout['alignment']) == ('section', 'LEFT')
     assert by_text['雨水'].layout['alignment'] == by_text['露水'].layout['alignment'] == 'LEFT'
     assert by_text['雨水'].role == by_text['露水'].role == 'entry'
     assert all(by_text[row[0]].layout['source_typography']['left'] > 20000 for row in rows[1:3])

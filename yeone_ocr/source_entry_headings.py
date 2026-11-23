@@ -10,12 +10,12 @@ from .toc_tabs import list_entry
 
 _HAN = r'\u3400-\u9fff\uf900-\ufaff'
 _NAME = re.compile(rf'[{_HAN}]{{2,12}}')
-_SECTION_LABELS = {'總論', '總說', '通論', '概論', '緒論'}
+GENERAL_SECTION_LABELS = frozenset({'總論', '總說', '通論', '概論', '緒論'})
 _FIELD = re.compile(r'^(?:[\[［〔【]\s*(?:[氣气]味|主治|修治)\s*[\]］〕】]|一名|又名)')
 
 
 def _herb_name_shape(key):
-    return key not in _SECTION_LABELS and _NAME.fullmatch(key)
+    return key not in GENERAL_SECTION_LABELS and _NAME.fullmatch(key)
 
 
 def catalogue_names(pdf, records, contents_pages):

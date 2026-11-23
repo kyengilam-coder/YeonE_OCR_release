@@ -7,7 +7,7 @@ from statistics import median
 from .citation_layout import heading_key
 from .schema import PageReading, TEXT_KINDS, TITLE_KINDS, paragraph_text
 from .hwpx_output_rules import HwpxOutputRules
-from .source_entry_headings import source_entry_rows, source_line
+from .source_entry_headings import GENERAL_SECTION_LABELS, source_entry_rows, source_line
 
 _IMPRINT = re.compile(r'ISBN|CIP|版权|版權|판권|原著|资助出版|資助出版', re.I)
 _NUMBERED_SECTION = re.compile(r'(?:[一二三四五六七八九十]+[、．.]|[0-9]{1,2}[．.])\s*[^。？！,，.;；]{2,42}')
@@ -231,11 +231,12 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
             if not (title or contents or index):
                 department = (infer_titles and _DEPARTMENT.fullmatch(text.strip()) and centered
                               and x1-x0 < width*.35 and gap >= body_height*.75)
-                entry = (department_seen and _ENTRY.fullmatch(text.strip()) and not centered
-                         and left-width*.04 <= x0 <= left+width*.10 and gap >= body_height)
-                if department or entry:
+                department_heading = (department_seen and _ENTRY.fullmatch(text.strip()) and not centered
+                                      and left-width*.04 <= x0 <= left+width*.10 and gap >= body_height)
+                if department or department_heading:
+                    section = department or key in GENERAL_SECTION_LABELS
                     hint = hints.setdefault(region.id, {})
-                    hint.update(kind='section' if department else 'entry', level=2 if department else 3,
+                    hint.update(kind='section' if section else 'entry', level=2 if section else 3,
                                 evidence='measured-source-heading')
                     department_seen |= bool(department)
                     title = True
