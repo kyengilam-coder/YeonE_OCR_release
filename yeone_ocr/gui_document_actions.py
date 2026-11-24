@@ -38,8 +38,6 @@ def export_menu(app, button):
         return
     current = app.selected_result_work()
     menu = tk.Menu(app, tearoff=False)
-    menu.add_command(label='자동 정리 HWPX 만들기', command=lambda: make_auto_hwpx(app))
-    menu.add_separator()
     state = 'normal' if (current / 'source.json').is_file() else 'disabled'
     menu.add_command(label='현재 결과 → HWPX', state=state,
                      command=lambda: export_records(app, folder=current))
@@ -56,6 +54,8 @@ def export_menu(app, button):
     other.add_command(label='HWPX 만들기…', command=app.do_reuse_build)
     other.add_command(label='문자 PDF 만들기…', command=app.do_reuse_textlayer)
     menu.add_cascade(label='다른 OCR 작업 폴더에서 내보내기', menu=other)
+    menu.add_separator()
+    menu.add_command(label='자동 정리 HWPX 만들기', command=lambda: make_auto_hwpx(app))
     _show(app, menu, button)
 
 
