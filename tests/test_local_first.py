@@ -15,6 +15,33 @@ from yeone_ocr.comparison import ComparisonProject
 from yeone_ocr.state import Work
 
 
+def test_fast_api_review_workers_process_checkpoints_in_parallel():
+    from queue import Queue
+    from threading import Event
+    from yeone_ocr.local_first import _AiWorkers
+
+    started, release = Queue(), Event()
+    errors = []
+
+    def stage(number, _time, _review, _extras, session, reader, saved):
+        assert session is reader is None and saved
+        started.put(number)
+        assert release.wait(5)
+
+    fake_cli = SimpleNamespace(CANCEL=Event(), log=lambda _message: None)
+    worker = _AiWorkers.start(SimpleNamespace(local_ai_pages=2), None, None, None, None, fake_cli,
+                              stage, lambda _, error: errors.append(error), True, api_parallel=True)
+    try:
+        worker.submit(1, 0, {}, {}, saved=True)
+        assert started.get(timeout=5) == 1
+        worker.submit(2, 0, {}, {}, saved=True)
+        assert started.get(timeout=5) == 2
+    finally:
+        release.set()
+        worker.finish()
+    assert not errors
+
+
 def test_automatic_split_uses_weighted_rotation_and_skips_unavailable_account():
     from queue import Queue
     from yeone_ocr.local_first import _AiWorkers

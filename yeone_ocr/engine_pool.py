@@ -98,6 +98,9 @@ class EnginePool:
     def __enter__(self):
         return self
 
+    def failed_gpu_engines(self):
+        return tuple(self._gpu_failed)
+
     def __exit__(self, *_exc):
         self.close()
 

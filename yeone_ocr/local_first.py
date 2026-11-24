@@ -7,6 +7,8 @@ changes. No legacy third-pass reader or document context model is invoked.
 """
 from __future__ import annotations
 
+from .local_options import FAST_STRATEGIES
+
 import copy
 import hashlib
 import json
@@ -679,16 +681,22 @@ class _AiWorkers:
             self._cond.notify_all()
 
     @classmethod
-    def start(cls, args, session, api, project, work, cli, stage, failed_page, review_enabled, **hooks):
-        if session is None or not review_enabled:
-            return None                              # API key or no review: the page loop does the AI part itself
+    def start(cls, args, session, api, project, work, cli, stage, failed_page, review_enabled, *, api_parallel=False, **hooks):
+        if not review_enabled:
+            return None
+        per = min(4, max(1, int(getattr(args, "local_ai_pages", 2) or 1)))
+        if session is None:
+            if not api_parallel:
+                return None
+            cli.log(f"  로컬 OCR과 선택 구간 API 검증을 병행합니다. API 검증은 {per}쪽씩 진행합니다.")
+            return cls([{"plan": "api", "session": None, "reader": None, "pages": per}], stage,
+                       failed_page, cli.log, should_stop=cli.CANCEL.is_set, **hooks)
         from . import subscriptions
         plans = [session.plan]
         if getattr(args, "local_ai_split", False):
             plans += [plan for plan in subscriptions.order(getattr(args, "local_ai_plan", None))
                       if plan != session.plan and plan not in subscriptions.exhausted()
                       and subscriptions.status(plan)["usable"]]
-        per = min(4, max(1, int(getattr(args, "local_ai_pages", 2) or 1)))
         crews = []
         for plan in plans:
             plan_session = session if plan == session.plan else subscriptions.Session(
@@ -721,7 +729,8 @@ class _AiWorkers:
 
     def _take_slot(self, crew):
         """Return the next usable slot for this worker, under the queue lock."""
-        usable = [other["session"].ready_for_page(split=len(self.crews) > 1) for other in self.crews]
+        usable = [other["session"] is None or other["session"].ready_for_page(split=len(self.crews) > 1)
+                  for other in self.crews]
         if not any(usable):
             return self._next_slot                  # record pending work when no account can answer
         for step in range(len(self._schedule)):
@@ -767,7 +776,8 @@ class _AiWorkers:
         if self.on_start is not None:
             self.on_start(number)
         try:
-            crew["session"].prepare_page(split=len(self.crews) > 1)
+            if crew["session"] is not None:
+                crew["session"].prepare_page(split=len(self.crews) > 1)
             if len(self.crews) > 1 and crew["session"].available:
                 self.log(f"  {number}쪽: AI 담당 계정 · {crew['session'].short()}")
             number, started, review, extras, saved = job
@@ -825,10 +835,12 @@ def command(args, *, work=None, doc=None):
     # One page is rendered for every engine, the preview and the review crops;
     # engine workers stay loaded across pages.
     from ab_ocr.ocr import input_enhancement
-    from ab_ocr.local_engines import easyocr_runtime, line_verification
+    from ab_ocr.local_engines import easyocr_runtime, fast_horizontal_ocr, line_verification
     enhancement = getattr(args, "local_enhance", "none")
     enhancement = None if enhancement in (None, "none") else enhancement
-    with render_cache(), input_enhancement(enhancement), line_verification(getattr(args, "local_line_verification", False)), \
+    verify = getattr(args, "local_line_verification", False)
+    fast = getattr(args, "ocr_strategy", None) in FAST_STRATEGIES and not getattr(args, "local_review_only", False)
+    with render_cache(), input_enhancement(enhancement), line_verification(verify), fast_horizontal_ocr(fast and not verify), \
             easyocr_runtime(getattr(args, "local_easyocr_threads", 2) or 2, getattr(args, "local_easyocr_batch", 1) or 1), \
             EnginePool(should_stop=cli.CANCEL.is_set, log=cli.log) as pool:
         return _command(args, work=work, doc=doc, pool=pool)
@@ -873,6 +885,15 @@ def _command(args, *, work=None, doc=None, pool=None):
         pages = parse_pages(getattr(args, "pages", None), len(doc))
         work.ensure_pages(pages, len(doc))
         cli.resolve_mode(args, doc, work)
+        fast_mode = getattr(args, "ocr_strategy", None) in FAST_STRATEGIES and not getattr(args, "local_review_only", False)
+        quick = fast_mode and args.mode == "horizontal_zh" and args.local_profile != "mixed"
+        collect_layout = fast_mode and not pdf_only and not getattr(args, "no_document_editing", False) and Path(args.pdf).suffix.lower() == ".pdf"
+        layout_lines = {}
+        if collect_layout:
+            from .source_typography import source_line_blocks
+            cli.log("  판독과 함께 원본 줄 위치·글자 크기를 수집합니다. HWPX는 전체 판독과 배치 정리가 끝난 뒤 만듭니다.")
+        if quick and pool is not None:
+            pool.max_requests = 64
         if getattr(args, "print_offset", None) is None:
             state = work.load_state()
             args.print_offset = state.get("print_offset")
@@ -936,7 +957,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             choice = getattr(args, "local_easyocr", None)
             return (args.mode != "horizontal_zh") if choice is None else bool(choice)
 
-        def engine_options():
+        def engine_options(skip=()):
             """Per page: workers resident so far, and how many engines may run at once."""
             if pool is None:
                 return {}
@@ -946,7 +967,9 @@ def _command(args, *, work=None, doc=None, pool=None):
             resident = pool.resident()
             from .automatic_ocr import gpu_engines_enabled
             mode = getattr(args, "local_enhance", "none")
-            exclude = set(getattr(args, "local_exclude_engines", None) or ())
+            exclude = set(getattr(args, "local_exclude_engines", None) or ()) | set(skip)
+            if quick:
+                exclude.update(pool.failed_gpu_engines())
             if not easyocr_wanted():
                 exclude.add("easyocr")
             exclude = tuple(sorted(exclude))
@@ -975,7 +998,7 @@ def _command(args, *, work=None, doc=None, pool=None):
                 options[option] = value
         if options:
             cli.log("  선택 옵션(측정 전 시험 기능): " + ", ".join(f"{k}={v}" for k, v in options.items()))
-        fast = FastPlan() if options.get("engine_plan") == "fast" else None
+        fast = FastPlan() if not quick and options.get("engine_plan") == "fast" else None
 
         def witness_text(number):
             from .pdfio import text_layer
@@ -1157,7 +1180,7 @@ def _command(args, *, work=None, doc=None, pool=None):
             page_finished()
 
         split = _AiWorkers.start(args, session, api, project, work, cli, ai_stage, page_failed, review_enabled,
-                                 on_done=page_finished)
+                                 api_parallel=fast_mode and bool(key), on_done=page_finished)
         if resume != "unfinished":
             cli.log("  이어서 할 때: " + {"continue": "앞선 쪽은 점검하지 않고 바로 이어갑니다",
                                          "all": "앞선 쪽을 모두 다시 점검한 뒤 이어갑니다"}.get(resume, resume))
@@ -1166,6 +1189,9 @@ def _command(args, *, work=None, doc=None, pool=None):
             memory_stop()
             if cli.CANCEL.is_set():
                 return 3 if storage_fault else 130
+            if collect_layout:
+                with cli.DOC_LOCK:
+                    layout_lines[number] = source_line_blocks(doc[number - 1])
             started = time.perf_counter()
             extras = {"columns": bool(getattr(args, "local_columns", True)), "options": options or None,
                       "witness": witness_text(number) if options.get("textlayer_witness") else None}
@@ -1247,15 +1273,22 @@ def _command(args, *, work=None, doc=None, pool=None):
                         page_finished()
                         continue
 
-                def read(only=None):
+                def read(only=None, skip=()):
                     return run_automatic_page(project, number, profile=args.local_profile,
                         direction="horizontal" if args.mode == "horizontal_zh" else "vertical", dpi=args.dpi,
                         engine_root=getattr(args, "local_engine_root", None), force=getattr(args, "force", False),
                         should_stop=cli.CANCEL.is_set, on_result=saver.maybe,
-                        on_recognition=lambda: cli.page_event(number, 'reocr' if old else 'ocr'), **engine_options(),
+                        on_recognition=lambda: cli.page_event(number, 'reocr' if old else 'ocr'),
+                        **engine_options(skip), **({"quick": True} if quick else {}),
                         **({"only": only} if only else {}))
                 only = fast.engines() if fast is not None else None
                 outcome = read(only)
+                if quick and not outcome.get("cancelled") and not (outcome.get("selection") or {}).get("selected_engine"):
+                    tried = set(outcome.get("errors", ())) | set(outcome.get("completed", ())) | set(outcome.get("skipped", ()))
+                    tried.discard("automatic")
+                    if tried:
+                        cli.log(f"  {number}쪽: {', '.join(sorted(tried))} 판독이 비어 다른 로컬 엔진으로 다시 읽습니다.")
+                        outcome = read(skip=tried)
                 if only and not outcome.get("cancelled") and FastPlan.needs_fallback(outcome.get("selection")):
                     cli.log(f"  {number}쪽: 줄인 엔진({', '.join(only)})의 점수가 낮아 모든 엔진으로 다시 읽음")
                     only = None
@@ -1338,6 +1371,8 @@ def _command(args, *, work=None, doc=None, pool=None):
             except (OCRError, ComparisonError, AIReviewError, OSError, ValueError) as exc:
                 page_failed(number, exc)
         if split is not None:
+            if fast_mode and pool is not None:
+                pool.close()
             if split.waiting():
                 cli.log(f"  엔진 판독을 모두 마쳤습니다. AI 판독·검증을 기다리는 쪽 {split.waiting()} — 끝날 때까지 이어갑니다"
                         "([중지]를 누르면 끝난 쪽까지 저장하고, 남은 쪽은 다음 실행에서 이어 검증).")
@@ -1360,6 +1395,8 @@ def _command(args, *, work=None, doc=None, pool=None):
         # Local review is the only model path; document assembly must stay offline.
         build_args = copy.copy(args)
         build_args.no_context_model = True
+        if layout_lines:
+            build_args._source_layout_lines = layout_lines
         if pdf_only:
             rc = cli.make_textlayer(build_args, work, completed)
         elif getattr(args, 'defer_recheck_hwpx', False):

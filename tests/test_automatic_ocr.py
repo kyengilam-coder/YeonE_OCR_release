@@ -39,6 +39,18 @@ def execute(project, texts, **options):
         return auto.run_automatic_page(project, 1, **options)
 
 
+def test_quick_horizontal_prefers_paddle_cuda_and_uses_one_cpu_fallback():
+    with patch.object(auto, "memory_status", return_value=None), \
+            patch.object(auto, "_gpu_candidates", return_value=["paddle_server"]) as gpu, \
+            patch.object(ocr, "doctor", return_value={"available": True, "languages": ["chi_tra"]}) as doctor:
+        assert auto.available_engines("traditional", "horizontal", gpu=True, quick=True)[0] == ["paddle_server"]
+        doctor.assert_not_called()
+        assert gpu.call_args.args[-1] == {"glmocr", "surya"}
+        gpu.return_value = []
+        assert auto.available_engines("traditional", "horizontal", gpu=True, quick=True)[0] == ["rapidocr"]
+        assert doctor.call_count == 1
+
+
 def test_omission_and_garbled_readings_lose_to_complete_agreeing_text(project):
     texts = {"ppocrv6": "天地玄黃，宇宙洪荒。", "rapidocr": "天地玄黃，宇宙洪荒。",
              "easyocr": "天地", "tesseract": "\ufffd" * 30}

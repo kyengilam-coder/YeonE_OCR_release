@@ -6,7 +6,8 @@ import shutil
 import tempfile
 
 
-LAYOUT_LABELS = {"flow": "편집용 HWPX (제목·문단)", "page": "원본 대조용 HWPX (쪽별)"}
+LAYOUT_LABELS = {"source": "원본 배치 HWPX (쪽·열·구분선)",
+                 "flow": "편집용 HWPX (제목·문단)", "page": "원본 대조용 HWPX (쪽별)"}
 
 
 def select_template(template, layout, path):

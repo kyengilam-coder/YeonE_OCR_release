@@ -26,11 +26,21 @@ def make_hwpx(app):
     app.do_run()
 
 
+def make_source_hwpx(app):
+    from .book_output import LAYOUT_LABELS
+
+    app.v_layout.set(LAYOUT_LABELS['source'])
+    make_hwpx(app)
+
+
 def export_menu(app, button):
     if app.running or not app._need_pdf():
         return
     current = app.selected_result_work()
     menu = tk.Menu(app, tearoff=False)
+    if Path(app.pdf()).suffix.lower() == '.pdf':
+        menu.add_command(label='원본 배치 HWPX 만들기', command=lambda: make_source_hwpx(app))
+        menu.add_separator()
     state = 'normal' if (current / 'source.json').is_file() else 'disabled'
     menu.add_command(label='현재 결과 → HWPX', state=state,
                      command=lambda: export_records(app, folder=current))

@@ -289,7 +289,7 @@ def _recognize_local_file_once(path, *, engine, languages, page_number, dpi, tim
                 *info.get("worker_args", [])]
         if engine in ("easyocr", "rapidocr", "ppocrv6"):
             argv.extend(["--direction", direction])
-        argv += _verification_args(engine)
+        argv += _verification_args(engine, direction)
         if engine == "glmocr":
             argv += ["--timeout", str(timeout)]
         try:
@@ -368,8 +368,26 @@ def line_verification_enabled() -> bool:
     return _LINE_VERIFICATION["enabled"]
 
 
-def _verification_args(engine) -> list[str]:
+_FAST_HORIZONTAL = {"enabled": False}
+
+
+@contextmanager
+def fast_horizontal_ocr(enabled=False):
+    previous, _FAST_HORIZONTAL["enabled"] = _FAST_HORIZONTAL["enabled"], bool(enabled)
+    try:
+        yield
+    finally:
+        _FAST_HORIZONTAL["enabled"] = previous
+
+
+def fast_horizontal_enabled(engine, direction):
+    return _FAST_HORIZONTAL["enabled"] and direction == "horizontal" and engine in ("rapidocr", "paddle_server")
+
+
+def _verification_args(engine, direction="horizontal") -> list[str]:
     extra = [] if _LINE_VERIFICATION["enabled"] or engine not in VERIFYING_ENGINES else ["--no-line-verification"]
+    if fast_horizontal_enabled(engine, direction):
+        extra.append("--fast-horizontal")
     return extra + (_easyocr_args() if engine == "easyocr" else [])
 
 
@@ -523,11 +541,11 @@ class RecognitionSession:
             folder = Path(self.folder.name)
             args = list(info.get("worker_args", []))
             if self.engine == "paddle_server":
-                args = ["--profile", "server", "--provider", selected_device]
+                args = ["--profile", "server", "--provider", selected_device, *_verification_args(self.engine, self.direction)]
             elif self.engine in ("surya", "glmocr"):
                 args += ["--device", selected_device]
             elif self.engine in ("easyocr", "ppocrv6", "rapidocr"):
-                args += ["--direction", self.direction, *_verification_args(self.engine)]
+                args += ["--direction", self.direction, *_verification_args(self.engine, self.direction)]
             if self.engine == "glmocr":
                 args += ["--timeout", str(self.timeout)]
             argv = [info["executable"], "-I", "-B", "-X", "utf8", info["worker"], "--model-dir", info["model_dir"],

@@ -18,6 +18,8 @@ from collections import Counter
 import difflib
 import re
 
+FAST_STRATEGIES = ("local-fast", "local-fast-review")
+
 # ---------------------------------------------------------------- blank pages
 BLANK_DARK_LEVEL = 160          # 0-255 gray; darker counts as ink
 BLANK_INK_SHARE = 0.0002        # below this share of dark pixels the page is blank

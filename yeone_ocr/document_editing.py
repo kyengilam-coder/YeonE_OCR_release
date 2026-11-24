@@ -345,7 +345,7 @@ def _marked_entry_hints(reading, pdf, chapter_keys, seen_chapters):
 
 def prepare_records(records, *, common_layout=False, citation=None, headings=None, template_headings=None,
                     source_pdf=None, page_types=None, infer_entries=False, output_rules=HwpxOutputRules(),
-                    field_labels=None, adaptive=False):
+                    field_labels=None, adaptive=False, source_lines=None):
     """Restore paragraphs in local line records using explicit separators.
 
     Proper structured OCR paragraphs keep their existing boundaries. Local
@@ -472,7 +472,8 @@ def prepare_records(records, *, common_layout=False, citation=None, headings=Non
         from .source_typography import measure_source_typography
         measure_source_typography(output, source_pdf, infer_titles=common_layout, output_rules=output_rules,
                                   entry_catalogue=entry_catalogue, contents_pages=contents_pages,
-                                  adaptive=adaptive, footnote_pages=set((page_types or {}).get('각주', ())))
+                                  adaptive=adaptive, footnote_pages=set((page_types or {}).get('각주', ())),
+                                  source_lines=source_lines)
     return output, names
 
 

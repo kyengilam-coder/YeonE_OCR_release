@@ -42,6 +42,22 @@ class LocalFirstGuiTests(unittest.TestCase):
         app.v_ocr_strategy.set(self.gui.OCR_STRATEGY_LABELS["ai-full"])
         self.assertEqual(self.gui.App._strategy_opts(app), ["--ocr-strategy", "ai-full"])
 
+    def test_fast_local_mode_launches_without_ai_cost_validation(self):
+        app = self.app(v_ocr_strategy=self.gui.OCR_STRATEGY_LABELS["local-fast"], v_local_ai_max_calls="")
+        launch = mock.Mock()
+        self.assertTrue(self.gui.App._local_first(app))
+        self.assertEqual(self.gui.App._strategy_opts(app)[:2], ["--ocr-strategy", "local-fast"])
+        self.gui.App._with_plan(app, "run", launch)
+        launch.assert_called_once_with([])
+
+    def test_fast_review_mode_routes_selective_review_and_retains_the_review_only_command(self):
+        app = self.app(v_ocr_strategy=self.gui.OCR_STRATEGY_LABELS["local-fast-review"])
+        self.assertEqual(self.gui.App._strategy_opts(app)[:2], ["--ocr-strategy", "local-fast-review"])
+        self.assertEqual(self.gui.App._strategy_opts(app, review_only=True)[:2], ["--ocr-strategy", "local-first"])
+        launch = mock.Mock()
+        self.gui.App._with_plan(app, "run", launch)
+        launch.assert_called_once_with([])
+
     def test_two_column_order_is_on_by_default_and_only_switching_it_off_adds_a_flag(self):
         app = self.app()
         self.assertNotIn("--no-local-columns", self.gui.App._strategy_opts(app))

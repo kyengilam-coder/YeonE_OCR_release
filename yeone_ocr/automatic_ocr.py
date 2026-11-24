@@ -134,13 +134,19 @@ def _gpu_candidates(profile, direction, engine_root, should_stop, memory, reside
     return ready
 
 
-def available_engines(profile, direction, engine_root=None, should_stop=None, resident=(), gpu=False, exclude=()):
+def available_engines(profile, direction, engine_root=None, should_stop=None, resident=(), gpu=False, exclude=(), quick=False):
     from .comparison import ComparisonError, PROFILES
     if profile not in PROFILES or direction not in ("horizontal", "vertical"):
         raise ComparisonError("문서 종류 또는 읽기 방향을 확인하세요.")
     ready, excluded = [], {}
     memory = memory_status()
-    for engine in PREFERENCE:
+    if quick and gpu:
+        skip = set(exclude) | {"glmocr", "surya"}
+        accelerated = _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded, skip)
+        if accelerated:
+            return accelerated, excluded
+    preference = ("rapidocr", "ppocrv6", "tesseract", "easyocr") if quick else PREFERENCE
+    for engine in preference:
         if should_stop and should_stop():
             raise ocr.OCRCancelled("자동 선택을 중지했습니다.")
         # The Korean neural models do not cover Hanja. Do not treat their
@@ -169,9 +175,11 @@ def available_engines(profile, direction, engine_root=None, should_stop=None, re
         supported = needed in installed or (engine == "tesseract" and set(needed.split("+")) <= installed)
         if info.get("available") and supported:
             ready.append(engine)
+            if quick:
+                break
         else:
             excluded[engine] = info.get("message", "선택 언어 모델이 없습니다.") if not info.get("available") else "선택 언어 모델이 없습니다."
-    if gpu:
+    if gpu and not quick:
         ready += _gpu_candidates(profile, direction, engine_root, should_stop, memory, resident, excluded, exclude)
     return ready, excluded
 
@@ -249,7 +257,7 @@ def assess_readings(runs, profile):
 def run_automatic_page(project, number, profile="traditional", direction="horizontal", dpi=300,
                        should_stop=None, on_result=None, timeout=300.0, engine_root=None, *, force=False,
                        recognizer=None, parallel=1, resident=(), gpu_engines=False, only=None,
-                       input_enhancement=None, exclude=(), on_recognition=None):
+                       input_enhancement=None, exclude=(), on_recognition=None, quick=False):
     from .comparison import ComparisonError, latest_runs, run_page
     if type(dpi) is not int or not 72 <= dpi <= 600 or type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ComparisonError("렌더링 DPI와 엔진 제한 시간을 확인하세요.")
@@ -259,7 +267,8 @@ def run_automatic_page(project, number, profile="traditional", direction="horizo
     preserve_baseline = bool(previous["reviewed"] or previous.get("baseline_choice") == "manual"
                              or previous["corrected_text"] is not None or previous["edits"])
     try:
-        extra = {k: v for k, v in (("resident", resident), ("gpu", gpu_engines), ("exclude", tuple(exclude or ()))) if v}
+        extra = {k: v for k, v in (("resident", resident), ("gpu", gpu_engines), ("exclude", tuple(exclude or ())),
+                                  ("quick", quick)) if v}
         engines, excluded = available_engines(profile, direction, engine_root, should_stop, **extra)
     except ocr.OCRCancelled:
         return {"completed": [], "errors": {}, "cancelled": True, "skipped": [], "unsupported": {}}

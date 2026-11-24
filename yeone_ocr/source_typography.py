@@ -247,12 +247,17 @@ def _printed_title_size(page, box):
     return None
 
 
-def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=HwpxOutputRules(),
-                              entry_catalogue=None, contents_pages=(), adaptive=False, footnote_pages=()):
+def source_line_blocks(page):
     import pymupdf
+    flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
+    return page.get_text('dict', flags=flags)['blocks']
+
+
+def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=HwpxOutputRules(),
+                              entry_catalogue=None, contents_pages=(), adaptive=False, footnote_pages=(),
+                              source_lines=None):
     from .common_layout import MAJOR, SECTION
 
-    flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
     for record in records:
         number = record['pdf_page']
         if not 1 <= number <= len(pdf):
@@ -262,7 +267,8 @@ def measure_source_typography(records, pdf, *, infer_titles=False, output_rules=
         if page.rotation or not width or not height:
             continue
         lines, matches, folios, printed = [], defaultdict(list), set(), []
-        for block in page.get_text('dict', flags=flags)['blocks']:
+        blocks = source_lines.get(number) if source_lines is not None else None
+        for block in source_line_blocks(page) if blocks is None else blocks:
             for line in block.get('lines', []):
                 if line.get('wmode') or tuple(line.get('dir', ())) != (1, 0):
                     continue

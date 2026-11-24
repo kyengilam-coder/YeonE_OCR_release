@@ -60,6 +60,22 @@ class ColumnVerificationTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    def test_fast_horizontal_preserves_native_text_and_skipped_stage_timing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (100, 100), "white").save(source)
+            engine = Mock(return_value=SimpleNamespace(boxes=[[[0, 0], [80, 0], [80, 30], [0, 30]]],
+                txts=["甲乙"], scores=[.9], elapse_list=[.1, None, .2]))
+            instance = worker.Worker(Path(directory), fast=True)
+            with patch.object(instance, "engine", return_value=(engine, {})), \
+                 patch.object(worker, "_helper_module") as helper, \
+                 patch.object(worker.importlib.metadata, "version", return_value="test"):
+                result = instance.recognize(source, "chi_tra")
+            engine.assert_called_once_with(str(source.resolve()), use_cls=False)
+            helper.assert_not_called()
+            self.assertEqual(result["text"], "甲乙")
+            self.assertEqual(result["engine_metadata"]["stage_seconds"], [.1, None, .2])
+
     def test_native_model_result_is_kept_and_korean_does_not_use_glyph_helpers(self):
         with tempfile.TemporaryDirectory() as directory:
             source=Path(directory)/'source.png';Image.new('RGB',(100,100),'white').save(source)

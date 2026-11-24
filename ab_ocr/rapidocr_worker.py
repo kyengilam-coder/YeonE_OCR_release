@@ -155,7 +155,7 @@ def preload_nvrtc(manifest: dict) -> tuple[list, list]:
 
 
 class Worker:
-    def __init__(self, model_dir: Path, profile: str = "mobile", provider: str = "cpu"):
+    def __init__(self, model_dir: Path, profile: str = "mobile", provider: str = "cpu", *, fast: bool = False):
         self.model_dir = model_dir.resolve()
         if profile not in ("server", "mobile"):
             raise ValueError("Unsupported recognition profile")
@@ -165,6 +165,7 @@ class Worker:
         if provider == "cuda" and profile != "server":
             raise ValueError("CUDA backend is enabled only for the explicit server profile")
         self.provider = provider
+        self.fast = fast
         self.cuda_dlls = []
         self.cuda_dll_directories = []
         self.engines = {}
@@ -249,10 +250,12 @@ class Worker:
             width, height = image.size
         started = time.perf_counter()
         engine, metadata = self.engine(languages)
-        result = engine(str(image_path.resolve()))
+        result = engine(str(image_path.resolve()), use_cls=False) if self.fast else engine(str(image_path.resolve()))
         text, words = serialize_lines(result.boxes, result.txts, result.scores)
         metadata = dict(metadata)
-        if language_route(languages) == "ch":
+        if self.fast:
+            metadata["recognition_policy"] = "ppocrv5-native-horizontal-lines-v1"
+        elif language_route(languages) == "ch":
             import numpy as np
             module = _helper_module("glyph_verifier")
             if self.glyph_verifier is None:
@@ -278,7 +281,7 @@ class Worker:
                 "glyph_verification_thresholds": {"min_similarity": module.MIN_SIMILARITY, "min_margin": module.MIN_MARGIN},
                 "text_policy": "verified glyph output; unmodified neural lines retained in model_result; no script conversion",
                 "confidence_granularity": "null for verified composites; native line scores retained in model_result"})
-        metadata["stage_seconds"] = [float(value) for value in (result.elapse_list or [])]
+        metadata["stage_seconds"] = [None if value is None else float(value) for value in (result.elapse_list or [])]
         metadata["detection_resize_policy"] = "RapidOCR max-side policy: 960 below 960px, 1500 below 1500px, otherwise 2000px; dimensions rounded to multiples of 32"
         return {"text": text, "words": words, "image_width": width, "image_height": height,
                 "duration_seconds": time.perf_counter() - started,
@@ -296,12 +299,15 @@ def main() -> int:
     parser.add_argument("--provider", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--batch", type=Path)
     parser.add_argument("--direction", choices=("horizontal", "vertical"), default="horizontal")
+    parser.add_argument("--fast-horizontal", action="store_true")
     parser.add_argument("--session-root", type=Path)
     parser.add_argument("--max-requests", type=int, default=8)
     args = parser.parse_args()
     block_network()
     try:
-        worker = Worker(args.model_dir, args.profile, args.provider)
+        if args.fast_horizontal and args.direction != "horizontal":
+            parser.error("--fast-horizontal requires horizontal text")
+        worker = Worker(args.model_dir, args.profile, args.provider, fast=args.fast_horizontal)
         if args.session_root:
             import importlib.util
             spec = importlib.util.spec_from_file_location("yeone_worker_protocol", Path(__file__).with_name("worker_sessions.py"))

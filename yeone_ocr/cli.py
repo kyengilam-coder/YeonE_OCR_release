@@ -1833,8 +1833,49 @@ def _output_records(work, records, source, **review):
     return records
 
 
+def _build_source_output(work, doc, records, args, stem, companion, already_reviewed):
+    from copy import copy
+    from tempfile import TemporaryDirectory
+    from ab_ocr.ocr import OCRCancelled
+    from .output_names import next_document_path
+    from .source_layout_hwpx import write_source_hwpx
+    from .state import write_atomic_with
+    from .textlayer import TextlayerVerificationError
+    import shutil
+
+    target = work.out_dir / f"{stem or args.out or next_document_path(work.out_dir, args.pdf, '.hwpx').stem}.hwpx"
+    try:
+        if not already_reviewed:
+            records = _output_records(work, records, args.pdf)
+        if any(record.get("mode") == "vertical" for record in records):
+            raise ValueError("세로쓰기 판독은 원본 대조용 또는 편집용 HWPX로 출력하세요.")
+        with TemporaryDirectory(prefix="source-layout-", dir=work.dir) as temporary:
+            layer = Path(temporary) / "aligned.pdf"
+            layer_args = copy(args)
+            layer_args.textlayer_pdf = True
+            pages = [record["pdf_page"] for record in records]
+            if make_textlayer(layer_args, work, pages, out=layer, report=False, output_records=records):
+                return False
+            progress("build", 0, len(pages)+1)
+            with open_pdf(layer) as aligned:
+                count = write_source_hwpx(doc, aligned, records, target, should_stop=CANCEL.is_set,
+                                          step=lambda done, total: progress("build", done, total))
+            if companion is not None:
+                write_atomic_with(companion, lambda temporary: shutil.copyfile(layer, temporary))
+        for number in pages:
+            work.set_status(number, "문서 반영 완료")
+            work.set_status(number, "파일 구조 검사 완료")
+        log(f"원본 배치 HWPX {count}쪽: {target}")
+        return True
+    except OCRCancelled:
+        return False
+    except (OSError, ValueError, KeyError, TypeError, TextlayerVerificationError) as exc:
+        log(f"원본 배치 HWPX 생성 실패: {exc}")
+        return False
+
+
 def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = False, *, document_stem: str | None = None,
-                  note_evidence: list | None = None) -> bool:
+                  note_evidence: list | None = None, source_pdf_out: Path | None = None) -> bool:
     """판독 기록들로 HWPX(+DOCX)를 만든다. interim=True 면 '<이름>_진행중.hwpx' 한 파일만 조용히 만든다(중간 저장)."""
     from .hwpx_builder import build_hwpx
     from .hwpx_output_rules import HwpxOutputRules
@@ -1843,6 +1884,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         args.no_highlight = True
     if not interim and (error := _check_document(args)):
         log(error + ' — 문서를 만들지 않았습니다(판독 기록은 그대로)'); return False
+    if not interim and getattr(args, "layout", None) == "source":
+        return _build_source_output(work, doc, records, args, document_stem, source_pdf_out, note_evidence is not None)
     import copy
     try:
         records = copy.deepcopy(records) if interim or note_evidence is not None else _output_records(work, records, args.pdf)
@@ -1901,7 +1944,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                                           template_headings=template_titles, source_pdf=doc, page_types=page_types,
                                           infer_entries=bool(book_rule and book_rule.entry), output_rules=output_rules,
                                           field_labels=effective_fields,
-                                          adaptive=bool(book_rule and book_rule.source_sha256))
+                                          adaptive=bool(book_rule and book_rule.source_sha256),
+                                          source_lines=getattr(args, '_source_layout_lines', None))
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
         progress("build", 0, steps)
@@ -2247,6 +2291,13 @@ def _check_document(args) -> str | None:
     원본 쪽대로에서는 짜임 규칙을 보지 않는다(쓰지 않는 규칙 파일이 없어도 막지 않게)."""
     template = getattr(args, "template", None)
     flow = (getattr(args, "layout", "page") or "page") == "flow"
+    if getattr(args, "layout", None) == "source":
+        if Path(args.pdf).suffix.lower() != ".pdf":
+            return "원본 배치 HWPX는 PDF 입력에 적용됩니다. 이미지 입력에는 다른 짜임을 선택하세요."
+        if getattr(args, "mode", None) == "vertical":
+            return "원본 배치 HWPX는 가로쓰기 PDF에 적용됩니다. 세로쓰기에는 다른 짜임을 선택하세요."
+        if getattr(args, "docx", False) or getattr(args, "split", 0):
+            return "원본 배치 HWPX는 한 권을 한 HWPX로 만듭니다. DOCX 또는 나눠 저장하려면 다른 짜임을 선택하세요."
     if template and not flow:
         return f"오류: 양식 HWPX 는 내용별 문서(--layout flow)에만 씁니다 — 짜임을 내용별로 바꾸거나 양식 칸을 비우십시오: {template}"
     if getattr(args, "preset", None) and getattr(args, "structure", None):
@@ -2321,14 +2372,16 @@ def cmd_build(args, work: Work | None = None, doc=None):
             log('원본 PDF가 바뀌어 두 문서의 생성을 중단했습니다. 저장된 판독은 보존했습니다.')
             return 2
         note_evidence = []
-    ok = build_outputs(work, doc, records, args, document_stem=document_stem, note_evidence=note_evidence)
+    source_layout = getattr(args, "layout", None) == "source"
+    opts = {"source_pdf_out": work.out_dir / f"{document_stem}.pdf"} if with_pdf and source_layout else {}
+    ok = build_outputs(work, doc, records, args, document_stem=document_stem, note_evidence=note_evidence, **opts)
     interim = work.out_dir / f"{Path(args.pdf).stem}_진행중.hwpx"
     if not reuse and ok and interim.exists():
         try: interim.unlink(); log("  진행중 파일을 지움(최종 문서가 만들어짐)")
         except OSError: pass
     if CANCEL.is_set():
         return 130
-    if with_pdf:
+    if with_pdf and not source_layout:
         try:
             pdf_rc = make_textlayer(args, work, pages, out=work.out_dir / f"{document_stem}.pdf", report=False,
                                     output_records=records if source_review else None)
@@ -2786,6 +2839,16 @@ def cmd_run(args, work: Work | None = None, doc=None):
     if getattr(args, 'recheck_from', None):
         from .recheck import command
         return command(args)
+    from .local_options import FAST_STRATEGIES
+    strategy = getattr(args, "ocr_strategy", "ai-full")
+    if strategy in FAST_STRATEGIES and not getattr(args, "local_review_only", False):
+        args.local_ai_review = strategy == "local-fast-review"
+        args.local_ai_page = "off"
+        args.local_ai_accept = False
+        args.local_skip_blank = True
+        args.source_review = False
+        if getattr(args, "local_resume", "unfinished") == "unfinished":
+            args.local_resume = "continue"
     if (getattr(args, 'pdf_only', False) and not getattr(args, 'local_review_only', False)
             and not getattr(args, 'force', False) and getattr(args, 'local_resume', 'unfinished') == 'unfinished'):
         existing = work or Work(args.pdf, getattr(args, 'work', None), initialize=False)
@@ -2801,7 +2864,7 @@ def cmd_run(args, work: Work | None = None, doc=None):
                         in ('reviewed','no-api-needed','blank-page','needs-local-review') for r in saved)):
             log('기존 판독·교정 기록으로 문자 PDF를 만듭니다(AI 재호출 없음).')
             return make_textlayer(args, existing, selected)
-    if getattr(args, "ocr_strategy", "ai-full") == "local-first" and args.reader != "mock":
+    if strategy in ("local-first", *FAST_STRATEGIES) and args.reader != "mock":
         from .local_first import command
         return command(args, work=work, doc=doc)
     pdf_only = getattr(args, "pdf_only", False)
@@ -3036,8 +3099,8 @@ def build_parser():
                        help='책별 于 표기: 고전은 일반 문장의 于→於, 1900년 이후 출판물·현대 백화문은 于 유지')
         p.add_argument("--no-context-model", action="store_true",
                        help="번체 문맥 교정에 모델을 부르지 않음: 규칙 변환(간체→번체·부호)은 하고, 문맥으로 갈리는 후보(发→發/髮, 云/雲 등)는 원문을 두고 교정 보고에 남김")
-        p.add_argument("--layout", choices=["page", "flow"], default="page",
-                       help="문서 짜임: page=원본 쪽을 기준으로 조립(기본) / flow=제목·문단을 내용별로 이음. 기본 출력은 본문만 수록하고 작업용 책갈피·쪽 기록을 제외")
+        p.add_argument("--layout", choices=["page", "flow", "source"], default="page",
+                       help="문서 짜임: source=가로 PDF의 쪽·열·구분선 재현 / flow=내용별 문단 / page=원본 쪽별 대조(기본)")
         p.add_argument("--template", help="내용별 문서(--layout flow)를 채울 양식 HWPX — 그 스타일(제목-장·제목-절·본경 원문·주석…)과 쪽 설정을 쓴다")
         p.add_argument("--preset", default=None,
                        help="내용별 짜임 규칙: basic(기본 · 제목·문단 스타일) · regions(영역 종류만) · kaibao(本草 조문 — 開寶本草·證類 계열) · 또는 규칙 JSON 파일 경로(README '짜임 규칙 파일 만들기')")
@@ -3124,8 +3187,9 @@ def build_parser():
     p = sub.add_parser("run"); common(p); read_opts(p); adjudicate_opts(p); build_opts(p); answered_opt(p); p.set_defaults(fn=cmd_run)
     p.add_argument('--recheck-from', help='기존 OCR 작업 폴더를 보존하고 새 --work 폴더에서 재판독')
     p.add_argument('--recheck-mode', choices=('suspect', 'all'), default='suspect', help='의심 쪽 우선 또는 전체 재판독')
-    p.add_argument("--ocr-strategy", choices=("local-first", "ai-full"), default="local-first",
-                   help="local-first(기본)=로컬 인식 뒤 AI 검증; 사용 가능한 구독이 있으면 기본으로 쪽 AI 판독·자동 반영도 수행. ai-full=기존 전체 쪽 AI 판독")
+    from .local_options import FAST_STRATEGIES
+    p.add_argument("--ocr-strategy", choices=("local-first", *FAST_STRATEGIES, "ai-full"), default="local-first",
+                   help="local-first(기본)=기존 로컬 우선; local-fast=빠른 로컬 인식; local-fast-review=빠른 로컬과 AI 선별 검증 병행; ai-full=전체 쪽 AI 판독")
     p.add_argument("--local-engine-root", help="tools 폴더를 포함하는 로컬 엔진 설치 루트")
     p.add_argument("--local-profile", choices=("traditional", "simplified", "mixed"), default="traditional")
     p.add_argument("--local-ai-review", action=argparse.BooleanOptionalAction, default=True,

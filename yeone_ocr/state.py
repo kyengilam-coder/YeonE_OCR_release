@@ -11,7 +11,7 @@ HUMAN_ONLY = {"원본 대조 완료(사람)"}   # 프로그램이 스스로 붙�
 WARN = lambda msg: print(msg, flush=True)      # 깨진 파일을 치웠을 때의 한 줄 알림('주의:'). 창 프로그램은 stdout 을 모으므로 그대로 보인다
 
 BOOK_SETTINGS = "book_settings.json"           # 결과 폴더의 책별 설정(창이 읽고 쓴다 — 명령줄은 읽지 않고 창이 늘 선택지로 넘긴다). 원본이 바뀌어 보관할 때도 그대로 둔다
-BOOK_KEYS = {"layout": ("page", "flow"), "template": str, "reference_hwpx": str, "yu_policy": ('classical','post1900','vernacular'), "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
+BOOK_KEYS = {"layout": ("page", "flow", "source"), "template": str, "reference_hwpx": str, "yu_policy": ('classical','post1900','vernacular'), "preset": str, "bold_split": bool, "pages": str, "print_offset": str,
              "mode": ("auto", "vertical", "horizontal_zh"), "textlayer_pdf": bool,
              "source_review": bool, "hwpx_bookmarks": ("headings", "none")}
 BOOK_KEYS.update(dict.fromkeys(HWPX_OUTPUT_RULES, bool))

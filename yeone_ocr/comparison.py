@@ -1970,7 +1970,9 @@ def run_page(project, number, profile="traditional", direction="horizontal", dpi
             from ab_ocr.glyph_verifier import font_sources
             engine_request["recognition_policy"] = HORIZONTAL_RECOGNITION_POLICY
             engine_request["glyph_font_sources"] = font_sources()
-        from ab_ocr.local_engines import VERIFYING_ENGINES, line_verification_enabled
+        from ab_ocr.local_engines import VERIFYING_ENGINES, fast_horizontal_enabled, line_verification_enabled
+        if fast_horizontal_enabled(engine, direction):
+            engine_request["recognition_policy"] = "ppocrv5-native-horizontal-lines-v1"
         if engine in VERIFYING_ENGINES and not line_verification_enabled():
             engine_request["line_verification"] = "off"         # a different reading: never reuse verified runs
         if engine == "easyocr":

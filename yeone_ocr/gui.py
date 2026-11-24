@@ -41,7 +41,10 @@ DEFAULTS = {"pages": "", "print_offset": "", "upscale": "2", "reader": "gemini",
             "local_ai_subscription": True, "local_ai_plan": "auto", "local_ai_api_fallback": False, "gemini_subscription_model": "", "local_resume": "unfinished",
             "local_ai_parallel": 3, "local_ai_split": True, "local_ai_pages": 2,
             "simple_view": True}                                    # 간단히 보기(원본 → 인식 → 결과만) — 명령 띠의 '자세히'로 끈다
-OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 설정에 따라 AI 판독·검증", "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
+OCR_STRATEGY_LABELS = {"local-first": "로컬 먼저 · 설정에 따라 AI 판독·검증",
+                       "local-fast": "빠른 로컬 OCR · AI 사용 안 함",
+                       "local-fast-review": "빠른 로컬 OCR · AI 선별 검증 병행",
+                       "ai-full": "AI 전체 쪽 판독 (기존 방식)"}
 AI_PLAN_LABELS = {"auto": "자동 (Antigravity → ChatGPT → Claude)", "gemini": "Antigravity (Google 계정)",
                   "chatgpt": "ChatGPT (Codex CLI)", "claude": "Claude (Claude Code)"}
 RESUME_LABELS = {'unfinished': '남은 쪽 OCR + 보류 검증', 'continue': '기록 없는 쪽만 OCR',
@@ -6640,14 +6643,16 @@ class App(ResultNavigation, tk.Tk):
         return "ai-full"
 
     def _local_first(self) -> bool:
-        return App._ocr_strategy(self) == "local-first" and self.v_reader.get() != "mock"
+        return App._ocr_strategy(self) != "ai-full" and self.v_reader.get() != "mock"
 
-    def _strategy_opts(self) -> list[str]:
+    def _strategy_opts(self, *, review_only=False) -> list[str]:
         if vars(self).get("v_ocr_strategy") is None and "ocr_strategy" not in vars(self).get("cfg", {}):
             return []
         strategy = App._ocr_strategy(self)
+        if review_only and strategy.startswith("local-fast"):
+            strategy = "local-first"
         options = ["--ocr-strategy", strategy]
-        if strategy != "local-first":
+        if strategy == "ai-full":
             return options
         cfg = vars(self).get("cfg", {})
         reference = vars(self).get("v_reference_hwpx")
@@ -6660,8 +6665,9 @@ class App(ResultNavigation, tk.Tk):
         review = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_review", True))
         variable = vars(self).get("v_local_ai_max_calls")
         cap = variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20)
-        options += ["--local-profile", profile, "--local-ai-max-calls", str(cap),
-                    "--local-ai-review" if review else "--no-local-ai-review"]
+        options += ["--local-profile", profile]
+        if strategy != "local-fast":
+            options += ["--local-ai-max-calls", str(cap), "--local-ai-review" if review else "--no-local-ai-review"]
         variable = vars(self).get("v_local_columns")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_columns", True))):
             options.append("--no-local-columns")
@@ -6680,6 +6686,13 @@ class App(ResultNavigation, tk.Tk):
         workers = max_calls_value(variable.get() if variable is not None else cfg.get('local_engine_parallel', 0))
         if workers and workers <= 8:
             options += ['--local-engine-parallel', str(workers)]
+        variable = vars(self).get("v_local_resume")
+        resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
+        if resume in RESUME_LABELS and resume != 'unfinished':
+            options += ["--local-resume", resume]
+        root = cfg.get("local_engine_root")
+        if strategy == "local-fast":
+            return options + (["--local-engine-root", str(root)] if root else [])
         variable = vars(self).get("v_local_ai_parallel")
         try:
             parallel = int(variable.get() if variable is not None else cfg.get("local_ai_parallel", 3))
@@ -6697,10 +6710,6 @@ class App(ResultNavigation, tk.Tk):
             together = 2
         if 1 <= together <= 4 and together != 2:
             options += ["--local-ai-pages", str(together)]
-        variable = vars(self).get("v_local_resume")
-        resume = (_label_key(RESUME_LABELS, variable.get()) if variable is not None else cfg.get("local_resume")) or "unfinished"
-        if resume in RESUME_LABELS and resume != 'unfinished':
-            options += ["--local-resume", resume]
         variable = vars(self).get("v_local_ai_subscription")
         if not (bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_subscription", True))):
             options += ["--local-ai-auth", "api", "--local-ai-page", "off"]
@@ -6712,7 +6721,6 @@ class App(ResultNavigation, tk.Tk):
             options += ["--local-ai-auth", "subscription", "--no-local-ai-api-fallback"]
             if cfg.get("gemini_subscription_model"):
                 options += ["--local-gemini-model", cfg["gemini_subscription_model"]]
-        root = cfg.get("local_engine_root")
         if root:
             options += ["--local-engine-root", str(root)]
         return options
@@ -6764,7 +6772,8 @@ class App(ResultNavigation, tk.Tk):
     def _build_opts(self) -> list[str]:
         from .hwpx_output_rules import cli_flags
         o = []
-        if self.v_docx.get(): o.append("--docx")
+        if self.v_docx.get() and (getattr(self, "v_layout", None) is None or self.layout_key() != "source"):
+            o.append("--docx")
         if App._companion_pdf(self):
             o.append("--textlayer-pdf")
         if getattr(self, "v_layout", None) is not None:
@@ -7952,7 +7961,8 @@ class App(ResultNavigation, tk.Tk):
         return PlanInput(kind=kind, pdf=self.pdf(), work_dir=str(self.work()), pages=self.v_pages.get().strip(), reader=self.v_reader.get(),
                          model=self.v_model.get().strip(), second_model=self.v_model2.get().strip(), second_pass=bool(self.v_second.get()), upscale=up,
                          use_cache=bool(self.v_cache.get()), force=bool(self.v_force.get()), suspects=bool(self.v_suspects.get()), blind=bool(self.v_blind.get()),
-                         context_model=App._context_model_enabled(self), layout=self.layout_key(), preset=App.preset_ref(self), join_pages=bool(self.v_join.get()),
+                         context_model=self.layout_key() != "source" and App._context_model_enabled(self),
+                         layout=self.layout_key(), preset=App.preset_ref(self), join_pages=bool(self.v_join.get()),
                          normalize_traditional=bool(self.v_traditional.get()) if getattr(self, "v_traditional", None) is not None else True,
                          normalize_yun=bool(self.v_yun.get()) if getattr(self, "v_yun", None) is not None else True,
                          normalize_punctuation=bool(self.v_punctuation.get()) if getattr(self, "v_punctuation", None) is not None else True,
@@ -7973,6 +7983,16 @@ class App(ResultNavigation, tk.Tk):
         작은 진행 창을 띄우고 단추를 잠근다) 끝나면 _poll → _plan_done. go(extra) 는 실행(extra = 모델 단계를 뺄 선택), go=None 은 [비용 미리 보기].
         mock 판독기는 모델을 부르지 않아 어림하지 않는다. 어림 중에 다시 눌러도(창이 잠겨 있지만) 두 번 세지 않는다."""
         if kind in ('run', 'run-pdf', 'review-only') and App._local_first(self):
+            if kind != 'review-only' and App._ocr_strategy(self) == 'local-fast':
+                notice = '빠른 로컬 OCR로 인식합니다. AI 판독·검증과 출력 전 원본 재대조는 생략합니다.'
+                if go is None:
+                    messagebox.showinfo(APP_NAME, notice)
+                else:
+                    vars(self).pop('_ledger_pending', None)
+                    self._ledger = None
+                    self._append(notice + '\n')
+                    go([])
+                return
             cfg = vars(self).get("cfg", {})
             variable = vars(self).get("v_local_ai_max_calls")
             cap = max_calls_value(variable.get() if variable is not None else cfg.get("local_ai_max_calls", 20))
@@ -7985,6 +8005,17 @@ class App(ResultNavigation, tk.Tk):
                 if hasattr(self, '_append'):
                     self._append('보류된 AI 검증만 진행합니다. 기존 OCR과 출력은 보존하고 검증 결과는 제안으로 저장합니다.\n')
                 go([])
+                return
+            if App._ocr_strategy(self) == 'local-fast-review':
+                notice = ('로컬 OCR로 다음 쪽을 읽는 동안 완료된 쪽의 의심 구간만 AI로 검증합니다. '
+                          '검증 결과는 교정 제안으로 저장됩니다.')
+                if go is None:
+                    messagebox.showinfo(APP_NAME, notice)
+                else:
+                    vars(self).pop('_ledger_pending', None)
+                    self._ledger = None
+                    self._append(notice + '\n')
+                    go([])
                 return
             variable = vars(self).get("v_local_ai_review")
             review = bool(variable.get()) if variable is not None else bool(cfg.get("local_ai_review", True))
@@ -8212,6 +8243,8 @@ class App(ResultNavigation, tk.Tk):
                 App._save_ledger(self)                                     # 이번 어림을 결과 폴더(last_cost.json)에 — 장부
                 pages = self.v_pages.get().strip()
                 opts = self._build_opts()
+                if App._ocr_strategy(self).startswith('local-fast'):
+                    opts = [flag for flag in opts if flag != '--source-review']
                 output = 'HWPX·문자 PDF' if '--textlayer-pdf' in opts else 'HWPX'
                 self.start(["run", self.pdf(), "--work", str(self.work())] + self._pages() + self._read_opts() + self._glyph_opts(suspects=True)
                            + self._answered_opts() + extra + opts + App._strategy_opts(self), f"한 번에 인식 ({pages + '쪽' if pages else '전체'} → {output})")
@@ -8234,7 +8267,7 @@ class App(ResultNavigation, tk.Tk):
                 out = next_document_path(App.result_dir(self)/'out',self.pdf(),'.pdf')
                 argv = ["run", self.pdf(), "--work", str(self.work()), "--pdf-only"]
                 if not review_only: argv += ['--out', str(out)]
-                argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra + App._strategy_opts(self)
+                argv += self._pages() + self._read_opts() + self._glyph_opts(suspects=True) + self._answered_opts() + extra + App._strategy_opts(self, review_only=review_only)
                 if review_only:
                     argv = [flag for flag in argv if flag != '--no-local-ai-review']
                     if '--local-review-only' not in argv:
