@@ -6,7 +6,7 @@ import shutil
 import tempfile
 
 
-LAYOUT_LABELS = {"source": "원본 배치 HWPX (쪽·열·구분선)",
+LAYOUT_LABELS = {"auto": "자동 정리 HWPX (자료 구조에 맞춤)", "source": "원본 배치 HWPX (쪽·열·구분선)",
                  "flow": "편집용 HWPX (제목·문단)", "page": "원본 대조용 HWPX (쪽별)"}
 
 
@@ -103,7 +103,7 @@ def preview_document(pdf, work_dir, output_options, preferred=(), *, analysis=No
                     pages = profile['pages']
                     preferred = tuple(pages[kind][0] for kind in
                                       ('차례', '목차', '색인', '본문', '문헌 목록', '각주') if pages.get(kind))
-        adaptive = args.layout == 'flow' and bool(resolve_preset(preset_ref(args)).source_sha256)
+        adaptive = args.layout == 'auto' or (args.layout == 'flow' and bool(resolve_preset(preset_ref(args)).source_sha256))
         records, origin = _source_records(source, doc, preferred, limit=max(3, min(5, len(set(preferred)))),
                                           adaptive=adaptive)
         args.docx = False

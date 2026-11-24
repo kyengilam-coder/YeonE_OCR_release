@@ -578,7 +578,7 @@ class Command(unittest.TestCase):
         app.v_layout = V(gui.LAYOUT_LABELS["page"])
         o = gui.App._build_opts(app)
         self.assertEqual(o[:2], ["--layout", "page"]); self.assertNotIn("--preset", o); self.assertNotIn("--template", o)
-        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("flow", "", True, "basic"))
+        self.assertEqual((gui.DEFAULTS["layout"], gui.DEFAULTS["template"], gui.DEFAULTS["bold_split"], gui.DEFAULTS["preset"]), ("auto", "", True, "basic"))
         self.assertNotIn("structure", gui.DEFAULTS)
 
     def test_window_greys_out_options_the_layout_does_not_use(self):

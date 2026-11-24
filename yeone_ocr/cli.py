@@ -1670,6 +1670,8 @@ def normalization_plan(work: Work, records: list[dict], provider: str, model: st
     열쇠가 달라져 다시 묻는다(run 의 어림은 그만큼을 위쪽 범위로 둔다)."""
     from .marks import MARK_AB
     from .normalization import normalize_blocks
+    if layout == 'auto':
+        layout, preset = 'flow', 'basic'
     blocks = assemble_blocks(records, grades=False, layout=layout, join_pages=join_pages)
     if layout == "flow":
         from .structure import apply_structure
@@ -1893,6 +1895,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         log(f'오류: 교정 기록을 적용하지 못했습니다: {exc} — 문서를 만들지 않았습니다.');return False
     bookmark_policy = 'legacy' if interim else getattr(args, 'hwpx_bookmarks', 'legacy')
     edit_document=not interim and not getattr(args,'no_document_editing',False)
+    auto_layout = not interim and getattr(args, 'layout', None) == 'auto'
     if edit_document and output_rules.source_typography:
         for record in records:
             if record.get('_output_repairs') or record.get('source_row_layout') == 'measured':
@@ -1914,7 +1917,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 except (OSError,ValueError,TypeError,AttributeError) as exc:
                     log(f'주의: 확인된 문서 배치 파일을 적용하지 못했습니다({type(exc).__name__}). 원본 판독은 유지합니다.')
         try:
-            book_rule=resolve_preset(preset_ref(args)) if getattr(args,'layout','page')=='flow' else None
+            book_rule = resolve_preset('basic') if auto_layout else (
+                resolve_preset(preset_ref(args)) if getattr(args,'layout','page')=='flow' else None)
         except PresetError as exc:
             log(f'오류: {exc}'); return False
         from .template_headings import read_template_headings
@@ -1926,6 +1930,15 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         except (OSError,ValueError,KeyError,BadZipFile,ParseError) as exc:
             log(f'오류: 양식의 제목 스타일을 읽을 수 없습니다: {exc}');return False
         page_types = None
+        if auto_layout:
+            from ab_ocr.ocr import OCRCancelled
+            from .adaptive_layout import analyze_records
+            log('PDF와 OCR 줄 위치를 함께 분석해 제목·문단·표·각주·열을 판정합니다.')
+            try:
+                page_types = analyze_records(records, doc, stop=CANCEL.is_set)
+            except OCRCancelled:
+                return False
+            log('구조 판정: ' + ' · '.join(f'{kind} {len(numbers)}쪽' for kind, numbers in page_types.items()))
         if book_rule and book_rule.page_types:
             from ab_ocr.ocr import stable_file_sha256
             if book_rule.page_types['source_sha256'] == stable_file_sha256(args.pdf):
@@ -1944,7 +1957,8 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                                           template_headings=template_titles, source_pdf=doc, page_types=page_types,
                                           infer_entries=bool(book_rule and book_rule.entry), output_rules=output_rules,
                                           field_labels=effective_fields,
-                                          adaptive=bool(book_rule and book_rule.source_sha256),
+                                          adaptive=auto_layout or bool(book_rule and book_rule.source_sha256),
+                                          auto_layout=auto_layout,
                                           source_lines=getattr(args, '_source_layout_lines', None))
     steps = len(records) + 1                                    # 쪽마다 도판 자르기 + 문서 조립 한 번
     if not interim:
@@ -1989,10 +2003,10 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     if normalize:
         from .normalization import normalize_blocks
         resolver, resolver_meta = _normalization_resolver(work, args)
-    layout = getattr(args, "layout", "page") or "page"
+    layout = 'flow' if auto_layout else (getattr(args, "layout", "page") or "page")
     template = getattr(args, "template", None)
     if not template and layout == 'flow' and not interim:
-        try: template = resolve_preset(preset_ref(args)).template or None
+        try: template = resolve_preset('basic' if auto_layout else preset_ref(args)).template or None
         except PresetError as exc:
             log(f'오류: {exc}'); return False
     if layout == "page" and template:
@@ -2006,7 +2020,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
     preset = None
     if layout == "flow" and not interim:
         try:
-            preset = resolve_preset(preset_ref(args))
+            preset = resolve_preset('basic' if auto_layout else preset_ref(args))
         except PresetError as e:                                        # 시작 때 검사(_check_document)했으나 그 사이 규칙 파일이 없어졌으면 문서를 만들지 않는다
             log(f"오류: {e} — 문서를 만들지 않았습니다(판독 기록은 그대로). 짜임 규칙을 다시 고르고 문서 만들기를 다시 하십시오.")
             return False                                                # 다른 규칙으로 만들면 문단이 달라져 문맥 교정을 다시 사고, 원하지 않은 문서가 나온다
@@ -2135,6 +2149,9 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
                 note_evidence.extend(chunk_evidence)
             from .output_recovery import quality_report
             quality=quality_report(blocks,chunk)
+            if auto_layout:
+                quality['automatic_layout'] = [dict(page=r['pdf_page'], **r['_automatic_layout'])
+                                               for r in chunk if '_automatic_layout' in r]
             review_counts['findings'] += len(quality['findings'])
             review_counts['pending_proposals'] += sum(item['pending_proposals'] for item in quality['unresolved_history'])
             quality_path=out_h.with_name(f'{out_h.stem}_quality.json')
@@ -2231,7 +2248,7 @@ def build_outputs(work: Work, doc, records: list[dict], args, interim: bool = Fa
         with Work._lock:                                         # 이 문서를 어떤 짜임·양식·짜임 규칙으로 만들었는지(창의 책별 설정과 달라도 실제로 쓴 것)
             state = work.load_state()
             review_counts['missing_styles'] = len(missing_styles)
-            state["last_build"] = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "layout": layout, "template": template or "",
+            state["last_build"] = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "layout": 'auto' if auto_layout else layout, "template": template or "",
                                    "preset": preset.ref if preset else "", "outputs": written, "review": review_counts}
             work.save_state(state)
         for rec in records:
@@ -3099,8 +3116,8 @@ def build_parser():
                        help='책별 于 표기: 고전은 일반 문장의 于→於, 1900년 이후 출판물·현대 백화문은 于 유지')
         p.add_argument("--no-context-model", action="store_true",
                        help="번체 문맥 교정에 모델을 부르지 않음: 규칙 변환(간체→번체·부호)은 하고, 문맥으로 갈리는 후보(发→發/髮, 云/雲 등)는 원문을 두고 교정 보고에 남김")
-        p.add_argument("--layout", choices=["page", "flow", "source"], default="page",
-                       help="문서 짜임: source=가로 PDF의 쪽·열·구분선 재현 / flow=내용별 문단 / page=원본 쪽별 대조(기본)")
+        p.add_argument("--layout", choices=["page", "flow", "source", "auto"], default="page",
+                       help="문서 짜임: auto=자료 구조에 맞춰 자동 정리 / source=가로 PDF의 원본 배치 / flow=내용별 문단 / page=쪽별 대조")
         p.add_argument("--template", help="내용별 문서(--layout flow)를 채울 양식 HWPX — 그 스타일(제목-장·제목-절·본경 원문·주석…)과 쪽 설정을 쓴다")
         p.add_argument("--preset", default=None,
                        help="내용별 짜임 규칙: basic(기본 · 제목·문단 스타일) · regions(영역 종류만) · kaibao(本草 조문 — 開寶本草·證類 계열) · 또는 규칙 JSON 파일 경로(README '짜임 규칙 파일 만들기')")

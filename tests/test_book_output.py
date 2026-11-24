@@ -112,7 +112,7 @@ def test_new_default_does_not_change_older_saved_layout(tmp_path):
     from yeone_ocr import gui
     config = tmp_path / "config.json"
     with patch.object(gui, "CONFIG_PATH", config):
-        assert gui.load_config()["layout"] == "flow"
+        assert gui.load_config()["layout"] == "auto"
         for data, expected in [({"layout": "page"}, "page"), ({"layout": "flow"}, "flow"),
                                ({"reader": "mock"}, "page")]:
             config.write_text(json.dumps(data), encoding="utf-8")

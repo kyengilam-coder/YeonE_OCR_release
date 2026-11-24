@@ -135,10 +135,10 @@ def _page_layout(source, aligned, *, cover_position, record):
 
     boxes = []
     for region in (record.get("merged") or {}).get("regions", ()):
-        if region.get("kind") in (*IMAGE_KINDS, "표"):
+        if region.get("kind") in (*IMAGE_KINDS, "단순표"):
             top, left, bottom, right = region["bbox"]
             box = pymupdf.Rect(left*w/1000, top*h/1000, right*w/1000, bottom*h/1000)
-            if region["kind"] != "표" or not any(
+            if region["kind"] != "단순표" or not any(
                     box.y0 <= y <= box.y1 and any(f.left < box.x1 and f.right > box.x0 for f in row)
                     for y, row in layout.rows):
                 boxes.append(box)
