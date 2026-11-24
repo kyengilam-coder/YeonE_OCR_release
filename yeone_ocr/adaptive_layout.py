@@ -266,10 +266,14 @@ def apply_index_geometry(records, page_types):
             continue
         reading = PageReading.model_validate(record['merged'])
         entries = [r for r in reading.regions if index_entry(_line(r)) and r.bbox[0] >= 100]
-        cuts = _column_gutters(entries, index=True)
-        if not cuts:
+        if not entries:
             continue
         first_y = min(r.bbox[0] for r in entries)
+        # Wrapped labels sometimes have their reference number on the next
+        # line. Measure the gutter against both lines of every entry.
+        cuts = _column_gutters([r for r in reading.regions if r.bbox[0] >= first_y-8], index=True)
+        if not cuts:
+            continue
         header, columns = [], defaultdict(list)
         for region in reading.regions:
             y, left, _, right = region.bbox

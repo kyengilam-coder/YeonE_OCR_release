@@ -39,6 +39,7 @@ def test_scan_only_index_uses_three_columns_carried_by_ocr_geometry():
     rows = [line('index', '索引', [107, 460, 126, 540])]
     rows += [line(f'{col}-{i}', f'題目{col}{i}({10*col+i})', [185+62*i, x, 207+62*i, x+118])
              for i in range(8) for col, x in enumerate([95, 392, 683])]
+    rows.append(line('wrapped-label', 'A longer index label whose number is on the next line', [380, 392, 400, 662]))
     r = record(1, rows)
     with pymupdf.open() as doc:
         doc.new_page()
@@ -48,6 +49,7 @@ def test_scan_only_index_uses_three_columns_carried_by_ocr_geometry():
     assert r['_source_index_page']
     assert r['_automatic_layout']['column_count'] == 3
     assert r['_common_layout_regions']['local-line-index']['source_index_title']
+    assert r['_common_layout_regions']['local-line-wrapped-label']['source_index']['column'] == 1
     assert [r['_common_layout_regions'][f'local-line-{col}-0']['source_index']['column'] for col in range(3)] == [0, 1, 2]
 
 
